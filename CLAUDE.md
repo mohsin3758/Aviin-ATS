@@ -204,12 +204,35 @@ error, or user types STOP.
 
 ## 24/7 OPERATION
 Claude Code is already logged in (OAuth/Pro subscription, NOT an API
-key) inside tmux session `dev` on this VPS — that login persists.
-- scripts/status-check.sh    — phase status + tmux/docker snapshot
-- scripts/claude-auto-resume.sh — monitor-only: watch the `dev` tmux
-  pane for rate-limit messages and auto-send "continue" after reset;
-  run it from a SEPARATE tmux window/session, never inside `dev`
-  itself (it does not kill or recreate `dev`)
+key) inside tmux session `dev` (window 0, `dev:0.0`) on this VPS —
+that login persists across rate limits and reconnects. ALL development
+happens on the VPS, never the local laptop.
+
+- scripts/status-check.sh — phase status + tmux/docker snapshot
+- scripts/claude-auto-resume.sh — RUNNING 24/7 in `dev:1` (tmux window
+  "monitor", started 2026-06-15). Monitor-only, watches `dev:0.0`
+  every 30s and handles 3 cases with ZERO manual input:
+  1. Usage/rate limit hit (5-HOUR OR WEEKLY limit, any wording) ->
+     retry loop: sends "continue" on a backoff (15min for 5hr-style
+     limits, 2h for weekly-sounding ones), rechecks, keeps retrying
+     until the limit message clears, then resumes automatically. No
+     reset-time parsing required — works regardless of message format.
+  2. Claude Code process exited to a shell prompt -> auto-restarts
+     with `claude --continue` (resumes prior conversation, CLAUDE.md
+     reloads automatically) and re-sends the autopilot resume prompt
+     ("read FINSTACK_MASTER_INDEX.md + CLAUDE.md, continue NEXT phase
+     autonomously per docs/autopilot.md").
+  3. P14 DONE detected -> logs completion and stops monitoring.
+  Does NOT override intentional STOP CONDITIONS (test failure after 3
+  attempts, blocking error, etc.) — those leave Claude idle without a
+  rate-limit message, which the monitor ignores so a human can review.
+  Logs: logs/claude-resume.log, state/events.log.
+
+If the VPS reboots, re-attach and check `tmux ls` — if `dev` or the
+`monitor` window is missing, recreate: `tmux new-session -s dev -c
+~/airecruit` then `claude --continue` inside it, plus `tmux new-window
+-t dev -n monitor 'bash ~/airecruit/scripts/claude-auto-resume.sh'`.
+
 Do NOT use the systemd + ANTHROPIC_API_KEY installer pattern from the
 original blueprint (install-24x7.sh) — that's a different (paid API
 key) auth path and is unnecessary given the existing OAuth login.

@@ -3,19 +3,31 @@
 # AIrecruit (FinStack Staffing OS) Claude Code Auto-Resume Monitor
 # VPS: 187.127.179.128 | Ubuntu 24.04
 #
-# MONITOR-ONLY: watches the EXISTING `dev` tmux pane (where Claude
-# Code is already logged in via OAuth/Pro subscription) for
-# rate-limit messages and auto-sends "continue" after the reset
-# time. Does NOT kill, create, or restart the `dev` session itself.
+# 24/7 MONITOR: watches the EXISTING `dev` tmux pane (where Claude
+# Code is already logged in via OAuth/Pro subscription, CLAUDE.md
+# auto-loads every session) and handles three cases without any
+# human input:
 #
-# Run this from a SEPARATE tmux window/session, e.g.:
-#   tmux new-window -t dev -n monitor
-#   bash ~/airecruit/scripts/claude-auto-resume.sh
-# or detached:
-#   nohup bash ~/airecruit/scripts/claude-auto-resume.sh \
-#     > ~/airecruit/logs/monitor.out 2>&1 &
+#   1. Usage/rate limit hit (5-hour OR weekly limit) -> retries
+#      "continue" on a backoff loop until the limit clears, then
+#      resumes -- no time-parsing needed, works for any message
+#      wording/reset format.
+#   2. Claude Code process exited to a shell prompt -> restarts it
+#      with `claude --continue` (resumes prior conversation +
+#      CLAUDE.md context) and re-sends the autopilot resume prompt.
+#   3. Project complete (P14 DONE) -> logs and stops monitoring.
+#
+# Does NOT kill/recreate the `dev` session itself, and does NOT
+# override intentional STOP conditions from docs/autopilot.md
+# (test-failure-after-3-attempts, blocking error, etc.) -- those
+# leave Claude idle-but-not-rate-limited, which this monitor ignores
+# by design so a human can review.
+#
+# Start (in a separate tmux window, survives this SSH session ending):
+#   tmux new-window -t dev -n monitor \
+#     'bash ~/airecruit/scripts/claude-auto-resume.sh'
 # ============================================================
-set -euo pipefail
+set -uo pipefail
 
 SESSION="dev"
 PANE="${SESSION}:0.0"
@@ -26,44 +38,12 @@ STATE="$REPO_DIR/state"
 mkdir -p "$(dirname "$LOG")" "$STATE"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
-
-parse_wait_seconds() {
-  local msg="$1"
-  python3 - "$msg" << 'PYEOF'
-import sys, re
-from datetime import datetime, timedelta
-try:
-    import pytz
-except ImportError:
-    import subprocess; subprocess.run(["pip3","install","pytz","--break-system-packages","-q"])
-    import pytz
-
-msg = " ".join(sys.argv[1:])
-m = re.search(r'resets?\s+(\d{1,2}(?::\d{2})?(?:am|pm))\s*(?:\(([^)]+)\))?', msg, re.I)
-if not m:
-    print(1800); sys.exit()
-
-time_str = m.group(1).upper()
-tz_name  = m.group(2) or "UTC"
-try:
-    tz = pytz.timezone(tz_name)
-except Exception:
-    tz = pytz.UTC
-
-now = datetime.now(tz)
-fmt = "%I:%M%p" if ":" in time_str else "%I%p"
-try:
-    t = datetime.strptime(time_str, fmt)
-    reset = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-    if reset <= now: reset += timedelta(days=1)
-    print(max(60, int((reset - now).total_seconds()) + 60))
-except Exception:
-    print(1800)
-PYEOF
-}
-
 send_keys() { tmux send-keys -t "$PANE" "$1" Enter 2>/dev/null; }
-get_pane()  { tmux capture-pane -t "$PANE" -p 2>/dev/null | tail -15 || echo ""; }
+get_pane()  { tmux capture-pane -t "$PANE" -p -S -30 2>/dev/null || echo ""; }
+
+RESUME_PROMPT="Read FINSTACK_MASTER_INDEX.md and CLAUDE.md. Find the phase marked NEXT (or in-progress) and continue from the last incomplete task in autopilot mode (docs/autopilot.md) -- no confirmation needed, proceed autonomously."
+
+LIMIT_PATTERN='usage limit|rate.?limit|limit reached|try again (later|in)|5.?hour limit|weekly limit|out of (usage|extra)'
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   log "ERROR: tmux session '$SESSION' not found. Start Claude Code there first:"
@@ -73,39 +53,52 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 log "=============================================="
-log " AIrecruit Auto-Resume Monitor (monitor-only)"
+log " AIrecruit Auto-Resume Monitor (24/7, monitor-only)"
 log " Watching tmux pane: $PANE"
 log "=============================================="
-log "Checking every 30s for rate limits or exits..."
+log "Checking every 30s for usage limits or exits..."
 
 while true; do
   sleep 30
   pane=$(get_pane)
 
-  if echo "$pane" | grep -qiE "out of extra usage|usage limit|rate.?limit|resets [0-9]"; then
-    log "RATE LIMIT detected."
-    wait_sec=$(parse_wait_seconds "$pane")
-    wait_min=$(( wait_sec / 60 ))
-    log "Sleeping ${wait_min}min until reset (${wait_sec}s total)..."
-    echo "$(date '+%Y-%m-%d %H:%M:%S')|RATE_LIMITED|${wait_sec}s" >> "$STATE/events.log"
-    sleep "$wait_sec"
-    log "Sending 'continue' after rate limit reset..."
-    send_keys "continue"
-    sleep 5
-    echo "$(date '+%Y-%m-%d %H:%M:%S')|RESUMED" >> "$STATE/events.log"
-    log "Resumed. Watching..."
+  if echo "$pane" | grep -qiE "$LIMIT_PATTERN"; then
+    log "USAGE/RATE LIMIT detected. Entering retry loop (works for both 5-hour and weekly limits)."
+    echo "$(date '+%Y-%m-%d %H:%M:%S')|RATE_LIMITED" >> "$STATE/events.log"
 
-  elif echo "$pane" | grep -qE '^\$ |^dev@|# $'; then
+    if echo "$pane" | grep -qiE 'week|7.?day'; then
+      RETRY=7200   # weekly-sounding limit -> retry every 2h
+    else
+      RETRY=900    # 5-hour-style limit -> retry every 15min
+    fi
+
+    while true; do
+      log "Sleeping ${RETRY}s before retry..."
+      sleep "$RETRY"
+      send_keys "continue"
+      sleep 10
+      recheck=$(get_pane)
+      if echo "$recheck" | grep -qiE "$LIMIT_PATTERN"; then
+        log "Still limited, will retry again in ${RETRY}s."
+        continue
+      else
+        log "Limit cleared -- resumed."
+        echo "$(date '+%Y-%m-%d %H:%M:%S')|RESUMED" >> "$STATE/events.log"
+        break
+      fi
+    done
+
+  elif echo "$pane" | grep -qE '^\$ |^dev@.*[$#] *$|^# $'; then
     log "Claude Code appears to have exited (shell prompt visible)."
     sleep 5
     recheck=$(get_pane)
-    if echo "$recheck" | grep -qE '^\$ |^dev@|# $'; then
+    if echo "$recheck" | grep -qE '^\$ |^dev@.*[$#] *$|^# $'; then
       log "Restarting with 'claude --continue'..."
       send_keys "cd $REPO_DIR && claude --continue"
-      sleep 4
-      send_keys "Read FINSTACK_MASTER_INDEX.md and CLAUDE.md. Find the phase marked NEXT. Continue from the last incomplete task. No confirmation needed, proceed autonomously."
+      sleep 6
+      send_keys "$RESUME_PROMPT"
       echo "$(date '+%Y-%m-%d %H:%M:%S')|AUTO_RESTARTED" >> "$STATE/events.log"
-      log "Claude restarted."
+      log "Claude restarted and resume prompt sent."
     fi
 
   elif echo "$pane" | grep -qiE "P14.*DONE|all phases.*done|project.*complete"; then
