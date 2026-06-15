@@ -17,7 +17,7 @@
 | P1 | Foundation APIs (candidate, req, pipeline, offer) | ⏳ | ⏳ | Depends on P0 |
 | P2 | Automation (n8n workflows W1-W8) | ⏳ | ⏳ | Depends on P1 |
 | P3 | AI Engine (match, assign, rediscovery) | ⏳ | ⏳ | Depends on P2 |
-| P4 | Frontend Foundation (GlobalNav + shared components + design system) | ⏳ | ⏳ | Depends on P1; needs UI template decision (see Pending Inputs) |
+| P4 | Frontend Foundation (GlobalNav + shared components + 5-template theme system) | ⏳ | ⏳ | Depends on P1; 5 templates defined in docs/ui_templates.md — build data-theme/Zustand/Tailwind-variant infra here |
 | P5 | UI T1: Recruiter Command Center | ⏳ | ⏳ | Depends on P4 |
 | P6 | UI T2: Kanban Pipeline Board | ⏳ | ⏳ | Depends on P4 |
 | P7 | UI T3: Candidate 360 View | ⏳ | ⏳ | Depends on P4 |
@@ -37,9 +37,14 @@ Awaiting PDF conversions from the user of:
 - FinStack_UI_UX_Todos
 - FinStack_Complete_Guide
 
-These define the 5 selectable UI templates and the full
-competitor-feature-parity checklist. Re-check P4-P10 scope against
-these once available — do not treat current P4-P10 descriptions as final.
+The "5 selectable UI templates" item is now RESOLVED — see
+`docs/ui_templates.md` (defined against the competitor landscape,
+P4 unblocked). The full competitor-feature-parity checklist is also
+resolved — see `docs/competitor_landscape_and_feature_blueprint.md`.
+If/when the PDFs above are provided, use them only to refine
+per-template visual details and P4-P10 specifics — they should not
+change the template count (5), the theme-switcher mechanism, or the
+P0-P14 phase numbering.
 
 ## Competitor Benchmark & Gap Additions (2026-06-15)
 Full analysis: `docs/competitor_landscape_and_feature_blueprint.md`

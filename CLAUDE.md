@@ -20,6 +20,14 @@ DOMAIN: TBD — confirm with user before P14. Do NOT default to
 finstack.aviinjobs.com — that subdomain may already be used by an
 unrelated FinStack HR/Payroll deployment for the same company.
 
+## UI TEMPLATES (5 selectable — defined, P4 unblocked)
+Full spec: docs/ui_templates.md — Enterprise Classic, Modern SaaS,
+Minimal/Focus, AI Command Center, Mobile-First/Field. Implemented as
+a `data-theme` attribute + Zustand persist + Tailwind variant plugin
+(same pattern as the sister FinStack product's theme switcher).
+Build this infrastructure as part of P4 (Frontend Foundation) so
+every later UI phase (P5-P10) is theme-aware from the start.
+
 ## TECH STACK
 - Backend:    FastAPI (Python) + asyncpg
 - Frontend:   Next.js 14 + TypeScript + Tailwind CSS + ShadCN UI
