@@ -13,8 +13,8 @@
 
 | Phase | Name | Status | QA | Notes |
 |-------|------|--------|-----|-------|
-| P0 | Infrastructure (Docker + DB + schemas + RLS) | NEXT | ⏳ | No pre-existing setup script — write docker-compose.yml + sql/*.sql + .env from scratch per CLAUDE.md TECH STACK / TARGET DB sections. Also add `ai_jobs`, `ai_cache` (+`prompt_embedding vector(384)`), `audit_log`, `assignment_event`, `consent_records` tables (see Zero-Cost Architecture Review) |
-| P1 | Foundation APIs (candidate, req, pipeline, offer) | ⏳ | ⏳ | Depends on P0. Add `interview_scorecards` endpoints + HITL pause-for-approval gate on offer/reject/reassign actions (logs to `assignment_event`/`audit_log`) + `consent_records` read/write endpoints (see Zero-Cost Architecture Review) |
+| P0 | Infrastructure (Docker + DB + schemas + RLS) | ✅ DONE | 3/3 (S1 API Health) | docker-compose.yml: 7 services (db, embed, ollama, backend, frontend, n8n, waha) on `finstack` bridge net, all up/healthy (~2.5GB/7.8GB RAM used). sql/00_app_role.sql + 01_phase1_schema.sql + 10_phase1_staffing_additions.sql applied via docker-entrypoint-initdb.d — 16 tenant tables w/ FORCE RLS (core 9 + ai_jobs, ai_cache+hnsw cosine idx, audit_log monthly-partitioned, assignment_event, consent_records, hotlist, submittals, placements) + hnsw idx on candidates.resume_embedding / requisitions.jd_embedding. seed_data.py seeded 2 tenants (acme=a92d7fd7-fb72-47d8-881e-2493c61717ce, beta=539f4aea-646e-4816-a2f6-b476fed0bc51): acme=4 users/11 candidates/6 reqs/11 apps incl. 1 pending_approval offer (HITL demo) + 1 active placement + 2 hotlist entries; beta=1 user/2 candidates/1 req/2 apps. embed_writer.py filled 384-dim BGE-small embeddings (13 candidates, 7 reqs total). Ollama qwen2.5:1.5b-instruct-q4_K_M pulled (986MB). RLS verified: per-tenant counts correct, 0 cross-tenant leakage, unset app.tenant_id fails closed (uuid cast ERROR, not empty result). zerotoken-check.sh: CONFIRMED CLEAN. Playwright S1 (backend /health, embed 384-dim, Ollama model loaded): 3/3 passed. |
+| P1 | Foundation APIs (candidate, req, pipeline, offer) | NEXT | ⏳ | Depends on P0 (done). Add `interview_scorecards` endpoints + HITL pause-for-approval gate on offer/reject/reassign actions (logs to `assignment_event`/`audit_log`) + `consent_records` read/write endpoints (see Zero-Cost Architecture Review) |
 | P2 | Automation (n8n workflows W1-W8) | ⏳ | ⏳ | Depends on P1. Workflows touching offer/reject/reassign must pause at the HITL approval gate added in P1 (see Zero-Cost Architecture Review) |
 | P3 | AI Engine (match, assign, rediscovery) | ⏳ | ⏳ | Depends on P2. Add `backend/ai_router.py` (single cascade-enforcement module: Tier0→1→2 + semantic cache via `ai_cache.prompt_embedding` >0.95 cosine) + AI eval golden-datasets/agent-replay/cache-hit-rate QA (see Zero-Cost Architecture Review) |
 | P4 | Frontend Foundation (GlobalNav + shared components + 5-template theme system) | ⏳ | ⏳ | Depends on P1; 5 templates defined in docs/ui_templates.md — build data-theme/Zustand/Tailwind-variant infra here. Also establish a11y (WCAG 2.2 AA) + i18n (14+ languages) baseline and WebSocket/SSE real-time infra (see Zero-Cost Architecture Review) |
@@ -116,3 +116,12 @@ After each phase completes ALL Playwright tests:
 - [P0] vector(384) only — BGE-small dimensions locked
 - [P0] event_outbox written in same tx as business change
 - [P0] dedup_key required on every event_outbox row
+- [P0] JSONB params via asyncpg must be `json.dumps(...)`'d — passing a raw
+  dict raises `TypeError: expected str, got dict`
+- [P0] `set_config('app.tenant_id', $1, is_local)`: use `false` (session-level)
+  for sequential scripts (seed_data.py/embed_writer.py) running multiple
+  statements outside an explicit transaction; use `true` (LOCAL) only when
+  every statement is wrapped in `conn.transaction()` — this is what
+  `backend/db.py`'s `tenant_conn()` does for pooled per-request connections
+- [P0] This VPS shell session needs `sg docker -c "..."` for every
+  docker/docker-compose daemon command (see memory: project-docker-group-permission)

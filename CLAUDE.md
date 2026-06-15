@@ -74,14 +74,21 @@ every later UI phase (P5-P10) is theme-aware from the start.
     candidate PII (DPDP 2023), not just WhatsApp
 
 ## VPS RESOURCES (checked 2026-06-15)
-96GB disk (93GB free), 7.8GB RAM (5.5GB free), Docker 29.5.3 +
-Compose v5.1.4, `dev` user in both `sudo` and `docker` groups (no
-sudo prefix needed for docker commands). Node 20.20.2 / Python 3.12.3
-on host. 7.8GB RAM is workable but not generous once Postgres + Ollama
-+ n8n + FastAPI + Next.js + WAHA (P11, Chromium-based like Playwright)
-are all running together — if containers start OOM-killing in later
-phases, stagger non-essential services or add swap rather than
-removing the zero-token local-AI services.
+96GB disk (93GB free; 21GB used after P0 image pulls/builds), 7.8GB RAM
+(5.5GB free; ~2.5GB used with all 7 P0 containers up), Docker 29.5.3 +
+Compose v5.1.4. `dev` is in the `docker` group per `/etc/group`, but THIS
+shell session's cached `groups` output predates that grant — plain
+`docker`/`docker compose` commands fail with "permission denied ... docker
+API at unix:///var/run/docker.sock" in this session. WORKAROUND: prefix
+every docker/docker-compose daemon command with `sg docker -c "..."` (works
+without a password). `docker compose config` — pure YAML parse, no daemon —
+works without the wrapper. A fresh login/tmux session would pick up the
+group correctly and not need this. Node 20.20.2 / Python 3.12.3 on host.
+7.8GB RAM is workable but not generous once Postgres + Ollama + n8n +
+FastAPI + Next.js + WAHA (P11, Chromium-based like Playwright) are all
+running together — if containers start OOM-killing in later phases, stagger
+non-essential services or add swap rather than removing the zero-token
+local-AI services.
 
 ## DATABASE CONNECTION (target — created in P0)
 - Host: db (inside Docker) / localhost:5432 (outside)
@@ -128,8 +135,11 @@ removing the zero-token local-AI services.
 - FINSTACK_MASTER_INDEX.md              — phase status tracker
 
 ## PHASE STATUS (source of truth — keep in sync with FINSTACK_MASTER_INDEX.md)
-- [NEXT] P0:  Infrastructure — Docker up, schemas applied, RLS test passed, seed+embed done
-- [ ]     P1:  Backend APIs — all FastAPI endpoints for candidates/reqs/pipeline/offers
+- [DONE]  P0:  Infrastructure — Docker up (7/7 healthy), schemas applied,
+          RLS test passed (per-tenant isolation + fail-closed verified),
+          seed+embed done (2 tenants), Ollama qwen2.5:1.5b-instruct-q4_K_M
+          pulled, zerotoken-check CLEAN, Playwright S1 3/3
+- [NEXT] P1:  Backend APIs — all FastAPI endpoints for candidates/reqs/pipeline/offers
 - [ ]     P2:  n8n Workflows — W1-W8 automation workflows built and activated
 - [ ]     P3:  AI Engine — match, assign, rediscovery endpoints wired
 - [ ]     P4:  Frontend Foundation — GlobalNav, TenantProvider, shared components

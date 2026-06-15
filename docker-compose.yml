@@ -1,0 +1,123 @@
+name: finstack
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: finstack_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ats}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ats}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [finstack]
+
+  embed:
+    build: ./embed
+    container_name: finstack_embed
+    restart: unless-stopped
+    ports:
+      - "${EMBED_PORT:-8081}:8081"
+    volumes:
+      - embed_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks: [finstack]
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: finstack_ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks: [finstack]
+
+  backend:
+    build: ./backend
+    container_name: finstack_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${APP_DB_USER:-app_user}:${APP_DB_PASSWORD:-apppw}@db:5432/${POSTGRES_DB:-ats}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      EMBED_URL: http://embed:8081
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b-instruct-q4_K_M}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [finstack]
+
+  frontend:
+    build: ./frontend
+    container_name: finstack_frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    ports:
+      - "${FRONTEND_PORT:-3001}:3001"
+    depends_on:
+      - backend
+    networks: [finstack]
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: finstack_n8n
+    restart: unless-stopped
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      GENERIC_TIMEZONE: Asia/Kolkata
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks: [finstack]
+
+  waha:
+    image: devlikeapro/waha:latest
+    container_name: finstack_waha
+    restart: unless-stopped
+    environment:
+      WAHA_PRINT_QR: "false"
+    ports:
+      - "${WAHA_PORT:-3000}:3000"
+    volumes:
+      - waha_data:/app/.sessions
+    networks: [finstack]
+
+networks:
+  finstack:
+    driver: bridge
+
+volumes:
+  pgdata:
+  embed_cache:
+  ollama_data:
+  n8n_data:
+  waha_data:
