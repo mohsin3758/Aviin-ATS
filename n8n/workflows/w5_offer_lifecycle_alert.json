@@ -1,0 +1,151 @@
+{
+  "id": "wfP2W5OfferLfc00",
+  "name": "P2-W5 Offer Lifecycle Alert",
+  "active": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 60
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "getTenants",
+      "name": "Get tenants",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM tenants;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "getEvents",
+      "name": "Get offer.* events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ \"SELECT set_config('app.tenant_id','\" + $json.id + \"', false); SELECT eo.id, eo.tenant_id, eo.event_type, eo.payload, a.assigned_recruiter_id, c.full_name AS candidate_name, r.title AS req_title FROM event_outbox eo JOIN applications a ON a.id = (eo.payload->>'application_id')::uuid JOIN candidates c ON c.id = a.candidate_id JOIN requisitions r ON r.id = a.requisition_id WHERE eo.processed_at IS NULL AND eo.event_type IN ('offer.created','offer.issued','offer.accepted','offer.declined') ORDER BY eo.created_at LIMIT 50;\" }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "buildSql",
+      "name": "Build notification SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "const esc = (s) => String(s).replace(/'/g, \"''\");\nconst row = $input.item.json;\nif (Object.prototype.hasOwnProperty.call(row, 'set_config')) { return { json: { sql: 'SELECT 1;' } }; }\nconst payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {});\nconst tenant = row.tenant_id;\nconst recruiterId = row.assigned_recruiter_id;\nconst candidate = esc(row.candidate_name);\nconst reqTitle = esc(row.req_title);\nlet recipientCol, recipientVal, title, body;\nif (row.event_type === 'offer.created') {\n  recipientCol = 'recipient_role';\n  recipientVal = \"'manager'\";\n  title = 'Offer needs approval';\n  body = 'Offer drafted for ' + candidate + ' on \\\"' + reqTitle + '\\\" \\u2014 submit for approval.';\n} else {\n  const status = row.event_type.split('.')[1];\n  recipientCol = recruiterId ? 'recipient_user_id' : 'recipient_role';\n  recipientVal = recruiterId ? \"'\" + recruiterId + \"'\" : \"'manager'\";\n  title = 'Offer ' + status + ': ' + candidate;\n  body = 'Offer for ' + candidate + ' on \\\"' + reqTitle + '\\\" is now ' + status + '.';\n}\nlet sql = \"SELECT set_config('app.tenant_id','\" + tenant + \"', false); \";\nsql += \"INSERT INTO notifications (tenant_id, \" + recipientCol + \", channel, title, body, related_entity_type, related_entity_id) VALUES ('\" + tenant + \"', \" + recipientVal + \", 'inapp', '\" + title + \"', '\" + body + \"', 'offer', '\" + payload.offer_id + \"'); \";\nsql += \"UPDATE event_outbox SET processed_at = now() WHERE id = \" + row.id + \";\";\nreturn { json: { sql } };\n"
+      }
+    },
+    {
+      "id": "write",
+      "name": "Write notification + mark processed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get tenants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get tenants": {
+      "main": [
+        [
+          {
+            "node": "Get offer.* events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get offer.* events": {
+      "main": [
+        [
+          {
+            "node": "Build notification SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build notification SQL": {
+      "main": [
+        [
+          {
+            "node": "Write notification + mark processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

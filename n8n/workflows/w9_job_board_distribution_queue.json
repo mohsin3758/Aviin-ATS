@@ -1,0 +1,151 @@
+{
+  "id": "wfP2W9JobBoard00",
+  "name": "P2-W9 Job-Board Distribution Queue",
+  "active": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "getTenants",
+      "name": "Get tenants",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM tenants;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "getOpenReqs",
+      "name": "Get open reqs needing posting",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ \"SELECT set_config('app.tenant_id','\" + $json.id + \"', false); SELECT '\" + $json.id + \"' AS tenant_id, r.id AS requisition_id, r.title FROM requisitions r WHERE r.status='open' AND NOT EXISTS (SELECT 1 FROM job_board_postings jb WHERE jb.requisition_id=r.id) LIMIT 50;\" }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "buildSql",
+      "name": "Build queue-insert SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "const row = $input.item.json;\nif (Object.prototype.hasOwnProperty.call(row, 'set_config')) { return { json: { sql: 'SELECT 1;' } }; }\nconst tenant = row.tenant_id;\nconst boards = ['naukri','indeed','linkedin'];\nlet sql = \"SELECT set_config('app.tenant_id','\" + tenant + \"', false); \";\nfor (const b of boards) {\n  sql += \"INSERT INTO job_board_postings (tenant_id, requisition_id, board, status) VALUES ('\" + tenant + \"', '\" + row.requisition_id + \"', '\" + b + \"', 'queued') ON CONFLICT (tenant_id, requisition_id, board) DO NOTHING; \";\n}\nreturn { json: { sql } };\n"
+      }
+    },
+    {
+      "id": "write",
+      "name": "Queue job-board postings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get tenants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get tenants": {
+      "main": [
+        [
+          {
+            "node": "Get open reqs needing posting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get open reqs needing posting": {
+      "main": [
+        [
+          {
+            "node": "Build queue-insert SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build queue-insert SQL": {
+      "main": [
+        [
+          {
+            "node": "Queue job-board postings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

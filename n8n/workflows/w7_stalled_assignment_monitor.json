@@ -1,0 +1,151 @@
+{
+  "id": "wfP2W7Stalled000",
+  "name": "P2-W7 Stalled Assignment Monitor",
+  "active": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "getTenants",
+      "name": "Get tenants",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM tenants;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "getStalled",
+      "name": "Get stalled assignments",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ \"SELECT set_config('app.tenant_id','\" + $json.id + \"', false); SELECT '\" + $json.id + \"' AS tenant_id, f.* FROM find_stalled_assignments(72) f WHERE NOT EXISTS (SELECT 1 FROM notifications n WHERE n.related_entity_type='assignment' AND n.related_entity_id=f.assignment_id AND n.created_at > now() - interval '24 hours') LIMIT 50;\" }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "buildSql",
+      "name": "Build notification SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "const esc = (s) => String(s).replace(/'/g, \"''\");\nconst row = $input.item.json;\nif (Object.prototype.hasOwnProperty.call(row, 'set_config')) { return { json: { sql: 'SELECT 1;' } }; }\nconst tenant = row.tenant_id;\nconst title = 'Assignment stalled';\nconst body = esc(row.recruiter_name) + ' has had no activity on \\\"' + esc(row.requisition_title) + '\\\" for ' + row.hours_since_update + ' hours (assigned ' + row.assigned_at + ').';\nlet sql = \"SELECT set_config('app.tenant_id','\" + tenant + \"', false); \";\nsql += \"INSERT INTO notifications (tenant_id, recipient_role, channel, title, body, related_entity_type, related_entity_id) VALUES ('\" + tenant + \"', 'manager', 'inapp', '\" + title + \"', '\" + body + \"', 'assignment', '\" + row.assignment_id + \"');\";\nreturn { json: { sql } };\n"
+      }
+    },
+    {
+      "id": "write",
+      "name": "Write notification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get tenants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get tenants": {
+      "main": [
+        [
+          {
+            "node": "Get stalled assignments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get stalled assignments": {
+      "main": [
+        [
+          {
+            "node": "Build notification SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build notification SQL": {
+      "main": [
+        [
+          {
+            "node": "Write notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -129,6 +129,11 @@ local-AI services.
 - backend/embed_writer.py               — vector column filler
 - backend/seed_data.py                  — India demo data
 - embed/embed_service.py                — BGE-small service
+- sql/03_phase2_n8n_additions.sql       — notifications, job_board_postings,
+                                           find_stalled_assignments, find_sla_breaches
+- n8n/build_workflows.py                — generator for n8n/workflows/*.json (W1-W9)
+- n8n/workflows/                        — exported workflow JSON (re-import after editing the generator)
+- n8n/credentials/                      — exported Postgres app_user credential
 - docker-compose.yml                    — all 7 services
 - tests/qa_automation.spec.ts           — Playwright QA tests
 - CLAUDE.md                             — this file (auto-loaded)
@@ -147,8 +152,20 @@ local-AI services.
           (+HITL reassign), consent_records, interview_scorecards (new
           table + RLS). zerotoken-check CLEAN (regex false-positive on
           "Capgemini" fixed), Playwright S1+S4 5/5
-- [NEXT] P2:  n8n Workflows — W1-W8 automation workflows built and activated
-- [ ]     P3:  AI Engine — match, assign, rediscovery endpoints wired
+- [DONE]  P2:  n8n Workflows — `n8n/` (build_workflows.py generator +
+          credentials/ + workflows/), `sql/03_phase2_n8n_additions.sql`
+          (notifications, job_board_postings, find_stalled_assignments,
+          find_sla_breaches). W1 generic event_outbox dispatcher + W2-W5
+          per-event notifications (candidate/requisition/stage-change/
+          offer lifecycle), W6 HITL approval reminder (NEVER
+          auto-approves), W7 stalled-assignment + W8 SLA-breach monitors
+          (flag-only, NEVER auto-reassign), W9 job-board distribution
+          queue (naukri/indeed/linkedin, queued rows only, zero-token
+          scaffold). All 9 active in n8n, verified end-to-end against
+          live data (acme: 17 notifications from W1-W5, 18
+          job_board_postings from W9). zerotoken-check CLEAN, Playwright
+          S1+S4 5/5 (regression)
+- [NEXT] P3:  AI Engine — match, assign, rediscovery endpoints wired
 - [ ]     P4:  Frontend Foundation — GlobalNav, TenantProvider, shared components
 - [ ]     P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx)
 - [ ]     P6:  UI T2 — Kanban Pipeline Board (app/pipeline/[req_id]/page.tsx)
@@ -217,6 +234,23 @@ phase is a token leak; fix it before starting the next phase.
   qwen2.5:1.5b-instruct-q4_K_M`
 - n8n workflow not firing / returns 0 rows → confirm `SET
   app.tenant_id` is the first node in that workflow's Postgres query
+- n8n Code node sees `undefined` fields from a `SET
+  app.tenant_id; SELECT ...` Postgres node → the node's output
+  includes a phantom 1-column `{set_config: "<uuid>"}` item from
+  statement 1; every P2 Code node starts with the GUARD check (see
+  n8n/build_workflows.py) that skips this item with `SELECT 1;`. Keep
+  this guard on any NEW multi-statement Postgres→Code node pair.
+- n8n workflow edited → regenerate with `python3 n8n/build_workflows.py`,
+  `docker compose cp n8n/workflows n8n:/tmp/wf` (clear /tmp/wf first),
+  `docker compose exec -T n8n n8n import:workflow --separate
+  --input=/tmp/wf`, then `n8n update:workflow --id=<id> --active=true`
+  per workflow (deprecated but works), then `docker compose restart
+  n8n`. To debug executions, query
+  `/home/node/.n8n/database.sqlite` (`execution_entity` +
+  `execution_data`) via Node's built-in `node:sqlite` (`new
+  DatabaseSync(path, {readOnly:true})`) — n8n's bundled
+  better-sqlite3 path varies by version and the REST API + `n8n
+  execute` CLI don't work against a running single-main instance.
 - Frontend 404 on a new route → confirm the route exists under `app/`
   (Next 14 app router), rebuild the frontend container
 - Playwright login timeout → confirm seed_data.py ran and the demo

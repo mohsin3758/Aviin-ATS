@@ -15,8 +15,8 @@
 |-------|------|--------|-----|-------|
 | P0 | Infrastructure (Docker + DB + schemas + RLS) | ✅ DONE | 3/3 (S1 API Health) | docker-compose.yml: 7 services (db, embed, ollama, backend, frontend, n8n, waha) on `finstack` bridge net, all up/healthy (~2.5GB/7.8GB RAM used). sql/00_app_role.sql + 01_phase1_schema.sql + 10_phase1_staffing_additions.sql applied via docker-entrypoint-initdb.d — 16 tenant tables w/ FORCE RLS (core 9 + ai_jobs, ai_cache+hnsw cosine idx, audit_log monthly-partitioned, assignment_event, consent_records, hotlist, submittals, placements) + hnsw idx on candidates.resume_embedding / requisitions.jd_embedding. seed_data.py seeded 2 tenants (acme=a92d7fd7-fb72-47d8-881e-2493c61717ce, beta=539f4aea-646e-4816-a2f6-b476fed0bc51): acme=4 users/11 candidates/6 reqs/11 apps incl. 1 pending_approval offer (HITL demo) + 1 active placement + 2 hotlist entries; beta=1 user/2 candidates/1 req/2 apps. embed_writer.py filled 384-dim BGE-small embeddings (13 candidates, 7 reqs total). Ollama qwen2.5:1.5b-instruct-q4_K_M pulled (986MB). RLS verified: per-tenant counts correct, 0 cross-tenant leakage, unset app.tenant_id fails closed (uuid cast ERROR, not empty result). zerotoken-check.sh: CONFIRMED CLEAN. Playwright S1 (backend /health, embed 384-dim, Ollama model loaded): 3/3 passed. |
 | P1 | Foundation APIs (candidate, req, pipeline, offer) | ✅ DONE | 5/5 (S1+S4) | `sql/02_phase1_p1_additions.sql`: `interview_scorecards` table (+RLS) and `auth_lookup_user(email)` SECURITY DEFINER fn (owned by postgres, bypasses RLS for login-time tenant resolution). `backend/auth.py`+`deps.py`: JWT (tenant_id+role+user_id claims) via `/auth/login`+`/auth/me`; `get_actor` dual-resolves from `Authorization: Bearer` (JWT) or `x-tenant-id` header (anonymous, role=None); `require_role(...)` rejects anonymous actors. Routers: candidates (CRUD+filters, consent_records+event_outbox on create), requisitions (CRUD+`/pipeline` kanban-grouped view), applications (`/stage` transitions, `rejected` HITL-gated to admin/manager + assignment_event/audit_log), offers (draft→pending_approval→approved→issued→accepted/declined; approve+issue HITL-gated to admin/manager, write assignment_event+audit_log, issue also writes event_outbox `offer.issued`), assignments (+`/reassign` HITL-gated to admin/manager, old→reassigned + new active assignment, assignment_event+audit_log), consent-records (GET/POST), interview-scorecards (GET/POST). All curl-smoke-tested end to end against acme tenant. zerotoken-check.sh CLEAN (fixed `gemini`→`\bgemini\b` false-positive on "Capgemini"). Playwright S1 (3/3) + S4 (2/2) = 5/5. |
-| P2 | Automation (n8n workflows W1-W8) | NEXT | ⏳ | Depends on P1 (done). Workflows touching offer/reject/reassign must pause at the HITL approval gate added in P1 (see Zero-Cost Architecture Review) |
-| P3 | AI Engine (match, assign, rediscovery) | ⏳ | ⏳ | Depends on P2. Add `backend/ai_router.py` (single cascade-enforcement module: Tier0→1→2 + semantic cache via `ai_cache.prompt_embedding` >0.95 cosine) + AI eval golden-datasets/agent-replay/cache-hit-rate QA (see Zero-Cost Architecture Review) |
+| P2 | Automation (n8n workflows W1-W9) | ✅ DONE | 5/5 (S1+S4, regression) | `sql/03_phase2_n8n_additions.sql`: `notifications` + `job_board_postings` tables (+RLS), `find_stalled_assignments(hours)` + `find_sla_breaches()` fns. `n8n/build_workflows.py` generates all 9 workflows into `n8n/workflows/`; `n8n/credentials/postgres_app_user.json` (app_user/apppw, HARD RULE #9). W1 = generic event_outbox dispatcher (catch-all for event_types not claimed by W2-W5) → admin notification. W2 candidate.created → recruiter. W3 requisition.created → manager. W4 application.stage_changed → assigned recruiter (fallback manager). W5 offer.created/issued/accepted/declined → manager (created) or assigned recruiter (others). W6 HITL approval reminder (offers pending_approval >4h → manager, dedup via NOT EXISTS on notifications, NEVER auto-approves — HARD RULE #10). W7 stalled-assignment monitor (`find_stalled_assignments(72)` → manager, flag-only, NEVER auto-reassigns). W8 SLA-breach monitor (`find_sla_breaches()` → manager). W9 job-board distribution queue (open reqs → `job_board_postings` rows for naukri/indeed/linkedin, status='queued', ON CONFLICT DO NOTHING — zero-token scaffold, no external API calls). Every Postgres node runs `SELECT set_config('app.tenant_id','<uuid>', false); SELECT ...;` (HARD RULE #8); every downstream Code node starts with a GUARD that skips the resulting phantom `{set_config: "<uuid>"}` item (see Architecture Rules). All 9 imported + activated via n8n 2.25.7 CLI (`import:workflow --separate` + `update:workflow --active=true` + restart) and verified end-to-end against live acme-tenant data: W1-W5 processed all 17 pending event_outbox rows into 17 notifications (13 candidate.created, 2 stage_changed, 2 offer.*) with 0 errors; W6-W8 ran clean (0 flags — no stale offers/stalled assignments/SLA breaches in current seed data, confirmed via temporary short-interval test run); W9 queued 18 job_board_postings rows (6 open reqs × 3 boards) idempotently. zerotoken-check.sh CLEAN (53 files). Playwright S1+S4 5/5 (regression, no P0/P1 breakage). |
+| P3 | AI Engine (match, assign, rediscovery) | NEXT | ⏳ | Depends on P2 (done). Add `backend/ai_router.py` (single cascade-enforcement module: Tier0→1→2 + semantic cache via `ai_cache.prompt_embedding` >0.95 cosine) + AI eval golden-datasets/agent-replay/cache-hit-rate QA (see Zero-Cost Architecture Review) |
 | P4 | Frontend Foundation (GlobalNav + shared components + 5-template theme system) | ⏳ | ⏳ | Depends on P1; 5 templates defined in docs/ui_templates.md — build data-theme/Zustand/Tailwind-variant infra here. Also establish a11y (WCAG 2.2 AA) + i18n (14+ languages) baseline and WebSocket/SSE real-time infra (see Zero-Cost Architecture Review) |
 | P5 | UI T1: Recruiter Command Center | ⏳ | ⏳ | Depends on P4 |
 | P6 | UI T2: Kanban Pipeline Board | ⏳ | ⏳ | Depends on P4. Includes client/hiring-manager read-only portal (Competitor Benchmark gap) + candidate self-service portal — apply, track status, self-schedule (Zero-Cost Architecture Review gap) + live WebSocket/SSE pipeline updates |
@@ -145,3 +145,51 @@ After each phase completes ALL Playwright tests:
 - [P1] asyncpg returns JSONB columns (e.g. `interview_scorecards.scores`)
   as raw JSON strings (no codec registered) — P4+ frontend must
   `JSON.parse()` these fields rather than treating them as objects.
+- [P2] n8n Postgres node, multi-statement RLS pattern: every tenant-scoped
+  query is built as ONE node-postgres "simple query protocol" string:
+  `SELECT set_config('app.tenant_id','<uuid>', false); SELECT ...;`
+  (no `$N` placeholder params — they're incompatible with multi-statement
+  simple-protocol execution). The node concatenates ALL result sets into its output
+  items, so item #1 for each tenant is always the 1-row/1-column
+  `{set_config: "<uuid>"}` result of statement 1, NOT a data row.
+- [P2] GUARD pattern: every Code node downstream of a "set_config;
+  SELECT" Postgres node MUST start with
+  `const row = $input.item.json; if (Object.prototype.hasOwnProperty.call(row,
+  'set_config')) { return { json: { sql: 'SELECT 1;' } }; }` (see
+  `GUARD` const in `n8n/build_workflows.py`) — otherwise the phantom
+  item produces `undefined` fields and the downstream write fails with
+  e.g. `invalid input syntax for type uuid: "undefined"`. This bug
+  silently broke W1-W5 on first activation (0 notifications written,
+  no log errors at default level) until found via n8n's internal
+  execution_entity/execution_data tables.
+- [P2] Free-text values (candidate names, job titles, reasons) going
+  into multi-statement SQL strings are escaped with a local
+  `esc = (s) => String(s).replace(/'/g, "''")` helper in the Code
+  node — there is no parameterization available in this pattern.
+- [P2] event_type ownership: each `event_outbox.event_type` is claimed
+  by exactly ONE workflow for setting `processed_at` (W2-W5 claim
+  candidate.created/requisition.created/application.stage_changed/
+  offer.*; W1 is the catch-all for everything else). W9 does NOT use
+  event_outbox at all — it queries `requisitions`/`job_board_postings`
+  directly, avoiding any ownership conflict.
+- [P2] n8n 2.25.7 CLI activation procedure for this single-main
+  deployment (no queue/multi-main mode, so `--activeState=fromJson`
+  and the REST API's session auth both fail):
+  `docker compose cp n8n/workflows n8n:/tmp/wf` (rm -rf /tmp/wf first
+  if re-running, since `cp` merges into an existing dir and
+  `import:workflow --input=<dir>` is non-recursive — stale top-level
+  files get re-imported) → `n8n import:workflow --separate
+  --input=/tmp/wf` → `n8n update:workflow --id=<id> --active=true` per
+  workflow (prints a deprecation warning but works) → `docker compose
+  restart n8n`. Confirm via `docker compose logs n8n | grep Activated`.
+- [P2] Debugging n8n executions: `n8n execute --id=X` conflicts with
+  the running instance (Task Broker port 5679 already bound) and the
+  `/rest/workflows/:id` API returns 401 even with basic auth (session-
+  based auth in 2.x). Instead, query n8n's internal SQLite directly
+  with Node's built-in `node:sqlite` (Node 22+, no native module path
+  issues): `new (require('node:sqlite').DatabaseSync)('/home/node/.n8n/database.sqlite',
+  {readOnly:true})`, then `SELECT id, workflowId, status, startedAt,
+  finished FROM execution_entity ...` for pass/fail, and `SELECT data
+  FROM execution_data WHERE executionId=<id>` for the full error
+  message/stack (data is a JSON-serialized array with reference
+  indices, the error message is a plain substring near the end).

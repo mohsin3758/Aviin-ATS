@@ -1,0 +1,52 @@
+{
+  "id": "wfTestRlsCheck01",
+  "name": "[TEST] RLS set_config pattern check",
+  "active": false,
+  "nodes": [
+    {
+      "id": "scheduleTrigger1",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "seconds", "secondsInterval": 10 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "pgSetAndQuery1",
+      "name": "Set tenant + write test notification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT set_config('app.tenant_id', 'a92d7fd7-fb72-47d8-881e-2493c61717ce', false); INSERT INTO notifications (tenant_id, recipient_role, channel, title, body) SELECT 'a92d7fd7-fb72-47d8-881e-2493c61717ce', 'admin', 'inapp', 'RLS test', 'candidates=' || (SELECT count(*) FROM candidates)::text;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set tenant + write test notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,151 @@
+{
+  "id": "wfP2W6HitlRemd00",
+  "name": "P2-W6 HITL Approval Reminder",
+  "active": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "getTenants",
+      "name": "Get tenants",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM tenants;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "getStale",
+      "name": "Get stale pending_approval offers",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ \"SELECT set_config('app.tenant_id','\" + $json.id + \"', false); SELECT '\" + $json.id + \"' AS tenant_id, o.id AS offer_id, c.full_name AS candidate_name, r.title AS req_title, ROUND(EXTRACT(EPOCH FROM (now()-o.updated_at))/3600,1) AS hours_pending FROM offers o JOIN applications a ON a.id=o.application_id JOIN candidates c ON c.id=a.candidate_id JOIN requisitions r ON r.id=a.requisition_id WHERE o.status='pending_approval' AND o.updated_at < now() - interval '4 hours' AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.related_entity_type='offer' AND n.related_entity_id=o.id AND n.title='Offer pending approval' AND n.created_at > now() - interval '4 hours') LIMIT 50;\" }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    },
+    {
+      "id": "buildSql",
+      "name": "Build notification SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "const esc = (s) => String(s).replace(/'/g, \"''\");\nconst row = $input.item.json;\nif (Object.prototype.hasOwnProperty.call(row, 'set_config')) { return { json: { sql: 'SELECT 1;' } }; }\nconst tenant = row.tenant_id;\nconst title = 'Offer pending approval';\nconst body = 'Offer for ' + esc(row.candidate_name) + ' on \\\"' + esc(row.req_title) + '\\\" has been pending approval for ' + row.hours_pending + ' hours.';\nlet sql = \"SELECT set_config('app.tenant_id','\" + tenant + \"', false); \";\nsql += \"INSERT INTO notifications (tenant_id, recipient_role, channel, title, body, related_entity_type, related_entity_id) VALUES ('\" + tenant + \"', 'manager', 'inapp', '\" + title + \"', '\" + body + \"', 'offer', '\" + row.offer_id + \"');\";\nreturn { json: { sql } };\n"
+      }
+    },
+    {
+      "id": "write",
+      "name": "Write notification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgAppUserAts0001",
+          "name": "Postgres app_user (ats)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get tenants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get tenants": {
+      "main": [
+        [
+          {
+            "node": "Get stale pending_approval offers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get stale pending_approval offers": {
+      "main": [
+        [
+          {
+            "node": "Build notification SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build notification SQL": {
+      "main": [
+        [
+          {
+            "node": "Write notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
