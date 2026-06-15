@@ -29,17 +29,26 @@ P14. VPS Deploy - domain + SSL + production
 All phases are purely additive - do not modify or regress any existing feature.
 
 For each phase apply this template:
-[Px] [name]. Build backend+frontend. Run Playwright QA. Fix errors.
-Update CLAUDE.md + FINSTACK_MASTER_INDEX.md. Code only. No stops.
+[Px] [name]. Build backend+frontend. Run Playwright QA. Run
+`bash scripts/zerotoken-check.sh` (must print CONFIRMED CLEAN).
+Fix errors. Update CLAUDE.md + FINSTACK_MASTER_INDEX.md. Code only.
+No stops.
 
 After each phase finishes with ALL Playwright tests passing:
-1. Update CLAUDE.md (add architecture-rule + mark phase DONE + next NEXT)
-2. Update FINSTACK_MASTER_INDEX.md (status row + QA result)
-3. Run /compact to free context
-4. Immediately start next phase - no user input needed
+1. Run `bash scripts/zerotoken-check.sh` — must print "ZERO-TOKEN
+   CASCADE: CONFIRMED CLEAN". If it reports a violation, replace the
+   offending call with the local cascade (Ollama/BGE/pgvector/OCR)
+   before continuing — this is a HARD RULE, not optional.
+2. Update CLAUDE.md (add architecture-rule + mark phase DONE + next NEXT)
+3. Update FINSTACK_MASTER_INDEX.md (status row + QA result)
+4. Run /compact to free context
+5. Immediately start next phase - no user input needed
 
 STOP CONDITIONS (pause and report to user):
 - Playwright test fails and cannot be fixed after 3 attempts
+- zerotoken-check.sh reports a violation that can't be resolved with
+  the local cascade (i.e. the feature genuinely requires a paid
+  external API) — STOP and ask the user before adding it
 - Blocking error (missing credentials, DB unreachable, migration conflict)
 - VPS Deploy (P14): STOP and ask for domain + SSL details first
 - User types: STOP

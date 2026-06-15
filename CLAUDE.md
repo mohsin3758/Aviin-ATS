@@ -165,12 +165,24 @@ phase is a token leak; fix it before starting the next phase.
   scripts/claude-auto-resume.sh detect it and auto-send "continue"
   (see 24/7 OPERATION) — never silently abandon a phase
 
+## ZERO-TOKEN AUDIT (run at the end of EVERY phase)
+`bash scripts/zerotoken-check.sh` scans the full repo (code + config
++ env + compose files) for any reference to a paid/external AI API
+(OpenAI, Anthropic, Gemini, Cohere, Mistral, Together, Replicate,
+Groq, Bedrock, Vertex AI, HF Inference API, etc.) and must print
+"ZERO-TOKEN CASCADE: CONFIRMED CLEAN". A violation = HARD RULE
+breach — fix by routing through the local cascade (Ollama Qwen2.5 /
+BGE-small embeddings / pgvector / Tesseract+OpenCV OCR), never by
+adding a key. Use `--diff` for a quick pre-commit check on changed
+files only.
+
 ## AUTOPILOT MODE
 When told "autopilot" — run phases end-to-end without stopping, per
-docs/autopilot.md. After each phase: update CLAUDE.md +
-FINSTACK_MASTER_INDEX.md, run Playwright QA, fix failures, then start
-next phase automatically. Stop ONLY on: test failure after retry,
-blocking error, or user types STOP.
+docs/autopilot.md. After each phase: run the ZERO-TOKEN AUDIT above,
+update CLAUDE.md + FINSTACK_MASTER_INDEX.md, run Playwright QA, fix
+failures, then start next phase automatically. Stop ONLY on: test
+failure after retry, an unresolvable zero-token violation, blocking
+error, or user types STOP.
 
 ## 24/7 OPERATION
 Claude Code is already logged in (OAuth/Pro subscription, NOT an API
