@@ -120,6 +120,51 @@ these once available.
 - Precise prompts save ~60% vs vague ones
 - Specific file targeting saves ~50%
 
+## MODEL SWITCHING RULES
+- `/model haiku` (~60% cheaper) — simple tasks: read files, check
+  syntax, verify code, fix small bugs, run/inspect test output
+- `/model sonnet` (default) — complex tasks: build features, install
+  packages, DB migrations/schema changes, deploy, architecture
+  decisions
+- Switch back to sonnet before any multi-file feature work or schema
+  change — don't let a haiku session drift into building a phase
+
+## TOKEN-SAVING STRATEGY (target: ~99% reduction vs naive usage)
+These compound — apply ALL of them, every phase:
+- CLAUDE.md auto-load context              ~70%
+- /compact after each phase                ~40%
+- Precise, one-line prompts                ~60%
+- Playwright auto-QA (no manual debugging) ~80%
+- AGENTS.md cross-tool rules               ~75%
+- Custom slash commands (/qa /phase ...)   ~70%
+- Self-healing AUTO-FIX RULES (below)      ~85%
+- Autopilot mode (no stop-and-ask)         ~90%
+- /model haiku for simple sub-tasks        ~60%
+During /compact, check this list — a technique not in active use on a
+phase is a token leak; fix it before starting the next phase.
+
+## AUTO-FIX RULES (self-healing — expand this list as new errors appear)
+- Backend container crash → `docker compose logs backend`, fix the
+  env var/import error, `docker compose up -d --build backend`
+- DB connection refused → check `db` healthcheck (`docker compose
+  ps`), confirm app_user/apppw match between .env and docker-compose
+- "relation does not exist" → re-run sql/*.sql migrations in order
+  against the `ats` db; check RLS policy wasn't applied before the
+  table existed
+- Embeddings dimension mismatch → confirm embed service returns
+  384-dim vectors (BGE-small-en-v1.5); never resize the vector column
+- Ollama model missing → `docker exec finstack_ollama ollama pull
+  qwen2.5:1.5b-instruct-q4_K_M`
+- n8n workflow not firing / returns 0 rows → confirm `SET
+  app.tenant_id` is the first node in that workflow's Postgres query
+- Frontend 404 on a new route → confirm the route exists under `app/`
+  (Next 14 app router), rebuild the frontend container
+- Playwright login timeout → confirm seed_data.py ran and the demo
+  user exists; check backend `/health` first
+- Claude usage-limit hit mid-phase → do NOT stop; let
+  scripts/claude-auto-resume.sh detect it and auto-send "continue"
+  (see 24/7 OPERATION) — never silently abandon a phase
+
 ## AUTOPILOT MODE
 When told "autopilot" — run phases end-to-end without stopping, per
 docs/autopilot.md. After each phase: update CLAUDE.md +
