@@ -34,6 +34,9 @@ every later UI phase (P5-P10) is theme-aware from the start.
 - Database:   PostgreSQL 16 + pgvector extension
 - Embeddings: BGE-small-en-v1.5 (384 dims) at http://embed:8081
 - Generation: Qwen2.5-1.5B via Ollama at http://ollama:11434
+- Job queue:  Postgres-based `ai_jobs` table polled by a worker (NOT
+              Redis/Celery/BullMQ — keeps footprint lean on 7.8GB RAM)
+              for async Tier-2 generation (JD drafts, summaries, FAQ)
 - Automation: n8n self-hosted at http://n8n:5678
 - WhatsApp:   WAHA at http://waha:3000
 - OCR:        Tesseract + OpenCV (CPU, free)
@@ -45,17 +48,30 @@ every later UI phase (P5-P10) is theme-aware from the start.
 - Tier 0 (~70%): PostgreSQL rules + n8n + regex + OCR — FREE
 - Tier 1 (~20%): BGE-small embeddings + pgvector — FREE (CPU)
 - Tier 2-lite (~10%): Qwen via Ollama async+cached — FREE (CPU)
+- AI ROUTER (P3): `backend/ai_router.py` is the ONE module every AI
+  call passes through — dispatches Tier0→1→2, enforces HARD RULES
+  #1/#3/#4, and does the semantic-cache lookup before any Ollama call
 
 ## HARD RULES — ZERO TOLERANCE
 1. NEVER call OpenAI/Anthropic/Gemini or any external LLM API
 2. NEVER connect to DB as postgres superuser (bypasses RLS)
 3. ALWAYS vector(384) for all embeddings (BGE-small only)
-4. ALWAYS make Ollama calls async + cache in ai_cache table
+4. ALWAYS make Ollama calls async via the AI Router + cache in
+   `ai_cache` — cache lookup is by embedding similarity (>0.95 cosine
+   on `ai_cache.prompt_embedding vector(384)`), not just exact-hash
 5. ALWAYS write event_outbox in SAME DB transaction as business change
 6. ALWAYS set dedup_key on every event_outbox row
-7. WhatsApp ALWAYS requires consent record first (India DPDP 2023)
+7. WhatsApp ALWAYS requires a consent record first (India DPDP 2023) —
+   one instance of rule 12 below
 8. ALL n8n PostgreSQL nodes MUST SET app.tenant_id first
 9. ALWAYS connect as app_user (password: apppw) NEVER postgres
+10. High-stakes actions (offer issued, candidate rejected, recruiter
+    reassigned) ALWAYS pause for human approval (HITL gate) and log to
+    `assignment_event`/`audit_log` — never fully autonomous on these
+11. ALWAYS encrypt Aadhaar/PAN/PF/bank-account columns at rest
+    (pgcrypto field-level encryption) — applies to P12/P13 data
+12. ALWAYS write a `consent_records` row before storing/processing ANY
+    candidate PII (DPDP 2023), not just WhatsApp
 
 ## VPS RESOURCES (checked 2026-06-15)
 96GB disk (93GB free), 7.8GB RAM (5.5GB free), Docker 29.5.3 +
@@ -86,6 +102,15 @@ removing the zero-token local-AI services.
 - v_agency_funnel        → submittals→placements per client
 - v_recruiter_capacity   → workload vs capacity
 - v_skill_gap            → skill demand vs supply
+
+## TARGET DB TABLES — additions from zerocost_architecture_review.md (build in phase noted)
+- ai_jobs                → P0 schema, P3 worker — Postgres-based async queue for Tier-2 generation
+- ai_cache               → P0 schema — adds prompt_embedding vector(384) for >0.95 cosine semantic-cache hits (HARD RULE #4)
+- audit_log              → P0 schema — append-only, partitioned by month
+- assignment_event       → P0 schema — append-only; also written on every HITL approval (HARD RULE #10)
+- consent_records        → P0/P1 — per data-category DPDP consent (HARD RULE #12; WhatsApp consent is one row type)
+- interview_scorecards   → P1 — structured interview kits/scorecards
+- trust_graph            → P13 — talent/trust graph adjacency table
 
 ## PROJECT FILES (paths relative to repo root ~/airecruit)
 - sql/01_phase1_schema.sql              — Phase 1 foundation
