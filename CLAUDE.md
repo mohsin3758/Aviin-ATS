@@ -139,8 +139,15 @@ local-AI services.
           RLS test passed (per-tenant isolation + fail-closed verified),
           seed+embed done (2 tenants), Ollama qwen2.5:1.5b-instruct-q4_K_M
           pulled, zerotoken-check CLEAN, Playwright S1 3/3
-- [NEXT] P1:  Backend APIs — all FastAPI endpoints for candidates/reqs/pipeline/offers
-- [ ]     P2:  n8n Workflows — W1-W8 automation workflows built and activated
+- [DONE]  P1:  Backend APIs — JWT auth (auth_lookup_user SECURITY DEFINER
+          + Bearer JWT / x-tenant-id dual actor resolution), candidates,
+          requisitions (+pipeline kanban view), applications (stage
+          transitions), offers (draft->pending_approval->approved->issued
+          ->accepted/declined, HITL-gated approve/issue), assignments
+          (+HITL reassign), consent_records, interview_scorecards (new
+          table + RLS). zerotoken-check CLEAN (regex false-positive on
+          "Capgemini" fixed), Playwright S1+S4 5/5
+- [NEXT] P2:  n8n Workflows — W1-W8 automation workflows built and activated
 - [ ]     P3:  AI Engine — match, assign, rediscovery endpoints wired
 - [ ]     P4:  Frontend Foundation — GlobalNav, TenantProvider, shared components
 - [ ]     P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx)

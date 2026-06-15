@@ -1,7 +1,7 @@
 """AIrecruit (FinStack Staffing OS) — FastAPI backend.
 
-P0: infrastructure skeleton only (/health). Candidate/requisition/
-pipeline/offer endpoints are built in P1.
+P1: candidate/requisition/pipeline/offer/assignment/consent/scorecard
+endpoints + JWT auth (see deps.py for tenant/actor resolution).
 """
 
 from contextlib import asynccontextmanager
@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 import db
+from routers import applications, assignments, auth, candidates, consent, offers, requisitions, scorecards
 
 
 @asynccontextmanager
@@ -19,6 +20,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AIrecruit API", lifespan=lifespan)
+
+app.include_router(auth.router)
+app.include_router(candidates.router)
+app.include_router(requisitions.router)
+app.include_router(applications.router)
+app.include_router(offers.router)
+app.include_router(assignments.router)
+app.include_router(consent.router)
+app.include_router(scorecards.router)
 
 
 @app.get("/health")

@@ -23,7 +23,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 # Forbidden: any paid/external LLM, embedding, or inference API.
-PATTERN='openai|anthropic[^[:space:]]*api|api\.anthropic|gpt-3|gpt-4|gpt-5|gemini|generativelanguage\.googleapis|vertexai|aiplatform\.googleapis|cohere\.ai|api\.cohere|mistral\.ai|api\.mistral|together\.ai|api\.together|replicate\.com|api-inference\.huggingface|groq\.com|api\.groq|perplexity\.ai|bedrock-runtime|azure.*openai|claude-(3|opus|sonnet|haiku)|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|COHERE_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|REPLICATE_API_TOKEN|HUGGINGFACE_API'
+# NOTE: \bgemini\b (not bare `gemini`) — bare substring matching also
+# flags "Capgemini" (a real Indian IT employer name used in seed data),
+# which has nothing to do with the Google Gemini API.
+PATTERN='openai|anthropic[^[:space:]]*api|api\.anthropic|gpt-3|gpt-4|gpt-5|\bgemini\b|generativelanguage\.googleapis|vertexai|aiplatform\.googleapis|cohere\.ai|api\.cohere|mistral\.ai|api\.mistral|together\.ai|api\.together|replicate\.com|api-inference\.huggingface|groq\.com|api\.groq|perplexity\.ai|bedrock-runtime|azure.*openai|claude-(3|opus|sonnet|haiku)|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|COHERE_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|REPLICATE_API_TOKEN|HUGGINGFACE_API'
 
 # File types that matter: app code + config/env/compose. Markdown
 # docs (CLAUDE.md, AGENTS.md, this script's own comments, blueprints)

@@ -14,8 +14,8 @@
 | Phase | Name | Status | QA | Notes |
 |-------|------|--------|-----|-------|
 | P0 | Infrastructure (Docker + DB + schemas + RLS) | ✅ DONE | 3/3 (S1 API Health) | docker-compose.yml: 7 services (db, embed, ollama, backend, frontend, n8n, waha) on `finstack` bridge net, all up/healthy (~2.5GB/7.8GB RAM used). sql/00_app_role.sql + 01_phase1_schema.sql + 10_phase1_staffing_additions.sql applied via docker-entrypoint-initdb.d — 16 tenant tables w/ FORCE RLS (core 9 + ai_jobs, ai_cache+hnsw cosine idx, audit_log monthly-partitioned, assignment_event, consent_records, hotlist, submittals, placements) + hnsw idx on candidates.resume_embedding / requisitions.jd_embedding. seed_data.py seeded 2 tenants (acme=a92d7fd7-fb72-47d8-881e-2493c61717ce, beta=539f4aea-646e-4816-a2f6-b476fed0bc51): acme=4 users/11 candidates/6 reqs/11 apps incl. 1 pending_approval offer (HITL demo) + 1 active placement + 2 hotlist entries; beta=1 user/2 candidates/1 req/2 apps. embed_writer.py filled 384-dim BGE-small embeddings (13 candidates, 7 reqs total). Ollama qwen2.5:1.5b-instruct-q4_K_M pulled (986MB). RLS verified: per-tenant counts correct, 0 cross-tenant leakage, unset app.tenant_id fails closed (uuid cast ERROR, not empty result). zerotoken-check.sh: CONFIRMED CLEAN. Playwright S1 (backend /health, embed 384-dim, Ollama model loaded): 3/3 passed. |
-| P1 | Foundation APIs (candidate, req, pipeline, offer) | NEXT | ⏳ | Depends on P0 (done). Add `interview_scorecards` endpoints + HITL pause-for-approval gate on offer/reject/reassign actions (logs to `assignment_event`/`audit_log`) + `consent_records` read/write endpoints (see Zero-Cost Architecture Review) |
-| P2 | Automation (n8n workflows W1-W8) | ⏳ | ⏳ | Depends on P1. Workflows touching offer/reject/reassign must pause at the HITL approval gate added in P1 (see Zero-Cost Architecture Review) |
+| P1 | Foundation APIs (candidate, req, pipeline, offer) | ✅ DONE | 5/5 (S1+S4) | `sql/02_phase1_p1_additions.sql`: `interview_scorecards` table (+RLS) and `auth_lookup_user(email)` SECURITY DEFINER fn (owned by postgres, bypasses RLS for login-time tenant resolution). `backend/auth.py`+`deps.py`: JWT (tenant_id+role+user_id claims) via `/auth/login`+`/auth/me`; `get_actor` dual-resolves from `Authorization: Bearer` (JWT) or `x-tenant-id` header (anonymous, role=None); `require_role(...)` rejects anonymous actors. Routers: candidates (CRUD+filters, consent_records+event_outbox on create), requisitions (CRUD+`/pipeline` kanban-grouped view), applications (`/stage` transitions, `rejected` HITL-gated to admin/manager + assignment_event/audit_log), offers (draft→pending_approval→approved→issued→accepted/declined; approve+issue HITL-gated to admin/manager, write assignment_event+audit_log, issue also writes event_outbox `offer.issued`), assignments (+`/reassign` HITL-gated to admin/manager, old→reassigned + new active assignment, assignment_event+audit_log), consent-records (GET/POST), interview-scorecards (GET/POST). All curl-smoke-tested end to end against acme tenant. zerotoken-check.sh CLEAN (fixed `gemini`→`\bgemini\b` false-positive on "Capgemini"). Playwright S1 (3/3) + S4 (2/2) = 5/5. |
+| P2 | Automation (n8n workflows W1-W8) | NEXT | ⏳ | Depends on P1 (done). Workflows touching offer/reject/reassign must pause at the HITL approval gate added in P1 (see Zero-Cost Architecture Review) |
 | P3 | AI Engine (match, assign, rediscovery) | ⏳ | ⏳ | Depends on P2. Add `backend/ai_router.py` (single cascade-enforcement module: Tier0→1→2 + semantic cache via `ai_cache.prompt_embedding` >0.95 cosine) + AI eval golden-datasets/agent-replay/cache-hit-rate QA (see Zero-Cost Architecture Review) |
 | P4 | Frontend Foundation (GlobalNav + shared components + 5-template theme system) | ⏳ | ⏳ | Depends on P1; 5 templates defined in docs/ui_templates.md — build data-theme/Zustand/Tailwind-variant infra here. Also establish a11y (WCAG 2.2 AA) + i18n (14+ languages) baseline and WebSocket/SSE real-time infra (see Zero-Cost Architecture Review) |
 | P5 | UI T1: Recruiter Command Center | ⏳ | ⏳ | Depends on P4 |
@@ -125,3 +125,23 @@ After each phase completes ALL Playwright tests:
   `backend/db.py`'s `tenant_conn()` does for pooled per-request connections
 - [P0] This VPS shell session needs `sg docker -c "..."` for every
   docker/docker-compose daemon command (see memory: project-docker-group-permission)
+- [P0] zerotoken-check.sh regex fixed: bare `gemini` matched the substring
+  in "Capgemini" (a real employer name in seed_data.py demo data, unrelated
+  to Google Gemini) — changed to `\bgemini\b`. False positive, not a real
+  violation.
+- [P1] Actor/tenant resolution is dual-mode (`backend/deps.py`):
+  `Authorization: Bearer <jwt>` (claims: tenant_id+role+user_id, from
+  `/auth/login` via `auth_lookup_user`) is the primary path and is required
+  for any `require_role(...)`-gated endpoint; `x-tenant-id: <uuid>` header
+  is an anonymous tenant-scoped fallback (role=None, user_id=None) for
+  reads/basic-creates and the existing Playwright S2/S4 suite. RLS is the
+  backstop either way — an unknown/garbage tenant id fails closed.
+- [P1] `auth_lookup_user(p_email)` is SECURITY DEFINER + owned by postgres
+  (superuser bypasses RLS even with FORCE) so login can resolve tenant_id
+  before app.tenant_id is set (see NOTE in 01_phase1_schema.sql). New P1+
+  SQL files that need a similar pre-tenant lookup should follow this same
+  pattern, applied as postgres so ALTER DEFAULT PRIVILEGES from
+  00_app_role.sql auto-grants EXECUTE to app_user.
+- [P1] asyncpg returns JSONB columns (e.g. `interview_scorecards.scores`)
+  as raw JSON strings (no codec registered) — P4+ frontend must
+  `JSON.parse()` these fields rather than treating them as objects.
