@@ -1,0 +1,101 @@
+import { test, expect } from '@playwright/test';
+
+const BASE = 'http://localhost:3001';
+const API  = 'http://localhost:8080';
+const EMAIL = process.env.QA_EMAIL || 'admin@example.com';
+const PASS  = process.env.QA_PASSWORD || 'changeme';
+const TID   = process.env.TENANT_ID || '';
+
+// Suite 1: API Health
+test.describe('S1 API Health', () => {
+  test('backend /health', async ({ request }) => {
+    const r = await request.get(`${API}/health`);
+    expect(r.status()).toBe(200);
+    expect((await r.json()).ok).toBe(true);
+  });
+  test('embeddings return 384 dims', async ({ request }) => {
+    const r = await request.post('http://localhost:8081/embed', {
+      data: { texts: ['Senior Python Engineer Bengaluru'] }
+    });
+    expect((await r.json()).embeddings[0]).toHaveLength(384);
+  });
+  test('Ollama model loaded', async ({ request }) => {
+    const r = await request.get('http://localhost:11434/api/tags');
+    const models = (await r.json()).models?.map((m: any) => m.name) || [];
+    expect(models.some((n: string) => n.includes('qwen2.5'))).toBe(true);
+  });
+});
+
+// Suite 2: Zero-Token AI
+test.describe('S2 Zero-Token AI', () => {
+  test('match_candidates returns fit_scores 0-100', async ({ request }) => {
+    if (!TID) return test.skip();
+    const reqs = await request.get(`${API}/requisitions`, { headers: { 'x-tenant-id': TID } });
+    const reqId = (await reqs.json())[0]?.id;
+    if (!reqId) return test.skip();
+    const r = await request.get(`${API}/requisitions/${reqId}/match-candidates`, { headers: { 'x-tenant-id': TID } });
+    const matches = await r.json();
+    expect(matches[0].fit_score).toBeGreaterThanOrEqual(0);
+    expect(matches[0].fit_score).toBeLessThanOrEqual(100);
+  });
+  test('JD generation caches on 2nd call', async ({ request }) => {
+    if (!TID) return test.skip();
+    const body = { title: 'QA Tester', skills: ['Playwright'], location: 'Bengaluru', exp_years: 3 };
+    await request.post(`${API}/jd/generate`, { headers: { 'x-tenant-id': TID, 'content-type': 'application/json' }, data: body });
+    const r2 = await request.post(`${API}/jd/generate`, { headers: { 'x-tenant-id': TID, 'content-type': 'application/json' }, data: body });
+    expect((await r2.json()).cached).toBe(true);
+  });
+});
+
+// Suite 3: Frontend
+test.describe('S3 Frontend Pages', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+  const pages = [
+    ['dashboard', 'T1 Command Center'],
+    ['pipeline', 'T2 Kanban'],
+    ['candidates', 'Candidates'],
+    ['analytics', 'T4 Analytics'],
+    ['command-center', 'T5 War Room'],
+    ['finance', 'T6 Finance'],
+  ];
+  for (const [route, label] of pages) {
+    test(`${label} page loads`, async ({ page }) => {
+      await page.goto(`${BASE}/${route}`);
+      await page.screenshot({ path: `tests/screenshots/${route}.png` });
+      expect(page.url()).toContain(route);
+    });
+  }
+  test('Sidebar has all nav items', async ({ page }) => {
+    await page.goto(`${BASE}/dashboard`);
+    for (const item of ['Dashboard','Pipeline','Candidates','Analytics','Finance','Requisitions']) {
+      await expect(page.locator(`text=${item}`).first()).toBeVisible({ timeout: 5000 });
+    }
+  });
+  test('Cmd+K opens command palette', async ({ page }) => {
+    await page.goto(`${BASE}/dashboard`);
+    await page.keyboard.press('Control+k');
+    await expect(page.locator('[role="dialog"]').first()).toBeVisible();
+  });
+});
+
+// Suite 4: Core API Workflows
+test.describe('S4 Core Workflows', () => {
+  test('Create candidate returns id', async ({ request }) => {
+    if (!TID) return test.skip();
+    const r = await request.post(`${API}/candidates`, {
+      headers: { 'x-tenant-id': TID, 'content-type': 'application/json' },
+      data: { full_name: 'QA Candidate', email: `qa${Date.now()}@test.com`, skills: ['QA'], total_exp_mo: 36, location: 'Bengaluru' }
+    });
+    expect((await r.json()).id).toBeTruthy();
+  });
+  test('RLS cross-tenant isolation', async ({ request }) => {
+    const r = await request.get(`${API}/candidates`, { headers: { 'x-tenant-id': '00000000-0000-0000-0000-000000000000' } });
+    if (r.status() === 200) expect((await r.json()).length).toBe(0);
+  });
+});
