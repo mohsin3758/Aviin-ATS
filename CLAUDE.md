@@ -57,6 +57,16 @@ every later UI phase (P5-P10) is theme-aware from the start.
 8. ALL n8n PostgreSQL nodes MUST SET app.tenant_id first
 9. ALWAYS connect as app_user (password: apppw) NEVER postgres
 
+## VPS RESOURCES (checked 2026-06-15)
+96GB disk (93GB free), 7.8GB RAM (5.5GB free), Docker 29.5.3 +
+Compose v5.1.4, `dev` user in both `sudo` and `docker` groups (no
+sudo prefix needed for docker commands). Node 20.20.2 / Python 3.12.3
+on host. 7.8GB RAM is workable but not generous once Postgres + Ollama
++ n8n + FastAPI + Next.js + WAHA (P11, Chromium-based like Playwright)
+are all running together — if containers start OOM-killing in later
+phases, stagger non-essential services or add swap rather than
+removing the zero-token local-AI services.
+
 ## DATABASE CONNECTION (target — created in P0)
 - Host: db (inside Docker) / localhost:5432 (outside)
 - Database: ats

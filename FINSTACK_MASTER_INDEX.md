@@ -13,7 +13,7 @@
 
 | Phase | Name | Status | QA | Notes |
 |-------|------|--------|-----|-------|
-| P0 | Infrastructure (Docker + DB + schemas + RLS) | NEXT | ⏳ | Run finstack-setup.sh (adjust paths to ~/airecruit) |
+| P0 | Infrastructure (Docker + DB + schemas + RLS) | NEXT | ⏳ | No pre-existing setup script — write docker-compose.yml + sql/*.sql + .env from scratch per CLAUDE.md TECH STACK / TARGET DB sections |
 | P1 | Foundation APIs (candidate, req, pipeline, offer) | ⏳ | ⏳ | Depends on P0 |
 | P2 | Automation (n8n workflows W1-W8) | ⏳ | ⏳ | Depends on P1 |
 | P3 | AI Engine (match, assign, rediscovery) | ⏳ | ⏳ | Depends on P2 |
