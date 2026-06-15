@@ -115,6 +115,15 @@ class ConsentCreate(BaseModel):
     consent_text: Optional[str] = None
 
 
+class JDGenerateRequest(BaseModel):
+    title: str
+    skills_required: list[str] = Field(default_factory=list)
+    location: Optional[str] = None
+    employment_type: EmploymentType = "contract"
+    experience_years: Optional[int] = None
+    notes: Optional[str] = None
+
+
 class ScorecardCreate(BaseModel):
     application_id: str
     interviewer_id: Optional[str] = None

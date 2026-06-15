@@ -121,9 +121,8 @@ local-AI services.
 
 ## PROJECT FILES (paths relative to repo root ~/airecruit)
 - sql/01_phase1_schema.sql              — Phase 1 foundation
+- sql/02_phase1_p1_additions.sql        — P1 backend API additions
 - sql/10_phase1_staffing_additions.sql  — hotlist/submittal/placement
-- sql/05_phase2_schema.sql              — automation schema
-- sql/09_phase3_schema.sql              — AI engine schema
 - sql/00_app_role.sql                   — app_user role
 - backend/app.py                        — FastAPI backend
 - backend/embed_writer.py               — vector column filler
@@ -134,6 +133,14 @@ local-AI services.
 - n8n/build_workflows.py                — generator for n8n/workflows/*.json (W1-W9)
 - n8n/workflows/                        — exported workflow JSON (re-import after editing the generator)
 - n8n/credentials/                      — exported Postgres app_user credential
+- sql/04_phase3_ai_engine.sql           — match_candidates/match_recruiters/
+                                           assign_with_explanation/do_reassign +
+                                           v_redeployment_queue/v_agency_funnel/
+                                           v_recruiter_capacity/v_skill_gap
+- backend/ai_router.py                  — Tier2-lite cascade: embed -> ai_cache
+                                           lookup (>0.95 cosine) -> Ollama -> cache store
+- backend/routers/ai.py                 — POST /jd/generate
+- backend/routers/analytics.py          — GET /analytics/{4 views}
 - docker-compose.yml                    — all 7 services
 - tests/qa_automation.spec.ts           — Playwright QA tests
 - CLAUDE.md                             — this file (auto-loaded)
@@ -165,8 +172,28 @@ local-AI services.
           live data (acme: 17 notifications from W1-W5, 18
           job_board_postings from W9). zerotoken-check CLEAN, Playwright
           S1+S4 5/5 (regression)
-- [NEXT] P3:  AI Engine — match, assign, rediscovery endpoints wired
-- [ ]     P4:  Frontend Foundation — GlobalNav, TenantProvider, shared components
+- [DONE]  P3:  AI Engine — `sql/04_phase3_ai_engine.sql`: match_candidates
+          (T1 pgvector cosine + skill overlap -> fit_score 0-100),
+          match_recruiters (T1 skill-history + spare capacity ->
+          match_score 0-100), assign_with_explanation (T0/T1 auto-assign,
+          NOT HITL-gated — only "reassigned" is HARD RULE #10), do_reassign
+          (canonical reassign primitive, auto-picks alternative recruiter),
+          plus 4 views (v_redeployment_queue, v_agency_funnel,
+          v_recruiter_capacity, v_skill_gap) all WITH (security_invoker =
+          true) for RLS-safe app_user access. `backend/ai_router.py` —
+          Tier2-lite cascade: BGE-small embed -> ai_cache cosine-similarity
+          lookup (>0.95, HARD RULE #4) -> Ollama Qwen2.5 on miss -> cache
+          store, never an external API (HARD RULE #1). New endpoints:
+          GET/POST /requisitions/{id}/match-candidates,
+          /match-recruiters, /assign; POST /jd/generate
+          (backend/routers/ai.py); GET /analytics/{redeployment-queue,
+          agency-funnel,recruiter-capacity,skill-gap}
+          (backend/routers/analytics.py). Verified live: fit_score/
+          match_score in range, cross-tenant req_id -> 404 (RLS
+          fail-closed), JD cache hit on 2nd identical call (similarity
+          1.0, ~9.7s -> ~30ms). zerotoken-check CLEAN, Playwright S1+S2+S4
+          10/10
+- [NEXT] P4:  Frontend Foundation — GlobalNav, TenantProvider, shared components
 - [ ]     P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx)
 - [ ]     P6:  UI T2 — Kanban Pipeline Board (app/pipeline/[req_id]/page.tsx)
 - [ ]     P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)

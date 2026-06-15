@@ -38,12 +38,43 @@ test.describe('S2 Zero-Token AI', () => {
     expect(matches[0].fit_score).toBeGreaterThanOrEqual(0);
     expect(matches[0].fit_score).toBeLessThanOrEqual(100);
   });
+  test('match_recruiters returns match_scores 0-100', async ({ request }) => {
+    if (!TID) return test.skip();
+    const reqs = await request.get(`${API}/requisitions`, { headers: { 'x-tenant-id': TID } });
+    const reqId = (await reqs.json())[0]?.id;
+    if (!reqId) return test.skip();
+    const r = await request.get(`${API}/requisitions/${reqId}/match-recruiters`, { headers: { 'x-tenant-id': TID } });
+    const matches = await r.json();
+    expect(matches[0].match_score).toBeGreaterThanOrEqual(0);
+    expect(matches[0].match_score).toBeLessThanOrEqual(100);
+  });
+  test('assign-with-explanation returns recruiter + explanation', async ({ request }) => {
+    if (!TID) return test.skip();
+    const reqs = await request.get(`${API}/requisitions`, { headers: { 'x-tenant-id': TID } });
+    const reqId = (await reqs.json())[0]?.id;
+    if (!reqId) return test.skip();
+    const r = await request.post(`${API}/requisitions/${reqId}/assign`, { headers: { 'x-tenant-id': TID } });
+    const body = await r.json();
+    expect(body.recruiter_id).toBeTruthy();
+    expect(body.explanation.reason).toBeTruthy();
+  });
   test('JD generation caches on 2nd call', async ({ request }) => {
     if (!TID) return test.skip();
-    const body = { title: 'QA Tester', skills: ['Playwright'], location: 'Bengaluru', exp_years: 3 };
-    await request.post(`${API}/jd/generate`, { headers: { 'x-tenant-id': TID, 'content-type': 'application/json' }, data: body });
+    const body = { title: 'QA Tester Role', skills_required: ['Playwright'], location: 'Bengaluru', experience_years: 3 };
+    const r1 = await request.post(`${API}/jd/generate`, { headers: { 'x-tenant-id': TID, 'content-type': 'application/json' }, data: body });
+    expect((await r1.json()).jd_text.length).toBeGreaterThan(0);
     const r2 = await request.post(`${API}/jd/generate`, { headers: { 'x-tenant-id': TID, 'content-type': 'application/json' }, data: body });
-    expect((await r2.json()).cached).toBe(true);
+    const body2 = await r2.json();
+    expect(body2.cached).toBe(true);
+    expect(body2.similarity).toBeGreaterThan(0.95);
+  });
+  test('analytics views return arrays', async ({ request }) => {
+    if (!TID) return test.skip();
+    for (const route of ['redeployment-queue', 'agency-funnel', 'recruiter-capacity', 'skill-gap']) {
+      const r = await request.get(`${API}/analytics/${route}`, { headers: { 'x-tenant-id': TID } });
+      expect(r.status()).toBe(200);
+      expect(Array.isArray(await r.json())).toBe(true);
+    }
   });
 });
 

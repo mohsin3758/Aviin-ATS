@@ -2,6 +2,7 @@
 
 P1: candidate/requisition/pipeline/offer/assignment/consent/scorecard
 endpoints + JWT auth (see deps.py for tenant/actor resolution).
+P3: AI engine (match/assign + JD generation) and analytics views.
 """
 
 from contextlib import asynccontextmanager
@@ -9,7 +10,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 import db
-from routers import applications, assignments, auth, candidates, consent, offers, requisitions, scorecards
+from routers import (
+    ai,
+    analytics,
+    applications,
+    assignments,
+    auth,
+    candidates,
+    consent,
+    offers,
+    requisitions,
+    scorecards,
+)
 
 
 @asynccontextmanager
@@ -29,6 +41,8 @@ app.include_router(offers.router)
 app.include_router(assignments.router)
 app.include_router(consent.router)
 app.include_router(scorecards.router)
+app.include_router(ai.router)
+app.include_router(analytics.router)
 
 
 @app.get("/health")

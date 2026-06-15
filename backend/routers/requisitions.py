@@ -1,3 +1,6 @@
+import json
+
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 import db
@@ -113,3 +116,43 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
     for row in rows:
         board[row["stage"]].append(dict(row))
     return board
+
+
+@router.get("/{requisition_id}/match-candidates")
+async def match_candidates_for_requisition(
+    requisition_id: str, limit: int = 10, actor: Actor = Depends(get_actor)
+):
+    """T1: pgvector cosine similarity + skill overlap (see match_candidates() in
+    sql/04_phase3_ai_engine.sql). RLS makes a wrong-tenant requisition_id yield []."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("SELECT * FROM match_candidates($1, $2)", requisition_id, limit)
+    return [dict(r) for r in rows]
+
+
+@router.get("/{requisition_id}/match-recruiters")
+async def match_recruiters_for_requisition(
+    requisition_id: str, limit: int = 5, actor: Actor = Depends(get_actor)
+):
+    """T1: historical skill-overlap + spare capacity (see match_recruiters() in
+    sql/04_phase3_ai_engine.sql)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("SELECT * FROM match_recruiters($1, $2)", requisition_id, limit)
+    return [dict(r) for r in rows]
+
+
+@router.post("/{requisition_id}/assign")
+async def assign_requisition(requisition_id: str, actor: Actor = Depends(get_actor)):
+    """T0/T1: auto-assign the top-ranked recruiter via assign_with_explanation()
+    (sql/04_phase3_ai_engine.sql). Not HITL-gated — only "reassigned" is in
+    HARD RULE #10, not the initial "assigned"."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        try:
+            row = await conn.fetchrow("SELECT * FROM assign_with_explanation($1)", requisition_id)
+        except asyncpg.exceptions.RaiseError as exc:
+            message = str(exc)
+            status_code = 404 if "not found" in message.lower() else 409
+            raise HTTPException(status_code=status_code, detail=message)
+
+    result = dict(row)
+    result["explanation"] = json.loads(result["explanation"])
+    return result
