@@ -1,0 +1,23 @@
+# Runtime logs / monitor state (claude-auto-resume.sh writes here)
+logs/
+state/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+
+# Env files (never commit secrets)
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
