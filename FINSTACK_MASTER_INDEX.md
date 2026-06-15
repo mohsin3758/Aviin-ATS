@@ -41,6 +41,18 @@ These define the 5 selectable UI templates and the full
 competitor-feature-parity checklist. Re-check P4-P10 scope against
 these once available — do not treat current P4-P10 descriptions as final.
 
+## Competitor Benchmark & Gap Additions (2026-06-15)
+Full analysis: `docs/competitor_landscape_and_feature_blueprint.md`
+(~100 vendors across staffing ATS/CRM, enterprise ATS, AI sourcing,
+conversational AI, automation, communication, video, assessments,
+BGV, payroll/ERP, job boards — mapped to AIrecruit's zero-token
+modules and P0-P14 phases). Four gap items identified, to implement
+as sub-tasks of the noted phase (no new phase numbers):
+- Async video screening -> sub-task of P7 (Candidate 360)
+- Skills assessment / MCQ + coding test, rule-based scoring -> P3 (backend) + P7 (UI tab)
+- Job-board distribution (Naukri/Indeed/LinkedIn posting via n8n) -> P2 workflow W9
+- Client/hiring-manager read-only portal -> P6 (Kanban, read-only mode for `client` role)
+
 ## How to Update This File
 After each phase completes ALL Playwright tests:
 1. Change status from ⏳ to ✅ DONE
