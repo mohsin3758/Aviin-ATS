@@ -334,6 +334,43 @@ test.describe('S9 CEO War Room', () => {
   });
 });
 
+// Suite 10: Finance ERP Dashboard (P10)
+test.describe('S10 Finance ERP', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('finance KPI cards visible', async ({ page }) => {
+    await page.goto(`${BASE}/finance`);
+    await page.waitForSelector('[data-testid="finance-kpis"]', { state: 'visible', timeout: 10000 });
+    const text = await page.locator('[data-testid="finance-kpis"]').textContent();
+    expect(text).toMatch(/Active Contractors|Monthly Bill|Gross Margin/);
+  });
+
+  test('contractor billing grid visible', async ({ page }) => {
+    await page.goto(`${BASE}/finance`);
+    await page.waitForSelector('[data-testid="contractors-panel"]', { state: 'visible', timeout: 15000 });
+  });
+
+  test('timesheets tab shows P12 stub', async ({ page }) => {
+    await page.goto(`${BASE}/finance`);
+    await page.waitForSelector('[data-testid="contractors-panel"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="timesheets"]');
+    await page.waitForSelector('[data-testid="timesheets-panel"]', { state: 'visible', timeout: 5000 });
+  });
+
+  test('invoices tab shows P12 stub', async ({ page }) => {
+    await page.goto(`${BASE}/finance`);
+    await page.waitForSelector('[data-testid="contractors-panel"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="invoices"]');
+    await page.waitForSelector('[data-testid="invoices-panel"]', { state: 'visible', timeout: 5000 });
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {
