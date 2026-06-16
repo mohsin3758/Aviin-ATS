@@ -205,8 +205,14 @@ local-AI services.
           stub pages for all 6 routes, shared UI: Button (CVA variants),
           Card, Modal (Radix Dialog), Spinner, Table, ThemeSwitcher.
           zerotoken-check CLEAN, Playwright S1+S2+S3+S4 18/18
-- [NEXT] P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx)
-- [ ]     P6:  UI T2 — Kanban Pipeline Board (app/pipeline/page.tsx + [req_id]/page.tsx)
+- [DONE]  P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx): 4 KPI
+          stat cards (Open Reqs, Active Candidates, Placements, Ending in 21
+          Days), Redeployment Queue table (v_redeployment_queue), Recruiter
+          Capacity bars (v_recruiter_capacity, color: green/amber/red by pct),
+          Agency Funnel table (v_agency_funnel), useFetch hook (lib/useFetch.ts,
+          Bearer JWT, cancel-on-unmount). zerotoken-check CLEAN, Playwright
+          S1+S2+S3+S4+S5 21/21
+- [NEXT] P6:  UI T2 — Kanban Pipeline Board (app/pipeline/page.tsx + [req_id]/page.tsx)
 - [ ]     P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
 - [ ]     P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
 - [ ]     P9:  UI T5 — CEO War Room (app/command-center/page.tsx)

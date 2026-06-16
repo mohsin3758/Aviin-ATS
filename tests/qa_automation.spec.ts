@@ -116,6 +116,49 @@ test.describe('S3 Frontend Pages', () => {
   });
 });
 
+// Suite 5: Recruiter Command Center (P5)
+test.describe('S5 Recruiter Command Center', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('stat cards visible with numeric values', async ({ page }) => {
+    await page.goto(`${BASE}/dashboard`);
+    await page.waitForSelector('[data-testid="stat-cards"]', { state: 'visible', timeout: 10000 });
+    // Wait for at least one card to show a number (not a spinner)
+    await page.waitForFunction(() => {
+      const cards = document.querySelector('[data-testid="stat-cards"]');
+      return cards && /\d/.test(cards.textContent ?? '');
+    }, { timeout: 10000 });
+    const cardText = await page.locator('[data-testid="stat-cards"]').textContent();
+    expect(cardText).toMatch(/Open Requisitions/);
+    expect(cardText).toMatch(/Active Candidates/);
+  });
+
+  test('redeployment queue section renders', async ({ page }) => {
+    await page.goto(`${BASE}/dashboard`);
+    await page.waitForSelector('text=Redeployment Queue', { state: 'visible', timeout: 10000 });
+    // Either data rows or the empty-state message must appear
+    const hasContent = await page.locator('text=No upcoming redeployments').or(
+      page.locator('table tbody tr').first()
+    ).waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+    expect(hasContent).toBe(true);
+  });
+
+  test('recruiter capacity bars render', async ({ page }) => {
+    await page.goto(`${BASE}/dashboard`);
+    await page.waitForSelector('text=Recruiter Capacity', { state: 'visible', timeout: 10000 });
+    const hasCapacity = await page.locator('[data-testid="capacity-bars"]').or(
+      page.locator('text=No recruiter data')
+    ).waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+    expect(hasCapacity).toBe(true);
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {
