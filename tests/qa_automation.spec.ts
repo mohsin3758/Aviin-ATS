@@ -519,6 +519,95 @@ test.describe('S12 ERP Timesheet/Invoice/Payroll', () => {
   });
 });
 
+// Suite 13: BGV + Trust Intelligence (P13)
+test.describe('S13 BGV Trust Intelligence', () => {
+  test('BGV trust score endpoint returns score fields', async ({ request }) => {
+    const loginR = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const { access_token } = await loginR.json();
+    const candsR = await request.get(`${API}/candidates`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    const candId = (await candsR.json())[0]?.id;
+    if (!candId) return;
+    const r = await request.get(`${API}/bgv/trust-score/${candId}`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    expect(r.status()).toBe(200);
+    const data = await r.json();
+    expect(data.trust_rating).toBeDefined();
+    expect(typeof data.total_score).toBe('number');
+  });
+
+  test('BGV check creation initiates in_progress check', async ({ request }) => {
+    const loginR = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const { access_token } = await loginR.json();
+    const candsR = await request.get(`${API}/candidates`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    const candId = (await candsR.json())[0]?.id;
+    if (!candId) return;
+    const r = await request.post(`${API}/bgv/checks`, {
+      headers: { 'Authorization': `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      data: { candidate_id: candId, check_type: 'education' }
+    });
+    expect(r.status()).toBe(200);
+    const check = await r.json();
+    expect(check.status).toBe('in_progress');
+    expect(check.score_points).toBe(20);
+  });
+
+  test('Aadhaar initiate returns transaction_id (demo mode)', async ({ request }) => {
+    const loginR = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const { access_token } = await loginR.json();
+    const candsR = await request.get(`${API}/candidates`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    const candId = (await candsR.json())[0]?.id;
+    if (!candId) return;
+    const r = await request.post(`${API}/bgv/aadhaar/initiate`, {
+      headers: { 'Authorization': `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      data: { candidate_id: candId, aadhaar_number: '999988887777', mobile_last4: '1234' }
+    });
+    expect(r.status()).toBe(200);
+    const data = await r.json();
+    expect(data.transaction_id).toBeTruthy();
+    expect(data.production_required).toBe(true);
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('BGV page trust overview visible', async ({ page }) => {
+    await page.goto(`${BASE}/bgv`);
+    await page.waitForSelector('[data-testid="trust-overview"]', { state: 'visible', timeout: 10000 });
+  });
+
+  test('BGV checks tab visible', async ({ page }) => {
+    await page.goto(`${BASE}/bgv`);
+    await page.waitForSelector('[data-testid="trust-overview"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="checks"]');
+    await page.waitForSelector('[data-testid="bgv-checks-panel"]', { state: 'visible', timeout: 5000 });
+  });
+
+  test('India verify tab visible', async ({ page }) => {
+    await page.goto(`${BASE}/bgv`);
+    await page.waitForSelector('[data-testid="trust-overview"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="india-verify"]');
+    await page.waitForSelector('[data-testid="india-verify-panel"]', { state: 'visible', timeout: 5000 });
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {

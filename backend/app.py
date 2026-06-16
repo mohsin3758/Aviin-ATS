@@ -17,6 +17,7 @@ from routers import (
     applications,
     assignments,
     auth,
+    bgv,
     candidates,
     consent,
     erp,
@@ -56,6 +57,7 @@ app.include_router(ai.router)
 app.include_router(analytics.router)
 app.include_router(whatsapp.router)
 app.include_router(erp.router)
+app.include_router(bgv.router)
 
 
 @app.get("/health")

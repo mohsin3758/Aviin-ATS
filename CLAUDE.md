@@ -267,8 +267,21 @@ local-AI services.
           pgcrypto verified: Aadhaar stored as 80-byte ciphertext. HARD RULE
           #11 confirmed: PII never returned in plaintext. zerotoken-check
           CLEAN, Playwright S1-S12 40/40
-- [NEXT] P13: BGV — Trust Intelligence + India verification APIs
-- [ ]     P14: VPS Deploy — domain + SSL + production
+- [DONE]  P13: BGV — `sql/06_phase13_bgv.sql` (trust_graph adjacency table
+          [referral/worked_with/placed/vouched/reported_fraud edges, weight
+          -1 to +1], bgv_checks [8 types: identity/education/employment/
+          criminal/credit/address/reference/digilocker, 5-status workflow],
+          bgv_documents, offer_letters), v_trust_scores view (rule-based:
+          bgv_score + trust_graph_score - fraud_flags×30, capped at 100).
+          `backend/routers/bgv.py`: BGV checks CRUD, trust score endpoint,
+          trust graph edge CRUD, offer letter draft via AI Router (Tier-2
+          Qwen2.5 local, cache-first), Aadhaar OTP initiate/verify-otp
+          (demo mode — production requires UIDAI ASA), DigiLocker initiate
+          (demo — requires NIC credentials). Frontend: BGV page with 4 tabs
+          (Trust Overview with score gauge, BGV Checks table + initiate form,
+          Trust Graph edge table, India Verify with Aadhaar+DigiLocker panels).
+          zerotoken-check CLEAN (100 files), Playwright S1-S13 46/46
+- [NEXT] P14: VPS Deploy — domain + SSL + production
 
 ## PENDING INPUTS (blocks finalizing P4-P10 detail)
 Awaiting PDF conversions of these blueprint docs from the user:

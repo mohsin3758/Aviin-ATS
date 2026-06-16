@@ -11,6 +11,7 @@ import {
   FileText,
   DollarSign,
   MessageCircle,
+  ShieldCheck,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
   { label: 'Analytics',     href: '/analytics',        icon: BarChart3 },
   { label: 'Finance',       href: '/finance',          icon: DollarSign },
   { label: 'WhatsApp',     href: '/whatsapp',         icon: MessageCircle },
+  { label: 'BGV',          href: '/bgv',              icon: ShieldCheck },
 ];
 
 export function Sidebar() {
