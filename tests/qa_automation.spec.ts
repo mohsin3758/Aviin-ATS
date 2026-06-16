@@ -273,6 +273,39 @@ test.describe('S7 Candidate 360 View', () => {
   });
 });
 
+// Suite 8: Analytics BI Dashboard (P8)
+test.describe('S8 Analytics BI Dashboard', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('analytics KPI cards visible', async ({ page }) => {
+    await page.goto(`${BASE}/analytics`);
+    await page.waitForSelector('[data-testid="analytics-kpi"]', { state: 'visible', timeout: 10000 });
+    const text = await page.locator('[data-testid="analytics-kpi"]').textContent();
+    expect(text).toMatch(/Placement Rate|Skill Gaps|Utilization/);
+  });
+
+  test('funnel chart renders', async ({ page }) => {
+    await page.goto(`${BASE}/analytics`);
+    await page.waitForSelector('[data-testid="funnel-chart"]', { state: 'visible', timeout: 15000 });
+  });
+
+  test('skill gap chart renders', async ({ page }) => {
+    await page.goto(`${BASE}/analytics`);
+    await page.waitForSelector('[data-testid="skill-gap-chart"]', { state: 'visible', timeout: 15000 });
+  });
+
+  test('hiring difficulty panel renders', async ({ page }) => {
+    await page.goto(`${BASE}/analytics`);
+    await page.waitForSelector('[data-testid="difficulty-panel"]', { state: 'visible', timeout: 10000 });
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {

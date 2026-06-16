@@ -229,7 +229,14 @@ local-AI services.
           Scorecards: star ratings. Assessment: rule-based MCQ per skill (3
           hardcoded + fallback, no LLM — ZERO-TOKEN). Video: scaffold (no
           external service). zerotoken-check CLEAN, Playwright S1-S7 28/28
-- [NEXT] P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
+- [DONE]  P8:  UI T4 — Analytics BI Dashboard: recharts BarCharts (agency funnel,
+          recruiter utilization, skill demand vs supply), KPI cards (placement
+          rate, skill gaps, redeployment risk, avg utilization), rule-based
+          Hiring Difficulty Forecast table (gap/demand ratio → % hard, zero-token),
+          Redeployment Risk Alert (≤14 days). Fix: data-testid on div wrapper not
+          ResponsiveContainer (recharts doesn't forward attrs). zerotoken-check
+          CLEAN, Playwright S1-S8 32/32
+- [NEXT] P9:  UI T5 — CEO War Room (app/command-center/page.tsx)
 - [ ]     P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
 - [ ]     P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
 - [ ]     P9:  UI T5 — CEO War Room (app/command-center/page.tsx)
