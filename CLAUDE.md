@@ -281,7 +281,21 @@ local-AI services.
           (Trust Overview with score gauge, BGV Checks table + initiate form,
           Trust Graph edge table, India Verify with Aadhaar+DigiLocker panels).
           zerotoken-check CLEAN (100 files), Playwright S1-S13 46/46
-- [NEXT] P14: VPS Deploy — domain + SSL + production
+- [DONE]  P14: VPS Deploy — nginx reverse proxy with SSL termination
+          (nginx.conf.template with ${DOMAIN} placeholder, HTTPS redirect,
+          security headers, WebSocket upgrade for Next.js dev), certbot
+          auto-renewal (12h loop in docker-compose.prod.yml override),
+          production compose override (loopback-only port binds for
+          backend/frontend/n8n/waha, db port removed, ERP_ENCRYPT_KEY
+          required). Scripts: ssl-init.sh (standalone certbot, warns
+          against finstack.aviinjobs.com), deploy-prod.sh (preflight,
+          zero-token audit, build, start, health-check), p14-readiness-check.sh
+          (full preflight: env vars, Docker health, API health, DB tables,
+          zero-token, SSL, Playwright). .env.prod.example with all required
+          vars (CHANGEME placeholders, domain must be confirmed with user).
+          DOMAIN IS STILL TBD — all configs use ${DOMAIN} / CHANGEME,
+          must confirm with user before go-live. zerotoken-check CLEAN
+          (103 files), Playwright S1-S14 52/52
 
 ## PENDING INPUTS (blocks finalizing P4-P10 detail)
 Awaiting PDF conversions of these blueprint docs from the user:

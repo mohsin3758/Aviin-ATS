@@ -608,6 +608,67 @@ test.describe('S13 BGV Trust Intelligence', () => {
   });
 });
 
+// Suite 14: P14 Production Deploy Config (static file checks)
+test.describe('S14 VPS Deploy Config', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const REPO = path.resolve(__dirname, '..');
+
+  test('nginx.conf.template exists and contains DOMAIN placeholder', async () => {
+    const p = path.join(REPO, 'nginx', 'nginx.conf.template');
+    expect(fs.existsSync(p)).toBe(true);
+    const content = fs.readFileSync(p, 'utf8');
+    expect(content).toContain('${DOMAIN}');
+    expect(content).toContain('ssl_certificate');
+    expect(content).toContain('proxy_pass');
+  });
+
+  test('docker-compose.prod.yml exists and references nginx + certbot', async () => {
+    const p = path.join(REPO, 'docker-compose.prod.yml');
+    expect(fs.existsSync(p)).toBe(true);
+    const content = fs.readFileSync(p, 'utf8');
+    expect(content).toContain('nginx:');
+    expect(content).toContain('certbot');
+    expect(content).toContain('127.0.0.1');
+  });
+
+  test('.env.prod.example has DOMAIN placeholder, not the forbidden domain as value', async () => {
+    const p = path.join(REPO, '.env.prod.example');
+    expect(fs.existsSync(p)).toBe(true);
+    const content = fs.readFileSync(p, 'utf8');
+    // finstack.aviinjobs.com may appear in a comment/warning; must NOT be the actual DOMAIN= value
+    const domainLine = content.split('\n').find(l => l.startsWith('DOMAIN='));
+    expect(domainLine).toBeTruthy();
+    expect(domainLine).not.toContain('finstack.aviinjobs.com');
+    expect(content).toContain('ERP_ENCRYPT_KEY=');
+  });
+
+  test('deploy-prod.sh exists and guards against CHANGEME domain', async () => {
+    const p = path.join(REPO, 'scripts', 'deploy-prod.sh');
+    expect(fs.existsSync(p)).toBe(true);
+    const content = fs.readFileSync(p, 'utf8');
+    expect(content).toContain('CHANGEME');
+    expect(content).toContain('ERP_ENCRYPT_KEY');
+    expect(content).toContain('zerotoken-check');
+  });
+
+  test('ssl-init.sh exists and warns against finstack.aviinjobs.com', async () => {
+    const p = path.join(REPO, 'scripts', 'ssl-init.sh');
+    expect(fs.existsSync(p)).toBe(true);
+    const content = fs.readFileSync(p, 'utf8');
+    expect(content).toContain('finstack.aviinjobs.com');
+    expect(content).toContain('certbot');
+  });
+
+  test('p14-readiness-check.sh exists and runs zero-token check', async () => {
+    const p = path.join(REPO, 'scripts', 'p14-readiness-check.sh');
+    expect(fs.existsSync(p)).toBe(true);
+    const content = fs.readFileSync(p, 'utf8');
+    expect(content).toContain('zerotoken-check');
+    expect(content).toContain('ERP_ENCRYPT_KEY');
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {
