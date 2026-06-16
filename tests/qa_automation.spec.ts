@@ -306,6 +306,34 @@ test.describe('S8 Analytics BI Dashboard', () => {
   });
 });
 
+// Suite 9: CEO War Room (P9)
+test.describe('S9 CEO War Room', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('war room KPI cards visible', async ({ page }) => {
+    await page.goto(`${BASE}/command-center`);
+    await page.waitForSelector('[data-testid="war-room-kpis"]', { state: 'visible', timeout: 10000 });
+    const text = await page.locator('[data-testid="war-room-kpis"]').textContent();
+    expect(text).toMatch(/Total Placements|Fill Rate|Utilization/);
+  });
+
+  test('capacity vs demand panel visible', async ({ page }) => {
+    await page.goto(`${BASE}/command-center`);
+    await page.waitForSelector('[data-testid="capacity-demand-panel"]', { state: 'visible', timeout: 15000 });
+  });
+
+  test('retention risk panel visible', async ({ page }) => {
+    await page.goto(`${BASE}/command-center`);
+    await page.waitForSelector('[data-testid="retention-risk-panel"]', { state: 'visible', timeout: 15000 });
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {

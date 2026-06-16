@@ -236,7 +236,13 @@ local-AI services.
           Redeployment Risk Alert (≤14 days). Fix: data-testid on div wrapper not
           ResponsiveContainer (recharts doesn't forward attrs). zerotoken-check
           CLEAN, Playwright S1-S8 32/32
-- [NEXT] P9:  UI T5 — CEO War Room (app/command-center/page.tsx)
+- [DONE]  P9:  UI T5 — CEO War Room (app/command-center/page.tsx): 4 hero KPI
+          cards (Total Placements, Fill Rate, Avg Utilization, Skill Gaps),
+          Capacity vs Demand model (headroom = capacity−active vs open reqs →
+          critical/warning/healthy badge), Retention Risk model (redeployment
+          queue with critical/warning/watch tiering ≤7d/≤14d/≤21d), Top Clients
+          table, Skill Shortage gap bars. All rule-based, zero-token. 35/35
+- [NEXT] P10: UI T6 — Finance ERP Dashboard (app/finance/page.tsx)
 - [ ]     P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
 - [ ]     P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
 - [ ]     P9:  UI T5 — CEO War Room (app/command-center/page.tsx)
