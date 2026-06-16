@@ -10,6 +10,7 @@ import {
   Briefcase,
   FileText,
   DollarSign,
+  MessageCircle,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -24,6 +25,7 @@ const NAV_ITEMS = [
   { label: 'Requisitions',  href: '/requisitions',     icon: Briefcase },
   { label: 'Analytics',     href: '/analytics',        icon: BarChart3 },
   { label: 'Finance',       href: '/finance',          icon: DollarSign },
+  { label: 'WhatsApp',     href: '/whatsapp',         icon: MessageCircle },
 ];
 
 export function Sidebar() {

@@ -22,6 +22,7 @@ from routers import (
     offers,
     requisitions,
     scorecards,
+    whatsapp,
 )
 
 
@@ -52,6 +53,7 @@ app.include_router(consent.router)
 app.include_router(scorecards.router)
 app.include_router(ai.router)
 app.include_router(analytics.router)
+app.include_router(whatsapp.router)
 
 
 @app.get("/health")

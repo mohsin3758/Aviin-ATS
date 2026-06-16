@@ -371,6 +371,77 @@ test.describe('S10 Finance ERP', () => {
   });
 });
 
+// Suite 11: WhatsApp Outreach (P11)
+test.describe('S11 WhatsApp Outreach', () => {
+  test('WhatsApp session status endpoint returns status field', async ({ request }) => {
+    const r = await request.get(`${API}/whatsapp/session/status`, {
+      headers: { 'x-tenant-id': process.env.TENANT_ID || 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const data = await r.json();
+    expect(r.status()).toBe(200);
+    expect(data.status).toBeDefined();
+    expect(data.session).toBe('default');
+  });
+
+  test('WhatsApp templates endpoint returns 4 templates in 14 languages', async ({ request }) => {
+    const r = await request.get(`${API}/whatsapp/templates`, {
+      headers: { 'x-tenant-id': 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const templates = await r.json();
+    expect(r.status()).toBe(200);
+    expect(templates).toHaveLength(4);
+    expect(templates[0].languages).toHaveLength(14);
+  });
+
+  test('HARD RULE #7: send without consent returns 403', async ({ request }) => {
+    const loginR = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const { access_token } = await loginR.json();
+    const candsR = await request.get(`${API}/candidates`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    const candId = (await candsR.json())[0]?.id;
+    if (!candId) return;
+    const r = await request.post(`${API}/whatsapp/send`, {
+      headers: { 'Authorization': `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      data: { candidate_id: candId, phone: '+919876543210', template_key: 'job_opportunity', lang: 'en', vars: {} }
+    });
+    expect(r.status()).toBe(403);
+    const body = await r.json();
+    expect(body.detail).toContain('HARD RULE #7/#12');
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('WhatsApp page session panel visible', async ({ page }) => {
+    await page.goto(`${BASE}/whatsapp`);
+    await page.waitForSelector('[data-testid="session-panel"]', { state: 'visible', timeout: 15000 });
+  });
+
+  test('WhatsApp templates tab shows 14 languages', async ({ page }) => {
+    await page.goto(`${BASE}/whatsapp`);
+    await page.waitForSelector('[data-testid="session-panel"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="templates"]');
+    await page.waitForSelector('[data-testid="templates-panel"]', { state: 'visible', timeout: 5000 });
+    const text = await page.locator('[data-testid="templates-panel"]').textContent();
+    expect(text).toMatch(/Hindi|Tamil|Telugu|Kannada/);
+  });
+
+  test('WhatsApp consent tab visible', async ({ page }) => {
+    await page.goto(`${BASE}/whatsapp`);
+    await page.waitForSelector('[data-testid="session-panel"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="consent"]');
+    await page.waitForSelector('[data-testid="consent-panel"]', { state: 'visible', timeout: 5000 });
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {

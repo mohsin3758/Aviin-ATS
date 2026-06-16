@@ -249,8 +249,15 @@ local-AI services.
           via GET /analytics/active-placements, new endpoint added to
           analytics.py), Timesheets/Invoices/Payroll (P12 stubs with feature
           descriptions). zerotoken-check CLEAN, Playwright S1-S10 28/28
-- [NEXT] P11: WhatsApp — WAHA integration + consent-gated outreach
-- [ ]     P12: ERP — Timesheet + Payroll + Billing endpoints (pgcrypto for
+- [DONE]  P11: WhatsApp — WAHA integration + consent-gated outreach:
+          `backend/routers/whatsapp.py` (session start/status/QR, send,
+          bulk-send all HARD RULE #7/#12 consent-gated), 14-language
+          template system (en/hi/ta/te/kn/ml/mr/gu/pa/bn/or/as/ur/kok —
+          zero-token, plain text lookup), WAHA client via httpx async,
+          `frontend/app/(dashboard)/whatsapp/page.tsx` (4 tabs: Session
+          QR/status, Outreach form, Templates grid, Consent Log).
+          zerotoken-check CLEAN, Playwright S1-S11 34/34
+- [NEXT] P12: ERP — Timesheet + Payroll + Billing endpoints (pgcrypto for
           Aadhaar/PAN/PF/bank-account — HARD RULE #11)
 - [ ]     P13: BGV — Trust Intelligence + India verification APIs
 - [ ]     P14: VPS Deploy — domain + SSL + production
