@@ -60,6 +60,7 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b-instruct-q4_K_M}
       WAHA_URL: http://waha:3000
       WAHA_API_KEY: ${WAHA_API_KEY:-}
+      ERP_ENCRYPT_KEY: ${ERP_ENCRYPT_KEY:-erp_demo_key_change_in_prod}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     depends_on:

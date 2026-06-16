@@ -257,9 +257,17 @@ local-AI services.
           `frontend/app/(dashboard)/whatsapp/page.tsx` (4 tabs: Session
           QR/status, Outreach form, Templates grid, Consent Log).
           zerotoken-check CLEAN, Playwright S1-S11 34/34
-- [NEXT] P12: ERP — Timesheet + Payroll + Billing endpoints (pgcrypto for
-          Aadhaar/PAN/PF/bank-account — HARD RULE #11)
-- [ ]     P13: BGV — Trust Intelligence + India verification APIs
+- [DONE]  P12: ERP — `sql/05_phase12_erp.sql` (contractor_pii HARD RULE #11:
+          Aadhaar/PAN/PF/bank pgcrypto-encrypted; timesheets, invoices +
+          invoice_line_items, payroll_runs, payslips — all RLS with
+          tenant_isolation), `backend/routers/erp.py` (contractor-pii
+          upsert/get, timesheets CRUD + submit/approve, invoice list +
+          generate_invoice_from_timesheets(), payroll-runs + payslips),
+          Finance ERP frontend tabs updated from P12 stubs to live ERP tables.
+          pgcrypto verified: Aadhaar stored as 80-byte ciphertext. HARD RULE
+          #11 confirmed: PII never returned in plaintext. zerotoken-check
+          CLEAN, Playwright S1-S12 40/40
+- [NEXT] P13: BGV — Trust Intelligence + India verification APIs
 - [ ]     P14: VPS Deploy — domain + SSL + production
 
 ## PENDING INPUTS (blocks finalizing P4-P10 detail)

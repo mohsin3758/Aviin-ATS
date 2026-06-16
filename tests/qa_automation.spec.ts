@@ -442,6 +442,83 @@ test.describe('S11 WhatsApp Outreach', () => {
   });
 });
 
+// Suite 12: ERP Timesheet + Invoice + Payroll (P12)
+test.describe('S12 ERP Timesheet/Invoice/Payroll', () => {
+  test('ERP timesheets endpoint returns array (RLS)', async ({ request }) => {
+    const loginR = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const { access_token } = await loginR.json();
+    const r = await request.get(`${API}/erp/timesheets`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    expect(r.status()).toBe(200);
+    expect(Array.isArray(await r.json())).toBe(true);
+  });
+
+  test('ERP invoices endpoint returns array', async ({ request }) => {
+    const loginR = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const { access_token } = await loginR.json();
+    const r = await request.get(`${API}/erp/invoices`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    expect(r.status()).toBe(200);
+    expect(Array.isArray(await r.json())).toBe(true);
+  });
+
+  test('HARD RULE #11: contractor PII encrypted — Aadhaar bytes not plaintext', async ({ request }) => {
+    const loginR = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
+    });
+    const { access_token } = await loginR.json();
+    const candsR = await request.get(`${API}/candidates`, {
+      headers: { 'Authorization': `Bearer ${access_token}` }
+    });
+    const candId = (await candsR.json())[0]?.id;
+    if (!candId) return;
+    const piiR = await request.post(`${API}/erp/contractor-pii`, {
+      headers: { 'Authorization': `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      data: { candidate_id: candId, aadhaar: '9999-8888-7777', pan: 'TESTX1234Y', bank_account: '999888777' }
+    });
+    expect(piiR.status()).toBe(200);
+    const body = await piiR.json();
+    expect(body.note).toContain('HARD RULE #11');
+    // Aadhaar must NOT be returned in plaintext
+    expect(JSON.stringify(body)).not.toContain('9999-8888-7777');
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('Finance timesheets tab shows ERP table', async ({ page }) => {
+    await page.goto(`${BASE}/finance`);
+    await page.waitForSelector('[data-testid="contractors-panel"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="timesheets"]');
+    await page.waitForSelector('[data-testid="timesheets-panel"]', { state: 'visible', timeout: 8000 });
+  });
+
+  test('Finance invoices tab shows ERP table', async ({ page }) => {
+    await page.goto(`${BASE}/finance`);
+    await page.waitForSelector('[data-testid="contractors-panel"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="invoices"]');
+    await page.waitForSelector('[data-testid="invoices-panel"]', { state: 'visible', timeout: 8000 });
+  });
+
+  test('Finance payroll tab shows ERP table', async ({ page }) => {
+    await page.goto(`${BASE}/finance`);
+    await page.waitForSelector('[data-testid="contractors-panel"]', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="payroll"]');
+    await page.waitForSelector('[data-testid="payroll-panel"]', { state: 'visible', timeout: 8000 });
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {
