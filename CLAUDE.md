@@ -221,7 +221,15 @@ local-AI services.
           fit_score + skills; skill_overlap is int not array — use skills[]).
           useFetch refetch + apiFetch util in lib/useFetch.ts. zerotoken-check
           CLEAN, Playwright S1-S6 24/24
-- [NEXT] P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
+- [DONE]  P7:  UI T3 — Candidate 360 View: candidates list (search by q=,
+          initials avatar, skills chips, exp, location); [id] 360 page with 5
+          tabs (Profile/Applications/Scorecards/Assessment/Video). Profile: 3
+          cards (contact, skills, resume extract). Applications: table via
+          GET /candidates/{id}/applications (req title links to kanban).
+          Scorecards: star ratings. Assessment: rule-based MCQ per skill (3
+          hardcoded + fallback, no LLM — ZERO-TOKEN). Video: scaffold (no
+          external service). zerotoken-check CLEAN, Playwright S1-S7 28/28
+- [NEXT] P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
 - [ ]     P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
 - [ ]     P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
 - [ ]     P9:  UI T5 — CEO War Room (app/command-center/page.tsx)

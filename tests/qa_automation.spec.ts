@@ -213,6 +213,66 @@ test.describe('S6 Kanban Pipeline Board', () => {
   });
 });
 
+// Suite 7: Candidate 360 View (P7)
+test.describe('S7 Candidate 360 View', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('candidate list shows candidates', async ({ page }) => {
+    await page.goto(`${BASE}/candidates`);
+    await page.waitForSelector('[data-testid="candidate-list"]', { state: 'visible', timeout: 10000 });
+    const count = await page.locator('[data-testid="candidate-list"] a').count();
+    expect(count).toBeGreaterThan(0);
+  });
+
+  test('candidate 360 profile tab loads', async ({ page }) => {
+    if (!TID) return test.skip();
+    const resp = await page.request.get(`${API}/candidates`, {
+      headers: { 'x-tenant-id': TID },
+    });
+    const candidates = await resp.json();
+    const candId = candidates.find((c: { full_name: string; id: string }) => !c.full_name.startsWith('QA'))?.id;
+    expect(candId).toBeTruthy();
+
+    await page.goto(`${BASE}/candidates/${candId}`);
+    await page.waitForSelector('[data-testid="profile-panel"]', { state: 'visible', timeout: 10000 });
+    await expect(page.locator('[data-tab="profile"]')).toBeVisible();
+  });
+
+  test('applications tab loads', async ({ page }) => {
+    if (!TID) return test.skip();
+    const resp = await page.request.get(`${API}/candidates`, {
+      headers: { 'x-tenant-id': TID },
+    });
+    const candidates = await resp.json();
+    const candId = candidates.find((c: { full_name: string; id: string }) => !c.full_name.startsWith('QA'))?.id;
+
+    await page.goto(`${BASE}/candidates/${candId}`);
+    await page.waitForSelector('nav', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="applications"]');
+    await page.waitForSelector('[data-testid="applications-panel"]', { state: 'visible', timeout: 10000 });
+  });
+
+  test('assessment tab renders MCQ questions', async ({ page }) => {
+    if (!TID) return test.skip();
+    const resp = await page.request.get(`${API}/candidates`, {
+      headers: { 'x-tenant-id': TID },
+    });
+    const candidates = await resp.json();
+    const candId = candidates.find((c: { full_name: string; id: string }) => !c.full_name.startsWith('QA'))?.id;
+
+    await page.goto(`${BASE}/candidates/${candId}`);
+    await page.waitForSelector('nav', { state: 'visible', timeout: 10000 });
+    await page.click('[data-tab="assessment"]');
+    await page.waitForSelector('[data-testid="assessment-panel"]', { state: 'visible', timeout: 10000 });
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {
