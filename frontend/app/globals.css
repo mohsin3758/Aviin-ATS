@@ -1,3 +1,66 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ── Template 1: Enterprise Classic (default / baseline) ─────────── */
+:root, [data-theme="enterprise"] {
+  --color-primary:      #1e3a5f;
+  --color-primary-dark: #132848;
+  --color-secondary:    #4a6fa5;
+  --color-accent:       #e8a020;
+  --color-surface:      #ffffff;
+  --color-surface-alt:  #f4f6f9;
+  --color-muted:        #6b7280;
+}
+
+/* ── Template 2: Modern SaaS ─────────────────────────────────────── */
+[data-theme="modern"] {
+  --color-primary:      #4f46e5;
+  --color-primary-dark: #3730a3;
+  --color-secondary:    #0ea5e9;
+  --color-accent:       #f59e0b;
+  --color-surface:      #ffffff;
+  --color-surface-alt:  #f8fafc;
+  --color-muted:        #64748b;
+}
+
+/* ── Template 3: Minimal / Focus ─────────────────────────────────── */
+[data-theme="minimal"] {
+  --color-primary:      #111827;
+  --color-primary-dark: #030712;
+  --color-secondary:    #374151;
+  --color-accent:       #6366f1;
+  --color-surface:      #1f2937;
+  --color-surface-alt:  #111827;
+  --color-muted:        #9ca3af;
+  color-scheme: dark;
+}
+
+/* ── Template 4: AI Command Center ───────────────────────────────── */
+[data-theme="ai-command"] {
+  --color-primary:      #7c3aed;
+  --color-primary-dark: #5b21b6;
+  --color-secondary:    #0891b2;
+  --color-accent:       #10b981;
+  --color-surface:      #0f172a;
+  --color-surface-alt:  #1e293b;
+  --color-muted:        #94a3b8;
+  color-scheme: dark;
+}
+
+/* ── Template 5: Mobile-First / Field ────────────────────────────── */
+[data-theme="mobile-first"] {
+  --color-primary:      #0f766e;
+  --color-primary-dark: #0d5c56;
+  --color-secondary:    #2563eb;
+  --color-accent:       #f97316;
+  --color-surface:      #ffffff;
+  --color-surface-alt:  #f0fdfa;
+  --color-muted:        #6b7280;
+}
+
+@layer base {
+  body {
+    @apply bg-[--color-surface-alt] text-gray-900;
+  }
+}

@@ -193,9 +193,20 @@ local-AI services.
           fail-closed), JD cache hit on 2nd identical call (similarity
           1.0, ~9.7s -> ~30ms). zerotoken-check CLEAN, Playwright S1+S2+S4
           10/10
-- [NEXT] P4:  Frontend Foundation — GlobalNav, TenantProvider, shared components
-- [ ]     P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx)
-- [ ]     P6:  UI T2 — Kanban Pipeline Board (app/pipeline/[req_id]/page.tsx)
+- [DONE]  P4:  Frontend Foundation — Next.js 14 app-router shell: 5-template
+          theme system (data-theme + Zustand persist + Tailwind addVariant
+          plugin; templates: enterprise/modern/minimal/ai-command/mobile-first),
+          CORSMiddleware on FastAPI backend, TenantProvider (JWT read from
+          localStorage, redirect-to-login guard), ThemeProvider (sets
+          data-theme on <html>), Sidebar (6 nav items, collapse toggle),
+          Topbar (user info + logout), CommandPalette (Ctrl+K, Radix Dialog,
+          waitForSelector hydration fix in Playwright), login page
+          (POST /auth/login -> JWT -> router.replace('/dashboard')),
+          stub pages for all 6 routes, shared UI: Button (CVA variants),
+          Card, Modal (Radix Dialog), Spinner, Table, ThemeSwitcher.
+          zerotoken-check CLEAN, Playwright S1+S2+S3+S4 18/18
+- [NEXT] P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx)
+- [ ]     P6:  UI T2 — Kanban Pipeline Board (app/pipeline/page.tsx + [req_id]/page.tsx)
 - [ ]     P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
 - [ ]     P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
 - [ ]     P9:  UI T5 — CEO War Room (app/command-center/page.tsx)

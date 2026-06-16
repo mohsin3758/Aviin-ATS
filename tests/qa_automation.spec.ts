@@ -110,8 +110,9 @@ test.describe('S3 Frontend Pages', () => {
   });
   test('Cmd+K opens command palette', async ({ page }) => {
     await page.goto(`${BASE}/dashboard`);
+    await page.waitForSelector('nav', { state: 'visible', timeout: 10000 });
     await page.keyboard.press('Control+k');
-    await expect(page.locator('[role="dialog"]').first()).toBeVisible();
+    await expect(page.locator('[role="dialog"]').first()).toBeVisible({ timeout: 5000 });
   });
 });
 
