@@ -212,7 +212,16 @@ local-AI services.
           Agency Funnel table (v_agency_funnel), useFetch hook (lib/useFetch.ts,
           Bearer JWT, cancel-on-unmount). zerotoken-check CLEAN, Playwright
           S1+S2+S3+S4+S5 21/21
-- [NEXT] P6:  UI T2 — Kanban Pipeline Board (app/pipeline/page.tsx + [req_id]/page.tsx)
+- [DONE]  P6:  UI T2 — Kanban Pipeline Board: pipeline list page (all reqs as
+          clickable cards), kanban board ([req_id] route, 7 columns:
+          sourced/screened/submitted/interview/offer/placed/rejected, color-coded
+          top border), application cards (candidate name, exp, skill chips, prev/
+          next stage buttons → PATCH /applications/{id}/stage), Match Candidates
+          panel (Ctrl, Radix open state, loads GET match-candidates, shows
+          fit_score + skills; skill_overlap is int not array — use skills[]).
+          useFetch refetch + apiFetch util in lib/useFetch.ts. zerotoken-check
+          CLEAN, Playwright S1-S6 24/24
+- [NEXT] P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
 - [ ]     P7:  UI T3 — Candidate 360 View (app/candidates/[id]/page.tsx)
 - [ ]     P8:  UI T4 — Analytics BI Dashboard (app/analytics/page.tsx)
 - [ ]     P9:  UI T5 — CEO War Room (app/command-center/page.tsx)

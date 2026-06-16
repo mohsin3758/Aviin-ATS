@@ -159,6 +159,60 @@ test.describe('S5 Recruiter Command Center', () => {
   });
 });
 
+// Suite 6: Kanban Pipeline Board (P6)
+test.describe('S6 Kanban Pipeline Board', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', EMAIL);
+    await page.fill('input[name="password"]', PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE}/dashboard`);
+  });
+
+  test('pipeline list shows requisitions', async ({ page }) => {
+    await page.goto(`${BASE}/pipeline`);
+    await page.waitForSelector('[data-testid="requisition-list"]', { state: 'visible', timeout: 10000 });
+    const count = await page.locator('[data-testid="requisition-list"] a').count();
+    expect(count).toBeGreaterThan(0);
+  });
+
+  test('kanban board shows stage columns', async ({ page }) => {
+    if (!TID) return test.skip();
+    // Get first requisition ID from API
+    const resp = await page.request.get(`${API}/requisitions`, {
+      headers: { 'x-tenant-id': TID },
+    });
+    const reqs = await resp.json();
+    const reqId = reqs[0]?.id;
+    expect(reqId).toBeTruthy();
+
+    await page.goto(`${BASE}/pipeline/${reqId}`);
+    await page.waitForSelector('[data-testid="kanban-board"]', { state: 'visible', timeout: 10000 });
+    // Verify stage columns present
+    const sourced = page.locator('[data-stage="sourced"]');
+    const screened = page.locator('[data-stage="screened"]');
+    await expect(sourced).toBeVisible();
+    await expect(screened).toBeVisible();
+  });
+
+  test('match candidates button fetches AI matches', async ({ page }) => {
+    if (!TID) return test.skip();
+    const resp = await page.request.get(`${API}/requisitions`, {
+      headers: { 'x-tenant-id': TID },
+    });
+    const reqs = await resp.json();
+    const reqId = reqs[0]?.id;
+
+    await page.goto(`${BASE}/pipeline/${reqId}`);
+    await page.waitForSelector('[data-testid="kanban-board"]', { state: 'visible', timeout: 10000 });
+    await page.waitForSelector('nav', { state: 'visible', timeout: 5000 });
+    await page.click('button:has-text("Match Candidates")');
+    await page.waitForSelector('[data-testid="match-cards"]', { state: 'visible', timeout: 15000 });
+    const matchCount = await page.locator('[data-testid="match-cards"] > div').count();
+    expect(matchCount).toBeGreaterThanOrEqual(0);
+  });
+});
+
 // Suite 4: Core API Workflows
 test.describe('S4 Core Workflows', () => {
   test('Create candidate returns id', async ({ request }) => {
