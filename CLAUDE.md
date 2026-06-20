@@ -74,21 +74,14 @@ every later UI phase (P5-P10) is theme-aware from the start.
     candidate PII (DPDP 2023), not just WhatsApp
 
 ## VPS RESOURCES (checked 2026-06-15)
-96GB disk (93GB free; 21GB used after P0 image pulls/builds), 7.8GB RAM
-(5.5GB free; ~2.5GB used with all 7 P0 containers up), Docker 29.5.3 +
-Compose v5.1.4. `dev` is in the `docker` group per `/etc/group`, but THIS
-shell session's cached `groups` output predates that grant — plain
-`docker`/`docker compose` commands fail with "permission denied ... docker
-API at unix:///var/run/docker.sock" in this session. WORKAROUND: prefix
-every docker/docker-compose daemon command with `sg docker -c "..."` (works
-without a password). `docker compose config` — pure YAML parse, no daemon —
-works without the wrapper. A fresh login/tmux session would pick up the
-group correctly and not need this. Node 20.20.2 / Python 3.12.3 on host.
-7.8GB RAM is workable but not generous once Postgres + Ollama + n8n +
-FastAPI + Next.js + WAHA (P11, Chromium-based like Playwright) are all
-running together — if containers start OOM-killing in later phases, stagger
-non-essential services or add swap rather than removing the zero-token
-local-AI services.
+96GB disk (93GB free), 7.8GB RAM (5.5GB free), Docker 29.5.3 +
+Compose v5.1.4, `dev` user in both `sudo` and `docker` groups (no
+sudo prefix needed for docker commands). Node 20.20.2 / Python 3.12.3
+on host. 7.8GB RAM is workable but not generous once Postgres + Ollama
++ n8n + FastAPI + Next.js + WAHA (P11, Chromium-based like Playwright)
+are all running together — if containers start OOM-killing in later
+phases, stagger non-essential services or add swap rather than
+removing the zero-token local-AI services.
 
 ## DATABASE CONNECTION (target — created in P0)
 - Host: db (inside Docker) / localhost:5432 (outside)
@@ -119,183 +112,72 @@ local-AI services.
 - interview_scorecards   → P1 — structured interview kits/scorecards
 - trust_graph            → P13 — talent/trust graph adjacency table
 
+## TARGET DB TABLES — Compensation & Incentive Framework (P15-P17)
+Full spec: docs/compensation_incentive_framework.md — ALL zero-token (pure SQL/rules, no LLM).
+
+P15 tables:
+- recruiter_kpi_scores        → monthly 100-pt scorecard per recruiter (grades D/C/B/A/A+, payout ranges)
+- recruiter_advanced_kpis     → monthly advanced metrics (offer_drop_rate, no_show_pct, 90-day retention, etc.)
+- candidate_retention_tracking→ per placement (days_employed → 0/50/75/100% credit at <30/30-60/60-90/90+d)
+- incentive_records           → 70% immediate / 30% retention bank split per month, calc from Contribution Margin
+- retention_bank              → 30% hold with quarterly/half-yearly/annual release; forfeited on resignation
+- loyalty_milestones          → 1/2/3/5yr bonuses (₹15k/30k/50k/1L) per user
+
+P16 tables:
+- kae_kpi_scores              → monthly KAE scorecard (Client Retention 30%, Account Growth 25%, Collection 20%, Satisfaction 15%, Compliance 10%)
+- kae_incentives              → retention/growth/collection/satisfaction bonuses per KAE per period
+- client_owners               → 3-owner rule per client (kae_id, founder_id, backup_id) — no single-point dependency
+- account_visibility          → L1-L5 visibility level per user per client (RLS-enforced)
+- kae_client_retention        → per-client retention start date + milestone trigger tracking
+
+P17 tables:
+- account_pl                  → per client per month (revenue, company_share 20%, delivery_pool 80%)
+- delivery_pool_allocations   → per account_pl (recruiter_incentives, sourcing, referral, kae, growth_reserve, op_reserve)
+- contribution_margins        → Revenue - Delivery Cost - Incentives - OpCost = CM (incentives capped if CM<0)
+- collection_records          → per client/invoice (amount_collected, kae_id, milestone_triggered)
+- bu_eligibility              → KAE BU readiness (tenure≥18m, loyalty+retention+growth scores, eligible_for_bu flag)
+
+P17 views:
+- v_account_pl                → visibility-gated L3+
+- v_recruiter_revenue         → revenue per recruiter per period (leaderboard for CEO Dashboard)
+- v_kae_revenue               → revenue per KAE per period
+- v_90day_retention           → 90-day retention rate per recruiter
+- v_collection_aging          → overdue collection aging per client (KAE: own accounts; Founder: all)
+
 ## PROJECT FILES (paths relative to repo root ~/airecruit)
 - sql/01_phase1_schema.sql              — Phase 1 foundation
-- sql/02_phase1_p1_additions.sql        — P1 backend API additions
 - sql/10_phase1_staffing_additions.sql  — hotlist/submittal/placement
+- sql/05_phase2_schema.sql              — automation schema
+- sql/09_phase3_schema.sql              — AI engine schema
 - sql/00_app_role.sql                   — app_user role
 - backend/app.py                        — FastAPI backend
 - backend/embed_writer.py               — vector column filler
 - backend/seed_data.py                  — India demo data
 - embed/embed_service.py                — BGE-small service
-- sql/03_phase2_n8n_additions.sql       — notifications, job_board_postings,
-                                           find_stalled_assignments, find_sla_breaches
-- n8n/build_workflows.py                — generator for n8n/workflows/*.json (W1-W9)
-- n8n/workflows/                        — exported workflow JSON (re-import after editing the generator)
-- n8n/credentials/                      — exported Postgres app_user credential
-- sql/04_phase3_ai_engine.sql           — match_candidates/match_recruiters/
-                                           assign_with_explanation/do_reassign +
-                                           v_redeployment_queue/v_agency_funnel/
-                                           v_recruiter_capacity/v_skill_gap
-- backend/ai_router.py                  — Tier2-lite cascade: embed -> ai_cache
-                                           lookup (>0.95 cosine) -> Ollama -> cache store
-- backend/routers/ai.py                 — POST /jd/generate
-- backend/routers/analytics.py          — GET /analytics/{4 views}
 - docker-compose.yml                    — all 7 services
 - tests/qa_automation.spec.ts           — Playwright QA tests
 - CLAUDE.md                             — this file (auto-loaded)
 - FINSTACK_MASTER_INDEX.md              — phase status tracker
 
 ## PHASE STATUS (source of truth — keep in sync with FINSTACK_MASTER_INDEX.md)
-- [DONE]  P0:  Infrastructure — Docker up (7/7 healthy), schemas applied,
-          RLS test passed (per-tenant isolation + fail-closed verified),
-          seed+embed done (2 tenants), Ollama qwen2.5:1.5b-instruct-q4_K_M
-          pulled, zerotoken-check CLEAN, Playwright S1 3/3
-- [DONE]  P1:  Backend APIs — JWT auth (auth_lookup_user SECURITY DEFINER
-          + Bearer JWT / x-tenant-id dual actor resolution), candidates,
-          requisitions (+pipeline kanban view), applications (stage
-          transitions), offers (draft->pending_approval->approved->issued
-          ->accepted/declined, HITL-gated approve/issue), assignments
-          (+HITL reassign), consent_records, interview_scorecards (new
-          table + RLS). zerotoken-check CLEAN (regex false-positive on
-          "Capgemini" fixed), Playwright S1+S4 5/5
-- [DONE]  P2:  n8n Workflows — `n8n/` (build_workflows.py generator +
-          credentials/ + workflows/), `sql/03_phase2_n8n_additions.sql`
-          (notifications, job_board_postings, find_stalled_assignments,
-          find_sla_breaches). W1 generic event_outbox dispatcher + W2-W5
-          per-event notifications (candidate/requisition/stage-change/
-          offer lifecycle), W6 HITL approval reminder (NEVER
-          auto-approves), W7 stalled-assignment + W8 SLA-breach monitors
-          (flag-only, NEVER auto-reassign), W9 job-board distribution
-          queue (naukri/indeed/linkedin, queued rows only, zero-token
-          scaffold). All 9 active in n8n, verified end-to-end against
-          live data (acme: 17 notifications from W1-W5, 18
-          job_board_postings from W9). zerotoken-check CLEAN, Playwright
-          S1+S4 5/5 (regression)
-- [DONE]  P3:  AI Engine — `sql/04_phase3_ai_engine.sql`: match_candidates
-          (T1 pgvector cosine + skill overlap -> fit_score 0-100),
-          match_recruiters (T1 skill-history + spare capacity ->
-          match_score 0-100), assign_with_explanation (T0/T1 auto-assign,
-          NOT HITL-gated — only "reassigned" is HARD RULE #10), do_reassign
-          (canonical reassign primitive, auto-picks alternative recruiter),
-          plus 4 views (v_redeployment_queue, v_agency_funnel,
-          v_recruiter_capacity, v_skill_gap) all WITH (security_invoker =
-          true) for RLS-safe app_user access. `backend/ai_router.py` —
-          Tier2-lite cascade: BGE-small embed -> ai_cache cosine-similarity
-          lookup (>0.95, HARD RULE #4) -> Ollama Qwen2.5 on miss -> cache
-          store, never an external API (HARD RULE #1). New endpoints:
-          GET/POST /requisitions/{id}/match-candidates,
-          /match-recruiters, /assign; POST /jd/generate
-          (backend/routers/ai.py); GET /analytics/{redeployment-queue,
-          agency-funnel,recruiter-capacity,skill-gap}
-          (backend/routers/analytics.py). Verified live: fit_score/
-          match_score in range, cross-tenant req_id -> 404 (RLS
-          fail-closed), JD cache hit on 2nd identical call (similarity
-          1.0, ~9.7s -> ~30ms). zerotoken-check CLEAN, Playwright S1+S2+S4
-          10/10
-- [DONE]  P4:  Frontend Foundation — Next.js 14 app-router shell: 5-template
-          theme system (data-theme + Zustand persist + Tailwind addVariant
-          plugin; templates: enterprise/modern/minimal/ai-command/mobile-first),
-          CORSMiddleware on FastAPI backend, TenantProvider (JWT read from
-          localStorage, redirect-to-login guard), ThemeProvider (sets
-          data-theme on <html>), Sidebar (6 nav items, collapse toggle),
-          Topbar (user info + logout), CommandPalette (Ctrl+K, Radix Dialog,
-          waitForSelector hydration fix in Playwright), login page
-          (POST /auth/login -> JWT -> router.replace('/dashboard')),
-          stub pages for all 6 routes, shared UI: Button (CVA variants),
-          Card, Modal (Radix Dialog), Spinner, Table, ThemeSwitcher.
-          zerotoken-check CLEAN, Playwright S1+S2+S3+S4 18/18
-- [DONE]  P5:  UI T1 — Recruiter Command Center (app/dashboard/page.tsx): 4 KPI
-          stat cards (Open Reqs, Active Candidates, Placements, Ending in 21
-          Days), Redeployment Queue table (v_redeployment_queue), Recruiter
-          Capacity bars (v_recruiter_capacity, color: green/amber/red by pct),
-          Agency Funnel table (v_agency_funnel), useFetch hook (lib/useFetch.ts,
-          Bearer JWT, cancel-on-unmount). zerotoken-check CLEAN, Playwright
-          S1+S2+S3+S4+S5 21/21
-- [DONE]  P6:  UI T2 — Kanban Pipeline Board: pipeline list page (all reqs as
-          clickable cards), kanban board ([req_id] route, 7 columns:
-          sourced/screened/submitted/interview/offer/placed/rejected, color-coded
-          top border), application cards (candidate name, exp, skill chips, prev/
-          next stage buttons → PATCH /applications/{id}/stage), Match Candidates
-          panel (Ctrl, Radix open state, loads GET match-candidates, shows
-          fit_score + skills; skill_overlap is int not array — use skills[]).
-          useFetch refetch + apiFetch util in lib/useFetch.ts. zerotoken-check
-          CLEAN, Playwright S1-S6 24/24
-- [DONE]  P7:  UI T3 — Candidate 360 View: candidates list (search by q=,
-          initials avatar, skills chips, exp, location); [id] 360 page with 5
-          tabs (Profile/Applications/Scorecards/Assessment/Video). Profile: 3
-          cards (contact, skills, resume extract). Applications: table via
-          GET /candidates/{id}/applications (req title links to kanban).
-          Scorecards: star ratings. Assessment: rule-based MCQ per skill (3
-          hardcoded + fallback, no LLM — ZERO-TOKEN). Video: scaffold (no
-          external service). zerotoken-check CLEAN, Playwright S1-S7 28/28
-- [DONE]  P8:  UI T4 — Analytics BI Dashboard: recharts BarCharts (agency funnel,
-          recruiter utilization, skill demand vs supply), KPI cards (placement
-          rate, skill gaps, redeployment risk, avg utilization), rule-based
-          Hiring Difficulty Forecast table (gap/demand ratio → % hard, zero-token),
-          Redeployment Risk Alert (≤14 days). Fix: data-testid on div wrapper not
-          ResponsiveContainer (recharts doesn't forward attrs). zerotoken-check
-          CLEAN, Playwright S1-S8 32/32
-- [DONE]  P9:  UI T5 — CEO War Room (app/command-center/page.tsx): 4 hero KPI
-          cards (Total Placements, Fill Rate, Avg Utilization, Skill Gaps),
-          Capacity vs Demand model (headroom = capacity−active vs open reqs →
-          critical/warning/healthy badge), Retention Risk model (redeployment
-          queue with critical/warning/watch tiering ≤7d/≤14d/≤21d), Top Clients
-          table, Skill Shortage gap bars. All rule-based, zero-token. 35/35
-- [DONE]  P10: UI T6 — Finance ERP Dashboard (app/finance/page.tsx): 4 KPI
-          cards (Active Contractors, Monthly Bill INR, Gross Margin %, Ending
-          Soon), Contractor Billing Grid (bill_rate/pay_rate/margin per placement,
-          status badges, Indian INR formatting), 4 tabs: Contractors (live data
-          via GET /analytics/active-placements, new endpoint added to
-          analytics.py), Timesheets/Invoices/Payroll (P12 stubs with feature
-          descriptions). zerotoken-check CLEAN, Playwright S1-S10 28/28
-- [DONE]  P11: WhatsApp — WAHA integration + consent-gated outreach:
-          `backend/routers/whatsapp.py` (session start/status/QR, send,
-          bulk-send all HARD RULE #7/#12 consent-gated), 14-language
-          template system (en/hi/ta/te/kn/ml/mr/gu/pa/bn/or/as/ur/kok —
-          zero-token, plain text lookup), WAHA client via httpx async,
-          `frontend/app/(dashboard)/whatsapp/page.tsx` (4 tabs: Session
-          QR/status, Outreach form, Templates grid, Consent Log).
-          zerotoken-check CLEAN, Playwright S1-S11 34/34
-- [DONE]  P12: ERP — `sql/05_phase12_erp.sql` (contractor_pii HARD RULE #11:
-          Aadhaar/PAN/PF/bank pgcrypto-encrypted; timesheets, invoices +
-          invoice_line_items, payroll_runs, payslips — all RLS with
-          tenant_isolation), `backend/routers/erp.py` (contractor-pii
-          upsert/get, timesheets CRUD + submit/approve, invoice list +
-          generate_invoice_from_timesheets(), payroll-runs + payslips),
-          Finance ERP frontend tabs updated from P12 stubs to live ERP tables.
-          pgcrypto verified: Aadhaar stored as 80-byte ciphertext. HARD RULE
-          #11 confirmed: PII never returned in plaintext. zerotoken-check
-          CLEAN, Playwright S1-S12 40/40
-- [DONE]  P13: BGV — `sql/06_phase13_bgv.sql` (trust_graph adjacency table
-          [referral/worked_with/placed/vouched/reported_fraud edges, weight
-          -1 to +1], bgv_checks [8 types: identity/education/employment/
-          criminal/credit/address/reference/digilocker, 5-status workflow],
-          bgv_documents, offer_letters), v_trust_scores view (rule-based:
-          bgv_score + trust_graph_score - fraud_flags×30, capped at 100).
-          `backend/routers/bgv.py`: BGV checks CRUD, trust score endpoint,
-          trust graph edge CRUD, offer letter draft via AI Router (Tier-2
-          Qwen2.5 local, cache-first), Aadhaar OTP initiate/verify-otp
-          (demo mode — production requires UIDAI ASA), DigiLocker initiate
-          (demo — requires NIC credentials). Frontend: BGV page with 4 tabs
-          (Trust Overview with score gauge, BGV Checks table + initiate form,
-          Trust Graph edge table, India Verify with Aadhaar+DigiLocker panels).
-          zerotoken-check CLEAN (100 files), Playwright S1-S13 46/46
-- [DONE]  P14: VPS Deploy — nginx reverse proxy with SSL termination
-          (nginx.conf.template with ${DOMAIN} placeholder, HTTPS redirect,
-          security headers, WebSocket upgrade for Next.js dev), certbot
-          auto-renewal (12h loop in docker-compose.prod.yml override),
-          production compose override (loopback-only port binds for
-          backend/frontend/n8n/waha, db port removed, ERP_ENCRYPT_KEY
-          required). Scripts: ssl-init.sh (standalone certbot, warns
-          against finstack.aviinjobs.com), deploy-prod.sh (preflight,
-          zero-token audit, build, start, health-check), p14-readiness-check.sh
-          (full preflight: env vars, Docker health, API health, DB tables,
-          zero-token, SSL, Playwright). .env.prod.example with all required
-          vars (CHANGEME placeholders, domain must be confirmed with user).
-          DOMAIN IS STILL TBD — all configs use ${DOMAIN} / CHANGEME,
-          must confirm with user before go-live. zerotoken-check CLEAN
-          (103 files), Playwright S1-S14 52/52
+- [✅]    P0:  Infrastructure — DONE (3/3)
+- [✅]    P1:  Backend APIs — DONE (5/5)
+- [✅]    P2:  n8n Workflows W1-W9 — DONE (5/5)
+- [✅]    P3:  AI Engine — DONE (10/10)
+- [✅]    P4:  Frontend Foundation — DONE (18/18)
+- [✅]    P5:  UI T1 Recruiter Command Center — DONE (21/21)
+- [✅]    P6:  UI T2 Kanban Pipeline Board — DONE (24/24)
+- [✅]    P7:  UI T3 Candidate 360 View — DONE (28/28)
+- [✅]    P8:  UI T4 Analytics BI Dashboard — DONE (32/32)
+- [✅]    P9:  UI T5 CEO War Room — DONE (35/35)
+- [✅]    P10: UI T6 Finance ERP Dashboard — DONE (28/28)
+- [✅]    P11: WhatsApp + WAHA (14-language, DPDP) — DONE (34/34)
+- [✅]    P12: ERP Timesheet + Payroll (pgcrypto) — DONE (40/40)
+- [✅]    P13: BGV + Trust Intelligence — DONE (46/46)
+- [✅]    P14: VPS Deploy (nginx/SSL, domain=TBD) — DONE (52/52)
+- [NEXT] P15: Recruiter Performance & Incentive Engine
+- [ ]     P16: KAE Module & Account Ownership
+- [ ]     P17: Account Financial Framework & CEO Dashboard Extensions
 
 ## PENDING INPUTS (blocks finalizing P4-P10 detail)
 Awaiting PDF conversions of these blueprint docs from the user:
@@ -353,23 +235,6 @@ phase is a token leak; fix it before starting the next phase.
   qwen2.5:1.5b-instruct-q4_K_M`
 - n8n workflow not firing / returns 0 rows → confirm `SET
   app.tenant_id` is the first node in that workflow's Postgres query
-- n8n Code node sees `undefined` fields from a `SET
-  app.tenant_id; SELECT ...` Postgres node → the node's output
-  includes a phantom 1-column `{set_config: "<uuid>"}` item from
-  statement 1; every P2 Code node starts with the GUARD check (see
-  n8n/build_workflows.py) that skips this item with `SELECT 1;`. Keep
-  this guard on any NEW multi-statement Postgres→Code node pair.
-- n8n workflow edited → regenerate with `python3 n8n/build_workflows.py`,
-  `docker compose cp n8n/workflows n8n:/tmp/wf` (clear /tmp/wf first),
-  `docker compose exec -T n8n n8n import:workflow --separate
-  --input=/tmp/wf`, then `n8n update:workflow --id=<id> --active=true`
-  per workflow (deprecated but works), then `docker compose restart
-  n8n`. To debug executions, query
-  `/home/node/.n8n/database.sqlite` (`execution_entity` +
-  `execution_data`) via Node's built-in `node:sqlite` (`new
-  DatabaseSync(path, {readOnly:true})`) — n8n's bundled
-  better-sqlite3 path varies by version and the REST API + `n8n
-  execute` CLI don't work against a running single-main instance.
 - Frontend 404 on a new route → confirm the route exists under `app/`
   (Next 14 app router), rebuild the frontend container
 - Playwright login timeout → confirm seed_data.py ran and the demo
