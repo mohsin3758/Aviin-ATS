@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 import db
-import events
+import events, asyncio
 from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
 
@@ -49,6 +49,65 @@ async def get_application(application_id: str, actor: Actor = Depends(get_actor)
         raise HTTPException(status_code=404, detail="Application not found")
     return dict(row)
 
+
+
+
+async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id):
+    """Background: WhatsApp + email + n8n on stage change."""
+    import httpx, smtplib, os
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    MSGS = {
+        "screened": f"Hi {name}, your profile has been shortlisted by AVIIN Jobs. Our recruiter will be in touch soon.",
+        "submitted": f"Hi {name}, your profile has been submitted to the client. We will update you on progress.",
+        "interview": f"Hi {name}, you have been selected for an interview! Please check your email for details.",
+        "offer": f"Hi {name}, great news - an offer is being prepared for you! Our team will call you shortly.",
+        "placed": f"Hi {name}, congratulations on your placement! Wishing you success in your new role.",
+        "rejected": f"Hi {name}, thank you for your interest. We will keep your profile for future opportunities.",
+    }
+    msg_text = MSGS.get(stage, "")
+    SUBJS = {
+        "interview": "Interview Scheduled - AVIIN Jobs",
+        "offer": "Offer Update - AVIIN Jobs",
+        "placed": "Placement Confirmation - AVIIN Jobs",
+        "screened": "Application Update - AVIIN Jobs",
+    }
+
+    async with httpx.AsyncClient(timeout=5.0) as cli:
+        # WhatsApp via WAHA
+        try:
+            waha_key = os.environ.get("WAHA_API_KEY","2037c635e42c471a9f2032800ee6ff5b")
+            waha_url = os.environ.get("WAHA_URL","http://waha:3000")
+            if msg_text:
+                phone = "91" + str(candidate_id)[:10]  # placeholder
+                # Try to get real phone from DB in background
+                await cli.post(f"{waha_url}/api/sendText",
+                    headers={"X-Api-Key": waha_key},
+                    json={"chatId": "status@broadcast", "text": f"Stage: {name} -> {stage}", "session": "default"},
+                    timeout=3.0)
+        except Exception:
+            pass
+        # n8n webhook
+        try:
+            await cli.post("http://n8n:5678/webhook/aviin-stage-change",
+                json={"candidate_name": name, "stage_to": stage, "candidate_id": str(candidate_id)},
+                timeout=3.0)
+        except Exception:
+            pass
+
+    # Email notification for key stages
+    if email and stage in SUBJS:
+        try:
+            smtp_host = os.environ.get("SMTP_HOST","mailhog")
+            smtp_port = int(os.environ.get("SMTP_PORT","1025"))
+            smtp_from = os.environ.get("SMTP_FROM","noreply@aviinjobs.com")
+            em = MIMEMultipart(); em["Subject"] = SUBJS[stage]; em["From"] = smtp_from; em["To"] = email
+            em.attach(MIMEText(f"Dear {name},\n\n{msg_text}\n\nBest regards,\nAVIIN Jobs Team","plain"))
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=5) as s:
+                s.sendmail(smtp_from,[email],em.as_string())
+        except Exception:
+            pass
 
 @router.patch("/{application_id}/stage")
 async def update_stage(application_id: str, body: StageUpdate, actor: Actor = Depends(get_actor)):

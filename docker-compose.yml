@@ -1,9 +1,9 @@
-name: finstack
+name: aviin
 
 services:
   db:
     image: pgvector/pgvector:pg16
-    container_name: finstack_db
+    container_name: aviin_db
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ats}
@@ -19,11 +19,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [finstack]
+    networks: [aviin]
 
   embed:
     build: ./embed
-    container_name: finstack_embed
+    container_name: aviin_embed
     restart: unless-stopped
     ports:
       - "${EMBED_PORT:-8081}:8081"
@@ -35,21 +35,21 @@ services:
       timeout: 10s
       retries: 10
       start_period: 90s
-    networks: [finstack]
+    networks: [aviin]
 
   ollama:
     image: ollama/ollama:latest
-    container_name: finstack_ollama
+    container_name: aviin_ollama
     restart: unless-stopped
     ports:
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama_data:/root/.ollama
-    networks: [finstack]
+    networks: [aviin]
 
   backend:
     build: ./backend
-    container_name: finstack_backend
+    container_name: aviin_backend
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${APP_DB_USER:-app_user}:${APP_DB_PASSWORD:-apppw}@db:5432/${POSTGRES_DB:-ats}
@@ -72,11 +72,11 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
-    networks: [finstack]
+    networks: [aviin]
 
   frontend:
     build: ./frontend
-    container_name: finstack_frontend
+    container_name: aviin_frontend
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
@@ -84,13 +84,14 @@ services:
       - "${FRONTEND_PORT:-3001}:3001"
     depends_on:
       - backend
-    networks: [finstack]
+    networks: [aviin]
 
   n8n:
     image: n8nio/n8n:latest
-    container_name: finstack_n8n
+    container_name: aviin_n8n
     restart: unless-stopped
     environment:
+      N8N_SECURE_COOKIE: "false"
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
@@ -100,26 +101,39 @@ services:
       - "${N8N_PORT:-5678}:5678"
     volumes:
       - n8n_data:/home/node/.n8n
-    networks: [finstack]
+    networks: [aviin]
 
   waha:
     image: devlikeapro/waha:latest
-    container_name: finstack_waha
+    container_name: aviin_waha
     restart: unless-stopped
     environment:
-      WAHA_PRINT_QR: "false"
+      WAHA_PRINT_QR: "true"
+      WAHA_API_KEY: "2037c635e42c471a9f2032800ee6ff5b"
+      WHATSAPP_API_KEY: "2037c635e42c471a9f2032800ee6ff5b"
     ports:
       - "${WAHA_PORT:-3000}:3000"
     volumes:
       - waha_data:/app/.sessions
-    networks: [finstack]
+    networks: [aviin]
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: aviin_mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks: [aviin]
 
 networks:
-  finstack:
+  aviin:
     driver: bridge
 
 volumes:
   pgdata:
+    external: true
+    name: finstack_pgdata
   embed_cache:
   ollama_data:
   n8n_data:

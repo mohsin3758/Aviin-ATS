@@ -1,28 +1,25 @@
 'use client';
-
-import { useState } from 'react';
-import { TenantProvider } from '@/components/providers/TenantProvider';
-import { ThemeProvider } from '@/components/providers/ThemeProvider';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Topbar } from '@/components/layout/Topbar';
-import { CommandPalette } from '@/components/layout/CommandPalette';
+import { ThemeProvider } from '@/components/providers/ThemeProvider';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { getToken } from '@/lib/auth';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const [cmdOpen, setCmdOpen] = useState(false);
-
+  const router = useRouter();
+  useEffect(() => { if (!getToken()) router.replace('/login'); }, [router]);
   return (
-    <TenantProvider>
-      <ThemeProvider />
-      <CommandPalette />
-      <div className="flex h-screen overflow-hidden">
+    <ThemeProvider>
+      <div suppressHydrationWarning style={{ display:'flex', height:'100vh', overflow:'hidden', background:'var(--gray-50,#f8fafc)' }}>
         <Sidebar />
-        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-          <Topbar onOpenCmdK={() => setCmdOpen(true)} />
-          <main className="flex-1 overflow-y-auto p-6">
+        <div suppressHydrationWarning style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0, overflow:'hidden' }}>
+          <Topbar />
+          <main suppressHydrationWarning style={{ flex:1, overflowY:'auto', overflowX:'hidden', padding:'24px 28px', minHeight:0 }}>
             {children}
           </main>
         </div>
       </div>
-    </TenantProvider>
+    </ThemeProvider>
   );
 }

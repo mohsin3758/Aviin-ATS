@@ -10,11 +10,16 @@ from schemas import RequisitionCreate, RequisitionUpdate
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 
-# jd_embedding (vector(384)) deliberately excluded — large and has no
+# jd_embedding (vector(384)) deliberately excluded - large and has no
 # asyncpg codec registered for the `vector` type.
 FIELDS = """id, tenant_id, client_id, title, description, skills_required,
             location, employment_type, status, positions_count, sla_hours,
-            created_by, created_at, updated_at"""
+            created_by, created_at, updated_at,
+            experience_min, experience_max,
+            budget_min, budget_max, bill_rate,
+            work_mode, priority, deadline, expected_start_date,
+            education_required, shift_type, notice_period_max,
+            industry, client_name"""
 
 PIPELINE_STAGES = ["sourced", "screened", "submitted", "interview", "offer", "placed", "rejected"]
 
@@ -23,6 +28,8 @@ PIPELINE_STAGES = ["sourced", "screened", "submitted", "interview", "offer", "pl
 async def list_requisitions(
     status: str | None = None,
     client_id: str | None = None,
+    priority: str | None = None,
+    work_mode: str | None = None,
     actor: Actor = Depends(get_actor),
 ):
     conditions: list[str] = []
@@ -33,6 +40,12 @@ async def list_requisitions(
     if client_id:
         params.append(client_id)
         conditions.append(f"client_id = ${len(params)}")
+    if priority:
+        params.append(priority)
+        conditions.append(f"priority = ${len(params)}")
+    if work_mode:
+        params.append(work_mode)
+        conditions.append(f"work_mode = ${len(params)}")
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     sql = f"SELECT {FIELDS} FROM requisitions {where} ORDER BY created_at DESC"
@@ -48,12 +61,24 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(get
         row = await conn.fetchrow(
             f"""INSERT INTO requisitions
                   (tenant_id, client_id, title, description, skills_required,
-                   location, employment_type, positions_count, sla_hours, created_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   location, employment_type, positions_count, sla_hours, created_by,
+                   experience_min, experience_max,
+                   budget_min, budget_max, bill_rate,
+                   work_mode, priority, deadline, expected_start_date,
+                   education_required, shift_type, notice_period_max,
+                   industry, client_name)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                        $20, $21, $22, $23, $24)
                 RETURNING {FIELDS}""",
             actor.tenant_id, body.client_id, body.title, body.description,
             body.skills_required, body.location, body.employment_type,
             body.positions_count, body.sla_hours, actor.user_id,
+            body.experience_min, body.experience_max,
+            body.budget_min, body.budget_max, body.bill_rate,
+            body.work_mode, body.priority, body.deadline, body.expected_start_date,
+            body.education_required, body.shift_type, body.notice_period_max,
+            body.industry, body.client_name,
         )
 
         await events.write_outbox(
@@ -143,7 +168,7 @@ async def match_recruiters_for_requisition(
 @router.post("/{requisition_id}/assign")
 async def assign_requisition(requisition_id: str, actor: Actor = Depends(get_actor)):
     """T0/T1: auto-assign the top-ranked recruiter via assign_with_explanation()
-    (sql/04_phase3_ai_engine.sql). Not HITL-gated — only "reassigned" is in
+    (sql/04_phase3_ai_engine.sql). Not HITL-gated - only "reassigned" is in
     HARD RULE #10, not the initial "assigned"."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         try:

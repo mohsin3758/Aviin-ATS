@@ -1,86 +1,318 @@
 'use client';
-
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { useState, useEffect } from 'react';
 import {
-  LayoutDashboard,
-  KanbanSquare,
-  Users,
-  BarChart3,
-  Briefcase,
-  FileText,
-  DollarSign,
-  MessageCircle,
-  ShieldCheck,
-  Settings,
-  ChevronLeft,
-  ChevronRight,
+  LayoutDashboard, Users, Building2, Briefcase, KanbanSquare,
+  Brain, Sparkles, TrendingUp, ClipboardCheck,
+  Calendar, FileText, BookOpen, Globe, Share2, ClipboardList,
+  BarChart3, PieChart, AlertTriangle, Heart, Target,
+  DollarSign, Wallet, Building, Crown, FileCheck, Gauge,
+  Award, Handshake,
+  Shield, FileSearch,
+  Mail, MessageCircle, MessageSquare, Zap, Webhook,
+  Truck, UserCog, Lock, BookMarked, Palette,
+  ChevronDown, ChevronLeft, ChevronRight,
 } from 'lucide-react';
-import { cn } from '@/lib/cn';
-import { useUIStore } from '@/lib/store';
 
-const NAV_ITEMS = [
-  { label: 'Dashboard',     href: '/dashboard',        icon: LayoutDashboard },
-  { label: 'Pipeline',      href: '/pipeline',         icon: KanbanSquare },
-  { label: 'Candidates',    href: '/candidates',       icon: Users },
-  { label: 'Requisitions',  href: '/requisitions',     icon: Briefcase },
-  { label: 'Analytics',     href: '/analytics',        icon: BarChart3 },
-  { label: 'Finance',       href: '/finance',          icon: DollarSign },
-  { label: 'WhatsApp',     href: '/whatsapp',         icon: MessageCircle },
-  { label: 'BGV',          href: '/bgv',              icon: ShieldCheck },
+const NAV_GROUPS = [
+  { id:'core', label:'CORE', defaultOpen:true, items:[
+    { icon:LayoutDashboard, href:'/dashboard',    label:'Dashboard' },
+    { icon:Users,           href:'/candidates',   label:'Candidates' },
+    { icon:Building2,       href:'/companies',    label:'Companies' },
+    { icon:Briefcase,       href:'/requisitions', label:'Jobs / Requisitions' },
+    { icon:KanbanSquare,    href:'/pipeline',     label:'Pipeline (Kanban)' },
+    { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity' },
+  ]},
+  { id:'ai', label:'AI & INTELLIGENCE', defaultOpen:true, items:[
+    { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },
+    { icon:Sparkles,        href:'/ai-tools',     label:'AI Tools' },
+    { icon:TrendingUp,      href:'/predictions',  label:'Predictive Hiring' },
+    { icon:ClipboardCheck,  href:'/assessments',  label:'Assessments' },
+  ]},
+  { id:'recruitment', label:'RECRUITMENT', defaultOpen:true, items:[
+    { icon:Calendar,        href:'/interviews',   label:'Interviews' },
+    { icon:FileText,       href:'/offers',       label:'Offer Engine' },
+    { icon:FileText,        href:'/jd-templates', label:'JD Templates' },
+    { icon:BookOpen,        href:'/question-bank',label:'Question Bank' },
+    { icon:Globe,           href:'/jobs',         label:'Job Board' },
+    { icon:Share2,          href:'/job-sharing',  label:'Job Sharing' },
+    { icon:ClipboardList,   href:'/onboarding',   label:'Onboarding' },
+  ]},
+  { id:'analytics', label:'ANALYTICS', defaultOpen:false, items:[
+    { icon:BarChart3,       href:'/analytics',        label:'Analytics' },
+    { icon:PieChart,        href:'/reports',           label:'Reports' },
+    { icon:AlertTriangle,   href:'/sla',               label:'SLA Dashboard' },
+    { icon:TrendingUp,      href:'/revenue-forecast',  label:'Revenue Forecast' },
+    { icon:Heart,           href:'/client-health',     label:'Client Health' },
+    { icon:Target,          href:'/headcount',         label:'Headcount Plan' },
+  ]},
+  { id:'finance', label:'FINANCE', defaultOpen:false, items:[
+    { icon:DollarSign,      href:'/finance',          label:'ERP / Finance' },
+    { icon:BarChart3,       href:'/account-pl',       label:'Account P&L' },
+    { icon:Wallet,          href:'/collections',      label:'Collections' },
+    { icon:Building,        href:'/bu-tracker',       label:'BU Tracker' },
+    { icon:Crown,           href:'/ceo-dashboard',    label:'CEO Dashboard' },
+    { icon:FileCheck,       href:'/compliance',       label:'PF/ESI/TDS' },
+    { icon:Gauge,           href:'/salary-benchmark', label:'Salary Benchmark' },
+  ]},
+  { id:'incentives', label:'INCENTIVES & KAE', defaultOpen:false, items:[
+    { icon:Award,           href:'/incentives',  label:'Incentives' },
+    { icon:Handshake,       href:'/kae',         label:'KAE Module' },
+  ]},
+  { id:'bgv', label:'BGV & COMPLIANCE', defaultOpen:false, items:[
+    { icon:Shield,          href:'/bgv',   label:'BGV Checks' },
+    { icon:FileSearch,      href:'/audit', label:'Audit Log' },
+  ]},
+  { id:'communication', label:'COMMUNICATION', defaultOpen:false, items:[
+    { icon:Mail,            href:'/conversations', label:'Email / Conversations' },
+    { icon:MessageCircle,   href:'/whatsapp',      label:'WhatsApp Bot' },
+    { icon:Globe,            href:'/whatsapp-setup', label:'WhatsApp Setup' },
+    { icon:MessageSquare,   href:'/sms',           label:'SMS Notifications' },
+    { icon:Zap,             href:'/automations',   label:'Automations' },
+    { icon:Webhook,         href:'/integrations',  label:'Integrations' },
+  ]},
+  { id:'vendors', label:'VENDORS', defaultOpen:false, items:[
+    { icon:Truck,           href:'/vendor-analytics', label:'Vendor Analytics' },
+  ]},
+  { id:'settings', label:'SETTINGS', defaultOpen:false, items:[
+    { icon:UserCog,         href:'/settings/users',  label:'Users & Roles' },
+    { icon:Lock,            href:'/security',        label:'Security / 2FA' },
+    { icon:BookMarked,      href:'/settings/skills', label:'Skills Taxonomy' },
+    { icon:Palette,         href:'/themes',          label:'6 Themes' },
+  ]},
 ];
 
 export function Sidebar() {
-  const pathname = usePathname();
-  const { sidebarCollapsed, toggleSidebar } = useUIStore();
+  // Client-only path — server always renders '' (no active state), avoids hydration mismatch
+  const [pathname, setPathname] = useState('');
+  useEffect(() => { setPathname(window.location.pathname); }, []);
+
+  const [collapsed, setCollapsed] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Record<string,boolean>>(
+    () => Object.fromEntries(NAV_GROUPS.map(g => [g.id, g.defaultOpen]))
+  );
+
+  const isActive = (href: string) =>
+    pathname === href || (href !== '/dashboard' && pathname.startsWith(href));
+
+  // Auto-open group containing active page
+  useEffect(() => {
+    NAV_GROUPS.forEach(group => {
+      if (group.items.some(item => isActive(item.href))) {
+        setOpenGroups(prev => ({ ...prev, [group.id]: true }));
+      }
+    });
+  }, [pathname]);
+
+  const toggleGroup = (id: string) => {
+    if (collapsed) return;
+    setOpenGroups(prev => ({ ...prev, [id]: !prev[id] }));
+  };
 
   return (
-    <aside
-      className={cn(
-        'flex flex-col h-full bg-[--color-primary] text-white transition-all duration-200',
-        sidebarCollapsed ? 'w-16' : 'w-56'
-      )}
-    >
-      {/* Logo */}
-      <div className="flex items-center gap-2 px-4 py-4 border-b border-white/10">
-        <FileText className="shrink-0 h-6 w-6 text-[--color-accent]" />
-        {!sidebarCollapsed && (
-          <span className="text-sm font-bold tracking-wide truncate">FinStack Staffing</span>
+    <div style={{
+      display: 'flex',
+      flexDirection: 'row',
+      flexShrink: 0,
+      position: 'relative',
+    }}>
+      {/* ── Main sidebar panel ── */}
+      <div style={{
+        width: collapsed ? '52px' : '220px',
+        background: '#0f172a',
+        minHeight: '100vh',
+        transition: 'width 0.25s ease',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        borderRight: '1px solid rgba(255,255,255,0.07)',
+      }}>
+        {/* Logo */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          padding: collapsed ? '13px 10px' : '13px 14px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          justifyContent: collapsed ? 'center' : 'flex-start',
+          gap: '10px',
+          flexShrink: 0,
+          minHeight: '56px',
+        }}>
+          <div style={{
+            width: '30px', height: '30px', borderRadius: '8px',
+            background: '#00b87c', display: 'flex', alignItems: 'center',
+            justifyContent: 'center', fontSize: '14px', fontWeight: '800',
+            color: 'white', flexShrink: 0,
+          }}>A</div>
+          {!collapsed && (
+            <div style={{ overflow: 'hidden' }}>
+              <div style={{ fontSize: '13px', fontWeight: '800', color: 'white', whiteSpace: 'nowrap' }}>AVIIN ATS</div>
+              <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.35)', whiteSpace: 'nowrap' }}>AI Staffing OS</div>
+            </div>
+          )}
+        </div>
+
+        {/* Nav items */}
+        <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '8px 6px 16px', }} suppressHydrationWarning>
+          {NAV_GROUPS.map(group => {
+            const isOpen = openGroups[group.id];
+            const hasActive = group.items.some(item => isActive(item.href));
+
+            return (
+              <div key={group.id} style={{ marginBottom: '2px' }} suppressHydrationWarning>
+                {/* Group header — only show when expanded */}
+                {!collapsed && (
+                  <button
+                    onClick={() => toggleGroup(group.id)}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      width: '100%', padding: '5px 8px', borderRadius: '6px',
+                      border: 'none', cursor: 'pointer',
+                      background: 'transparent', marginBottom: '2px',
+                    }}
+                    onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}
+                    onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+                  >
+                    <span style={{
+                      fontSize: '10px', fontWeight: '700',
+                      letterSpacing: '0.08em', textTransform: 'uppercase',
+                      color: hasActive ? '#00b87c' : 'rgba(255,255,255,0.3)',
+                    }}>
+                      {group.label}
+                    </span>
+                    <ChevronDown
+                      size={11}
+                      style={{
+                        color: hasActive ? '#00b87c' : 'rgba(255,255,255,0.25)',
+                        transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
+                        transition: 'transform 0.2s ease',
+                        flexShrink: 0,
+                      }}
+                    />
+                  </button>
+                )}
+
+                {/* Dot separator in collapsed mode */}
+                {collapsed && (
+                  <div style={{
+                    display: 'flex', justifyContent: 'center', padding: '5px 0 3px',
+                  }}>
+                    <div style={{
+                      width: '4px', height: '4px', borderRadius: '50%',
+                      background: hasActive ? '#00b87c' : 'rgba(255,255,255,0.15)',
+                    }} />
+                  </div>
+                )}
+
+                {/* Items */}
+                <div style={{
+                  overflow: 'hidden',
+                  maxHeight: collapsed ? '1000px' : (isOpen ? '600px' : '0px'),
+                  transition: collapsed ? 'none' : 'max-height 0.22s ease',
+                }}>
+                  {group.items.map(item => {
+                    const active = isActive(item.href);
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        title={collapsed ? item.label : undefined}
+                        style={{
+                          display: 'flex', alignItems: 'center',
+                          gap: collapsed ? '0' : '9px',
+                          padding: collapsed ? '8px 0' : '6px 8px 6px 10px',
+                          borderRadius: '7px', marginBottom: '1px',
+                          textDecoration: 'none',
+                          background: active ? 'rgba(0,184,124,0.14)' : 'transparent',
+                          borderLeft: !collapsed ? (active ? '2px solid #00b87c' : '2px solid transparent') : 'none',
+                          justifyContent: collapsed ? 'center' : 'flex-start',
+                          transition: 'background 0.12s',
+                        }}
+                        onMouseEnter={e => {
+                          if (!active) (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)';
+                        }}
+                        onMouseLeave={e => {
+                          if (!active) (e.currentTarget as HTMLElement).style.background = 'transparent';
+                        }}
+                      >
+                        <item.icon
+                          size={15}
+                          strokeWidth={active ? 2.2 : 1.7}
+                          style={{
+                            color: active ? '#00b87c' : 'rgba(255,255,255,0.5)',
+                            flexShrink: 0,
+                          }}
+                        />
+                        {!collapsed && (
+                          <span style={{
+                            fontSize: '12.5px',
+                            fontWeight: active ? '600' : '400',
+                            color: active ? '#fff' : 'rgba(255,255,255,0.65)',
+                            whiteSpace: 'nowrap', overflow: 'hidden',
+                            textOverflow: 'ellipsis', flex: 1,
+                          }}>
+                            {item.label}
+                          </span>
+                        )}
+                        {active && !collapsed && (
+                          <div style={{
+                            width: '5px', height: '5px', borderRadius: '50%',
+                            background: '#00b87c', flexShrink: 0,
+                          }} />
+                        )}
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Version footer */}
+        {!collapsed && (
+          <div style={{
+            padding: '8px 14px', fontSize: '10px',
+            color: 'rgba(255,255,255,0.18)',
+            borderTop: '1px solid rgba(255,255,255,0.06)',
+            flexShrink: 0, whiteSpace: 'nowrap',
+          }}>
+            AVIIN ATS v2.0 · 149 Features
+          </div>
         )}
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 py-3 overflow-y-auto">
-        {NAV_ITEMS.map(({ label, href, icon: Icon }) => {
-          const active = pathname === href || pathname.startsWith(href + '/');
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={cn(
-                'flex items-center gap-3 px-4 py-2.5 text-sm transition-colors',
-                active
-                  ? 'bg-white/15 font-semibold'
-                  : 'hover:bg-white/10 text-white/80'
-              )}
-            >
-              <Icon className="shrink-0 h-4 w-4" />
-              {!sidebarCollapsed && <span>{label}</span>}
-            </Link>
-          );
-        })}
-      </nav>
-
-      {/* Bottom */}
-      <div className="border-t border-white/10 p-2">
-        <button
-          onClick={toggleSidebar}
-          className="w-full flex items-center justify-center p-2 rounded hover:bg-white/10 transition-colors"
-          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-        </button>
-      </div>
-    </aside>
+      {/* ── Toggle tab — ALWAYS VISIBLE on the right edge ── */}
+      <button
+        onClick={() => setCollapsed(prev => !prev)}
+        title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        style={{
+          position: 'absolute',
+          right: '-14px',
+          top: '16px',
+          transform: 'none',
+          zIndex: 50,
+          width: '16px',
+          height: '36px',
+          background: '#1e293b',
+          border: '1px solid rgba(255,255,255,0.12)',
+          borderLeft: 'none',
+          borderRadius: '0 6px 6px 0',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'background 0.15s',
+          padding: 0,
+        }}
+        onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#2d3f56'}
+        onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = '#1e293b'}
+      >
+        {collapsed
+          ? <ChevronRight size={10} style={{ color: 'rgba(255,255,255,0.6)' }} />
+          : <ChevronLeft  size={10} style={{ color: 'rgba(255,255,255,0.6)' }} />
+        }
+      </button>
+    </div>
   );
 }

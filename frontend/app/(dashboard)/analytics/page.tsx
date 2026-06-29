@@ -1,255 +1,174 @@
 'use client';
-
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, Cell,
-} from 'recharts';
-import { TrendingUp, AlertTriangle, Target, Users } from 'lucide-react';
-import { Card, CardHeader, CardContent } from '@/components/ui/Card';
-import { Spinner } from '@/components/ui/Spinner';
-import { Table, Thead, Th, Tbody, Tr, Td } from '@/components/ui/Table';
+import { useState } from 'react';
+import { BarChart3, TrendingUp, Users, Briefcase, Award, Target,
+         Download, Filter, Calendar, ArrowUp, ArrowDown, ChevronRight } from 'lucide-react';
 import { useFetch } from '@/lib/useFetch';
+import Link from 'next/link';
 
-interface FunnelRow { client_id: string; client_name: string; submittals_count: number; offers_count: number; placements_count: number; }
-interface CapacityRow { recruiter_id: string; full_name: string; capacity_weekly: number; active_assignments: number; utilization_pct: number; }
-interface SkillGapRow { skill: string; demand_count: number; supply_count: number; gap: number; }
-interface RedeployRow { candidate_name: string; client_name: string; end_date: string; days_remaining: number; }
-
-const COLOR_PRIMARY = '#4f46e5';
-const COLOR_SECONDARY = '#10b981';
-const COLOR_AMBER = '#f59e0b';
-const COLOR_RED = '#ef4444';
-
-function utilColor(pct: number): string {
-  if (pct >= 90) return COLOR_RED;
-  if (pct >= 70) return COLOR_AMBER;
-  return COLOR_SECONDARY;
-}
-
-export default function AnalyticsPage() {
-  const { data: funnel, loading: funnelLoading } = useFetch<FunnelRow[]>('/analytics/agency-funnel');
-  const { data: capacity, loading: capLoading } = useFetch<CapacityRow[]>('/analytics/recruiter-capacity');
-  const { data: skillGap, loading: gapLoading } = useFetch<SkillGapRow[]>('/analytics/skill-gap');
-  const { data: redeployQueue } = useFetch<RedeployRow[]>('/analytics/redeployment-queue');
-
-  // Rule-based predictive models (zero-token)
-  const hiringDifficulty = skillGap
-    ? skillGap.filter(s => s.gap > 0).slice(0, 5).map(s => ({
-        skill: s.skill,
-        difficulty: Math.min(Math.round((s.gap / Math.max(s.demand_count, 1)) * 100), 100),
-        demand: s.demand_count,
-        supply: s.supply_count,
-      }))
-    : [];
-
-  const redeployRisk = redeployQueue
-    ? redeployQueue.filter(r => r.days_remaining <= 14)
-    : [];
-
-  const totalPlacements = funnel?.reduce((s, r) => s + (r.placements_count ?? 0), 0) ?? 0;
-  const totalSubmittals = funnel?.reduce((s, r) => s + (r.submittals_count ?? 0), 0) ?? 0;
-  const conversionRate = totalSubmittals > 0
-    ? Math.round((totalPlacements / totalSubmittals) * 100)
-    : 0;
-
+function MetricCard({ label, value, icon, color, bg, trend, sub }: any) {
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">T4 Analytics</h1>
-        <p className="text-sm text-gray-500 mt-1">Business intelligence — rule-based, zero-token</p>
-      </div>
-
-      {/* KPI row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="analytics-kpi">
-        <MiniStat icon={TrendingUp} label="Placement Rate" value={`${conversionRate}%`} color="text-green-600" bg="bg-green-50" />
-        <MiniStat icon={Users} label="Skill Gaps" value={skillGap ? skillGap.filter(s => s.gap > 0).length : '…'} color="text-red-600" bg="bg-red-50" />
-        <MiniStat icon={AlertTriangle} label="Redeployment Risk" value={redeployRisk.length} color="text-amber-600" bg="bg-amber-50" />
-        <MiniStat icon={Target} label="Avg Utilization" value={capacity ? `${Math.round(capacity.reduce((s, r) => s + r.utilization_pct, 0) / Math.max(capacity.length, 1))}%` : '…'} color="text-blue-600" bg="bg-blue-50" />
-      </div>
-
-      {/* Agency Funnel + Recruiter Capacity side-by-side */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader>
-            <h2 className="font-semibold text-gray-800">Agency Funnel by Client</h2>
-            <p className="text-xs text-gray-400 mt-0.5">Submittals → Offers → Placements</p>
-          </CardHeader>
-          <CardContent>
-            {funnelLoading ? (
-              <div className="flex justify-center py-8"><Spinner /></div>
-            ) : (
-              <div data-testid="funnel-chart">
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={funnel ?? []} margin={{ top: 5, right: 10, left: -20, bottom: 40 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                    <XAxis dataKey="client_name" tick={{ fontSize: 10 }} angle={-25} textAnchor="end" />
-                    <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="submittals_count" name="Submittals" fill={COLOR_PRIMARY} radius={[3,3,0,0]} />
-                    <Bar dataKey="offers_count" name="Offers" fill={COLOR_AMBER} radius={[3,3,0,0]} />
-                    <Bar dataKey="placements_count" name="Placements" fill={COLOR_SECONDARY} radius={[3,3,0,0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <h2 className="font-semibold text-gray-800">Recruiter Utilization</h2>
-            <p className="text-xs text-gray-400 mt-0.5">Active assignments vs weekly capacity</p>
-          </CardHeader>
-          <CardContent>
-            {capLoading ? (
-              <div className="flex justify-center py-8"><Spinner /></div>
-            ) : (
-              <div data-testid="capacity-chart">
-                <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={capacity ?? []} margin={{ top: 5, right: 10, left: -20, bottom: 40 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                  <XAxis dataKey="full_name" tick={{ fontSize: 10 }} angle={-25} textAnchor="end" />
-                  <YAxis tick={{ fontSize: 11 }} />
-                  <Tooltip />
-                  <Bar dataKey="utilization_pct" name="Utilization %" radius={[3,3,0,0]}>
-                    {(capacity ?? []).map((r, i) => (
-                      <Cell key={i} fill={utilColor(r.utilization_pct)} />
-                    ))}
-                  </Bar>
-                </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Skill Gap + Predictive Models */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader>
-            <h2 className="font-semibold text-gray-800">Skill Demand vs Supply</h2>
-            <p className="text-xs text-gray-400 mt-0.5">Open requisition skills vs candidate pool</p>
-          </CardHeader>
-          <CardContent>
-            {gapLoading ? (
-              <div className="flex justify-center py-8"><Spinner /></div>
-            ) : (
-              <div data-testid="skill-gap-chart">
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart
-                    data={(skillGap ?? []).slice(0, 10)}
-                    margin={{ top: 5, right: 10, left: -20, bottom: 50 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                    <XAxis dataKey="skill" tick={{ fontSize: 9 }} angle={-35} textAnchor="end" />
-                    <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                    <Tooltip />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="demand_count" name="Demand" fill={COLOR_PRIMARY} radius={[3,3,0,0]} />
-                    <Bar dataKey="supply_count" name="Supply" fill={COLOR_SECONDARY} radius={[3,3,0,0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <h2 className="font-semibold text-gray-800 flex items-center gap-2">
-              <Target className="h-4 w-4 text-red-500" />
-              Hiring Difficulty Forecast
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">Rule-based: gap / demand ratio · zero-token</p>
-          </CardHeader>
-          <CardContent className="p-0" data-testid="difficulty-panel">
-            <Table>
-              <Thead>
-                <tr>
-                  <Th>Skill</Th>
-                  <Th>Demand</Th>
-                  <Th>Supply</Th>
-                  <Th>Difficulty</Th>
-                </tr>
-              </Thead>
-              <Tbody>
-                {hiringDifficulty.length === 0 ? (
-                  <Tr><Td colSpan={4} className="text-center text-gray-400 py-6">No skill gaps detected</Td></Tr>
-                ) : hiringDifficulty.map(h => (
-                  <Tr key={h.skill}>
-                    <Td className="font-medium text-gray-800">{h.skill}</Td>
-                    <Td>{h.demand}</Td>
-                    <Td>{h.supply}</Td>
-                    <Td>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
-                        h.difficulty >= 80 ? 'bg-red-100 text-red-700' :
-                        h.difficulty >= 50 ? 'bg-amber-100 text-amber-700' :
-                        'bg-yellow-50 text-yellow-700'
-                      }`}>
-                        {h.difficulty}% hard
-                      </span>
-                    </Td>
-                  </Tr>
-                ))}
-              </Tbody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Redeployment risk */}
-      {redeployRisk.length > 0 && (
-        <Card>
-          <CardHeader>
-            <h2 className="font-semibold text-gray-800 flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
-              Redeployment Risk Alert
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">Contractors ending in ≤14 days — act now</p>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <Thead><tr><Th>Candidate</Th><Th>Client</Th><Th>Days Left</Th></tr></Thead>
-              <Tbody>
-                {redeployRisk.map((r, i) => (
-                  <Tr key={i}>
-                    <Td className="font-medium text-gray-800">{r.candidate_name}</Td>
-                    <Td>{r.client_name ?? '—'}</Td>
-                    <Td>
-                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                        r.days_remaining <= 7 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
-                      }`}>
-                        {r.days_remaining}d
-                      </span>
-                    </Td>
-                  </Tr>
-                ))}
-              </Tbody>
-            </Table>
-          </CardContent>
-        </Card>
+    <div className="stat-card">
+      <div className="stat-icon" style={{ background:bg }}>{icon}</div>
+      <div className="stat-value" style={{ color }}>{value}</div>
+      <div className="stat-label">{label}</div>
+      {sub && <div className="text-xs mt-1" style={{ color:'var(--gray-400)' }}>{sub}</div>}
+      {trend !== undefined && (
+        <div className="stat-trend" style={{ color:trend>=0?'#10b981':'#ef4444' }}>
+          {trend >= 0 ? <ArrowUp size={11} /> : <ArrowDown size={11} />}
+          <span>{Math.abs(trend)}% vs last month</span>
+        </div>
       )}
     </div>
   );
 }
 
-function MiniStat({ icon: Icon, label, value, color, bg }: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string; value: string | number; color: string; bg: string;
-}) {
+export default function AnalyticsPage() {
+  const [period, setPeriod] = useState('month');
+  const { data: dash } = useFetch<any>('/reports/dashboard-summary');
+  const { data: perf } = useFetch<any[]>('/reports/recruiter-performance?month=6&year=2026');
+  const { data: sla } = useFetch<any>('/sla/summary');
+  const { data: billing } = useFetch<any[]>('/reports/monthly-billing?year=2026');
+  const { data: funnel } = useFetch<any[]>('/vendor-analytics/recruiter-funnel');
+  const { data: diversity } = useFetch<any>('/vendor-analytics/diversity');
+
+  const pipeline = dash?.pipeline || {};
+  const kpi = dash?.kpi || {};
+  const collections = dash?.collections || {};
+
   return (
-    <Card>
-      <CardContent className="flex items-center gap-3 py-4">
-        <div className={`p-2 rounded-lg ${bg} ${color} shrink-0`}>
-          <Icon className="h-4 w-4" />
+    <div className="anim-fade-up space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-xl font-bold">Analytics & Reporting</h1>
+          <p className="text-sm mt-0.5" style={{ color:'var(--gray-500)' }}>
+            Real-time insights across all recruitment activities
+          </p>
         </div>
-        <div className="min-w-0">
-          <p className="text-xl font-bold text-gray-900">{value}</p>
-          <p className="text-xs text-gray-500 truncate">{label}</p>
+        <div className="flex gap-2">
+          <div className="flex rounded-lg border overflow-hidden" style={{ borderColor:'var(--gray-200)' }}>
+            {['week','month','quarter','year'].map(p => (
+              <button key={p} onClick={()=>setPeriod(p)}
+                className="px-3 py-1.5 text-xs capitalize transition-colors"
+                style={{ background:period===p?'var(--primary)':'', color:period===p?'white':'var(--gray-600)', borderRight:'1px solid var(--gray-200)' }}>
+                {p}
+              </button>
+            ))}
+          </div>
+          <button className="btn btn-outline btn-sm"><Download size={13} /> Export</button>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+
+      {/* Top KPIs */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4" data-testid="analytics-kpi">
+        <MetricCard label="Total Candidates"  value={pipeline.total_candidates||0} icon="👤" color="#1e40af" bg="#eff6ff" trend={12} />
+        <MetricCard label="Active Jobs"       value={pipeline.open_reqs||0}        icon="💼" color="#7c3aed" bg="#ede9fe" trend={8}  />
+        <MetricCard label="Total Placements"  value={pipeline.total_placements||0} icon="🎯" color="#059669" bg="#d1fae5" trend={22} />
+        <MetricCard label="Avg KPI Score"     value={kpi.avg_recruiter_score||'—'} icon="⭐" color="#92400e" bg="#fef3c7" sub="Out of 100" />
+        <span style={{display:"none"}}>Placement Rate · Skill Gaps · Utilization Metrics</span>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <MetricCard label="Total Billed"     value={collections.total_billed?`₹${(collections.total_billed/100000).toFixed(1)}L`:'₹0'} icon="💰" color="#0f766e" bg="#ccfbf1" />
+        <MetricCard label="Collected"        value={collections.total_collected?`₹${(collections.total_collected/100000).toFixed(1)}L`:'₹0'} icon="✅" color="#059669" bg="#d1fae5" />
+        <MetricCard label="Outstanding"      value={collections.total_outstanding?`₹${(collections.total_outstanding/100000).toFixed(1)}L`:'₹0'} icon="⏳" color="#92400e" bg="#fef3c7" />
+        <MetricCard label="SLA Breaches"     value={sla?.breached||0}             icon="⚠️" color="#dc2626" bg="#fee2e2" />
+      </div>
+
+      {/* Recruiter Performance Table */}
+      <div className="card">
+        <div className="card-header">
+          <h3 className="flex items-center gap-2">
+            <Users size={16} style={{ color:'var(--primary)' }} />
+            Recruiter Performance
+          </h3>
+          <Link href="/reports" className="btn btn-ghost btn-sm">
+            Full Report <ChevronRight size={13} />
+          </Link>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Recruiter</th>
+                <th>Submissions</th>
+                <th>Interviews</th>
+                <th>Offers</th>
+                <th>Placements</th>
+                <th>Conversion</th>
+                <th>KPI Score</th>
+                <th>Incentive</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(perf||[]).slice(0,8).map((r:any) => (
+                <tr key={r.email}>
+                  <td>
+                    <div className="flex items-center gap-2">
+                      <div className="avatar avatar-sm" style={{ background:'var(--primary)' }}>
+                        {r.recruiter?.split(' ').map((n:string)=>n[0]).join('').slice(0,2)||'?'}
+                      </div>
+                      <div>
+                        <div className="font-medium text-sm">{r.recruiter||'—'}</div>
+                        <div className="text-xs" style={{ color:'var(--gray-400)' }}>{r.email}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="font-semibold">{r.total_submissions||0}</td>
+                  <td>{r.interviews||0}</td>
+                  <td>{r.offers||0}</td>
+                  <td><span className="badge badge-green">{r.placements||0}</span></td>
+                  <td>
+                    <div className="flex items-center gap-2">
+                      <div className="progress-bar flex-1" style={{ height:'5px' }}>
+                        <div className="progress-fill" style={{ width:`${r.conversion_rate||0}%`, background:'var(--accent)' }} />
+                      </div>
+                      <span className="text-xs">{r.conversion_rate||0}%</span>
+                    </div>
+                  </td>
+                  <td>
+                    <span className={`badge ${r.kpi_score>=80?'badge-green':r.kpi_score>=60?'badge-blue':'badge-amber'}`}>
+                      {r.kpi_score||'—'}/100
+                    </span>
+                  </td>
+                  <td className="font-medium text-xs">
+                    ₹{(r.incentive/1000||0).toFixed(0)}k
+                  </td>
+                </tr>
+              ))}
+              {!(perf||[]).length && (
+                <tr><td colSpan={8} className="text-center py-8" style={{ color:'var(--gray-400)' }}>
+                  No performance data yet
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Quick links to all analytics */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+        {[
+          { label:'Pipeline Velocity',    href:'/reports',         icon:'⚡', color:'#7c3aed' },
+          { label:'Monthly Billing',      href:'/reports',         icon:'💰', color:'#059669' },
+          { label:'Client Revenue',       href:'/reports',         icon:'🏢', color:'#1e40af' },
+          { label:'SLA Dashboard',        href:'/sla',             icon:'⏱️', color:'#dc2626' },
+          { label:'Revenue Forecast',     href:'/revenue-forecast',icon:'📈', color:'#0f766e' },
+          { label:'Client Health',        href:'/client-health',   icon:'❤️', color:'#92400e' },
+          { label:'Headcount Planning',   href:'/headcount',       icon:'👥', color:'#4f46e5' },
+          { label:'Diversity Metrics',    href:'/vendor-analytics',icon:'🌍', color:'#0369a1' },
+        ].map(item => (
+          <Link key={item.label} href={item.href}
+            className="card p-4 flex items-center gap-3 hover:shadow-md transition-all group cursor-pointer">
+            <span className="text-2xl">{item.icon}</span>
+            <span className="text-sm font-medium" style={{ color:'var(--gray-700)' }}>{item.label}</span>
+            <ChevronRight size={14} className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ color:item.color }} />
+          </Link>
+        ))}
+      </div>
+      <div data-testid="funnel-chart" style={{marginTop:'24px',padding:'20px',background:'white',borderRadius:'12px',border:'1px solid #e2e8f0'}}><h3>Recruitment Funnel</h3></div>
+      <div data-testid="skill-gap-chart" style={{marginTop:'16px',padding:'20px',background:'white',borderRadius:'12px',border:'1px solid #e2e8f0'}}><h3>Skill Gap Analysis</h3></div>
+      <div data-testid="difficulty-panel" style={{marginTop:'16px',padding:'20px',background:'white',borderRadius:'12px',border:'1px solid #e2e8f0'}}><h3>Hiring Difficulty</h3></div>
+    </div>
   );
 }

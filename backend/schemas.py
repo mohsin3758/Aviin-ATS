@@ -10,7 +10,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-EmploymentType = Literal["contract", "fulltime", "c2h", "fte"]
+EmploymentType = Literal["contract", "fulltime", "c2h", "fte", "part_time"]
 RequisitionStatus = Literal["open", "on_hold", "filled", "closed"]
 ApplicationStage = Literal[
     "sourced", "screened", "submitted", "interview", "offer", "placed", "rejected"
@@ -37,6 +37,9 @@ class CandidateCreate(BaseModel):
     resume_text: Optional[str] = None
     source: Optional[str] = None
     consent_text: Optional[str] = None
+    expected_ctc: Optional[float] = None
+    current_ctc: Optional[float] = None
+    notice_period_days: Optional[int] = None
 
 
 class CandidateUpdate(BaseModel):
@@ -49,6 +52,9 @@ class CandidateUpdate(BaseModel):
     current_employer: Optional[str] = None
     resume_text: Optional[str] = None
     source: Optional[str] = None
+    expected_ctc: Optional[float] = None
+    current_ctc: Optional[float] = None
+    notice_period_days: Optional[int] = None
 
 
 class RequisitionCreate(BaseModel):
@@ -60,6 +66,21 @@ class RequisitionCreate(BaseModel):
     employment_type: EmploymentType = "contract"
     positions_count: int = 1
     sla_hours: Optional[int] = None
+    # New fields
+    experience_min: int = 0
+    experience_max: int = 10
+    budget_min: Optional[float] = None
+    budget_max: Optional[float] = None
+    bill_rate: Optional[float] = None
+    work_mode: Optional[str] = "onsite"
+    priority: Optional[str] = "medium"
+    deadline: Optional[str] = None
+    expected_start_date: Optional[str] = None
+    education_required: Optional[str] = None
+    shift_type: Optional[str] = "day"
+    notice_period_max: Optional[int] = 60
+    industry: Optional[str] = None
+    client_name: Optional[str] = None
 
 
 class RequisitionUpdate(BaseModel):
@@ -72,6 +93,21 @@ class RequisitionUpdate(BaseModel):
     status: Optional[RequisitionStatus] = None
     positions_count: Optional[int] = None
     sla_hours: Optional[int] = None
+    # New fields
+    experience_min: Optional[int] = None
+    experience_max: Optional[int] = None
+    budget_min: Optional[float] = None
+    budget_max: Optional[float] = None
+    bill_rate: Optional[float] = None
+    work_mode: Optional[str] = None
+    priority: Optional[str] = None
+    deadline: Optional[str] = None
+    expected_start_date: Optional[str] = None
+    education_required: Optional[str] = None
+    shift_type: Optional[str] = None
+    notice_period_max: Optional[int] = None
+    industry: Optional[str] = None
+    client_name: Optional[str] = None
 
 
 class ApplicationCreate(BaseModel):
@@ -113,6 +149,9 @@ class ConsentCreate(BaseModel):
     channel: Optional[str] = None
     consent_given: bool
     consent_text: Optional[str] = None
+    expected_ctc: Optional[float] = None
+    current_ctc: Optional[float] = None
+    notice_period_days: Optional[int] = None
 
 
 class JDGenerateRequest(BaseModel):
