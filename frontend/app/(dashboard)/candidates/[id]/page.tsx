@@ -1555,7 +1555,7 @@ export default function CandidateProfilePage() {
         )}
 
         {/* Notes tab */}
-        {activeTab==='interviews' && id && <InterviewsPanel candidateId={id as string}/>}
+        {activeTab==='interviews' && id && <InterviewsPanel candidateId={id as string} candidateName={candidate.full_name}/>}
         {activeTab==='offers' && id && <OffersPanel candidateId={id as string}/>}
         {activeTab==='notes' && id && <NotesPanel id={id as string}/>}
 

@@ -82,8 +82,8 @@ export default function RequisitionPipelinePage() {
   const reqId = params?.id as string;
 
   const { data: req } = useFetch<any>(`/requisitions/${reqId}`);
-  const { data: rawBoard, refresh: refreshBoard } = useFetch<Record<string, any[]>>(`/requisitions/${reqId}/pipeline`);
-  const { data: stats, refresh: refreshStats } = useFetch<any>(`/requisitions/${reqId}/pipeline-stats`);
+  const { data: rawBoard, refetch: refreshBoard } = useFetch<Record<string, any[]>>(`/requisitions/${reqId}/pipeline`);
+  const { data: stats, refetch: refreshStats } = useFetch<any>(`/requisitions/${reqId}/pipeline-stats`);
 
   const [board, setBoard] = useState<Record<string, any[]>>({});
   const [selected, setSelected] = useState<any | null>(null);
@@ -291,7 +291,7 @@ export default function RequisitionPipelinePage() {
                     {apps.map(app => (
                       <CandidateCard key={app.id} app={app} stageColor={stage.color}
                         onClick={() => { setSelected(app); setDrawerTab('profile'); }}
-                        onDragStart={e => onDragStart(e, app.id, stage.key)}
+                        onDragStart={(e: React.DragEvent) => onDragStart(e, app.id, stage.key)}
                         onMoveStage={(toStage: string) => moveStage(app.id, stage.key, toStage)} />
                     ))}
                     {apps.length === 0 && (
@@ -621,7 +621,7 @@ function NotesTab({ appId, showToast }: any) {
 
 // ── Scorecards Tab ────────────────────────────────────────────────────────────
 function AppScorecardsTab({ appId, showToast }: any) {
-  const { data: scorecards, refresh } = useFetch<any[]>(`/interview-scorecards?application_id=${appId}`);
+  const { data: scorecards, refetch: refresh } = useFetch<any[]>(`/interview-scorecards?application_id=${appId}`);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ round: 'L1', overall_rating: '', recommendation: 'yes', notes: '' });
   const [saving, setSaving] = useState(false);

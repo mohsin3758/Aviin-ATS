@@ -38,6 +38,7 @@ interface AccountFormData {
   smtp_password: string; smtp_tls: boolean;
   imap_host: string; imap_port: number; imap_user: string;
   imap_password: string; imap_ssl: boolean; is_default: boolean;
+  signature?: string; signature_enabled?: boolean;
 }
 
 

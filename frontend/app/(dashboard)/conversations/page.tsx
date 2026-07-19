@@ -212,14 +212,6 @@ function ComposePane({
   const applyFontFamily = (f: string) => { exec('fontName', f); setShowFontFamily(false); };
   const applyFontSize = (s: string) => { exec('fontSize', s); setShowFontSize(false); };
 
-  const handleUndoSend = () => {
-    if (undoToast) {
-      clearTimeout(undoToast.timer);
-      setUndoToast(null);
-      showToast('Send cancelled ✓');
-    }
-  };
-
   const handleSend = async () => {
     if (!to || !bodyRef.current?.innerHTML.trim()) return;
     setSending(true);
@@ -812,6 +804,9 @@ export default function MailboxPage() {
   const [loadedEmailId, setLoadedEmailId] = useState<string>('');
   const [loadedAttachments, setLoadedAttachments] = useState<any[]>([]);
   const [mailAccsCache, setMailAccsCache] = useState<any[]>([]);
+  const [lastFetched, setLastFetched] = useState('');
+  const [fetchingImap, setFetchingImap] = useState(false);
+  const [syncProgress, setSyncProgress] = useState('');
   const [threadMap, setThreadMap] = useState<Record<string,Msg[]>>({});
   const [loadingThread, setLoadingThread] = useState(false);
   const [viewMode, setViewMode] = useState<'normal'|'compact'>('normal');
@@ -1241,7 +1236,7 @@ export default function MailboxPage() {
           boxShadow:'0 8px 30px rgba(0,0,0,0.3)',display:'flex',alignItems:'center',gap:'12px'}}>
           <CheckCircle size={14} color="#22c55e"/>
           {undoToast.msg}
-          <button onClick={()=>{clearTimeout(undoToast.timer);setUndoToast(null);handleUndoSend();}}
+          <button onClick={()=>{clearTimeout(undoToast.timer);setUndoToast(null);showToast('Send cancelled ✓');}}
             style={{padding:'4px 12px',background:'rgba(255,255,255,0.15)',border:'1px solid rgba(255,255,255,0.3)',borderRadius:'6px',color:'white',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>
             Undo
           </button>

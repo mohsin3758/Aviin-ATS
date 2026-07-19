@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { CheckCircle2, Clock, XCircle, Calendar, Video, Phone, MapPin, ChevronRight, RefreshCw } from 'lucide-react';
 
@@ -30,7 +30,7 @@ const STAGE_COLOR: Record<string,{bg:string,text:string,ring:string}> = {
 
 function stageIdx(s: string) { return STAGES.indexOf(s); }
 
-export default function MyStatusPage() {
+function MyStatusPageInner() {
   const params = useSearchParams();
   const token = params.get('token');
   const [data, setData] = useState<any>(null);
@@ -303,5 +303,13 @@ export default function MyStatusPage() {
       </div>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
+  );
+}
+
+export default function MyStatusPage() {
+  return (
+    <Suspense fallback={<div style={{ minHeight: '100vh' }} />}>
+      <MyStatusPageInner />
+    </Suspense>
   );
 }

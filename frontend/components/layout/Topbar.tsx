@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import { Search, Bell, Plus, ChevronDown, Settings, LogOut,
          User, HelpCircle, Briefcase, Users, Building2, Keyboard, Mail, PenSquare } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { clearToken, getTokenPayload } from '@/lib/auth';
+import { clearToken, getToken, getTokenPayload } from '@/lib/auth';
 import { useFetch } from '@/lib/useFetch';
 import Link from 'next/link';
 

@@ -255,8 +255,8 @@ function OfferModal({ onClose, onCreated }:any) {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function OffersPage() {
-  const { data: aiOffers, loading: aiLoading, mutate: aiMutate } = useFetch<any[]>('/auto-offer/list');
-  const { data: formalOffers, loading: formalLoading, mutate: formalMutate } = useFetch<any[]>('/offers');
+  const { data: aiOffers, loading: aiLoading, refetch: aiMutate } = useFetch<any[]>('/auto-offer/list');
+  const { data: formalOffers, loading: formalLoading, refetch: formalMutate } = useFetch<any[]>('/offers');
   const [tab, setTab] = useState<'ai'|'formal'>('ai');
   const [showModal, setShowModal] = useState(false);
   const [letterOffer, setLetterOffer] = useState<any>(null);

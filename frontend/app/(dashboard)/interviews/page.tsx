@@ -76,7 +76,7 @@ function ScheduleModal({ onClose, onScheduled }:any) {
 }
 
 export default function InterviewsPage() {
-  const { data: interviews, loading, mutate } = useFetch<any[]>('/auto-interview/list');
+  const { data: interviews, loading, refetch } = useFetch<any[]>('/auto-interview/list');
   const [showModal, setShowModal] = useState(false);
   const [reminding, setReminding] = useState<string|null>(null);
   const [toast, setToast] = useState('');
@@ -101,7 +101,7 @@ export default function InterviewsPage() {
   return (
     <div className="anim-fade-up" style={{display:'flex',flexDirection:'column',gap:'20px'}}>
       {toast&&<div style={{position:'fixed',top:'80px',right:'24px',zIndex:1000,background:'#0f172a',color:'white',padding:'10px 18px',borderRadius:'8px',fontSize:'13px',fontWeight:'600'}}>✓ {toast}</div>}
-      {showModal&&<ScheduleModal onClose={()=>setShowModal(false)} onScheduled={()=>{mutate?.();setShowModal(false);}}/>}
+      {showModal&&<ScheduleModal onClose={()=>setShowModal(false)} onScheduled={()=>{refetch();setShowModal(false);}}/>}
 
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <div>
@@ -177,7 +177,7 @@ export default function InterviewsPage() {
                         {iv.scheduled_at&&<button onClick={()=>{
                         const dt=new Date(iv.scheduled_at);
                         const end=new Date(dt.getTime()+(iv.duration_mins||60)*60000);
-                        const fmt=(d)=>d.toISOString().replace(/[-:]/g,'').slice(0,15)+'Z';
+                        const fmt=(d: Date)=>d.toISOString().replace(/[-:]/g,'').slice(0,15)+'Z';
                         const title=encodeURIComponent('Interview: '+(iv.candidate||'')+' - '+(iv.job_title||'Position'));
                         window.open('https://calendar.google.com/calendar/render?action=TEMPLATE&text='+title+'&dates='+fmt(dt)+'/'+fmt(end),'_blank');
                       }} title="Add to Google Calendar" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'800',color:'#4285F4'}}>G</button>}

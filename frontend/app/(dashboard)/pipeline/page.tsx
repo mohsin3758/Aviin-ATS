@@ -5,7 +5,7 @@ import { useFetch, apiFetch } from '@/lib/useFetch';
 import {
   Search, Plus, X, RotateCcw, ChevronDown, MapPin, Users, Briefcase,
   Clock, CheckCircle, AlertTriangle, Send, Star, MessageSquare,
-  Activity, Download, ExternalLink, SlidersHorizontal, ArrowRight
+  Activity, Download, ExternalLink, ArrowRight
 } from 'lucide-react';
 
 // ── Stage config ──────────────────────────────────────────────────────────────
@@ -86,14 +86,16 @@ function PipelineInner() {
   const [selected, setSelected] = useState<any | null>(null);
   const [drawerTab, setDrawerTab] = useState('profile');
   const [candSearch, setCandSearch] = useState('');
+  const [activeStage, setActiveStage] = useState('all');
+  const [addCandidateOpen, setAddCandidateOpen] = useState(false);
   const { toast, show: showToast } = useToast();
   const dragRef = useRef<{ id: string; fromStage: string } | null>(null);
 
   const { data: reqs } = useFetch<any[]>('/requisitions?limit=200&status=open');
-  const { data: rawBoard, refresh: refreshBoard } = useFetch<Record<string, any[]>>(
+  const { data: rawBoard, refetch: refreshBoard } = useFetch<Record<string, any[]>>(
     selectedJobId ? `/requisitions/${selectedJobId}/pipeline` : null
   );
-  const { data: stats, refresh: refreshStats } = useFetch<any>(
+  const { data: stats, refetch: refreshStats } = useFetch<any>(
     selectedJobId ? `/requisitions/${selectedJobId}/pipeline-stats` : null
   );
   const selectedJob = (reqs || []).find((r: any) => r.id === selectedJobId);
@@ -112,6 +114,7 @@ function PipelineInner() {
     setJobPickerOpen(false);
     setBoard({});
     setSelected(null);
+    setActiveStage('all');
     router.replace(`/pipeline?job=${id}`, { scroll: false });
   }
 
@@ -136,18 +139,6 @@ function PipelineInner() {
       if (rawBoard) setBoard(rawBoard);
     }
   }, [rawBoard, selected, showToast, refreshStats]);
-
-  function onDragStart(e: React.DragEvent, appId: string, fromStage: string) {
-    dragRef.current = { id: appId, fromStage };
-    e.dataTransfer.effectAllowed = 'move';
-  }
-  function onDrop(e: React.DragEvent, toStage: string) {
-    e.preventDefault();
-    if (!dragRef.current) return;
-    const { id, fromStage } = dragRef.current;
-    dragRef.current = null;
-    moveStage(id, fromStage, toStage);
-  }
 
   const filteredApps = useCallback((apps: any[]) => {
     if (!candSearch.trim()) return apps;
@@ -257,12 +248,14 @@ function PipelineInner() {
 
           {/* Stage tab bar */}
           <div style={{ display: 'flex', gap: 0, overflowX: 'auto' }}>
-            <button style={{ padding: '8px 16px', fontSize: 12, fontWeight: 700, cursor: 'pointer', background: 'none', border: 'none', color: '#fff', borderBottom: '2px solid #60A5FA', whiteSpace: 'nowrap' }}>
+            <button onClick={() => setActiveStage('all')}
+              style={{ padding: '8px 16px', fontSize: 12, fontWeight: 700, cursor: 'pointer', background: 'none', border: 'none', color: activeStage === 'all' ? '#fff' : 'rgba(255,255,255,0.6)', borderBottom: activeStage === 'all' ? '2px solid #60A5FA' : '2px solid transparent', whiteSpace: 'nowrap' }}>
               🗂 All Stages
               {totalCandidates > 0 && <span style={{ marginLeft: 6, background: '#2563EB', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 999 }}>{totalCandidates}</span>}
             </button>
             {STAGES.filter(s => (board[s.key]?.length || 0) > 0).map(s => (
-              <button key={s.key} style={{ padding: '8px 14px', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', borderBottom: '2px solid transparent', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 5 }}>
+              <button key={s.key} onClick={() => setActiveStage(s.key)}
+                style={{ padding: '8px 14px', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', color: activeStage === s.key ? '#fff' : 'rgba(255,255,255,0.6)', borderBottom: activeStage === s.key ? '2px solid #60A5FA' : '2px solid transparent', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 5 }}>
                 <div style={{ width: 6, height: 6, borderRadius: '50%', background: s.color }} />
                 {s.label}
                 <span style={{ background: 'rgba(255,255,255,0.15)', color: '#fff', fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 999 }}>{board[s.key]?.length}</span>
@@ -312,9 +305,6 @@ function PipelineInner() {
               style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', width: '100%' }} />
             {candSearch && <button onClick={() => setCandSearch('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 0 }}><X size={12} /></button>}
           </div>
-          <button style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
-            <SlidersHorizontal size={13} /> Filter
-          </button>
           <button onClick={refreshBoard} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
             <RotateCcw size={13} /> Refresh
           </button>
@@ -323,7 +313,7 @@ function PipelineInner() {
               style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: '1px solid #DDD6FE', borderRadius: 8, background: '#FAF5FF', fontSize: 12, fontWeight: 700, color: '#7C3AED', textDecoration: 'none', cursor: 'pointer' }}>
               📬 Inbox Matches
             </a>
-            <button style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: 'none', borderRadius: 8, background: '#2563EB', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
+            <button onClick={() => setAddCandidateOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: 'none', borderRadius: 8, background: '#2563EB', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
               <Plus size={13} /> Add Candidate
             </button>
           </div>
@@ -335,7 +325,7 @@ function PipelineInner() {
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '14px 16px', display: 'flex', gap: 12 }}
             onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}>
-            {STAGES.map(stage => {
+            {(activeStage === 'all' ? STAGES : STAGES.filter(s => s.key === activeStage)).map(stage => {
               const apps = filteredApps(board[stage.key] || []);
               const total = (board[stage.key] || []).length;
               return (
@@ -355,8 +345,7 @@ function PipelineInner() {
                     {apps.map(app => (
                       <KanbanCard key={app.id} app={app} stageColor={stage.color}
                         onClick={() => { setSelected(app); setDrawerTab('profile'); }}
-                        onDragStart={e => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }}
-                        onMoveStage={(toStage: string) => moveStage(app.id, stage.key, toStage)} />
+                        onDragStart={(e: React.DragEvent) => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }} />
                     ))}
                     {apps.length === 0 && (
                       <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 11, padding: '20px 8px', fontStyle: 'italic' }}>Drop candidates here</div>
@@ -380,6 +369,13 @@ function PipelineInner() {
           drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} />
       )}
 
+      {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
+      {addCandidateOpen && selectedJobId && (
+        <AddCandidateModal jobId={selectedJobId}
+          onClose={() => setAddCandidateOpen(false)}
+          onAdded={() => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast('Candidate(s) added to pipeline'); }} />
+      )}
+
       {/* ── TOAST ───────────────────────────────────────────────────────── */}
       {toast && (
         <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', background: toast.ok ? '#1E293B' : '#DC2626', color: '#fff', padding: '10px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 16px rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -391,7 +387,7 @@ function PipelineInner() {
 }
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
-function KanbanCard({ app, stageColor, onClick, onDragStart, onMoveStage }: any) {
+function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
   const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
   const skills: string[] = app.skills || [];
   return (
@@ -601,7 +597,7 @@ function NotesTab({ appId, showToast }: any) {
 
 // ── Scorecards Tab ────────────────────────────────────────────────────────────
 function ScorecardsTab({ appId, showToast }: any) {
-  const { data: scorecards, refresh } = useFetch<any[]>(`/interview-scorecards?application_id=${appId}`);
+  const { data: scorecards, refetch: refresh } = useFetch<any[]>(`/interview-scorecards?application_id=${appId}`);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ round: 'L1', overall_rating: '', recommendation: 'yes', notes: '' });
   const [saving, setSaving] = useState(false);
@@ -692,6 +688,84 @@ function ActivityTab({ candidateId }: any) {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Add Candidate Modal ──────────────────────────────────────────────────────
+function AddCandidateModal({ jobId, onClose, onAdded }: any) {
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [saving, setSaving] = useState(false);
+  const { data, loading } = useFetch<any>(`/candidates?search=${encodeURIComponent(search)}&limit=20`);
+  const items: any[] = data?.items || [];
+
+  function toggle(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function submit() {
+    if (selected.size === 0) return;
+    setSaving(true);
+    try {
+      await apiFetch('/candidates/bulk-assign', {
+        method: 'POST',
+        body: JSON.stringify({ candidate_ids: Array.from(selected), requisition_id: jobId }),
+      });
+      onAdded();
+    } catch (e: any) {
+      alert(String(e?.message || 'Failed to add candidates'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div style={{ width: 480, maxWidth: '92vw', maxHeight: '80vh', background: '#fff', borderRadius: 14, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '16px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Add Candidate to Pipeline</div>
+          <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, cursor: 'pointer', color: '#94A3B8' }}>✕</button>
+        </div>
+        <div style={{ padding: '12px 18px 0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '7px 10px' }}>
+            <Search size={13} color="#94A3B8" />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search candidates by name, skill, employer…" autoFocus
+              style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', flex: 1 }} />
+          </div>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '10px 18px' }}>
+          {loading && <div style={{ textAlign: 'center', color: '#94A3B8', fontSize: 12, padding: 20 }}>Searching…</div>}
+          {!loading && items.length === 0 && <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>No candidates found</div>}
+          {items.map((c: any) => (
+            <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 6px', borderRadius: 8, cursor: 'pointer', background: selected.has(c.id) ? '#EFF6FF' : 'transparent' }}>
+              <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{c.full_name}</div>
+                <div style={{ fontSize: 11, color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ')}
+                </div>
+              </div>
+              {c.pipeline_stage && (
+                <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>
+                  already: {c.pipeline_stage}
+                </span>
+              )}
+            </label>
+          ))}
+        </div>
+        <div style={{ padding: '12px 18px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: '#94A3B8' }}>{selected.size} selected</span>
+          <button onClick={submit} disabled={selected.size === 0 || saving}
+            style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || saving ? '#94A3B8' : '#2563EB', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || saving ? 'not-allowed' : 'pointer' }}>
+            {saving ? 'Adding…' : `Add to Pipeline`}
+          </button>
+        </div>
       </div>
     </div>
   );

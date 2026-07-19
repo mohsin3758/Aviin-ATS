@@ -1,6 +1,6 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useState, useEffect, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
 import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy } from 'lucide-react';
@@ -326,7 +326,7 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
   );
 }
 
-export default function RequisitionsPage() {
+function RequisitionsPageInner() {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editId, setEditId] = useState<string | null>(null);
@@ -382,11 +382,13 @@ export default function RequisitionsPage() {
 
   // auto-open edit modal when URL has ?edit=<id>
   const searchParams = useSearchParams();
+  const router = useRouter();
   useEffect(() => {
     const eid = searchParams.get('edit');
     if (!eid || !reqs.length) return;
     const target = reqs.find((r) => r.id === eid);
     if (target) openEdit(target);
+    router.replace('/requisitions', { scroll: false });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, reqs]);
 
@@ -745,5 +747,13 @@ export default function RequisitionsPage() {
         </FormField>
       </Modal>
     </div>
+  );
+}
+
+export default function RequisitionsPage() {
+  return (
+    <Suspense fallback={<div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>Loading…</div>}>
+      <RequisitionsPageInner />
+    </Suspense>
   );
 }

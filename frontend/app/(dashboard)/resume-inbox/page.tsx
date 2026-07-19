@@ -1,5 +1,5 @@
 'use client';
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import {
@@ -350,7 +350,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
 
 // ─── Dedup Modal ──────────────────────────────────────────────────────────────
 function DedupModal({ candidateId, onClose }: { candidateId: string; onClose: () => void }) {
-  const { data, isLoading } = useFetch<any>(`/resume-intake/candidates/${candidateId}/duplicates`);
+  const { data, loading: isLoading } = useFetch<any>(`/resume-intake/candidates/${candidateId}/duplicates`);
   const [merging, setMerging] = useState<string|null>(null);
   const [merged, setMerged] = useState<string[]>([]);
   const [toast, setToast] = useState('');
@@ -428,7 +428,7 @@ function DedupModal({ candidateId, onClose }: { candidateId: string; onClose: ()
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
-export default function ResumeInboxPage() {
+function ResumeInboxPageInner() {
   const router = useRouter();
   const _sp = useSearchParams();
   const [statusFilter, setStatusFilter] = useState('all');
@@ -448,9 +448,9 @@ export default function ResumeInboxPage() {
   const [dedupTarget, setDedupTarget] = useState<string|null>(null);
   const [sortByMatch, setSortByMatch] = useState(false);
 
-  const { data: stats, mutate: reloadStats } = useFetch('/resume-intake/stats');
-  const { data: reqs } = useFetch('/requisitions?limit=200&status=open');
-  const { data: queueData, mutate: reloadQueue, isLoading } = useFetch(
+  const { data: stats, refetch: reloadStats } = useFetch<any>('/resume-intake/stats');
+  const { data: reqs } = useFetch<any>('/requisitions?limit=200&status=open');
+  const { data: queueData, refetch: reloadQueue, loading: isLoading } = useFetch<any>(
     `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}&limit=${limit}`
   );
 
@@ -701,5 +701,13 @@ export default function ResumeInboxPage() {
 
       {toast && <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', background: toastOk ? '#1e293b' : '#dc2626', color: '#fff', padding: '12px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 16px rgba(0,0,0,0.3)', whiteSpace: 'nowrap' }}>{toast}</div>}
     </div>
+  );
+}
+
+export default function ResumeInboxPage() {
+  return (
+    <Suspense fallback={<div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>Loading…</div>}>
+      <ResumeInboxPageInner />
+    </Suspense>
   );
 }

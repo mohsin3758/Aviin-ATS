@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { MessageSquare, Mail, Clock, Zap, ChevronUp, ChevronDown } from 'lucide-react';
 
 const TRIGGERS = [
   { value: 'offer_made', label: 'Offer Made' },

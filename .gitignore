@@ -20,9 +20,9 @@ score.py
 getcands.py
 qa_*.json
 qa_*.py
-
 waha.env
 .claude/
 *.bak
 *.bak2
 *.tsbuildinfo
+

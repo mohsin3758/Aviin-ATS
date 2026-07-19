@@ -198,7 +198,7 @@ export default function SignaturesPage() {
     setSigName(sig.name);
     // Try to parse stored fields from HTML comment
     try {
-      const match = sig.html.match(/<!--FIELDS:(.*?)-->/s);
+      const match = sig.html.match(/<!--FIELDS:([\s\S]*?)-->/);
       if (match) {
         const parsed = JSON.parse(decodeURIComponent(match[1]));
         setFields(parsed);

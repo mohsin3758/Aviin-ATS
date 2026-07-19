@@ -231,7 +231,7 @@ export default function PublicJobsPage() {
                     LinkedIn
                   </button>
                   <button
-                    onClick={() => window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent('Hiring: ' + job.title + ' at ' + job.company_name + ' - Apply now!') + '&url=' + encodeURIComponent(window.location.href), '_blank')}
+                    onClick={() => window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent('Hiring: ' + job.title + (job.location ? ' in ' + job.location : '') + ' - Apply now!') + '&url=' + encodeURIComponent(window.location.href), '_blank')}
                     style={{padding:'6px 12px',background:'#1da1f2',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>
                     Share
                   </button>
