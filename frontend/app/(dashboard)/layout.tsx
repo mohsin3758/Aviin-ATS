@@ -5,6 +5,7 @@ import { ThemeProvider } from '@/components/providers/ThemeProvider';
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getToken } from '@/lib/auth';
+import { GlobalSearch } from '@/components/GlobalSearch';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -18,6 +19,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <main suppressHydrationWarning style={{ flex:1, overflowY:'auto', overflowX:'hidden', padding:'24px 28px', minHeight:0 }}>
             {children}
           </main>
+          <GlobalSearch/>
         </div>
       </div>
     </ThemeProvider>

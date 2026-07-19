@@ -1,24 +1,40 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { Search, Bell, Plus, ChevronDown, Settings, LogOut,
-         User, HelpCircle, Briefcase, Users, Building2, Keyboard } from 'lucide-react';
+         User, HelpCircle, Briefcase, Users, Building2, Keyboard, Mail, PenSquare } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { clearToken } from '@/lib/auth';
+import { clearToken, getTokenPayload } from '@/lib/auth';
 import { useFetch } from '@/lib/useFetch';
 import Link from 'next/link';
 
 export function Topbar() {
   const router = useRouter();
   const [showProfile, setShowProfile] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [search, setSearch] = useState('');
-  const [mounted, setMounted] = useState(false);
   const { data: notifs } = useFetch<any>(mounted ? '/notifications/unread-count' : null);
   const unread = notifs?.unread || 0;
 
-  useEffect(() => setMounted(true), []);
+  useEffect(() => { setMounted(true); }, []);
+  const _tok = mounted ? getTokenPayload() : null;
+  const displayName = _tok?.full_name || 'Admin';
+  const displayRole = (_tok?.role || 'admin').replace(/_/g,' ').replace(/\w/g, (c:string) => c.toUpperCase());
+  const initials = displayName.split(' ').map((n:string) => n[0]).join('').slice(0,2).toUpperCase();
 
-  const logout = () => { clearToken(); router.push('/login'); };
+  const logout = async () => {
+    try {
+      const token = getToken();
+      if (token) {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        });
+      }
+    } catch (_) {}
+    clearToken();
+    router.push('/login');
+  };
 
   return (
     <header className="flex items-center px-6 gap-4 shrink-0" style={{
@@ -45,6 +61,14 @@ export function Topbar() {
       </div>
 
       <div className="flex items-center gap-2 ml-auto">
+        {/* Compose email */}
+        <a href="/conversations"
+          title="Open Mailbox"
+          style={{display:'flex',alignItems:'center',gap:'6px',padding:'6px 12px',
+            background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px',
+            color:'#1e40af',fontSize:'12px',fontWeight:'600',textDecoration:'none',cursor:'pointer'}}>
+          <PenSquare size={13}/> <span style={{whiteSpace:'nowrap'}}>Compose</span>
+        </a>
         {/* Quick add */}
         <div className="relative">
           <button onClick={()=>setShowAdd(!showAdd)}
@@ -54,6 +78,7 @@ export function Topbar() {
           {showAdd && (
             <div className="absolute right-0 top-full mt-2 w-48 bg-white rounded-xl shadow-xl border z-50 py-1 anim-scale-in" style={{ borderColor:'var(--gray-200)' }}>
               {[
+                { icon:<PenSquare size={14}/>, label:'Compose Mail',  href:'/conversations' },
                 { icon:<Users size={14}/>, label:'Add Candidate',  href:'/candidates' },
                 { icon:<Building2 size={14}/>, label:'Add Company', href:'/companies' },
                 { icon:<Briefcase size={14}/>, label:'Add Job',    href:'/requisitions' },
@@ -94,24 +119,26 @@ export function Topbar() {
           <button onClick={()=>setShowProfile(!showProfile)}
             className="flex items-center gap-2.5 pl-2 pr-3 py-1.5 rounded-xl hover:bg-gray-100 transition-colors">
             <div className="avatar avatar-sm" style={{ background:'linear-gradient(135deg, var(--primary), var(--primary-light))' }}>
-              A
+              {initials}
             </div>
             <div className="hidden sm:block text-left">
-              <div className="text-xs font-semibold leading-tight" style={{ color:'var(--gray-800)' }}>Admin</div>
-              <div className="text-xs leading-tight" style={{ color:'var(--gray-400)', fontSize:'10px' }}>Super Admin</div>
+              <div className="text-xs font-semibold leading-tight" style={{ color:'var(--gray-800)' }}>{displayName}</div>
+              <div className="text-xs leading-tight" style={{ color:'var(--gray-400)', fontSize:'10px' }}>{displayRole}</div>
             </div>
             <ChevronDown size={12} style={{ color:'var(--gray-400)' }} />
           </button>
           {showProfile && (
             <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-xl shadow-xl border z-50 overflow-hidden anim-scale-in" style={{ borderColor:'var(--gray-200)' }}>
               <div className="px-4 py-3" style={{ background:'linear-gradient(135deg, var(--primary), var(--primary-light))' }}>
-                <div className="font-semibold text-sm text-white">Admin User</div>
-                <div className="text-xs text-blue-200">admin@example.com</div>
+                <div className="font-semibold text-sm text-white">{displayName}</div>
+                <div className="text-xs text-blue-200">{_tok?.email || ''}</div>
                 <div className="text-xs mt-1 text-blue-200">AVIIN Jobs Services</div>
               </div>
               <div className="py-1">
                 {[
                   { icon:<User size={14}/>,       label:'My Profile',     action:()=>{} },
+                  { icon:<Mail size={14}/>,       label:'My Email Accounts', action:()=>router.push('/settings/mail-accounts') },
+                  { icon:<PenSquare size={14}/>,  label:'Open Mailbox',      action:()=>router.push('/conversations') },
                   { icon:<Settings size={14}/>,    label:'Account Settings',action:()=>router.push('/settings/users') },
                   { icon:<HelpCircle size={14}/>,  label:'Help & Support', action:()=>{} },
                 ].map(({ icon, label, action }) => (

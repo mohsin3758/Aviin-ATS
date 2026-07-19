@@ -153,8 +153,8 @@ export default function WhatsAppSetupPage() {
 
             <div style={{textAlign:'center',padding:'10px',background:'#f8fafc',borderRadius:'8px',fontSize:'12px',color:'#64748b'}}>
               Or access WAHA dashboard:{' '}
-              <a href="http://187.127.179.128:3000" target="_blank" rel="noreferrer" style={{color:'#3b82f6',display:'inline-flex',alignItems:'center',gap:'3px'}}>
-                http://187.127.179.128:3000 <ExternalLink size={11}/>
+              <a href="http://187.127.179.128:3002" target="_blank" rel="noreferrer" style={{color:'#3b82f6',display:'inline-flex',alignItems:'center',gap:'3px'}}>
+                http://187.127.179.128:3002 <ExternalLink size={11}/>
               </a>
             </div>
           </div>

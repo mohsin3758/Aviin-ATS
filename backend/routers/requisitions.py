@@ -21,7 +21,7 @@ FIELDS = """id, tenant_id, client_id, title, description, skills_required,
             education_required, shift_type, notice_period_max,
             industry, client_name"""
 
-PIPELINE_STAGES = ["sourced", "screened", "submitted", "interview", "offer", "placed", "rejected"]
+PIPELINE_STAGES = ["sourced", "contacted", "interested", "nda", "screened", "submitted", "l1_interview", "l2_interview", "offer", "offer_accepted", "placed", "rejected", "hold"]
 
 
 @router.get("")
@@ -30,6 +30,8 @@ async def list_requisitions(
     client_id: str | None = None,
     priority: str | None = None,
     work_mode: str | None = None,
+    search: str | None = None,
+    limit: int | None = None,
     actor: Actor = Depends(get_actor),
 ):
     conditions: list[str] = []
@@ -46,9 +48,17 @@ async def list_requisitions(
     if work_mode:
         params.append(work_mode)
         conditions.append(f"work_mode = ${len(params)}")
+    if search:
+        params.append(f"%{search}%")
+        conditions.append(
+            f"(lower(title) LIKE lower(${len(params)}) "
+            f"OR lower(location) LIKE lower(${len(params)}) "
+            f"OR EXISTS (SELECT 1 FROM unnest(skills_required) s WHERE lower(s) LIKE lower(${len(params)})))"
+        )
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"SELECT {FIELDS} FROM requisitions {where} ORDER BY created_at DESC"
+    limit_clause = f"LIMIT {int(limit)}" if limit and limit > 0 else ""
+    sql = f"SELECT {FIELDS} FROM requisitions {where} ORDER BY created_at DESC {limit_clause}"
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
@@ -128,8 +138,16 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             """SELECT a.id, a.candidate_id, c.full_name AS candidate_name,
-                      c.skills, c.total_exp_mo, a.stage, a.fit_score,
-                      a.assigned_recruiter_id, a.created_at, a.updated_at
+                      c.email, c.phone, c.skills, c.total_exp_mo,
+                      c.current_designation, c.current_employer, c.location,
+                      c.resume_path, c.expected_ctc, c.notice_period_days,
+                      c.jd_match_score, c.ai_match_score,
+                      a.stage, a.fit_score, a.app_notes, a.app_tags,
+                      a.rejected_reason, a.assigned_recruiter_id,
+                      a.created_at, a.updated_at,
+                      (SELECT COUNT(*) FROM interview_scorecards s
+                       WHERE s.application_id = a.id AND s.tenant_id = a.tenant_id
+                      )::int AS scorecard_count
                FROM applications a
                JOIN candidates c ON c.id = a.candidate_id
                WHERE a.requisition_id = $1
@@ -139,10 +157,26 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
 
     board: dict[str, list] = {stage: [] for stage in PIPELINE_STAGES}
     for row in rows:
-        board[row["stage"]].append(dict(row))
+        board.setdefault(row["stage"], []).append(dict(row))
     return board
 
 
+
+
+@router.get("/{requisition_id}/pipeline-stats")
+async def pipeline_stats(requisition_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """SELECT
+                 COUNT(*) FILTER (WHERE stage = 'placed') AS placed,
+                 COUNT(*) FILTER (WHERE stage = 'offer_accepted') AS offer_accepted,
+                 COUNT(*) FILTER (WHERE stage NOT IN ('placed','rejected','hold')) AS in_pipeline,
+                 COUNT(*) FILTER (WHERE stage IN ('rejected','hold')) AS dropped,
+                 COUNT(*) AS total
+               FROM applications WHERE requisition_id = $1 AND tenant_id = $2""",
+            requisition_id, actor.tenant_id,
+        )
+    return dict(row) if row else {"placed":0,"offer_accepted":0,"in_pipeline":0,"dropped":0,"total":0}
 @router.get("/{requisition_id}/match-candidates")
 async def match_candidates_for_requisition(
     requisition_id: str, limit: int = 10, actor: Actor = Depends(get_actor)

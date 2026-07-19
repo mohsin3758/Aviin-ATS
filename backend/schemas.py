@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 EmploymentType = Literal["contract", "fulltime", "c2h", "fte", "part_time"]
 RequisitionStatus = Literal["open", "on_hold", "filled", "closed"]
 ApplicationStage = Literal[
-    "sourced", "screened", "submitted", "interview", "offer", "placed", "rejected"
+    "sourced", "contacted", "interested", "nda",
+    "screened", "submitted",
+    "l1_interview", "l2_interview",
+    "offer", "offer_accepted",
+    "placed", "rejected", "hold",
+    "interview"  # legacy - kept for backwards compatibility
 ]
 OfferStatus = Literal[
     "draft", "pending_approval", "approved", "issued", "accepted", "declined", "rescinded"
@@ -114,11 +119,14 @@ class ApplicationCreate(BaseModel):
     requisition_id: str
     candidate_id: str
     assigned_recruiter_id: Optional[str] = None
+    stage: Optional[str] = 'sourced'
 
 
 class StageUpdate(BaseModel):
     stage: ApplicationStage
     reason: Optional[str] = None
+    custom_message: Optional[str] = None
+    send_email: bool = True
 
 
 class OfferCreate(BaseModel):

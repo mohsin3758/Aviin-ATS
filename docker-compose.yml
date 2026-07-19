@@ -57,10 +57,13 @@ services:
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       EMBED_URL: http://embed:8081
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b-instruct-q4_K_M}
+      OLLAMA_MODEL: qwen2.5:3b
       WAHA_URL: http://waha:3000
       WAHA_API_KEY: ${WAHA_API_KEY:-}
       ERP_ENCRYPT_KEY: ${ERP_ENCRYPT_KEY:-erp_demo_key_change_in_prod}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - resume_uploads:/app/uploads
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     depends_on:
@@ -109,10 +112,15 @@ services:
     restart: unless-stopped
     environment:
       WAHA_PRINT_QR: "true"
-      WAHA_API_KEY: "2037c635e42c471a9f2032800ee6ff5b"
-      WHATSAPP_API_KEY: "2037c635e42c471a9f2032800ee6ff5b"
+      WAHA_API_KEY: "aviinATS2026secure"
+      WHATSAPP_API_KEY: "aviinATS2026secure"
+      WAHA_DASHBOARD_USERNAME: "admin"
+      WAHA_DASHBOARD_PASSWORD: "aviinATS2026secure"
+      WAHA_DASHBOARD_ALLOWED_ORIGINS: "*"
+    env_file:
+      - ./waha.env
     ports:
-      - "${WAHA_PORT:-3000}:3000"
+      - "3002:3000"
     volumes:
       - waha_data:/app/.sessions
     networks: [aviin]
@@ -131,6 +139,7 @@ networks:
     driver: bridge
 
 volumes:
+  resume_uploads:
   pgdata:
     external: true
     name: finstack_pgdata

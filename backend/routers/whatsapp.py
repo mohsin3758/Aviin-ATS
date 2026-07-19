@@ -139,15 +139,21 @@ async def session_start(actor: Actor = Depends(get_actor)):
             json={"name": WAHA_SESSION, "config": {"webhooks": []}},
         )
         if r.status_code not in (200, 201):
-            return {"status": "already_running", "detail": r.json()}
-        return r.json()
+            # Session may already exist — try starting it
+            pass
+        # Start the session
+        await client.post(
+            f"{WAHA_BASE}/api/sessions/{WAHA_SESSION}/start",
+            headers=_waha_headers()
+        )
+        return {"status": "starting"}
 
 
 @router.get("/session/qr")
 async def session_qr(actor: Actor = Depends(get_actor)):
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(
-            f"{WAHA_BASE}/api/{WAHA_SESSION}/auth/qr",
+            f"{WAHA_BASE}/api/sessions/{WAHA_SESSION}/auth/qr",
             headers=_waha_headers(),
             params={"format": "image"},
         )
@@ -270,3 +276,16 @@ async def bulk_send(body: BulkRequest, actor: Actor = Depends(get_actor)):
             "skipped": sum(1 for r in results if r["status"] == "skipped"),
             "errors": sum(1 for r in results if r["status"] == "error"),
             "results": results}
+
+
+# Alias: Meta sometimes hits /whatsapp/webhook instead of /whatsapp-bot/webhook
+from fastapi import Request as _Request
+@router.post('/webhook')
+@router.get('/webhook')
+async def webhook_alias(request: _Request):
+    """Redirect alias so Meta WebHook GETs (verification) and POSTs (messages) don't 404."""
+    try:
+        from .whatsapp_bot import webhook as _bot_webhook
+        return await _bot_webhook(request)
+    except Exception:
+        return {'ok': True}

@@ -1,29 +1,28 @@
-# Runtime logs / monitor state (claude-auto-resume.sh writes here)
-logs/
-state/
-*.log
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-
-# Node / Next.js
 node_modules/
 .next/
-out/
-dist/
-
-# Playwright
-test-results/
-playwright-report/
-tests/playwright-report/
-tests/screenshots/
-
-# Env files (never commit secrets)
+__pycache__/
+*.pyc
 .env
 .env.local
-.env.*.local
-
-# OS / editor
+*.log
+test-results/
+playwright-report/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
 .DS_Store
+*.pem
+chk*.py
+fix*.py
+seed*.py
+score.py
+getcands.py
+qa_*.json
+qa_*.py
+
+waha.env
+.claude/
+*.bak
+*.bak2
+*.tsbuildinfo

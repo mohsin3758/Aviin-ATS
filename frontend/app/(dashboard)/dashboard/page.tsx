@@ -4,6 +4,7 @@ import { Users, Briefcase, TrendingUp, Clock, Star, CheckCircle,
          Circle, ArrowUp, ArrowRight, Calendar, Target, Award,
          Brain, Zap, Shield, BarChart3, ChevronRight, X } from 'lucide-react';
 import { useFetch } from '@/lib/useFetch';
+import { getTokenPayload } from '@/lib/auth';
 import Link from 'next/link';
 
 const CHECKLIST = [
@@ -15,13 +16,13 @@ const CHECKLIST = [
   { id:6, icon:'📊', title:'Explore Reports & Analytics', desc:'Get insights on your recruitment',             done:false },
 ];
 
-const PIPELINE_STAGES = [
-  { key:'applied',   label:'Applied',           color:'#64748b', count:0 },
-  { key:'assigned',  label:'Assigned',          color:'#3b82f6', count:1 },
-  { key:'interview', label:'Interview',         color:'#8b5cf6', count:0 },
-  { key:'offer',     label:'Offer Made',        color:'#f59e0b', count:0 },
-  { key:'placed',    label:'Placed',            color:'#10b981', count:0 },
-  { key:'rejected',  label:'Rejected',          color:'#ef4444', count:0 },
+const PIPELINE_STAGE_CONFIG = [
+  { key:'sourced',     label:'Sourced',     color:'#64748b' },
+  { key:'screened',    label:'Screened',    color:'#3b82f6' },
+  { key:'submitted',   label:'Submitted',   color:'#8b5cf6' },
+  { key:'l1_interview',label:'Interview',   color:'#f59e0b' },
+  { key:'offer',       label:'Offer',       color:'#10b981' },
+  { key:'placed',      label:'Placed',      color:'#059669' },
 ];
 
 function StatCard({ icon, label, value, color, bg, trend, href }: any) {
@@ -45,18 +46,25 @@ function StatCard({ icon, label, value, color, bg, trend, href }: any) {
 }
 
 export default function DashboardPage() {
+  const [_userName, set_UserName] = useState('Admin');
+  const [_userRole, set_UserRole] = useState('admin');
+  const isAdminOrLead = ['admin','super_admin','lead_recruiter','kae','kae_manager'].includes(_userRole);
+  useEffect(() => { const t = getTokenPayload(); if(t?.full_name) set_UserName(t.full_name.split(' ')[0]); if(t?.role) set_UserRole(t.role); }, []);
   const [checkedItems, setCheckedItems] = useState<number[]>([]);
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [tab, setTab] = useState('overview');
   const { data: stats } = useFetch<any>('/reports/dashboard-summary');
   const { data: reqs } = useFetch<any[]>('/requisitions');
   const { data: sla } = useFetch<any>('/sla/summary');
-  const { data: cands } = useFetch<any[]>('/candidates');
+  const { data: cands } = useFetch<any>('/candidates');
   const { data: schedStat } = useFetch<any>('/scheduler/status');
+  const { data: recruiterStats } = useFetch<any>(_userRole === 'recruiter' ? '/recruiter/my-stats' : null);
+  const { data: pipelineMetrics } = useFetch<any>('/pipeline/metrics');
+  const { data: recruiterCapacity } = useFetch<any[]>('/analytics/recruiter-capacity');
 
   const pipeline = stats?.pipeline || {};
   const openJobs = (reqs||[]).filter((r:any)=>r.status==='open').length;
-  const totalCands = (cands||[]).length;
+  const totalCands = cands?.total || 0;
   const pct = Math.round(checkedItems.length / CHECKLIST.length * 100);
 
   return (
@@ -65,7 +73,7 @@ export default function DashboardPage() {
       <div className="page-hero">
         <div className="relative z-10">
           <h1 className="text-white text-2xl font-bold mb-1">
-            Good Morning, Admin! 👋
+            {`Good Morning, ${_userName}! 👋`}
           </h1>
           <p className="text-blue-200 text-sm">
             You have <strong className="text-white">{openJobs} open positions</strong> and{' '}
@@ -87,13 +95,57 @@ export default function DashboardPage() {
         <StatCard icon="💼" label="Open Requisitions"        value={openJobs}    color="#1e40af" bg="#eff6ff" trend={12}  href="/requisitions" />
         <StatCard icon="👤" label="Active Candidates"       value={totalCands}  color="#059669" bg="#d1fae5" trend={8}   href="/candidates" />
         <StatCard icon="📋" label="In Pipeline"      value={pipeline.total_candidates||0} color="#7c3aed" bg="#ede9fe" trend={5} href="/pipeline" />
-        <StatCard icon="⚠️" label="SLA Breaches"    value={sla?.breached||0}            color="#dc2626" bg="#fee2e2" trend={-3} href="/sla" />
-        <StatCard icon="⚙️" label="Cron Jobs"       value={schedStat?.jobs?.length||6}  color="#0f766e" bg="#ccfbf1" href="/scheduler/status" />
-        <StatCard icon="🤖" label="AI Features"     value={19}          color="#7c3aed" bg="#ede9fe" href="/ai-tools" />
+        {isAdminOrLead && <StatCard icon="⚠️" label="SLA Breaches"    value={sla?.breached||0}            color="#dc2626" bg="#fee2e2" trend={-3} href="/sla" />}
+        {isAdminOrLead && <StatCard icon="⚙️" label="Cron Jobs"       value={schedStat?.jobs?.length||6}  color="#0f766e" bg="#ccfbf1" href="/scheduler/status" />}
+        {isAdminOrLead && <StatCard icon="🤖" label="AI Features"     value={19}          color="#7c3aed" bg="#ede9fe" href="/ai-tools" />}
       </div>
+      {/* Recruiter Performance (shown to recruiter role only) */}
+      {_userRole === 'recruiter' && recruiterStats && (
+        <div style={{marginTop:'0',padding:'20px',background:'linear-gradient(135deg,#eff6ff,#f0fdf4)',borderRadius:'12px',border:'1px solid #bfdbfe'}}>
+          <h3 style={{fontSize:'15px',fontWeight:'700',color:'#1e40af',marginBottom:'14px'}}>&#x26A1; My Performance Today</h3>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px'}}>
+            <div style={{background:'white',borderRadius:'10px',padding:'14px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+              <div style={{fontSize:'28px',fontWeight:'800',color:'#1e40af'}}>{recruiterStats.my_submissions_today}</div>
+              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Submissions Today</div>
+            </div>
+            <div style={{background:'white',borderRadius:'10px',padding:'14px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+              <div style={{fontSize:'28px',fontWeight:'800',color:'#7c3aed'}}>{recruiterStats.my_interviews_this_week}</div>
+              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Interviews This Week</div>
+            </div>
+            <div style={{background:'white',borderRadius:'10px',padding:'14px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+              <div style={{fontSize:'28px',fontWeight:'800',color:'#059669'}}>{recruiterStats.my_placements_month}</div>
+              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Placements This Month</div>
+            </div>
+          </div>
+          {Object.keys(recruiterStats.my_pipeline||{}).length > 0 && (
+            <div style={{marginTop:'14px',display:'flex',flexWrap:'wrap',gap:'8px'}}>
+              {Object.entries(recruiterStats.my_pipeline).map(([stage, cnt]:any) => (
+                <span key={stage} style={{fontSize:'11px',padding:'3px 10px',borderRadius:'20px',background:'white',border:'1px solid #e2e8f0',color:'#475569',fontWeight:'500'}}>
+                  {stage}: <strong>{cnt}</strong>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div data-testid="capacity-bars" style={{animation:"none",marginTop:"24px",padding:"20px",background:"white",borderRadius:"12px",border:"1px solid #e2e8f0",display:"block",minHeight:"80px"}}>
         <h3 style={{fontSize:"15px",fontWeight:"700",color:"#0f172a",marginBottom:"12px"}}>Recruiter Capacity</h3>
-        <p style={{color:"#94a3b8",fontSize:"13px"}}>No recruiter data</p>
+        {(recruiterCapacity && recruiterCapacity.length > 0) ? (
+          <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
+            {recruiterCapacity.slice(0,6).map((r:any) => (
+              <div key={r.recruiter_id} style={{display:'flex',alignItems:'center',gap:'12px'}}>
+                <div style={{width:'120px',fontSize:'12px',color:'#475569',fontWeight:'500',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.full_name}</div>
+                <div style={{flex:1,background:'#f1f5f9',borderRadius:'6px',height:'10px',overflow:'hidden'}}>
+                  <div style={{height:'100%',borderRadius:'6px',background: r.utilization_pct > 80 ? '#ef4444' : r.utilization_pct > 50 ? '#f59e0b' : '#10b981',width:`${Math.min(r.utilization_pct,100)}%`}} />
+                </div>
+                <div style={{width:'80px',fontSize:'11px',color:'#64748b',textAlign:'right'}}>{r.active_assignments}/{r.capacity_weekly} slots</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p style={{color:"#94a3b8",fontSize:"13px"}}>No recruiter data</p>
+        )}
       </div>
 
       {/* Pipeline bar */}
@@ -109,15 +161,18 @@ export default function DashboardPage() {
         </div>
         <div className="card-body p-0">
           <div className="flex divide-x" style={{ borderColor:'var(--gray-100)' }}>
-            {PIPELINE_STAGES.map(stage => (
+            {PIPELINE_STAGE_CONFIG.map(stage => {
+              const count = pipelineMetrics?.by_stage?.[stage.key] || 0;
+              const maxCount = Math.max(...PIPELINE_STAGE_CONFIG.map(s => pipelineMetrics?.by_stage?.[s.key] || 0), 1);
+              return (
               <div key={stage.key} className="flex-1 text-center py-4 px-3 hover:bg-gray-50 transition-colors cursor-pointer">
-                <div className="text-2xl font-bold" style={{ color:stage.color }}>{stage.count}</div>
+                <div className="text-2xl font-bold" style={{ color:stage.color }}>{count}</div>
                 <div className="text-xs mt-1" style={{ color:'var(--gray-500)' }}>{stage.label}</div>
                 <div className="progress-bar mt-2 mx-auto" style={{ width:'60%' }}>
-                  <div className="progress-fill" style={{ width:`${stage.count*20}%`, background:stage.color }} />
+                  <div className="progress-fill" style={{ width:`${Math.round(count/maxCount*100)}%`, background:stage.color }} />
                 </div>
               </div>
-            ))}
+            );})}
           </div>
         </div>
       </div>
@@ -132,7 +187,7 @@ export default function DashboardPage() {
               Recent Open Jobs
             </h3>
             <Link href="/requisitions" className="btn btn-primary btn-sm">
-              <span>+ Add Job</span>
+              <span>{isAdminOrLead ? "+ Add Job" : ""}</span>
             </Link>
           </div>
           <div className="overflow-hidden">

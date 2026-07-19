@@ -43,7 +43,7 @@ metrics_router  = APIRouter(prefix="/pipeline", tags=["pipeline-p2"])
 rules_router    = APIRouter(prefix="/pipeline-rules", tags=["pipeline-p2"])
 intel_router    = APIRouter(prefix="/pipeline", tags=["pipeline-p2"])
 
-STAGES = ["sourced","screened","submitted","interview","offer","placed","rejected"]
+STAGES = ["sourced","contacted","interested","nda","screened","submitted","l1_interview","l2_interview","offer","offer_accepted","placed","rejected","hold"]
 N8N_WEBHOOK = "http://n8n:5678/webhook/aviin-stage-change"
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -132,20 +132,27 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
 
 # ── Intelligence Chips ────────────────────────────────────────────────────────
 @intel_router.get("/intelligence")
-async def get_intelligence(actor: Actor = Depends(get_actor)):
+async def get_intelligence(req_id: str = None, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        req_filter = f"AND a.requisition_id={repr(req_id)}::uuid" if req_id else ""
         def q(cond): return f"""
             SELECT a.id, a.candidate_id, a.stage, a.fit_score,
                    c.full_name as candidate_name, c.skills, c.total_exp_mo
             FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            WHERE {cond} LIMIT 50"""
+            WHERE {cond} {req_filter} LIMIT 50"""
 
-        strong  = await conn.fetch(q("a.fit_score > 0.7 AND a.stage NOT IN ('placed','rejected')"))
-        offer_r = await conn.fetch(q("a.stage='submitted'"))
-        join_r  = await conn.fetch(q("a.stage='offer'"))
-        stuck   = await conn.fetch(q("a.updated_at < NOW() - INTERVAL '7 days' AND a.stage NOT IN ('placed','rejected')"))
-        at_risk = await conn.fetch(q("a.fit_score < 0.35 AND a.stage NOT IN ('placed','rejected','sourced')"))
-        in_int  = await conn.fetch(q("a.stage='interview'"))
+        # Strong Hire: high AI fit score (>= 0.65) in any active stage
+        strong  = await conn.fetch(q("a.fit_score >= 0.65 AND a.stage NOT IN ('placed','rejected','hold')"))
+        # Offer Ready: cleared L1 interview (in L2) OR cleared all rounds (stage=offer)
+        offer_r = await conn.fetch(q("a.stage IN ('l2_interview','offer') AND a.stage NOT IN ('placed','rejected')"))
+        # Join Ready: active offer given - likely to join
+        join_r  = await conn.fetch(q("a.stage IN ('offer','offer_accepted')"))
+        # Stuck: no stage movement in 7+ days (needs recruiter follow-up)
+        stuck   = await conn.fetch(q("a.updated_at < NOW() - INTERVAL '7 days' AND a.stage NOT IN ('placed','rejected','hold')"))
+        # At Risk: low fit score still in pipeline (might not convert)
+        at_risk = await conn.fetch(q("a.fit_score < 0.40 AND a.stage NOT IN ('placed','rejected','sourced','hold')"))
+        l1_int  = await conn.fetch(q("a.stage='l1_interview'"))
+        l2_int  = await conn.fetch(q("a.stage='l2_interview'"))
 
         def fmt(rows):
             return [{"id":str(r["id"]),"candidate_id":str(r["candidate_id"]),
@@ -158,14 +165,18 @@ async def get_intelligence(actor: Actor = Depends(get_actor)):
             "join_ready":   fmt(join_r),
             "stuck":        fmt(stuck),
             "at_risk":      fmt(at_risk),
-            "in_interview": fmt(in_int),
+            "l1_interview":   fmt(l1_int),
+            "l2_interview":   fmt(l2_int),
+            "in_interview":   fmt(l1_int),
             "counts": {
                 "strong_hire":  len(strong),
                 "offer_ready":  len(offer_r),
                 "join_ready":   len(join_r),
                 "stuck":        len(stuck),
                 "at_risk":      len(at_risk),
-                "in_interview": len(in_int),
+                "l1_interview":   len(l1_int),
+                "l2_interview":   len(l2_int),
+                "in_interview":   len(l1_int),
             }
         }
 
@@ -208,6 +219,8 @@ def _eval(val, op, threshold):
 @metrics_router.post("/auto-move")
 async def trigger_auto_move(bg: BackgroundTasks, actor: Actor = Depends(get_actor)):
     moved = []
+    errors = []
+    VALID_STAGES = {"sourced","contacted","interested","nda","screened","submitted","l1_interview","l2_interview","offer","offer_accepted","placed","rejected","hold"}
     async with db.tenant_conn(actor.tenant_id) as conn:
         rules = await conn.fetch("""
             SELECT id, name, stage_from, stage_to, conditions FROM stage_rules
@@ -217,24 +230,31 @@ async def trigger_auto_move(bg: BackgroundTasks, actor: Actor = Depends(get_acto
             return {"moved": 0, "detail": "No enabled rules. Create rules in the Auto Rules panel."}
 
         for rule in rules:
-            conds = rule["conditions"] if isinstance(rule["conditions"],list) else json.loads(rule["conditions"] or "[]")
+            if rule["stage_to"] not in VALID_STAGES:
+                errors.append({"rule": rule["name"], "error": "invalid stage_to: " + rule["stage_to"]})
+                continue
+            conds = rule["conditions"] if isinstance(rule["conditions"], list) else json.loads(rule["conditions"] or "[]")
             apps = await conn.fetch("""
                 SELECT a.id, a.candidate_id, a.stage, a.fit_score,
                        c.total_exp_mo, c.ai_match_score, c.expected_ctc,
                        c.notice_period_days, c.full_name, c.email, c.phone
                 FROM applications a JOIN candidates c ON c.id=a.candidate_id
-                WHERE a.stage=$1""", rule["stage_from"])
+                WHERE a.stage=$1 AND a.tenant_id=$2""", rule["stage_from"], actor.tenant_id)
 
             for app in apps:
-                if all(_eval(app.get(co.get("field")), co.get("op",">"), co.get("value",0)) for co in conds):
-                    await conn.execute("UPDATE applications SET stage=$1, updated_at=NOW() WHERE id=$2",
-                                       rule["stage_to"], app["id"])
-                    await conn.execute("""
-                        INSERT INTO pipeline_movements (id,tenant_id,candidate_id,application_id,stage_from,stage_to,reason,triggered_by)
-                        VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'auto_rule',$6)""",
-                        actor.tenant_id, app["candidate_id"], app["id"],
-                        rule["stage_from"], rule["stage_to"], f"rule:{rule['name']}")
-
+                if not all(_eval(app.get(co.get("field")), co.get("op",">"), co.get("value",0)) for co in conds):
+                    continue
+                try:
+                    async with conn.transaction():
+                        await conn.execute(
+                            "UPDATE applications SET stage=$1, updated_at=NOW() WHERE id=$2",
+                            rule["stage_to"], app["id"])
+                        await conn.execute("""
+                            INSERT INTO pipeline_movements
+                              (id,tenant_id,candidate_id,application_id,stage_from,stage_to,reason,triggered_by)
+                            VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'auto_rule',$6)""",
+                            actor.tenant_id, app["candidate_id"], app["id"],
+                            rule["stage_from"], rule["stage_to"], "rule:" + rule["name"])
                     payload = {
                         "candidate_name": app["full_name"], "email": app["email"],
                         "phone": app["phone"], "stage_from": rule["stage_from"],
@@ -242,10 +262,12 @@ async def trigger_auto_move(bg: BackgroundTasks, actor: Actor = Depends(get_acto
                         "timestamp": datetime.utcnow().isoformat()
                     }
                     bg.add_task(notify_n8n, payload)
-                    asyncio.create_task(send_stage_email(app.get('email',''), app['full_name'], rule['stage_to']))
+                    asyncio.create_task(send_stage_email(app.get("email",""), app["full_name"], rule["stage_to"]))
                     moved.append({"candidate": app["full_name"], "from": rule["stage_from"], "to": rule["stage_to"]})
+                except Exception as _e:
+                    errors.append({"candidate": app["full_name"], "rule": rule["name"], "error": str(_e)[:80]})
 
-    return {"moved": len(moved), "details": moved, "n8n_notified": len(moved)}
+    return {"moved": len(moved), "details": moved, "errors": errors, "n8n_notified": len(moved)}
 
 # ── Bulk Actions ──────────────────────────────────────────────────────────────
 @metrics_router.post("/bulk-action")
@@ -370,28 +392,45 @@ async def delete_rule(rule_id: str, actor: Actor = Depends(get_actor)):
         return {"ok": True}
 
 # ── Stage Analytics (Round 2) ────────────────────────────────────────────────
-SLA_DAYS = {"sourced":7,"screened":5,"submitted":3,"interview":7,"offer":5,"placed":999,"rejected":999}
+SLA_DAYS = {"sourced":2,"contacted":2,"interested":2,"nda":1,"screened":3,"submitted":3,"l1_interview":5,"l2_interview":5,"offer":3,"offer_accepted":3,"placed":999,"rejected":999,"hold":999,"interview":7}
 
 @metrics_router.get("/stage-analytics")
-async def get_stage_analytics(actor: Actor = Depends(get_actor)):
+async def get_stage_analytics(req_id: str = None, actor: Actor = Depends(get_actor)):
     """Per-stage: count, avg days, stale, conversion rate, SLA status."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
-            SELECT stage, COUNT(*) as count,
-                AVG(EXTRACT(EPOCH FROM (NOW()-updated_at))/86400)::numeric(6,1) as avg_days_in_stage,
-                COUNT(*) FILTER (WHERE updated_at < NOW() - INTERVAL '7 days') as stale_count
-            FROM applications GROUP BY stage
-        """)
+        if req_id:
+            rows = await conn.fetch("""
+                SELECT stage, COUNT(*) as count,
+                    AVG(EXTRACT(EPOCH FROM (NOW()-updated_at))/86400)::numeric(6,1) as avg_days_in_stage,
+                    COUNT(*) FILTER (WHERE updated_at < NOW() - INTERVAL '7 days') as stale_count
+                FROM applications WHERE requisition_id=$1::uuid GROUP BY stage
+            """, req_id)
+        else:
+            rows = await conn.fetch("""
+                SELECT stage, COUNT(*) as count,
+                    AVG(EXTRACT(EPOCH FROM (NOW()-updated_at))/86400)::numeric(6,1) as avg_days_in_stage,
+                    COUNT(*) FILTER (WHERE updated_at < NOW() - INTERVAL '7 days') as stale_count
+                FROM applications GROUP BY stage
+            """)
 
         velocity = {r["stage"]: dict(r) for r in rows}
 
         # Conversion rates: how many moved FROM this stage to next
-        moved = await conn.fetch("""
-            SELECT stage_from, stage_to, COUNT(*) as cnt
-            FROM pipeline_movements
-            WHERE tenant_id = $1
-            GROUP BY stage_from, stage_to
-        """, actor.tenant_id)
+        if req_id:
+            moved = await conn.fetch("""
+                SELECT pm.stage_from, pm.stage_to, COUNT(*) as cnt
+                FROM pipeline_movements pm
+                JOIN applications a ON a.id=pm.application_id
+                WHERE pm.tenant_id = $1 AND a.requisition_id=$2::uuid
+                GROUP BY pm.stage_from, pm.stage_to
+            """, actor.tenant_id, req_id)
+        else:
+            moved = await conn.fetch("""
+                SELECT stage_from, stage_to, COUNT(*) as cnt
+                FROM pipeline_movements
+                WHERE tenant_id = $1
+                GROUP BY stage_from, stage_to
+            """, actor.tenant_id)
 
         moves_from: dict = {}
         for m in moved:
@@ -758,3 +797,58 @@ async def get_active_requisitions(actor: Actor = Depends(get_actor)):
         return [{"id":str(r["id"]),"title":r["title"],
                  "location":r["location"],"status":r["status"],
                  "app_count":int(r["app_count"])} for r in rows]
+
+# ── Per-requisition stage counts (bulk, for job cards) ────────────────────────
+@metrics_router.get("/req-stage-counts")
+async def req_stage_counts(actor: Actor = Depends(get_actor)):
+    """Return stage breakdown for every open requisition in one query."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT
+                r.id::text AS req_id,
+                COUNT(a.id)                                                         AS total,
+                COUNT(a.id) FILTER (WHERE a.stage = 'sourced')              AS sourced,
+                COUNT(a.id) FILTER (WHERE a.stage = 'contacted')            AS contacted,
+                COUNT(a.id) FILTER (WHERE a.stage = 'interested')           AS interested,
+                COUNT(a.id) FILTER (WHERE a.stage = 'nda')                  AS nda,
+                COUNT(a.id) FILTER (WHERE a.stage = 'screened')             AS screened,
+                COUNT(a.id) FILTER (WHERE a.stage = 'submitted')            AS submitted,
+                COUNT(a.id) FILTER (WHERE a.stage IN ('l1_interview','l2_interview')) AS interview,
+                COUNT(a.id) FILTER (WHERE a.stage = 'contacted')            AS contacted,
+                COUNT(a.id) FILTER (WHERE a.stage = 'interested')           AS interested,
+                COUNT(a.id) FILTER (WHERE a.stage = 'nda')                  AS nda,
+                COUNT(a.id) FILTER (WHERE a.stage = 'submitted')            AS submitted,
+                COUNT(a.id) FILTER (WHERE a.stage = 'hold')                 AS on_hold,
+                COUNT(a.id) FILTER (WHERE a.stage IN ('offer','offer_accepted'))      AS offer,
+                COUNT(a.id) FILTER (WHERE a.stage = 'placed')               AS placed,
+                COUNT(a.id) FILTER (WHERE a.stage = 'rejected')             AS rejected,
+                (SELECT COUNT(*) FROM candidates c
+                 WHERE c.matched_requisition_id = r.id
+                   AND c.tenant_id = r.tenant_id)                          AS inbox_count
+            FROM requisitions r
+            LEFT JOIN applications a ON a.requisition_id = r.id
+            WHERE r.tenant_id = $1 AND r.status = 'open'
+            GROUP BY r.id
+        """, actor.tenant_id)
+        return {
+            r["req_id"]: {
+                "total":     int(r["total"]),
+                "sourced":   int(r["sourced"]),
+                "contacted": int(r["contacted"]),
+                "interested":int(r["interested"]),
+                "nda":       int(r["nda"]),
+                "screened":  int(r["screened"]),
+                "submitted": int(r["submitted"]),
+                "contacted": int(r["contacted"]),
+                "interested":int(r["interested"]),
+                "nda":       int(r["nda"]),
+                "submitted": int(r["submitted"]),
+                "on_hold":   int(r["on_hold"]),
+                "interview": int(r["interview"]),
+                "offer":     int(r["offer"]),
+                "placed":    int(r["placed"]),
+                "rejected":  int(r["rejected"]),
+                "inbox_count": int(r["inbox_count"]),
+            }
+            for r in rows
+        }

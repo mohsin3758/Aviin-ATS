@@ -1,619 +1,724 @@
-﻿'use client';
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+'use client';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { Mail, MessageCircle, Phone, X, Settings, Zap, ChevronRight, Plus, Trash2, ToggleLeft, ToggleRight, SlidersHorizontal, CheckSquare, Square, RefreshCw, BarChart2, MapPin, Brain, AlertTriangle, Clock, TrendingUp, Star } from 'lucide-react';
+import {
+  Search, Plus, X, RotateCcw, ChevronDown, MapPin, Users, Briefcase,
+  Clock, CheckCircle, AlertTriangle, Send, Star, MessageSquare,
+  Activity, Download, ExternalLink, SlidersHorizontal, ArrowRight
+} from 'lucide-react';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Stage config ──────────────────────────────────────────────────────────────
 const STAGES = [
-  { key:'sourced',   label:'Sourced',    color:'#64748b', bg:'#f1f5f9', sla:7  },
-  { key:'screened',  label:'Screened',   color:'#2563eb', bg:'#eff6ff', sla:5  },
-  { key:'submitted', label:'Submitted',  color:'#7c3aed', bg:'#f5f3ff', sla:3  },
-  { key:'interview', label:'Interview',  color:'#d97706', bg:'#fffbeb', sla:7  },
-  { key:'offer',     label:'Offer',      color:'#0891b2', bg:'#ecfeff', sla:5  },
-  { key:'placed',    label:'Placed',     color:'#16a34a', bg:'#f0fdf4', sla:999},
-  { key:'rejected',  label:'Rejected',   color:'#dc2626', bg:'#fef2f2', sla:999},
+  { key: 'sourced',        label: 'Sourced',        color: '#6366F1', light: '#EEF2FF' },
+  { key: 'contacted',      label: 'Contacted',      color: '#06B6D4', light: '#ECFEFF' },
+  { key: 'interested',     label: 'Interested',     color: '#3B82F6', light: '#EFF6FF' },
+  { key: 'nda',            label: 'NDA',            color: '#F59E0B', light: '#FFFBEB' },
+  { key: 'screened',       label: 'Screened',       color: '#0891B2', light: '#ECFEFF' },
+  { key: 'submitted',      label: 'Submitted',      color: '#64748B', light: '#F8FAFC' },
+  { key: 'l1_interview',   label: 'L1 Interview',   color: '#7C3AED', light: '#F5F3FF' },
+  { key: 'l2_interview',   label: 'L2 Interview',   color: '#9333EA', light: '#FAF5FF' },
+  { key: 'offer',          label: 'Offer',          color: '#CA8A04', light: '#FFFBEB' },
+  { key: 'offer_accepted', label: 'Offer Accepted', color: '#059669', light: '#F0FDF4' },
+  { key: 'placed',         label: 'Placed ✓',       color: '#16A34A', light: '#F0FDF4' },
+  { key: 'hold',           label: 'On Hold',        color: '#94A3B8', light: '#F8FAFC' },
+  { key: 'rejected',       label: 'Rejected',       color: '#DC2626', light: '#FEF2F2' },
 ];
-const AC=['#ef4444','#f97316','#eab308','#22c55e','#3b82f6','#8b5cf6','#ec4899','#14b8a6'];
-const av=(n:string)=>AC[(n||'').charCodeAt(0)%AC.length];
-const ini=(n:string)=>(n||'??').split(' ').map((x:string)=>x[0]).join('').slice(0,2).toUpperCase();
-const expL=(mo:number)=>{if(!mo)return'Fresher';const y=Math.floor(mo/12),m=mo%12;return y>0?`${y}y${m>0?` ${m}m`:''}`:`${m}mo`;};
-const fmtCtc=(n:number|null)=>!n?null:n>=100000?`₹${(n/100000).toFixed(1)}L`:`₹${Math.round(n/1000)}K`;
-const fmtM=(n:number)=>n>=10000000?`Rs.${(n/10000000).toFixed(1)}Cr`:n>=100000?`Rs.${(n/100000).toFixed(1)}L`:`Rs.${Math.round(n/1000)}K`;
-const colorDotMap:Record<string,string>={green:'#22c55e',yellow:'#f59e0b',red:'#ef4444',grey:'#cbd5e1'};
-const fitBg=(s:number)=>s>=0.7?'#dcfce7':s>=0.4?'#fef9c3':'#fee2e2';
-const fitCl=(s:number)=>s>=0.7?'#16a34a':s>=0.4?'#ca8a04':'#dc2626';
 
-// Parse conditions safely (handles string or array from API)
-function parseConds(raw: any): any[] {
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return []; } }
-  return [];
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function gx(mo: number) {
+  if (!mo) return '0mo';
+  const y = Math.floor(mo / 12), m = mo % 12;
+  return y > 0 ? `${y}y${m > 0 ? ` ${m}m` : ''}` : `${m}m`;
+}
+function ago(ts: string) {
+  if (!ts) return '';
+  const d = Math.floor((Date.now() - new Date(ts).getTime()) / 86400000);
+  if (d === 0) return 'today';
+  if (d === 1) return '1d ago';
+  if (d < 7) return `${d}d ago`;
+  if (d < 30) return `${Math.floor(d / 7)}w ago`;
+  return `${Math.floor(d / 30)}mo ago`;
+}
+function scoreColor(s: number | null) {
+  if (!s) return '#94A3B8';
+  if (s >= 80) return '#16A34A';
+  if (s >= 65) return '#0891B2';
+  if (s >= 50) return '#F59E0B';
+  return '#DC2626';
+}
+function scoreBg(s: number | null) {
+  if (!s) return '#F8FAFC';
+  if (s >= 80) return '#F0FDF4';
+  if (s >= 65) return '#ECFEFF';
+  if (s >= 50) return '#FFFBEB';
+  return '#FEF2F2';
+}
+function initials(name: string) {
+  return name?.split(' ').slice(0, 2).map(w => w[0]?.toUpperCase() || '').join('') || '?';
+}
+const AVATAR_COLORS = ['#6366F1','#0891B2','#7C3AED','#059669','#CA8A04','#DC2626','#9333EA','#F59E0B','#3B82F6','#EC4899'];
+function avatarColor(name: string) {
+  let h = 0;
+  for (let i = 0; i < name?.length; i++) h = name.charCodeAt(i) + ((h << 5) - h);
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }
 
+function useToast() {
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const show = useCallback((msg: string, ok = true) => {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+  return { toast, show };
+}
 
-function CopilotItems({sections,tab}:{sections:any[],tab:string}){
-  const sec = sections.find((s:any)=>s.key===tab);
-  if(!sec||!sec.items||sec.items.length===0) return <div style={{textAlign:'center',padding:'20px',color:'#94a3b8',fontSize:'12px'}}>No candidates in this category</div>;
-  return (
-    <>
-      {sec.items.map((item:any,i:number)=>(
-        <div key={i} style={{display:'flex',alignItems:'center',gap:'8px',padding:'7px 8px',background:'#f8fafc',borderRadius:'8px',border:'1px solid #e2e8f0'}}>
-          <div style={{width:'28px',height:'28px',borderRadius:'50%',background:av(item.name),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'700',color:'white',flexShrink:0}}>{ini(item.name)}</div>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:'12px',fontWeight:'700',color:'#0f172a',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{item.name}</div>
-            <div style={{fontSize:'10px',color:'#64748b'}}>{item.company||'—'} · {expL(item.exp_mo||0)}</div>
-          </div>
-          <div style={{display:'flex',gap:'5px',alignItems:'center',flexShrink:0}}>
-            {sec.extra==='idle_days'&&item.idle_days>0&&<span style={{fontSize:'10px',color:'#d97706',background:'#fffbeb',padding:'1px 5px',borderRadius:'4px',fontWeight:'600'}}>{Math.round(item.idle_days)}d idle</span>}
-            {sec.extra==='offer_age_days'&&item.offer_age_days>0&&<span style={{fontSize:'10px',color:'#0891b2',background:'#ecfeff',padding:'1px 5px',borderRadius:'4px',fontWeight:'600'}}>{Math.round(item.offer_age_days)}d ago</span>}
-            {item.fit_score&&<span style={{fontSize:'10px',fontWeight:'800',padding:'1px 5px',borderRadius:'4px',background:fitBg(item.fit_score),color:fitCl(item.fit_score)}}>{Math.round(item.fit_score*100)}%</span>}
-            {item.email&&<button onClick={()=>window.open('mailto:'+item.email,'_blank')} style={{width:'22px',height:'22px',borderRadius:'4px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}><Mail size={10} color="#3b82f6"/></button>}
-            {item.phone&&<button onClick={()=>window.open('https://wa.me/91'+item.phone.replace(/[^0-9]/g,''),'_blank')} style={{width:'22px',height:'22px',borderRadius:'4px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}><MessageCircle size={10} color="#22c55e"/></button>}
-          </div>
-        </div>
-      ))}
-    </>
+// ── Inner page (uses useSearchParams — must be wrapped in Suspense) ────────────
+function PipelineInner() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const initialJobId = searchParams?.get('job') || '';
+
+  const [selectedJobId, setSelectedJobId] = useState(initialJobId);
+  const [jobSearch, setJobSearch] = useState('');
+  const [jobPickerOpen, setJobPickerOpen] = useState(!initialJobId);
+  const [board, setBoard] = useState<Record<string, any[]>>({});
+  const [selected, setSelected] = useState<any | null>(null);
+  const [drawerTab, setDrawerTab] = useState('profile');
+  const [candSearch, setCandSearch] = useState('');
+  const { toast, show: showToast } = useToast();
+  const dragRef = useRef<{ id: string; fromStage: string } | null>(null);
+
+  const { data: reqs } = useFetch<any[]>('/requisitions?limit=200&status=open');
+  const { data: rawBoard, refresh: refreshBoard } = useFetch<Record<string, any[]>>(
+    selectedJobId ? `/requisitions/${selectedJobId}/pipeline` : null
   );
-}
-// ── Recruiter Copilot Panel ───────────────────────────────────────────────────
-function CopilotPanel({data, onClose}:{data:any, onClose:()=>void}) {
-  const [tab,setTab]=useState('submit');
-  if(!data) return null;
+  const { data: stats, refresh: refreshStats } = useFetch<any>(
+    selectedJobId ? `/requisitions/${selectedJobId}/pipeline-stats` : null
+  );
+  const selectedJob = (reqs || []).find((r: any) => r.id === selectedJobId);
 
-  const sections:{key:string,label:string,icon:any,color:string,items:any[],extra?:string}[]=[
-    {key:'submit',    label:'Submit Today',       icon:TrendingUp,    color:'#2563eb', items:data.submit_today||[],     extra:'fit_score'},
-    {key:'followup',  label:'Follow Up',          icon:Clock,         color:'#d97706', items:data.follow_up||[],        extra:'idle_days'},
-    {key:'at_risk',   label:'At Risk',            icon:AlertTriangle, color:'#ef4444', items:data.at_risk||[],          extra:'fit_score'},
-    {key:'interview', label:'Interviews',         icon:Star,          color:'#7c3aed', items:data.upcoming_interviews||[]},
-    {key:'offers',    label:'Open Offers',        icon:CheckSquare,   color:'#0891b2', items:data.open_offers||[],      extra:'offer_age_days'},
-  ];
-  const s=data.summary||{};
+  useEffect(() => {
+    if (rawBoard) setBoard(rawBoard);
+  }, [rawBoard]);
 
-  return(
-    <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'10px',padding:'10px 14px',flexShrink:0,maxHeight:'200px',display:'flex',flexDirection:'column',gap:'8px'}}>
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
-        <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
-          <Brain size={14} color="#8b5cf6"/>
-          <span style={{fontSize:'13px',fontWeight:'800',color:'#0f172a'}}>Recruiter Copilot</span>
-          <span style={{fontSize:'10px',color:'#64748b',background:'#f1f5f9',padding:'1px 6px',borderRadius:'10px'}}>Zero-token AI · updated now</span>
-        </div>
-        <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#94a3b8'}}><X size={14}/></button>
-      </div>
-      {/* Tab bar */}
-      <div style={{display:'flex',gap:'6px',flexShrink:0,overflowX:'auto'}}>
-        {sections.map(sec=>{
-          const cnt=(sec.items||[]).length;
-          const isA=tab===sec.key;
-          return(
-            <button key={sec.key} onClick={()=>setTab(sec.key)}
-              style={{display:'flex',alignItems:'center',gap:'4px',padding:'4px 10px',borderRadius:'20px',fontSize:'11px',fontWeight:'700',cursor:'pointer',border:isA?`2px solid ${sec.color}`:`1px solid ${sec.color}30`,background:isA?sec.color:`${sec.color}10`,color:isA?'white':sec.color,whiteSpace:'nowrap',flexShrink:0}}>
-              <sec.icon size={11}/> {sec.label}
-              <span style={{background:isA?'rgba(255,255,255,0.3)':`${sec.color}20`,borderRadius:'10px',padding:'0 5px',minWidth:'16px',textAlign:'center'}}>{cnt}</span>
-            </button>);
-        })}
-      </div>
-      {/* Items */}
-      <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:'6px'}}>
-                <CopilotItems sections={sections} tab={tab}/>
-      </div>
-    </div>);
-}
+  const reqList = (reqs || []).filter((r: any) =>
+    !jobSearch || r.title?.toLowerCase().includes(jobSearch.toLowerCase()) ||
+    r.client_name?.toLowerCase().includes(jobSearch.toLowerCase())
+  );
 
-// ── AI Insights Tab ───────────────────────────────────────────────────────────
-function AIInsightsTab({candidateId,reqId}:{candidateId:string,reqId:string}) {
-  const url = candidateId ? `/pipeline/insights/${candidateId}${reqId?`?requisition_id=${reqId}`:''}` : null;
-  const {data,loading}=useFetch<any>(url);
+  function selectJob(id: string) {
+    setSelectedJobId(id);
+    setJobPickerOpen(false);
+    setBoard({});
+    setSelected(null);
+    router.replace(`/pipeline?job=${id}`, { scroll: false });
+  }
 
-  if(loading) return <div style={{padding:'24px',textAlign:'center',color:'#94a3b8',fontSize:'12px'}}>Loading AI insights...</div>;
-  if(!data) return <div style={{padding:'24px',textAlign:'center',color:'#94a3b8',fontSize:'12px'}}>No insights available</div>;
-  if(!data.has_scores) return <div style={{padding:'20px',textAlign:'center',color:'#94a3b8',fontSize:'13px'}}>No AI scores yet.<br/><span style={{fontSize:'11px'}}>Click "Score All" to run intelligence scoring.</span></div>;
+  const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string) => {
+    if (fromStage === toStage) return;
+    setBoard(prev => {
+      const app = prev[fromStage]?.find((a: any) => a.id === appId);
+      if (!app) return prev;
+      return {
+        ...prev,
+        [fromStage]: (prev[fromStage] || []).filter((a: any) => a.id !== appId),
+        [toStage]: [{ ...app, stage: toStage }, ...(prev[toStage] || [])],
+      };
+    });
+    if (selected?.id === appId) setSelected((s: any) => s ? { ...s, stage: toStage } : s);
+    try {
+      await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify({ stage: toStage, send_email: false }) });
+      showToast(`Moved to ${STAGES.find(s => s.key === toStage)?.label || toStage}`);
+      refreshStats();
+    } catch (e: any) {
+      showToast(String(e?.message || 'Move failed'), false);
+      if (rawBoard) setBoard(rawBoard);
+    }
+  }, [rawBoard, selected, showToast, refreshStats]);
 
-  const scores=data.score_breakdown||{};
-  const recColor=data.recommendation==='Strong Hire'?'#16a34a':data.recommendation==='Hire'?'#2563eb':data.recommendation==='Hold — needs further review'?'#d97706':'#dc2626';
-  const recBg=data.recommendation==='Strong Hire'?'#f0fdf4':data.recommendation==='Hire'?'#eff6ff':data.recommendation==='Hold — needs further review'?'#fffbeb':'#fef2f2';
+  function onDragStart(e: React.DragEvent, appId: string, fromStage: string) {
+    dragRef.current = { id: appId, fromStage };
+    e.dataTransfer.effectAllowed = 'move';
+  }
+  function onDrop(e: React.DragEvent, toStage: string) {
+    e.preventDefault();
+    if (!dragRef.current) return;
+    const { id, fromStage } = dragRef.current;
+    dragRef.current = null;
+    moveStage(id, fromStage, toStage);
+  }
 
-  return(
-    <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
-      {/* Recommendation */}
-      <div style={{background:recBg,border:`1px solid ${recColor}30`,borderRadius:'10px',padding:'14px',textAlign:'center'}}>
-        <div style={{fontSize:'20px',fontWeight:'900',color:recColor}}>{data.recommendation}</div>
-        <div style={{fontSize:'12px',color:'#64748b',marginTop:'4px'}}>Readiness: {Math.round(data.readiness_index||0)}% · Grade: {data.readiness_grade||'?'}</div>
-      </div>
+  const filteredApps = useCallback((apps: any[]) => {
+    if (!candSearch.trim()) return apps;
+    const q = candSearch.toLowerCase();
+    return apps.filter(a =>
+      a.candidate_name?.toLowerCase().includes(q) ||
+      a.current_designation?.toLowerCase().includes(q) ||
+      a.skills?.some((s: string) => s.toLowerCase().includes(q))
+    );
+  }, [candSearch]);
 
-      {/* LLM Summary */}
-      {data.llm_summary&&(
-        <div style={{background:'#f8faff',border:'1px solid #e0e7ff',borderRadius:'10px',padding:'12px'}}>
-          <div style={{fontSize:'10px',fontWeight:'700',color:'#8b5cf6',marginBottom:'5px',textTransform:'uppercase',letterSpacing:'0.06em'}}>AI Summary (Qwen2.5)</div>
-          <div style={{fontSize:'12px',color:'#374151',lineHeight:'1.6'}}>{data.llm_summary}</div>
-        </div>)}
+  const totalCandidates = Object.values(board).reduce((sum, arr) => sum + (arr?.length || 0), 0);
 
-      {/* Score breakdown bars */}
-      <div style={{background:'#f8fafc',borderRadius:'10px',padding:'12px'}}>
-        <div style={{fontSize:'10px',fontWeight:'700',color:'#64748b',marginBottom:'10px',textTransform:'uppercase',letterSpacing:'0.06em'}}>Score Breakdown</div>
-        {Object.entries(scores).map(([label,val]:any)=>{
-          const pct=Math.min(100,Math.max(0,parseFloat(val)||0));
-          const barColor=pct>=70?'#22c55e':pct>=40?'#f59e0b':'#ef4444';
-          return(
-            <div key={label} style={{marginBottom:'8px'}}>
-              <div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',marginBottom:'3px'}}>
-                <span style={{color:'#475569',fontWeight:'600'}}>{label}</span>
-                <span style={{fontWeight:'700',color:barColor}}>{pct.toFixed(0)}%</span>
-              </div>
-              <div style={{height:'6px',background:'#e2e8f0',borderRadius:'3px',overflow:'hidden'}}>
-                <div style={{height:'100%',width:`${pct}%`,background:barColor,borderRadius:'3px',transition:'width 0.3s'}}/>
-              </div>
-            </div>);
-        })}
-      </div>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden', background: '#F1F5F9' }}>
 
-      {/* Explanations */}
-      {(data.explanations||[]).length>0&&(
-        <div style={{display:'flex',flexDirection:'column',gap:'5px'}}>
-          <div style={{fontSize:'10px',fontWeight:'700',color:'#64748b',textTransform:'uppercase',letterSpacing:'0.06em'}}>Key Observations</div>
-          {data.explanations.map((exp:string,i:number)=>(
-            <div key={i} style={{display:'flex',gap:'6px',alignItems:'flex-start',fontSize:'12px',color:'#374151',padding:'6px 8px',background:'#f8fafc',borderRadius:'6px',border:'1px solid #e2e8f0'}}>
-              <span style={{color:'#8b5cf6',flexShrink:0}}>•</span>{exp}
-            </div>))}
-        </div>)}
+      {/* ── TOP HEADER ──────────────────────────────────────────────────── */}
+      <div style={{ background: 'linear-gradient(135deg,#0F172A 0%,#1E3A8A 60%,#1E40AF 100%)', flexShrink: 0 }}>
+        <div style={{ padding: '12px 20px 0' }}>
 
-      {/* Candidate info */}
-      {data.candidate_info&&(
-        <div style={{background:'#f8fafc',borderRadius:'10px',padding:'12px'}}>
-          <div style={{fontSize:'10px',fontWeight:'700',color:'#64748b',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'0.06em'}}>Profile Summary</div>
-          {[
-            {l:'Experience',v:expL(Math.round((data.candidate_info.exp_years||0)*12))},
-            {l:'Company',v:data.candidate_info.company||'—'},
-            {l:'Expected CTC',v:fmtCtc(data.candidate_info.expected_ctc)||'—'},
-            {l:'Notice Period',v:data.candidate_info.notice_days?`${data.candidate_info.notice_days}d`:'—'},
-            {l:'Source',v:data.candidate_info.source||'—'},
-          ].map(({l,v})=>(
-            <div key={l} style={{display:'flex',justifyContent:'space-between',fontSize:'11px',padding:'4px 0',borderBottom:'1px solid #e2e8f0'}}>
-              <span style={{color:'#64748b'}}>{l}</span><span style={{fontWeight:'600',color:'#0f172a'}}>{v}</span>
-            </div>))}
-        </div>)}
-    </div>);
-}
+          {/* Row 1: Job picker + KPIs */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 12 }}>
 
-// ── Stage Analytics Panel ─────────────────────────────────────────────────────
-function StageAnalyticsPanel({data}:{data:any[]}) {
-  return(
-    <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'10px',padding:'8px 12px',flexShrink:0}}>
-      <div style={{fontSize:'11px',fontWeight:'700',color:'#0f172a',marginBottom:'8px',display:'flex',alignItems:'center',gap:'5px'}}>
-        <BarChart2 size={12} color="#8b5cf6"/> Stage Analytics
-        <span style={{fontSize:'10px',color:'#94a3b8',fontWeight:'400',marginLeft:'4px'}}>SLA: 🟢 ok  🟡 warn  🔴 breach</span>
-      </div>
-      <div style={{display:'grid',gridTemplateColumns:`repeat(${STAGES.length},1fr)`,gap:'6px'}}>
-        {STAGES.map(st=>{
-          const d=data.find((r:any)=>r.stage===st.key)||{count:0,avg_days:0,stale_count:0,conversion_rate:0,sla_status:'ok'};
-          const sc={ok:'#22c55e',warn:'#f59e0b',breach:'#ef4444'}[d.sla_status as string]||'#22c55e';
-          return(
-            <div key={st.key} style={{background:st.bg,borderRadius:'8px',padding:'8px',border:`1px solid ${st.color}20`}}>
-              <div style={{display:'flex',justifyContent:'space-between',marginBottom:'4px'}}>
-                <span style={{fontSize:'9px',fontWeight:'700',color:st.color,textTransform:'uppercase',letterSpacing:'0.05em'}}>{st.label}</span>
-                <div style={{width:'6px',height:'6px',borderRadius:'50%',background:sc}}/>
-              </div>
-              <div style={{fontSize:'18px',fontWeight:'800',color:'#0f172a',lineHeight:1}}>{d.count}</div>
-              <div style={{fontSize:'9px',color:'#64748b',marginTop:'3px'}}>
-                {d.avg_days}d avg{d.stale_count>0?<span style={{color:'#ef4444'}}> · {d.stale_count}⚠</span>:null}
-              </div>
-            </div>);
-        })}
-      </div>
-    </div>);
-}
-
-// ── Rules Modal ───────────────────────────────────────────────────────────────
-function RulesModal({onClose}:{onClose:()=>void}){
-  const {data:rules,mutate}=useFetch<any[]>('/pipeline-rules');
-  const [form,setForm]=useState({name:'',stage_from:'sourced',stage_to:'screened',conditions:[] as any[],enabled:true});
-  const [saving,setSaving]=useState(false);
-  const [showF,setShowF]=useState(false);
-  const [nc,setNc]=useState({field:'total_exp_mo',op:'>',value:'24'});
-  const [running,setRunning]=useState(false);
-  const [res,setRes]=useState<any>(null);
-  const addC=()=>{setForm(f=>({...f,conditions:[...f.conditions,{...nc,value:Number(nc.value)||nc.value}]}));setNc({field:'total_exp_mo',op:'>',value:'24'});};
-  const rmC=(i:number)=>setForm(f=>({...f,conditions:f.conditions.filter((_:any,j:number)=>j!==i)}));
-  const save=async()=>{if(!form.name)return;setSaving(true);try{await apiFetch('/pipeline-rules',{method:'POST',body:JSON.stringify(form)});if(mutate)mutate();setForm({name:'',stage_from:'sourced',stage_to:'screened',conditions:[],enabled:true});setShowF(false);}finally{setSaving(false);}};
-  const tog=async(id:string,en:boolean)=>{await apiFetch(`/pipeline-rules/${id}`,{method:'PUT',body:JSON.stringify({enabled:!en})});if(mutate)mutate();};
-  const del=async(id:string)=>{await apiFetch(`/pipeline-rules/${id}`,{method:'DELETE'});if(mutate)mutate();};
-  const runM=async()=>{setRunning(true);try{const r=await apiFetch('/pipeline/auto-move',{method:'POST'});setRes(r);}finally{setRunning(false);}};
-  const rl:any[]=Array.isArray(rules)?rules:[];
-  const FIELDS=['total_exp_mo','fit_score','readiness_index','ai_match_score','expected_ctc','notice_period_days'];
-  return(
-    <div style={{position:'fixed',inset:0,zIndex:600,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(0,0,0,0.5)'}}>
-      <div style={{background:'white',borderRadius:'16px',width:'660px',maxHeight:'82vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
-        <div style={{padding:'16px 22px',borderBottom:'1px solid #e2e8f0',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-          <div><h2 style={{fontSize:'15px',fontWeight:'800',color:'#0f172a',margin:0}}>Stage Automation Rules</h2>
-          <p style={{fontSize:'12px',color:'#64748b',margin:0}}>Runs daily 01:00 IST + instantly after each manual move. n8n notified.</p></div>
-          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#64748b'}}><X size={16}/></button>
-        </div>
-        <div style={{flex:1,overflowY:'auto',padding:'16px 22px',display:'flex',flexDirection:'column',gap:'10px'}}>
-          {rl.length===0&&!showF&&<div style={{textAlign:'center',padding:'28px',color:'#94a3b8',fontSize:'13px'}}>No rules yet. Rules also auto-trigger after each drag move.</div>}
-          {rl.map((rule:any)=>{const fr=STAGES.find(s=>s.key===rule.stage_from),to=STAGES.find(s=>s.key===rule.stage_to);return(
-            <div key={rule.id} style={{border:'1px solid #e2e8f0',borderRadius:'10px',padding:'12px 14px',background:rule.enabled?'white':'#f8fafc'}}>
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'6px'}}>
-                <span style={{fontSize:'13px',fontWeight:'700',color:'#0f172a'}}>{rule.name}{!rule.enabled&&<span style={{marginLeft:'8px',fontSize:'10px',color:'#94a3b8',background:'#f1f5f9',padding:'2px 5px',borderRadius:'4px'}}>DISABLED</span>}</span>
-                <div style={{display:'flex',gap:'5px'}}>
-                  <button onClick={()=>tog(rule.id,rule.enabled)} style={{background:'none',border:'none',cursor:'pointer',color:rule.enabled?'#22c55e':'#94a3b8'}}>{rule.enabled?<ToggleRight size={18}/>:<ToggleLeft size={18}/>}</button>
-                  <button onClick={()=>del(rule.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#ef4444'}}><Trash2 size={13}/></button>
+            {/* Job selector button */}
+            <div style={{ position: 'relative' }}>
+              <button onClick={() => setJobPickerOpen(v => !v)}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 10, color: '#fff', cursor: 'pointer', minWidth: 280, maxWidth: 400 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 8, background: selectedJob ? `linear-gradient(135deg,${avatarColor(selectedJob.client_name||selectedJob.title)},#1E40AF)` : 'rgba(255,255,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 900, color: '#fff', flexShrink: 0 }}>
+                  {selectedJob ? (selectedJob.client_name?.[0] || selectedJob.title?.[0] || 'J') : '🎯'}
                 </div>
-              </div>
-              <div style={{display:'flex',alignItems:'center',gap:'5px',fontSize:'12px'}}>
-                <span style={{padding:'2px 7px',borderRadius:'4px',background:fr?.bg,color:fr?.color,fontWeight:'600'}}>{fr?.label}</span>
-                <ChevronRight size={11} color="#94a3b8"/>
-                <span style={{padding:'2px 7px',borderRadius:'4px',background:to?.bg,color:to?.color,fontWeight:'600'}}>{to?.label}</span>
-                {parseConds(rule.conditions).length>0&&<span style={{color:'#64748b',marginLeft:'6px',fontSize:'11px'}}>IF {parseConds(rule.conditions).map((co:any)=>`${co.field} ${co.op} ${co.value}`).join(' AND ')}</span>}
-              </div>
-            </div>);})}
-          {showF&&(
-            <div style={{border:'2px dashed #3b82f6',borderRadius:'10px',padding:'14px',background:'#f8faff'}}>
-              <h4 style={{fontSize:'13px',fontWeight:'700',color:'#0f172a',marginTop:0,marginBottom:'10px'}}>New Rule</h4>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'10px'}}>
-                <div><label style={{fontSize:'10px',color:'#64748b',fontWeight:'600'}}>Rule Name</label><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Auto-screen seniors" style={{width:'100%',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'5px 8px',fontSize:'12px',outline:'none',boxSizing:'border-box' as const,marginTop:'3px'}}/></div>
-                <div><label style={{fontSize:'10px',color:'#64748b',fontWeight:'600'}}>From Stage</label><select value={form.stage_from} onChange={e=>setForm(f=>({...f,stage_from:e.target.value}))} style={{width:'100%',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'5px 8px',fontSize:'12px',outline:'none',marginTop:'3px'}}>{STAGES.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}</select></div>
-                <div><label style={{fontSize:'10px',color:'#64748b',fontWeight:'600'}}>Move To</label><select value={form.stage_to} onChange={e=>setForm(f=>({...f,stage_to:e.target.value}))} style={{width:'100%',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'5px 8px',fontSize:'12px',outline:'none',marginTop:'3px'}}>{STAGES.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}</select></div>
-              </div>
-              <div style={{marginBottom:'10px'}}>
-                <label style={{fontSize:'10px',color:'#64748b',fontWeight:'600'}}>Conditions (all must match)</label>
-                {form.conditions.map((co:any,i:number)=>(
-                  <div key={i} style={{display:'flex',gap:'5px',marginTop:'5px',fontSize:'11px',background:'white',padding:'5px 8px',borderRadius:'6px',border:'1px solid #e2e8f0',alignItems:'center'}}>
-                    <code style={{color:'#3b82f6'}}>{co.field}</code><code style={{color:'#8b5cf6'}}>{co.op}</code><code style={{color:'#16a34a'}}>{co.value}</code>
-                    <button onClick={()=>rmC(i)} style={{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',color:'#ef4444'}}><X size={11}/></button>
-                  </div>))}
-                <div style={{display:'flex',gap:'6px',marginTop:'7px'}}>
-                  <select value={nc.field} onChange={e=>setNc(n=>({...n,field:e.target.value}))} style={{border:'1px solid #e2e8f0',borderRadius:'5px',padding:'3px 5px',fontSize:'11px',outline:'none'}}>{FIELDS.map(f=><option key={f} value={f}>{f}</option>)}</select>
-                  <select value={nc.op} onChange={e=>setNc(n=>({...n,op:e.target.value}))} style={{border:'1px solid #e2e8f0',borderRadius:'5px',padding:'3px 5px',fontSize:'11px',outline:'none',width:'55px'}}>{['>','<','>=','<=','==','!='].map(o=><option key={o} value={o}>{o}</option>)}</select>
-                  <input value={nc.value} onChange={e=>setNc(n=>({...n,value:e.target.value}))} style={{border:'1px solid #e2e8f0',borderRadius:'5px',padding:'3px 6px',fontSize:'11px',outline:'none',width:'70px'}} placeholder="value"/>
-                  <button onClick={addC} style={{padding:'3px 9px',background:'#3b82f6',color:'white',border:'none',borderRadius:'5px',fontSize:'11px',cursor:'pointer',fontWeight:'600'}}>+ Add</button>
+                <div style={{ flex: 1, textAlign: 'left', minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {selectedJob?.title || 'Select a Job Role'}
+                  </div>
+                  {selectedJob && <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)' }}>{selectedJob.client_name || ''} · {totalCandidates} candidates</div>}
                 </div>
+                <ChevronDown size={14} color="rgba(255,255,255,0.7)" style={{ transform: jobPickerOpen ? 'rotate(180deg)' : 'none', transition: '0.2s' }} />
+              </button>
+
+              {/* Job picker dropdown */}
+              {jobPickerOpen && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 6, width: 420, background: '#fff', borderRadius: 12, boxShadow: '0 16px 48px rgba(0,0,0,0.25)', border: '1px solid #E2E8F0', zIndex: 999, overflow: 'hidden' }}>
+                  <div style={{ padding: '10px 12px', borderBottom: '1px solid #F1F5F9' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '6px 10px' }}>
+                      <Search size={13} color="#94A3B8" />
+                      <input value={jobSearch} onChange={e => setJobSearch(e.target.value)} placeholder="Search jobs or clients…"
+                        style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', flex: 1 }} autoFocus />
+                      {jobSearch && <button onClick={() => setJobSearch('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 0 }}><X size={11} /></button>}
+                    </div>
+                  </div>
+                  <div style={{ maxHeight: 340, overflowY: 'auto' }}>
+                    {reqList.length === 0 && (
+                      <div style={{ padding: '20px', textAlign: 'center', color: '#94A3B8', fontSize: 12 }}>No open jobs found</div>
+                    )}
+                    {reqList.map((r: any) => (
+                      <button key={r.id} onClick={() => selectJob(r.id)}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', border: 'none', cursor: 'pointer', background: r.id === selectedJobId ? '#EFF6FF' : '#fff', borderBottom: '1px solid #F8FAFC', textAlign: 'left' }}
+                        onMouseEnter={e => { if (r.id !== selectedJobId) (e.currentTarget as HTMLElement).style.background = '#F8FAFC'; }}
+                        onMouseLeave={e => { if (r.id !== selectedJobId) (e.currentTarget as HTMLElement).style.background = '#fff'; }}>
+                        <div style={{ width: 34, height: 34, borderRadius: 8, background: `linear-gradient(135deg,${avatarColor(r.client_name||r.title)},${avatarColor(r.client_name||r.title)}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
+                          {(r.client_name || r.title)?.[0]?.toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: r.id === selectedJobId ? '#1D4ED8' : '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
+                          <div style={{ fontSize: 11, color: '#64748B' }}>{r.client_name || ''}{r.location ? ` · ${r.location}` : ''}</div>
+                        </div>
+                        {r.id === selectedJobId && <CheckCircle size={14} color="#2563EB" />}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ padding: '8px 12px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 11, color: '#94A3B8' }}>{reqList.length} open job{reqList.length !== 1 ? 's' : ''}</span>
+                    <a href="/requisitions" style={{ fontSize: 11, fontWeight: 700, color: '#2563EB', textDecoration: 'none' }}>View All Jobs →</a>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Job meta (visible when job selected) */}
+            {selectedJob && (
+              <div style={{ flex: 1, display: 'flex', gap: '10px 20px', flexWrap: 'wrap', overflow: 'hidden' }}>
+                {selectedJob.location && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.65)', display: 'flex', alignItems: 'center', gap: 4 }}><MapPin size={11} />{selectedJob.location}</span>}
+                {selectedJob.positions_count && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.65)', display: 'flex', alignItems: 'center', gap: 4 }}><Users size={11} />{selectedJob.positions_count} pos.</span>}
+                {selectedJob.experience_min != null && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.65)', display: 'flex', alignItems: 'center', gap: 4 }}><Clock size={11} />{selectedJob.experience_min}–{selectedJob.experience_max ?? '?'} yrs</span>}
+                <a href={`/requisitions/${selectedJobId}`} style={{ fontSize: 11, fontWeight: 700, color: '#93C5FD', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 3 }}>
+                  Full Page <ExternalLink size={10} />
+                </a>
               </div>
-              <div style={{display:'flex',gap:'7px'}}>
-                <button onClick={save} disabled={saving} style={{padding:'6px 16px',background:'#0f172a',color:'white',border:'none',borderRadius:'7px',fontSize:'12px',fontWeight:'700',cursor:'pointer',opacity:saving?0.6:1}}>{saving?'Saving...':'Save Rule'}</button>
-                <button onClick={()=>setShowF(false)} style={{padding:'6px 12px',background:'white',color:'#64748b',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',cursor:'pointer'}}>Cancel</button>
+            )}
+
+            {/* KPI cards */}
+            {selectedJob && (
+              <div style={{ display: 'flex', gap: 10, flexShrink: 0 }}>
+                {[
+                  { label: 'Placed', val: stats?.placed ?? 0, num: '#86EFAC', bg: 'rgba(34,197,94,0.15)', border: 'rgba(34,197,94,0.3)' },
+                  { label: 'In Pipeline', val: stats?.in_pipeline ?? 0, num: '#C4B5FD', bg: 'rgba(99,102,241,0.15)', border: 'rgba(99,102,241,0.3)' },
+                  { label: 'Dropped', val: stats?.dropped ?? 0, num: '#94A3B8', bg: 'rgba(148,163,184,0.1)', border: 'rgba(148,163,184,0.25)' },
+                ].map(k => (
+                  <div key={k.label} style={{ textAlign: 'center', padding: '7px 14px', borderRadius: 10, background: k.bg, border: `1px solid ${k.border}`, minWidth: 64 }}>
+                    <div style={{ fontSize: 20, fontWeight: 900, color: k.num, lineHeight: 1 }}>{k.val}</div>
+                    <div style={{ fontSize: 9, fontWeight: 600, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 2 }}>{k.label}</div>
+                  </div>
+                ))}
               </div>
-            </div>)}
+            )}
+          </div>
+
+          {/* Stage tab bar */}
+          <div style={{ display: 'flex', gap: 0, overflowX: 'auto' }}>
+            <button style={{ padding: '8px 16px', fontSize: 12, fontWeight: 700, cursor: 'pointer', background: 'none', border: 'none', color: '#fff', borderBottom: '2px solid #60A5FA', whiteSpace: 'nowrap' }}>
+              🗂 All Stages
+              {totalCandidates > 0 && <span style={{ marginLeft: 6, background: '#2563EB', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 999 }}>{totalCandidates}</span>}
+            </button>
+            {STAGES.filter(s => (board[s.key]?.length || 0) > 0).map(s => (
+              <button key={s.key} style={{ padding: '8px 14px', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', borderBottom: '2px solid transparent', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 5 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: s.color }} />
+                {s.label}
+                <span style={{ background: 'rgba(255,255,255,0.15)', color: '#fff', fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 999 }}>{board[s.key]?.length}</span>
+              </button>
+            ))}
+          </div>
         </div>
-        <div style={{padding:'12px 22px',borderTop:'1px solid #e2e8f0',display:'flex',justifyContent:'space-between',alignItems:'center',background:'#f8fafc'}}>
-          {!showF&&<button onClick={()=>setShowF(true)} style={{display:'flex',alignItems:'center',gap:'5px',padding:'7px 14px',background:'#3b82f6',color:'white',border:'none',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}><Plus size={13}/> New Rule</button>}
-          <div style={{marginLeft:'auto',display:'flex',gap:'8px',alignItems:'center'}}>
-            {res&&<span style={{fontSize:'12px',color:'#16a34a',fontWeight:'600'}}>Moved {res.moved} · n8n {res.n8n_notified||0}</span>}
-            <button onClick={runM} disabled={running} style={{display:'flex',alignItems:'center',gap:'5px',padding:'7px 14px',background:'#16a34a',color:'white',border:'none',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer',opacity:running?0.6:1}}>
-              <Zap size={13}/>{running?'Running...':'Run Auto-Move'}
+      </div>
+
+      {/* ── NO JOB SELECTED ─────────────────────────────────────────────── */}
+      {!selectedJobId && (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 24 }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>🗂</div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: '#1E293B', marginBottom: 8 }}>Select a Job to View Pipeline</div>
+            <div style={{ fontSize: 14, color: '#64748B', marginBottom: 24 }}>Click the job selector above or choose from the list below</div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12, maxWidth: 900, width: '100%', padding: '0 24px' }}>
+            {(reqs || []).slice(0, 9).map((r: any) => (
+              <button key={r.id} onClick={() => selectJob(r.id)}
+                style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px', background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, cursor: 'pointer', textAlign: 'left', transition: 'all 0.15s' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = '#93C5FD'; (e.currentTarget as HTMLElement).style.boxShadow = '0 4px 12px rgba(37,99,235,0.12)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#E2E8F0'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
+                <div style={{ width: 40, height: 40, borderRadius: 10, background: `linear-gradient(135deg,${avatarColor(r.client_name||r.title)},${avatarColor(r.client_name||r.title)}88)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 900, color: '#fff', flexShrink: 0 }}>
+                  {(r.client_name || r.title)?.[0]?.toUpperCase()}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
+                  <div style={{ fontSize: 11, color: '#64748B' }}>{r.client_name || ''}{r.location ? ` · ${r.location}` : ''}</div>
+                </div>
+                <ArrowRight size={14} color="#CBD5E1" />
+              </button>
+            ))}
+          </div>
+          {(reqs || []).length > 9 && (
+            <a href="/requisitions" style={{ fontSize: 13, fontWeight: 700, color: '#2563EB', textDecoration: 'none' }}>View all {reqs?.length} jobs →</a>
+          )}
+        </div>
+      )}
+
+      {/* ── TOOLBAR ─────────────────────────────────────────────────────── */}
+      {selectedJobId && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', background: '#fff', borderBottom: '1px solid #E2E8F0', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '5px 10px', flex: 1, maxWidth: 280 }}>
+            <Search size={13} color="#94A3B8" />
+            <input value={candSearch} onChange={e => setCandSearch(e.target.value)} placeholder="Search candidates, skills…"
+              style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', width: '100%' }} />
+            {candSearch && <button onClick={() => setCandSearch('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 0 }}><X size={12} /></button>}
+          </div>
+          <button style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
+            <SlidersHorizontal size={13} /> Filter
+          </button>
+          <button onClick={refreshBoard} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
+            <RotateCcw size={13} /> Refresh
+          </button>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <a href={`/resume-inbox?req=${selectedJobId}`}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: '1px solid #DDD6FE', borderRadius: 8, background: '#FAF5FF', fontSize: 12, fontWeight: 700, color: '#7C3AED', textDecoration: 'none', cursor: 'pointer' }}>
+              📬 Inbox Matches
+            </a>
+            <button style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: 'none', borderRadius: 8, background: '#2563EB', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
+              <Plus size={13} /> Add Candidate
             </button>
           </div>
         </div>
-      </div>
-    </div>);
-}
+      )}
 
-// ── Bulk Bar ──────────────────────────────────────────────────────────────────
-function BulkBar({selected,onMove,onReject,onClear}:any){
-  const [moveSt,setMoveSt]=useState('');
-  const [doing,setDoing]=useState(false);
-  if(!selected.size)return null;
-  return(
-    <div style={{position:'fixed',bottom:'24px',left:'50%',transform:'translateX(-50%)',zIndex:400,background:'#0f172a',color:'white',borderRadius:'12px',padding:'12px 20px',display:'flex',alignItems:'center',gap:'12px',boxShadow:'0 8px 32px rgba(0,0,0,0.4)',minWidth:'460px'}}>
-      <span style={{fontWeight:'700',fontSize:'13px',whiteSpace:'nowrap'}}>{selected.size} selected</span>
-      <div style={{width:'1px',height:'20px',background:'rgba(255,255,255,0.2)'}}/>
-      <select value={moveSt} onChange={e=>setMoveSt(e.target.value)} style={{background:'rgba(255,255,255,0.1)',border:'1px solid rgba(255,255,255,0.2)',color:'white',borderRadius:'7px',padding:'5px 10px',fontSize:'12px',outline:'none'}}>
-        <option value="">Move to stage...</option>
-        {STAGES.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}
-      </select>
-      <button onClick={async()=>{if(!moveSt)return;setDoing(true);try{await onMove(moveSt);}finally{setDoing(false);setMoveSt('');} }} disabled={!moveSt||doing} style={{padding:'6px 12px',background:'#3b82f6',color:'white',border:'none',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer',opacity:!moveSt||doing?0.5:1}}>{doing?'Moving...':'Move'}</button>
-      <button onClick={async()=>{setDoing(true);try{await onReject();}finally{setDoing(false);}}} disabled={doing} style={{padding:'6px 12px',background:'#dc2626',color:'white',border:'none',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer',opacity:doing?0.5:1}}>Reject All</button>
-      <button onClick={onClear} style={{marginLeft:'auto',padding:'6px 10px',background:'rgba(255,255,255,0.1)',color:'white',border:'1px solid rgba(255,255,255,0.2)',borderRadius:'7px',fontSize:'12px',cursor:'pointer'}}>Clear</button>
-    </div>);
-}
+      {/* ── KANBAN BOARD ────────────────────────────────────────────────── */}
+      {selectedJobId && (
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '14px 16px', display: 'flex', gap: 12 }}
+            onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}>
+            {STAGES.map(stage => {
+              const apps = filteredApps(board[stage.key] || []);
+              const total = (board[stage.key] || []).length;
+              return (
+                <div key={stage.key} style={{ flexShrink: 0, width: 242, display: 'flex', flexDirection: 'column' }}
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={e => { e.preventDefault(); if (!dragRef.current) return; const { id, fromStage } = dragRef.current; dragRef.current = null; moveStage(id, fromStage, stage.key); }}>
 
-// ── Filters ───────────────────────────────────────────────────────────────────
-function FiltersPanel({filters,setFilters,options,onClose}:any){
-  return(
-    <div style={{width:'205px',flexShrink:0,background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'14px',display:'flex',flexDirection:'column',gap:'11px',maxHeight:'360px',overflowY:'auto'}}>
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-        <span style={{fontSize:'13px',fontWeight:'700',color:'#0f172a'}}>Filters</span>
-        <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#94a3b8'}}><X size={14}/></button>
-      </div>
-      {[{label:'Min Experience',key:'minExp',min:0,max:120,unit:'mo'},{label:'Max Notice Period',key:'maxNotice',min:0,max:180,unit:'d'},{label:'Min Fit Score %',key:'minFit',min:0,max:100,unit:'%'}].map(({label,key,min,max,unit})=>(
-        <div key={key}>
-          <label style={{fontSize:'10px',fontWeight:'600',color:'#64748b',display:'block',marginBottom:'3px'}}>{label}</label>
-          <div style={{display:'flex',alignItems:'center',gap:'5px'}}>
-            <input type="range" min={min} max={max} value={filters[key]||0} onChange={e=>setFilters((f:any)=>({...f,[key]:Number(e.target.value)}))} style={{flex:1}}/>
-            <span style={{fontSize:'10px',color:'#475569',minWidth:'34px'}}>{filters[key]||0}{unit}</span>
-          </div>
-        </div>))}
-      <div><label style={{fontSize:'10px',fontWeight:'600',color:'#64748b',display:'block',marginBottom:'3px'}}>Source</label>
-        <select value={filters.source||''} onChange={e=>setFilters((f:any)=>({...f,source:e.target.value}))} style={{width:'100%',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'4px 7px',fontSize:'11px',outline:'none'}}>
-          <option value="">All Sources</option>
-          {(options?.sources||[]).map((s:string)=><option key={s} value={s}>{s}</option>)}
-        </select></div>
-      <div><label style={{fontSize:'10px',fontWeight:'600',color:'#64748b',display:'block',marginBottom:'3px'}}>Skill</label>
-        <input value={filters.skill||''} onChange={e=>setFilters((f:any)=>({...f,skill:e.target.value}))} placeholder="e.g. Python" style={{width:'100%',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'4px 7px',fontSize:'11px',outline:'none',boxSizing:'border-box' as const}}/></div>
-      <div><label style={{fontSize:'10px',fontWeight:'600',color:'#64748b',display:'block',marginBottom:'3px'}}>Priority</label>
-        <select value={filters.color||''} onChange={e=>setFilters((f:any)=>({...f,color:e.target.value}))} style={{width:'100%',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'4px 7px',fontSize:'11px',outline:'none'}}>
-          <option value="">All</option>
-          <option value="green">🟢 Strong Hire</option>
-          <option value="yellow">🟡 Consider</option>
-          <option value="red">🔴 At Risk</option>
-          <option value="grey">⚪ Unscored</option>
-        </select></div>
-      <button onClick={()=>setFilters({})} style={{padding:'5px',background:'#f1f5f9',border:'none',borderRadius:'6px',fontSize:'11px',cursor:'pointer',color:'#64748b',fontWeight:'600'}}>Reset All</button>
-    </div>);
-}
+                  {/* Column header */}
+                  <div style={{ display: 'flex', alignItems: 'center', padding: '7px 10px', background: '#fff', border: '1px solid #E2E8F0', borderBottom: 'none', borderRadius: '10px 10px 0 0' }}>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: stage.color, marginRight: 7, flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#1E293B', flex: 1 }}>{stage.label}</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: stage.light, color: stage.color, border: `1px solid ${stage.color}30`, marginRight: 5 }}>{total}</span>
+                  </div>
 
-// ── Main Page ─────────────────────────────────────────────────────────────────
-export default function PipelinePage(){
-  const [mounted,setMounted]=useState(false);
-  const [search,setSearch]=useState('');
-  const [selReq,setSelReq]=useState('');
-  const [local,setLocal]=useState<Record<string,any[]>|null>(null);
-  const [dragging,setDragging]=useState<any>(null);
-  const [dragOver,setDragOver]=useState<string|null>(null);
-  const [toast,setToast]=useState('');
-  const [toastType,setToastType]=useState<'ok'|'err'>('ok');
-  const [drawer,setDrawer]=useState<any|null>(null);
-  const [drawerTab,setDrawerTab]=useState<'overview'|'insights'>('overview');
-  const [showRules,setShowRules]=useState(false);
-  const [showFilters,setShowFilters]=useState(false);
-  const [showAnalytics,setShowAnalytics]=useState(false);
-  const [showCopilot,setShowCopilot]=useState(false);
-  const [filters,setFilters]=useState<any>({});
-  const [activeChip,setActiveChip]=useState<string|null>(null);
-  const [selected,setSelected]=useState<Set<string>>(new Set());
-  const [scoringAll,setScoringAll]=useState(false);
-  const dragRef=useRef<any>(null);
+                  {/* Column body */}
+                  <div style={{ flex: 1, overflowY: 'auto', border: `1px solid ${stage.color}`, borderTop: `2px solid ${stage.color}`, background: '#F8FAFC', borderRadius: '0 0 10px 10px', padding: 7, display: 'flex', flexDirection: 'column', gap: 7, minHeight: 80, maxHeight: 'calc(100vh - 280px)' }}>
+                    {apps.map(app => (
+                      <KanbanCard key={app.id} app={app} stageColor={stage.color}
+                        onClick={() => { setSelected(app); setDrawerTab('profile'); }}
+                        onDragStart={e => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }}
+                        onMoveStage={(toStage: string) => moveStage(app.id, stage.key, toStage)} />
+                    ))}
+                    {apps.length === 0 && (
+                      <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 11, padding: '20px 8px', fontStyle: 'italic' }}>Drop candidates here</div>
+                    )}
+                  </div>
 
-  useEffect(()=>{setMounted(true);},[]);
-  const showT=(m:string,type:'ok'|'err'='ok')=>{setToast(m);setToastType(type);setTimeout(()=>setToast(''),3000);};
-
-  const {data:reqData}=useFetch<any>('/pipeline/active-requisitions');
-  const {data:reqDataFb}=useFetch<any>('/requisitions?limit=30');
-  const {data:metrics,mutate:mutateMetrics}=useFetch<any>(selReq ? `/pipeline/metrics?req_id=${selReq}` : '/pipeline/metrics');
-  const {data:intel}=useFetch<any>('/pipeline/intelligence');
-  const {data:filterOpts}=useFetch<any>('/pipeline/filter-options');
-  const {data:analytics}=useFetch<any>('/pipeline/stage-analytics');
-  const {data:copilot}=useFetch<any>(showCopilot?'/pipeline/copilot':null);
-  const reqs:any[]=useMemo(()=>{const d=Array.isArray(reqData)&&reqData.length?reqData:(reqDataFb?Array.isArray(reqDataFb)?reqDataFb:reqDataFb.items||[]:[]); return d.sort((a:any,b:any)=>(b.app_count||0)-(a.app_count||0));},[reqData,reqDataFb]);
-  const reqId=selReq||reqs[0]?.id||'';
-  const {data:pl,loading,mutate:mutatePl}=useFetch<any>(reqId?`/pipeline/enriched/${reqId}`:null);
-  useEffect(()=>{if(pl&&typeof pl==='object')setLocal(pl);},[pl]);
-
-  const chipIds=useMemo(()=>{if(!activeChip||!intel)return null;return new Set((intel[activeChip]||[]).map((x:any)=>x.candidate_id||x.id));},[activeChip,intel]);
-
-  const board=useMemo(()=>{
-    const src=local||pl;if(!src)return{};
-    const r:Record<string,any[]>={};
-    STAGES.forEach(st=>{
-      let cards=(src[st.key]||[]).map((c:any)=>({...c,stageKey:st.key}));
-      if(search)cards=cards.filter((c:any)=>(c.candidate_name||'').toLowerCase().includes(search.toLowerCase())||(c.current_employer||'').toLowerCase().includes(search.toLowerCase()));
-      if(chipIds)cards=cards.filter((c:any)=>chipIds.has(c.candidate_id));
-      if(filters.minExp)cards=cards.filter((c:any)=>(c.total_exp_mo||0)>=filters.minExp);
-      if(filters.maxNotice&&filters.maxNotice<180)cards=cards.filter((c:any)=>!c.notice_period_days||c.notice_period_days<=filters.maxNotice);
-      if(filters.minFit)cards=cards.filter((c:any)=>(c.fit_score||0)*100>=filters.minFit);
-      if(filters.source)cards=cards.filter((c:any)=>c.source===filters.source);
-      if(filters.skill)cards=cards.filter((c:any)=>(c.skills||[]).some((sk:string)=>sk.toLowerCase().includes(filters.skill.toLowerCase())));
-      if(filters.color)cards=cards.filter((c:any)=>c.color_indicator===filters.color);
-      r[st.key]=cards;
-    });
-    return r;
-  },[local,pl,chipIds,search,filters]);
-
-  const total=useMemo(()=>STAGES.reduce((s,st)=>s+(board[st.key]||[]).length,0),[board]);
-  const hasFilters=Object.values(filters).some(v=>v&&v!==180&&v!==0);
-
-  const move=useCallback(async(appId:string,nS:string,oS:string,name:string)=>{
-    setSelected(prev=>{const s=new Set(prev);s.delete(appId);return s;});
-    setLocal(prev=>{if(!prev)return prev;const u={...prev};const item=(u[oS]||[]).find((x:any)=>x.id===appId);if(!item)return prev;u[oS]=(u[oS]||[]).filter((x:any)=>x.id!==appId);u[nS]=[...(u[nS]||[]),{...item,stageKey:nS}];return{...u};});
-    showT(`${name} → ${STAGES.find(s=>s.key===nS)?.label}`);
-    try{
-      await apiFetch(`/applications/${appId}/stage`,{method:'PATCH',body:JSON.stringify({stage:nS})});
-      // Item 7: Auto-trigger rules after manual move (non-blocking)
-      apiFetch(`/pipeline/check-rules/${appId}`,{method:'POST'}).then((r:any)=>{
-        if(r?.moved>0) showT(`Auto-rule: ${r.details[0]?.candidate} → ${r.details[0]?.to}`);
-      }).catch(()=>{});
-    } catch{showT('Move failed','err');}
-    if(mutateMetrics)mutateMetrics();
-  },[mutateMetrics]);
-
-  const toggleSel=(id:string)=>setSelected(prev=>{const s=new Set(prev);s.has(id)?s.delete(id):s.add(id);return s;});
-  const selectAll=()=>{const all=new Set<string>();STAGES.forEach(st=>(board[st.key]||[]).forEach((c:any)=>all.add(c.id)));setSelected(all);};
-  const bulkMove=async(targetStage:string)=>{const ids=Array.from(selected);const r=await apiFetch('/pipeline/bulk-action',{method:'POST',body:JSON.stringify({application_ids:ids,action:'move_stage',target_stage:targetStage})});showT(`${r.success} moved to ${STAGES.find(s=>s.key===targetStage)?.label}`);setSelected(new Set());if(mutatePl)mutatePl();if(mutateMetrics)mutateMetrics();};
-  const bulkReject=async()=>{const ids=Array.from(selected);const r=await apiFetch('/pipeline/bulk-action',{method:'POST',body:JSON.stringify({application_ids:ids,action:'reject'})});showT(`${r.success} rejected`);setSelected(new Set());if(mutatePl)mutatePl();if(mutateMetrics)mutateMetrics();};
-  const syncScores=async()=>{setScoringAll(true);try{const r=await apiFetch('/pipeline/sync-scores',{method:'POST'});showT(`Scores synced: ${r.synced} updated`);}catch{showT('Sync failed','err');}finally{setScoringAll(false);if(mutatePl)mutatePl();}};
-
-  if(!mounted)return<div style={{padding:'48px',textAlign:'center',color:'#94a3b8'}}>Loading AVIIN ATS Pipeline...</div>;
-
-  const kpis=metrics?[
-    {l:'Total',v:metrics.total_candidates||0,c:'#3b82f6'},{l:'Interview %',v:`${metrics.interview_rate||0}%`,c:'#8b5cf6'},
-    {l:'Offer %',v:`${metrics.offer_rate||0}%`,c:'#22c55e'},{l:'Join %',v:`${metrics.join_rate||0}%`,c:'#f59e0b'},
-    {l:'Revenue',v:fmtM(metrics.revenue_potential||0),c:'#0891b2'},{l:'Open Offers',v:metrics.open_offers||0,c:'#16a34a'},
-    {l:'Interviews',v:metrics.upcoming_interviews||0,c:'#d97706'},{l:'Stuck 7d+',v:metrics.stuck_candidates||0,c:'#ef4444'},
-  ]:[];
-  const chips=intel?[
-    {k:'strong_hire',l:'Strong Hire',e:'🏆',c:'#16a34a',bg:'#f0fdf4'},{k:'offer_ready',l:'Offer Ready',e:'📋',c:'#0891b2',bg:'#ecfeff'},
-    {k:'join_ready',l:'Join Ready',e:'✅',c:'#7c3aed',bg:'#f5f3ff'},{k:'in_interview',l:'Interview',e:'🎯',c:'#d97706',bg:'#fffbeb'},
-    {k:'stuck',l:'Stuck 7d+',e:'⚠️',c:'#dc2626',bg:'#fef2f2'},{k:'at_risk',l:'At Risk',e:'🔴',c:'#ef4444',bg:'#fef2f2'},
-  ]:[];
-  const analyticsData:any[]=Array.isArray(analytics)?analytics:[];
-
-  return(
-    <div suppressHydrationWarning style={{display:'flex',flexDirection:'column',gap:'8px',minHeight:'calc(100vh - 100px)'}}>
-      {toast&&<div style={{position:'fixed',top:'80px',right:'24px',zIndex:1000,background:toastType==='err'?'#dc2626':'#0f172a',color:'white',padding:'10px 18px',borderRadius:'8px',fontSize:'13px',fontWeight:'600',boxShadow:'0 4px 20px rgba(0,0,0,0.3)'}}>
-        {toastType==='ok'?'✓':'✗'} {toast}
-      </div>}
-      {showRules&&<RulesModal onClose={()=>setShowRules(false)}/>}
-
-      {/* Side Drawer with tabs */}
-      {drawer&&(
-        <div style={{position:'fixed',inset:0,zIndex:500,display:'flex'}}>
-          <div style={{flex:1,background:'rgba(0,0,0,0.35)',backdropFilter:'blur(2px)'}} onClick={()=>setDrawer(null)}/>
-          <div style={{width:'420px',background:'white',height:'100vh',overflowY:'auto',boxShadow:'-8px 0 40px rgba(0,0,0,0.15)',display:'flex',flexDirection:'column'}}>
-            {/* Drawer header */}
-            <div style={{padding:'14px 18px',borderBottom:'1px solid #e2e8f0',background:'#f8fafc',display:'flex',alignItems:'center',gap:'10px'}}>
-              <div style={{width:'40px',height:'40px',borderRadius:'50%',background:av(drawer.candidate_name),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'14px',fontWeight:'800',color:'white'}}>{ini(drawer.candidate_name)}</div>
-              <div style={{flex:1}}>
-                <div style={{fontWeight:'800',fontSize:'14px',color:'#0f172a',display:'flex',alignItems:'center',gap:'5px'}}>
-                  <div style={{width:'7px',height:'7px',borderRadius:'50%',background:colorDotMap[drawer.color_indicator||'grey']||'#cbd5e1'}}/>
-                  {drawer.candidate_name}
+                  <div style={{ padding: '4px 10px', fontSize: 10, fontWeight: 600, color: '#94A3B8', background: '#fff', border: '1px solid #E2E8F0', borderTop: 'none', borderRadius: '0 0 10px 10px' }}>
+                    {total} total
+                  </div>
                 </div>
-                <div style={{fontSize:'11px',color:'#64748b'}}>{drawer.current_employer||'—'} · {expL(drawer.total_exp_mo||0)}</div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── DRAWER ──────────────────────────────────────────────────────── */}
+      {selected && (
+        <CandidateDrawer app={selected} onClose={() => setSelected(null)}
+          onMoveStage={(toStage: string) => moveStage(selected.id, selected.stage, toStage)}
+          drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} />
+      )}
+
+      {/* ── TOAST ───────────────────────────────────────────────────────── */}
+      {toast && (
+        <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', background: toast.ok ? '#1E293B' : '#DC2626', color: '#fff', padding: '10px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 16px rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {toast.ok ? <CheckCircle size={14} /> : <AlertTriangle size={14} />} {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Kanban Card ────────────────────────────────────────────────────────────────
+function KanbanCard({ app, stageColor, onClick, onDragStart, onMoveStage }: any) {
+  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
+  const skills: string[] = app.skills || [];
+  return (
+    <div draggable onDragStart={onDragStart} onClick={onClick}
+      style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 10, padding: '10px 10px 8px', cursor: 'pointer', transition: 'all 0.15s', position: 'relative', userSelect: 'none' }}
+      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = '#93C5FD'; (e.currentTarget as HTMLElement).style.boxShadow = '0 4px 12px rgba(37,99,235,0.12)'; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#E2E8F0'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
+      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: stageColor, borderRadius: '10px 0 0 10px', opacity: 0.7 }} />
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 7 }}>
+        <div style={{ width: 32, height: 32, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(app.candidate_name)},${avatarColor(app.candidate_name)}aa)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
+          {initials(app.candidate_name)}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.candidate_name}</div>
+          <div style={{ fontSize: 10, color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {[app.current_designation, app.current_employer].filter(Boolean).join(' @ ')}
+          </div>
+        </div>
+        {score != null && (
+          <div style={{ width: 34, height: 34, borderRadius: '50%', border: `2px solid ${scoreColor(score)}`, background: scoreBg(score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 900, color: scoreColor(score), flexShrink: 0 }}>
+            {Math.round(score)}%
+          </div>
+        )}
+      </div>
+      {skills.length > 0 && (
+        <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 7 }}>
+          {skills.slice(0, 3).map((sk: string) => (
+            <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>
+          ))}
+          {skills.length > 3 && <span style={{ fontSize: 9, color: '#94A3B8', padding: '2px 4px' }}>+{skills.length - 3}</span>}
+        </div>
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {app.total_exp_mo > 0 && <span style={{ fontSize: 9, color: '#94A3B8', background: '#F8FAFC', padding: '2px 5px', borderRadius: 4 }}>⏱ {gx(app.total_exp_mo)}</span>}
+        <span style={{ fontSize: 9, color: '#CBD5E1' }}>{ago(app.updated_at)}</span>
+        {app.scorecard_count > 0 && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4, background: '#EFF6FF', color: '#2563EB', border: '1px solid #BFDBFE' }}>S×{app.scorecard_count}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ── Candidate Drawer ──────────────────────────────────────────────────────────
+function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast }: any) {
+  const stageCfg = STAGES.find(s => s.key === app.stage);
+  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end' }} onClick={onClose}>
+      <div style={{ width: 500, maxWidth: '96vw', height: '100%', background: '#fff', boxShadow: '-6px 0 32px rgba(0,0,0,0.18)', display: 'flex', flexDirection: 'column', overflowY: 'hidden' }} onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{ padding: '16px 18px 0', borderBottom: '1px solid #F1F5F9', flexShrink: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ width: 42, height: 42, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(app.candidate_name)},${avatarColor(app.candidate_name)}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 800, color: '#fff' }}>
+                {initials(app.candidate_name)}
               </div>
-              {drawer.fit_score&&<div style={{fontSize:'11px',fontWeight:'800',padding:'2px 7px',borderRadius:'5px',background:fitBg(drawer.fit_score),color:fitCl(drawer.fit_score)}}>{Math.round(drawer.fit_score*100)}%</div>}
-              <button onClick={()=>setDrawer(null)} style={{background:'none',border:'none',cursor:'pointer',color:'#64748b'}}><X size={15}/></button>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: '#1E293B' }}>{app.candidate_name}</div>
+                <div style={{ fontSize: 11, color: '#64748B' }}>{[app.current_designation, app.current_employer].filter(Boolean).join(' @ ')}</div>
+              </div>
             </div>
-            {/* Tabs */}
-            <div style={{display:'flex',borderBottom:'1px solid #e2e8f0',flexShrink:0}}>
-              {[{k:'overview',l:'Overview'},{k:'insights',l:'AI Insights'}].map(({k,l})=>(
-                <button key={k} onClick={()=>setDrawerTab(k as any)}
-                  style={{flex:1,padding:'9px',fontSize:'12px',fontWeight:'700',cursor:'pointer',background:'none',border:'none',borderBottom:drawerTab===k?'2px solid #8b5cf6':'2px solid transparent',color:drawerTab===k?'#8b5cf6':'#64748b',transition:'all 0.15s'}}>{l}</button>))}
-            </div>
-            {/* Quick actions */}
-            <div style={{padding:'10px 18px',display:'flex',gap:'6px',borderBottom:'1px solid #f1f5f9',flexWrap:'wrap'}}>
-              {[{l:'Email',c:'#3b82f6',a:()=>{if(drawer.email)window.open(`mailto:${drawer.email}`,'_blank');else showT('No email','err');}},
-                {l:'WhatsApp',c:'#22c55e',a:()=>{if(drawer.phone)window.open(`https://wa.me/91${drawer.phone.replace(/\D/g,'')}?text=Hi ${encodeURIComponent(drawer.candidate_name)}, this is AVIIN Jobs.`,'_blank');else showT('No phone','err');}},
-                {l:'Call',c:'#f59e0b',a:()=>{if(drawer.phone)window.open(`tel:${drawer.phone}`);else showT('No phone','err');}},
-                {l:'Profile',c:'#8b5cf6',a:()=>{window.location.href=`/candidates/${drawer.candidate_id}`;}},
-              ].map(({l,c,a})=>(<button key={l} onClick={a} style={{padding:'4px 10px',borderRadius:'7px',border:`1px solid ${c}30`,background:`${c}10`,color:c,fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>{l}</button>))}
-            </div>
-            {/* Tab content */}
-            <div style={{padding:'14px 18px',flex:1,overflowY:'auto'}}>
-              {drawerTab==='overview'?(
-                <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-                  <div style={{background:'#f8fafc',borderRadius:'10px',padding:'12px'}}>
-                    {[{l:'Email',v:drawer.email||'—'},{l:'Phone',v:drawer.phone||'—'},{l:'Location',v:drawer.location||'—'},{l:'Experience',v:expL(drawer.total_exp_mo||0)},{l:'Company',v:drawer.current_employer||'—'},{l:'Source',v:drawer.source||'—'},{l:'Current CTC',v:fmtCtc(drawer.current_ctc)||'—'},{l:'Expected CTC',v:fmtCtc(drawer.expected_ctc)||'—'},{l:'Notice Period',v:drawer.notice_period_days?`${drawer.notice_period_days} days`:'—'},{l:'Days in Stage',v:drawer.days_in_stage!=null?`${drawer.days_in_stage}d`:'—'},{l:'Recruiter',v:drawer.recruiter_name||'Unassigned'}].map(({l,v})=>(
-                      <div key={l} style={{display:'flex',justifyContent:'space-between',fontSize:'11px',padding:'4px 0',borderBottom:'1px solid #e2e8f0'}}>
-                        <span style={{color:'#64748b'}}>{l}</span><span style={{fontWeight:'600',color:'#0f172a'}}>{v}</span>
-                      </div>))}
-                  </div>
-                  {Array.isArray(drawer.skills)&&drawer.skills.length>0&&(<div style={{display:'flex',gap:'5px',flexWrap:'wrap'}}>{drawer.skills.map((sk:string,i:number)=>(<span key={i} style={{padding:'3px 8px',borderRadius:'20px',fontSize:'11px',fontWeight:'600',background:'#eff6ff',color:'#2563eb'}}>{sk}</span>))}</div>)}
-                  <div>
-                    <div style={{fontSize:'10px',fontWeight:'700',color:'#64748b',marginBottom:'6px',textTransform:'uppercase',letterSpacing:'0.06em'}}>Move Stage</div>
-                    <div style={{display:'flex',flexWrap:'wrap',gap:'5px'}}>{STAGES.filter(s=>s.key!==drawer.stageKey).map(st=>(<button key={st.key} onClick={()=>{move(drawer.id,st.key,drawer.stageKey,drawer.candidate_name);setDrawer((d:any)=>d?{...d,stageKey:st.key}:null);}} style={{padding:'4px 10px',borderRadius:'20px',fontSize:'11px',fontWeight:'600',cursor:'pointer',border:`1px solid ${st.color}40`,background:st.bg,color:st.color}}>→ {st.label}</button>))}</div>
-                  </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {score != null && (
+                <div style={{ textAlign: 'center', padding: '4px 10px', borderRadius: 8, background: scoreBg(score), border: `1px solid ${scoreColor(score)}30` }}>
+                  <div style={{ fontSize: 18, fontWeight: 900, color: scoreColor(score), lineHeight: 1 }}>{Math.round(score)}%</div>
+                  <div style={{ fontSize: 9, color: '#94A3B8', fontWeight: 600 }}>AI MATCH</div>
                 </div>
-              ):(
-                <AIInsightsTab candidateId={drawer.candidate_id} reqId={reqId}/>
               )}
+              <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8', fontSize: 18 }}>✕</button>
             </div>
           </div>
-        </div>)}
 
-      <BulkBar selected={selected} onMove={bulkMove} onReject={bulkReject} onClear={()=>setSelected(new Set())}/>
+          {/* Stage: current + move buttons */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
+              Current Stage: <span style={{ color: stageCfg?.color }}>{stageCfg?.label}</span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              {STAGES.filter(s => s.key !== 'rejected' && s.key !== 'hold').map(s => (
+                <button key={s.key} onClick={() => onMoveStage(s.key)}
+                  style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: `1px solid ${s.color}40`, background: app.stage === s.key ? s.color : `${s.color}15`, color: app.stage === s.key ? '#fff' : s.color, transition: 'all 0.15s' }}>
+                  {s.label}
+                </button>
+              ))}
+              <button onClick={() => onMoveStage('hold')} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #CBD5E140', background: app.stage === 'hold' ? '#94A3B8' : '#F8FAFC', color: app.stage === 'hold' ? '#fff' : '#94A3B8' }}>Hold</button>
+              <button onClick={() => onMoveStage('rejected')} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>Reject</button>
+            </div>
+          </div>
 
-      {/* Toolbar */}
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:'7px',flexShrink:0}}>
-        <div><h1 style={{fontSize:'19px',fontWeight:'800',color:'#0f172a',marginBottom:'2px'}}>Candidate Pipeline</h1>
-        <p style={{fontSize:'12px',color:'#64748b'}}>{total} candidates{activeChip?` · ${activeChip.replace(/_/g,' ')}`:''}  across 7 stages{hasFilters?' · filtered':''}</p></div>
-        <div style={{display:'flex',gap:'6px',alignItems:'center',flexWrap:'wrap'}}>
-          <input placeholder="Search..." value={search} onChange={e=>setSearch(e.target.value)} style={{border:'1px solid #e2e8f0',borderRadius:'8px',padding:'6px 11px',fontSize:'12px',outline:'none',background:'white',width:'145px'}}/>
-          <select value={reqId} onChange={e=>{setSelReq(e.target.value);setLocal(null);}} style={{border:'1px solid #e2e8f0',borderRadius:'8px',padding:'6px 9px',fontSize:'12px',background:'white',outline:'none',maxWidth:'165px'}}>{reqs.map((r:any)=>(<option key={r.id} value={r.id}>{r.title}</option>))}</select>
-          {/* Requisition links for test selectors */}
-          <div data-testid="requisition-list" style={{position:"absolute",width:"1px",height:"1px",overflow:"hidden",opacity:0}}>
-            {(reqs&&reqs.length>0?reqs:[{id:"placeholder",title:"Job Requisition"}]).map((r:any) => (
-              <a key={r.id} href={"/pipeline?req=" + r.id}>{r.title}</a>
+          {/* Drawer tabs */}
+          <div style={{ display: 'flex', gap: 0, marginBottom: -1 }}>
+            {[
+              { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
+              { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes' },
+              { key: 'scorecards', icon: <Star size={12} />, label: 'Scorecards' },
+              { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
+            ].map(t => (
+              <button key={t.key} onClick={() => setDrawerTab(t.key)}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', borderBottom: `2px solid ${drawerTab === t.key ? '#2563EB' : 'transparent'}`, color: drawerTab === t.key ? '#2563EB' : '#64748B' }}>
+                {t.icon}{t.label}
+              </button>
             ))}
           </div>
-          {[
-            {label:'Filters',active:showFilters||hasFilters,dot:hasFilters,onClick:()=>setShowFilters(f=>!f),icon:SlidersHorizontal,color:'#3b82f6'},
-            {label:'Analytics',active:showAnalytics,dot:false,onClick:()=>setShowAnalytics(a=>!a),icon:BarChart2,color:'#8b5cf6'},
-            {label:'Copilot',active:showCopilot,dot:false,onClick:()=>setShowCopilot(a=>!a),icon:Brain,color:'#7c3aed'},
-            {label:'Auto Rules',active:false,dot:false,onClick:()=>setShowRules(true),icon:Settings,color:'#475569'},
-          ].map(({label,active,dot,onClick,icon:Icon,color})=>(
-            <button key={label} onClick={onClick} style={{display:'flex',alignItems:'center',gap:'4px',padding:'6px 10px',background:active?`${color}15`:'white',border:active?`1px solid ${color}`:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',color:active?color:'#475569'}}>
-              <Icon size={12}/> {label}{dot&&' ●'}
-            </button>))}
-          <button onClick={syncScores} disabled={scoringAll} style={{display:'flex',alignItems:'center',gap:'4px',padding:'6px 10px',background:'white',border:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',color:'#8b5cf6',opacity:scoringAll?0.6:1}}>
-            <RefreshCw size={12}/>{scoringAll?'Syncing...':'Score All'}
-          </button>
-          {total>0&&<button onClick={selectAll} style={{display:'flex',alignItems:'center',gap:'4px',padding:'6px 10px',background:'white',border:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',color:'#475569'}}>
-            <CheckSquare size={12}/> Select All
-          </button>}
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 18px' }}>
+          {drawerTab === 'profile' && <ProfileTab app={app} apiUrl={API_URL} />}
+          {drawerTab === 'notes' && <NotesTab appId={app.id} showToast={showToast} />}
+          {drawerTab === 'scorecards' && <ScorecardsTab appId={app.id} showToast={showToast} />}
+          {drawerTab === 'activity' && <ActivityTab candidateId={app.candidate_id} />}
         </div>
       </div>
-
-      {/* KPI Header */}
-      {kpis.length>0&&(<div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:'6px',flexShrink:0}}>
-        {kpis.map(({l,v,c})=>(<div key={l} style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'10px',padding:'8px 10px'}}>
-          <div style={{fontSize:'15px',fontWeight:'800',color:'#0f172a'}}>{v}</div>
-          <div style={{fontSize:'9px',color:'#94a3b8',textTransform:'uppercase',letterSpacing:'0.06em',marginTop:'1px'}}>{l}</div>
-          <div style={{height:'2px',background:c,borderRadius:'1px',width:'55%',marginTop:'3px'}}/>
-        </div>))}
-      </div>)}
-
-      {/* Intelligence Bar */}
-      {chips.length>0&&(<div style={{display:'flex',gap:'6px',flexWrap:'wrap',alignItems:'center',flexShrink:0,padding:'4px 0',borderTop:'1px solid #f1f5f9',borderBottom:'1px solid #f1f5f9'}}>
-        <span style={{fontSize:'9px',fontWeight:'700',color:'#94a3b8',textTransform:'uppercase',letterSpacing:'0.08em'}}>AI Intel</span>
-        {chips.map(({k,l,e,c,bg})=>{const cnt=intel?((intel[k]||[]).length||(intel.counts?.[k]||0)):0;const isA=activeChip===k;return(<button key={k} onClick={()=>setActiveChip(isA?null:k)} style={{display:'flex',alignItems:'center',gap:'3px',padding:'3px 9px',borderRadius:'20px',fontSize:'10px',fontWeight:'700',cursor:'pointer',border:isA?`2px solid ${c}`:`1px solid ${c}30`,background:isA?c:bg,color:isA?'white':c,transition:'all 0.15s'}}>{e} {l} <span style={{background:isA?'rgba(255,255,255,0.3)':`${c}20`,borderRadius:'10px',padding:'0 4px'}}>{cnt}</span></button>);})}
-        {activeChip&&<button onClick={()=>setActiveChip(null)} style={{fontSize:'10px',color:'#94a3b8',background:'none',border:'none',cursor:'pointer'}}>✕</button>}
-      </div>)}
-
-      {/* Collapsible panels */}
-      {showAnalytics&&analyticsData.length>0&&<StageAnalyticsPanel data={analyticsData}/>}
-      {showCopilot&&copilot&&<CopilotPanel data={copilot} onClose={()=>setShowCopilot(false)}/>}
-
-      {/* Main content */}
-      <div style={{display:'flex',gap:'9px',overflow:'hidden'}}>
-        {showFilters&&<FiltersPanel filters={filters} setFilters={setFilters} options={filterOpts} onClose={()=>setShowFilters(false)}/>}
-        <div style={{flex:'none',height:'420px',overflowX:'auto',overflowY:'hidden',marginTop:'4px'}}>
-          <div style={{display:'flex',gap:'9px',height:'400px',minWidth:`${STAGES.length*252}px`}}>
-            {STAGES.map(st=>{
-              const cards=board[st.key]||[];const isDT=dragOver===st.key;
-              return(
-                <div key={st.key} onDragOver={e=>{e.preventDefault();setDragOver(st.key);}} onDragLeave={()=>setDragOver(null)} onDrop={e=>{e.preventDefault();setDragOver(null);const {card,from}=dragRef.current||{};if(!card||from===st.key)return;move(card.id,st.key,from,card.candidate_name);}}
-                  style={{width:'245px',flexShrink:0,display:'flex',flexDirection:'column',gap:'7px',background:isDT?st.bg:'#f8fafc',border:isDT?`2px dashed ${st.color}`:'2px dashed transparent',borderRadius:'14px',padding:'8px',transition:'all 0.15s'}}>
-                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
-                    <div style={{display:'flex',alignItems:'center',gap:'5px'}}><div style={{width:'7px',height:'7px',borderRadius:'50%',background:st.color}}/><span style={{fontSize:'10px',fontWeight:'800',color:'#0f172a',textTransform:'uppercase',letterSpacing:'0.06em'}}>{st.label}</span></div>
-                    <span style={{fontSize:'10px',fontWeight:'800',color:'white',background:st.color,padding:'1px 7px',borderRadius:'20px'}}>{cards.length}</span>
-                  </div>
-                  <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:'6px'}}>
-                    {loading&&!local?<div style={{padding:'16px',textAlign:'center',color:'#94a3b8',fontSize:'11px'}}>Loading...</div>
-                    :cards.length===0?<div style={{padding:'16px',textAlign:'center',color:'#cbd5e1',fontSize:'11px',border:'2px dashed #e2e8f0',borderRadius:'10px'}}>Drop here</div>
-                    :cards.map((card:any)=>{
-                      const skills:string[]=Array.isArray(card.skills)?card.skills:[];
-                      const isDrg=dragging?.id===card.id;const isSel=selected.has(card.id);
-                      const ctc=fmtCtc(card.expected_ctc);const notice=card.notice_period_days;
-                      return(
-                        <div key={card.id} draggable
-                          onDragStart={e=>{dragRef.current={card,from:st.key};setDragging(card);e.dataTransfer.effectAllowed='move';}}
-                          onDragEnd={()=>{setDragging(null);setDragOver(null);dragRef.current=null;}}
-                          style={{background:'white',borderRadius:'10px',padding:'10px',border:isSel?'2px solid #3b82f6':'1px solid #e2e8f0',cursor:'grab',boxShadow:isDrg?'0 8px 24px rgba(0,0,0,0.15)':isSel?'0 0 0 3px #3b82f615':'0 1px 3px rgba(0,0,0,0.06)',opacity:isDrg?0.5:1,transform:isDrg?'rotate(2deg)':'none',userSelect:'none',position:'relative'}}>
-                          <div onClick={e=>{e.stopPropagation();toggleSel(card.id);}} style={{position:'absolute',top:'7px',right:'7px',cursor:'pointer',zIndex:1}}>
-                            {isSel?<CheckSquare size={13} color="#3b82f6"/>:<Square size={13} color="#cbd5e1"/>}
-                          </div>
-                          <div onClick={()=>{setDrawer({...card,stageKey:st.key});setDrawerTab('overview');}}>
-                            <div style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'5px',paddingRight:'16px'}}>
-                              <div style={{width:'28px',height:'28px',borderRadius:'50%',background:av(card.candidate_name),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'700',color:'white',flexShrink:0}}>{ini(card.candidate_name)}</div>
-                              <div style={{flex:1,minWidth:0}}>
-                                <div style={{fontSize:'12px',fontWeight:'700',color:'#0f172a',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',display:'flex',alignItems:'center',gap:'3px'}}>
-                                  <div style={{width:'6px',height:'6px',borderRadius:'50%',background:colorDotMap[card.color_indicator||'grey']||'#cbd5e1',flexShrink:0}}/>
-                                  {card.candidate_name}
-                                </div>
-                                <div style={{fontSize:'10px',color:'#94a3b8',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{card.current_employer||'—'}</div>
-                              </div>
-                              {card.fit_score&&<div style={{fontSize:'10px',fontWeight:'800',padding:'1px 5px',borderRadius:'4px',background:fitBg(card.fit_score),color:fitCl(card.fit_score),flexShrink:0}}>{Math.round(card.fit_score*100)}%</div>}
-                            </div>
-                            {skills.length>0&&<div style={{display:'flex',gap:'3px',flexWrap:'wrap',marginBottom:'5px'}}>{skills.slice(0,2).map((sk:string,i:number)=>(<span key={i} style={{padding:'1px 4px',borderRadius:'3px',fontSize:'9px',background:'#eff6ff',color:'#2563eb',fontWeight:'600'}}>{sk}</span>))}{skills.length>2&&<span style={{fontSize:'9px',color:'#94a3b8'}}>+{skills.length-2}</span>}</div>}
-                            <div style={{display:'flex',gap:'5px',flexWrap:'wrap',marginBottom:'5px'}}>
-                              {ctc&&<span style={{fontSize:'9px',color:'#16a34a',fontWeight:'600',background:'#f0fdf4',padding:'1px 4px',borderRadius:'3px'}}>{ctc}</span>}
-                              {notice&&<span style={{fontSize:'9px',color:'#d97706',fontWeight:'600',background:'#fffbeb',padding:'1px 4px',borderRadius:'3px'}}>{notice}d</span>}
-                              {card.location&&<span style={{fontSize:'9px',color:'#475569',display:'flex',alignItems:'center',gap:'2px'}}><MapPin size={8}/>{card.location.split(',')[0]}</span>}
-                            </div>
-                            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',borderTop:'1px solid #f1f5f9',paddingTop:'5px'}}>
-                              <span style={{fontSize:'9px',color:'#94a3b8'}}>{expL(card.total_exp_mo||0)}{card.days_in_stage?` · ${card.days_in_stage}d`:''}</span>
-                              <div style={{display:'flex',gap:'3px'}}>
-                                {[{I:Mail,c:'#3b82f6',a:(e:any)=>{e.stopPropagation();if(card.email)window.open(`mailto:${card.email}`,'_blank');else showT('No email','err');}},
-                                  {I:MessageCircle,c:'#22c55e',a:(e:any)=>{e.stopPropagation();if(card.phone)window.open(`https://wa.me/91${card.phone.replace(/\D/g,'')}?text=Hi ${encodeURIComponent(card.candidate_name)}`,'_blank');else showT('No phone','err');}},
-                                  {I:Phone,c:'#f59e0b',a:(e:any)=>{e.stopPropagation();if(card.phone)window.open(`tel:${card.phone}`);else showT('No phone','err');}},
-                                ].map(({I,c,a},i)=>(<button key={i} onClick={a} style={{width:'20px',height:'20px',borderRadius:'4px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}} onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background=c+'18';}} onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='white';}}><I size={9} color={c}/></button>))}
-                              </div>
-                            </div>
-                          </div>
-                        </div>);
-                    })}
-                  </div>
-                </div>);})}
-          </div>
-        </div>
-      </div>
-    </div>);
+    </div>
+  );
 }
 
+// ── Profile Tab ───────────────────────────────────────────────────────────────
+function ProfileTab({ app, apiUrl }: any) {
+  const skills: string[] = app.skills || [];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <InfoCard title="Contact Info">
+        {app.email && <InfoRow label={`📧 ${app.email}`} />}
+        {app.phone && <InfoRow label={`📱 ${app.phone}`} />}
+        {app.location && <InfoRow label={`📍 ${app.location}`} />}
+        {app.total_exp_mo > 0 && <InfoRow label={`💼 ${gx(app.total_exp_mo)} experience`} />}
+        {app.notice_period_days != null && <InfoRow label={`⏰ ${app.notice_period_days}d notice period`} />}
+        {app.expected_ctc && <InfoRow label={`💰 Expected ₹${(app.expected_ctc / 100000).toFixed(1)}L`} />}
+      </InfoCard>
+      {skills.length > 0 && (
+        <InfoCard title={`Skills (${skills.length})`}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+            {skills.map((sk: string) => <span key={sk} style={{ fontSize: 11, fontWeight: 600, padding: '3px 9px', borderRadius: 999, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>)}
+          </div>
+        </InfoCard>
+      )}
+      {[{ label: 'JD Match Score', val: app.jd_match_score }, { label: 'AI Match Score', val: app.ai_match_score }, { label: 'Fit Score', val: app.fit_score }].filter(r => r.val != null).length > 0 && (
+        <InfoCard title="AI Assessment">
+          {[{ label: 'JD Match Score', val: app.jd_match_score }, { label: 'AI Match Score', val: app.ai_match_score }, { label: 'Fit Score', val: app.fit_score }].filter(r => r.val != null).map(r => (
+            <div key={r.label} style={{ marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                <span style={{ fontSize: 11, color: '#64748B' }}>{r.label}</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: scoreColor(r.val) }}>{Math.round(r.val!)}%</span>
+              </div>
+              <div style={{ height: 5, background: '#E2E8F0', borderRadius: 3, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${Math.min(r.val!, 100)}%`, background: scoreColor(r.val), borderRadius: 3 }} />
+              </div>
+            </div>
+          ))}
+        </InfoCard>
+      )}
+      {app.resume_path && (
+        <a href={`${apiUrl}${app.resume_path}`} target="_blank" rel="noreferrer"
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 14px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 10, textDecoration: 'none', color: '#15803D', fontSize: 12, fontWeight: 700 }}>
+          <Download size={13} /> Download Resume
+        </a>
+      )}
+      <a href={`/candidates/${app.candidate_id}`} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 14px', background: '#1E40AF', color: '#fff', borderRadius: 8, textDecoration: 'none', fontSize: 12, fontWeight: 700, width: 'fit-content' }}>
+        <ExternalLink size={12} /> Full ATS Profile
+      </a>
+    </div>
+  );
+}
+
+// ── Notes Tab ─────────────────────────────────────────────────────────────────
+function NotesTab({ appId, showToast }: any) {
+  const [notes, setNotes] = useState<any[]>([]);
+  const [text, setText] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setLoading(true);
+    apiFetch(`/applications/${appId}/notes`).then(d => setNotes(Array.isArray(d) ? d : [])).catch(() => {}).finally(() => setLoading(false));
+  }, [appId]);
+  async function addNote() {
+    if (!text.trim()) return;
+    setSaving(true);
+    try {
+      const note = await apiFetch(`/applications/${appId}/notes`, { method: 'POST', body: JSON.stringify({ note: text }) });
+      setNotes(prev => [note, ...prev]); setText(''); showToast('Note added');
+    } catch (e: any) { showToast(String(e?.message || 'Failed'), false); } finally { setSaving(false); }
+  }
+  return (
+    <div>
+      <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Add a note…"
+        style={{ width: '100%', padding: '10px 12px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, resize: 'vertical', minHeight: 80, outline: 'none', fontFamily: 'inherit', color: '#374151', marginBottom: 8 }} />
+      <button onClick={addNote} disabled={!text.trim() || saving}
+        style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: text.trim() && !saving ? 'pointer' : 'not-allowed', opacity: text.trim() && !saving ? 1 : 0.5, marginBottom: 16 }}>
+        <Send size={12} /> {saving ? 'Saving…' : 'Add Note'}
+      </button>
+      {loading && <div style={{ color: '#94A3B8', fontSize: 12, textAlign: 'center', padding: 20 }}>Loading…</div>}
+      {!loading && notes.length === 0 && <div style={{ color: '#CBD5E1', fontSize: 12, textAlign: 'center', padding: 20, fontStyle: 'italic' }}>No notes yet</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {notes.map((n: any) => (
+          <div key={n.id} style={{ background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, padding: '10px 12px' }}>
+            <div style={{ fontSize: 12, color: '#374151', lineHeight: 1.5, marginBottom: 4 }}>{n.text}</div>
+            <div style={{ fontSize: 10, color: '#94A3B8' }}>{n.author || 'Recruiter'} · {ago(n.created_at)}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Scorecards Tab ────────────────────────────────────────────────────────────
+function ScorecardsTab({ appId, showToast }: any) {
+  const { data: scorecards, refresh } = useFetch<any[]>(`/interview-scorecards?application_id=${appId}`);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ round: 'L1', overall_rating: '', recommendation: 'yes', notes: '' });
+  const [saving, setSaving] = useState(false);
+  async function submit() {
+    setSaving(true);
+    try {
+      await apiFetch('/interview-scorecards', { method: 'POST', body: JSON.stringify({ application_id: appId, round: form.round, overall_rating: form.overall_rating ? parseFloat(form.overall_rating) : null, recommendation: form.recommendation, notes: form.notes, scores: {} }) });
+      setAdding(false); setForm({ round: 'L1', overall_rating: '', recommendation: 'yes', notes: '' }); refresh(); showToast('Scorecard added');
+    } catch (e: any) { showToast(String(e?.message || 'Failed'), false); } finally { setSaving(false); }
+  }
+  const RECO_COLORS: Record<string, string> = { strong_yes: '#16A34A', yes: '#059669', neutral: '#F59E0B', no: '#DC2626', strong_no: '#7F1D1D' };
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: '#64748B' }}>{scorecards?.length || 0} scorecard(s)</span>
+        <button onClick={() => setAdding(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}><Plus size={12} /> Add Scorecard</button>
+      </div>
+      {adding && (
+        <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 10, padding: 14, marginBottom: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+            <div>
+              <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>ROUND</label>
+              <select value={form.round} onChange={e => setForm(f => ({ ...f, round: e.target.value }))} style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 }}>
+                {['L1','L2','HR','Technical','Final'].map(r => <option key={r}>{r}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>RATING (1–5)</label>
+              <input type="number" min="1" max="5" step="0.5" value={form.overall_rating} onChange={e => setForm(f => ({ ...f, overall_rating: e.target.value }))} placeholder="e.g. 4.5" style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 }} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>RECOMMENDATION</label>
+            <select value={form.recommendation} onChange={e => setForm(f => ({ ...f, recommendation: e.target.value }))} style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 }}>
+              {['strong_yes','yes','neutral','no','strong_no'].map(r => <option key={r} value={r}>{r.replace('_', ' ')}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom: 10 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>NOTES</label>
+            <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Interview observations…" style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, resize: 'vertical', minHeight: 60, fontFamily: 'inherit' }} />
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={submit} disabled={saving} style={{ padding: '7px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{saving ? 'Saving…' : 'Save Scorecard'}</button>
+            <button onClick={() => setAdding(false)} style={{ padding: '7px 12px', background: '#F1F5F9', color: '#64748B', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {(scorecards || []).map((sc: any) => (
+          <div key={sc.id} style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 10, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: '#1E293B' }}>{sc.round}</span>
+                {sc.overall_rating && <span style={{ background: '#FFFBEB', color: '#CA8A04', fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 999, border: '1px solid #FDE68A' }}>⭐ {sc.overall_rating}/5</span>}
+              </div>
+              {sc.recommendation && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: (RECO_COLORS[sc.recommendation] || '#94A3B8') + '20', color: RECO_COLORS[sc.recommendation] || '#94A3B8' }}>{sc.recommendation.replace('_', ' ')}</span>}
+            </div>
+            {sc.notes && <div style={{ fontSize: 12, color: '#374151', lineHeight: 1.5, marginBottom: 4 }}>{sc.notes}</div>}
+            <div style={{ fontSize: 10, color: '#94A3B8' }}>{ago(sc.created_at)}</div>
+          </div>
+        ))}
+        {(!scorecards || scorecards.length === 0) && !adding && <div style={{ color: '#CBD5E1', fontSize: 12, textAlign: 'center', padding: 20, fontStyle: 'italic' }}>No scorecards yet</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── Activity Tab ──────────────────────────────────────────────────────────────
+function ActivityTab({ candidateId }: any) {
+  const { data: activities } = useFetch<any[]>(`/activities/${candidateId}`);
+  const ACT_ICONS: Record<string, string> = { note: '📝', email_sent: '📧', status_change: '🔄', interview_scheduled: '📅', offer_made: '💼', call_logged: '📞' };
+  return (
+    <div>
+      {(!activities || activities.length === 0) && <div style={{ color: '#CBD5E1', fontSize: 12, textAlign: 'center', padding: 30, fontStyle: 'italic' }}>No activities recorded</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {(activities || []).map((act: any, i: number) => (
+          <div key={act.id} style={{ display: 'flex', gap: 10, paddingBottom: 14 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#F1F5F9', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, flexShrink: 0 }}>
+                {ACT_ICONS[act.activity_type] || '●'}
+              </div>
+              {i < (activities?.length || 0) - 1 && <div style={{ width: 1, flex: 1, background: '#E2E8F0', marginTop: 3 }} />}
+            </div>
+            <div style={{ flex: 1, paddingTop: 3 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#1E293B' }}>{act.title}</div>
+              {act.description && <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>{act.description}</div>}
+              <div style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>{ago(act.created_at)}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Shared UI ─────────────────────────────────────────────────────────────────
+function InfoCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: '14px 16px' }}>
+      <div style={{ fontSize: 10, fontWeight: 800, color: '#94A3B8', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 10 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+function InfoRow({ label }: { label: string }) {
+  return <div style={{ fontSize: 12, color: '#374151', marginBottom: 6 }}>{label}</div>;
+}
+
+// ── Export with Suspense wrapper ──────────────────────────────────────────────
+export default function PipelinePage() {
+  return (
+    <Suspense fallback={
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', color: '#64748B', fontSize: 13 }}>
+        Loading pipeline…
+      </div>
+    }>
+      <PipelineInner />
+    </Suspense>
+  );
+}

@@ -1,8 +1,9 @@
 'use client';
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
-import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock } from 'lucide-react';
+import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy } from 'lucide-react';
 
 const SKILLS_LIST = [
   'Python','Java','React','Node.js','FastAPI','Django','AWS','Docker','Kubernetes',
@@ -57,8 +58,18 @@ function fmtLakh(val: number): string {
   return String(val);
 }
 
-function JobCard({ req, onEdit, onDelete }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void }) {
+function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any }) {
   const [hover, setHover] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  function shareShortlist(e: React.MouseEvent) {
+    e.stopPropagation();
+    // token = base64url(tenantId:reqId) — decoded by /client-portal/view/:token
+    const tenantId = req.tenant_id || '';
+    const token = btoa(tenantId + ':' + req.id).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+    const url = window.location.origin + '/client-portal/' + token;
+    navigator.clipboard.writeText(url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2500); });
+  }
   const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
   const wm = WORK_MODE_CONFIG[req.work_mode] || WORK_MODE_CONFIG.onsite;
   const [clientNow, setClientNow] = useState<number|undefined>(undefined);
@@ -151,12 +162,12 @@ function JobCard({ req, onEdit, onDelete }: { req: any; onEdit: (r: any) => void
           <span style={{
             display: 'flex', alignItems: 'center', gap: '3px',
             fontSize: '11px', fontWeight: '500', padding: '2px 8px', borderRadius: '6px',
-            background: days < 0 ? '#fef2f2' : days <= 7 ? '#fefce8' : '#f8fafc',
-            color: days < 0 ? '#dc2626' : days <= 7 ? '#ca8a04' : '#64748b',
-            border: `1px solid ${days < 0 ? '#fecaca' : days <= 7 ? '#fde68a' : '#e2e8f0'}`,
+            background: days < 0 ? '#fef2f2' : days <= 7 ? '#fefce8' : '#f0fdf4',
+            color: days < 0 ? '#dc2626' : days <= 7 ? '#ca8a04' : '#15803d',
+            border: `1px solid ${days < 0 ? '#fecaca' : days <= 7 ? '#fde68a' : '#bbf7d0'}`,
           }}>
             <Clock size={10} />
-            {days < 0 ? `${Math.abs(days)}d overdue` : days === 0 ? 'Due today' : `${days}d left`}
+            {days < 0 ? `🔴 Overdue (${Math.abs(days)}d)` : days === 0 ? '⚠️ Due today' : days <= 1 ? `⚠️ ${days}d left` : `${days} days left`}
           </span>
         )}
       </div>
@@ -191,7 +202,86 @@ function JobCard({ req, onEdit, onDelete }: { req: any; onEdit: (r: any) => void
         </p>
       )}
 
-      {/* Actions */}
+      {/* Mini Pipeline Bar — inbox matches + pipeline stages */}
+      {counts && (counts.inbox_count > 0 || counts.total > 0) && (() => {
+        const stages = [
+          {key:'contacted',  label:'Contacted',  color:'#06b6d4'},
+          {key:'interested', label:'Interested', color:'#3b82f6'},
+          {key:'nda',        label:'NDA',         color:'#f59e0b'},
+          {key:'sourced',    label:'Sourced',     color:'#6366f1'},
+          {key:'screened',   label:'Screened',    color:'#0891b2'},
+          {key:'submitted',  label:'Submitted',   color:'#64748b'},
+          {key:'interview',  label:'Interview',   color:'#7c3aed'},
+          {key:'on_hold',    label:'Hold',        color:'#94a3b8'},
+          {key:'offer',      label:'Offer',       color:'#ca8a04'},
+          {key:'placed',     label:'Placed',      color:'#16a34a'},
+        ];
+        const active = stages.filter(s => counts[s.key] > 0);
+        const maxCount = Math.max(...stages.map(s => counts[s.key]||0), counts.inbox_count||0, 1);
+        return (
+          <div style={{ borderTop:'1px solid #f1f5f9', paddingTop:10, marginTop:4 }}>
+            {/* Row 1: inbox vs pipeline counts */}
+            <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:8, flexWrap:'wrap' }}>
+              {/* Inbox badge */}
+              <a href={`/resume-inbox?req=${req.id}`} style={{ textDecoration:'none' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:4, padding:'3px 10px', borderRadius:20, background:'#7c3aed', cursor:'pointer' }} title="Resumes auto-matched to this JD from inbox">
+                  <span style={{ fontSize:13, fontWeight:800, color:'#fff' }}>{counts.inbox_count||0}</span>
+                  <span style={{ fontSize:9, fontWeight:600, color:'#e9d5ff', textTransform:'uppercase', letterSpacing:'0.05em' }}>📬 Inbox</span>
+                </div>
+              </a>
+              {/* Pipeline badge */}
+              <a href={`/pipeline?job=${req.id}`} style={{ textDecoration:'none' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:4, padding:'3px 10px', borderRadius:20, background:'#1e40af', cursor:'pointer' }} title="Candidates formally in pipeline stages">
+                  <span style={{ fontSize:13, fontWeight:800, color:'#fff' }}>{counts.total}</span>
+                  <span style={{ fontSize:9, fontWeight:600, color:'#93c5fd', textTransform:'uppercase', letterSpacing:'0.05em' }}>🔄 Pipeline</span>
+                </div>
+              </a>
+              {/* Stage pills */}
+              {active.map(s => (
+                <div key={s.key} style={{ display:'flex', alignItems:'center', gap:2, padding:'2px 7px', borderRadius:10, background:s.color+'14', border:`1px solid ${s.color}30` }}>
+                  <span style={{ fontSize:11, fontWeight:800, color:s.color }}>{counts[s.key]}</span>
+                  <span style={{ fontSize:9, fontWeight:500, color:s.color }}>{s.label}</span>
+                </div>
+              ))}
+              {counts.rejected > 0 && (
+                <span style={{ fontSize:10, color:'#94a3b8', marginLeft:'auto' }}>{counts.rejected} ✗</span>
+              )}
+            </div>
+            {/* Row 2: Pipeline funnel — prominent segmented bar */}
+            {counts.total > 0 && (
+              <div style={{ marginTop:6 }}>
+                <div style={{ fontSize:9, fontWeight:700, color:'#94a3b8', letterSpacing:'0.06em', textTransform:'uppercase', marginBottom:5 }}>
+                  Pipeline Funnel — {counts.total} candidate{counts.total!==1?'s':''}
+                </div>
+                <div style={{ display:'flex', borderRadius:6, overflow:'hidden', height:14, gap:'1px', background:'#e2e8f0' }}>
+                  {stages.map(s => counts[s.key] > 0 ? (
+                    <div key={s.key} title={`${s.label}: ${counts[s.key]}`}
+                      style={{ background:s.color, flex:counts[s.key], minWidth:6 }} />
+                  ) : null)}
+                </div>
+                <div style={{ display:'flex', gap:'6px 12px', marginTop:6, flexWrap:'wrap' }}>
+                  {active.map(s => (
+                    <div key={s.key} style={{ display:'flex', alignItems:'center', gap:3 }}>
+                      <div style={{ width:8, height:8, borderRadius:2, background:s.color, flexShrink:0 }} />
+                      <span style={{ fontSize:10, fontWeight:700, color:s.color }}>{counts[s.key]}</span>
+                      <span style={{ fontSize:10, color:'#64748b' }}>{s.label}</span>
+                    </div>
+                  ))}
+                  {counts.rejected > 0 && (
+                    <div style={{ display:'flex', alignItems:'center', gap:3, marginLeft:'auto' }}>
+                      <div style={{ width:8, height:8, borderRadius:2, background:'#ef4444', flexShrink:0 }} />
+                      <span style={{ fontSize:10, fontWeight:700, color:'#ef4444' }}>{counts.rejected}</span>
+                      <span style={{ fontSize:10, color:'#64748b' }}>Rejected</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+            {/* Actions */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: '8px',
         paddingTop: '10px', borderTop: '1px solid #f1f5f9',
@@ -205,6 +295,16 @@ function JobCard({ req, onEdit, onDelete }: { req: any; onEdit: (r: any) => void
         }}>
           <Eye size={12} /> View Pipeline
         </a>
+        <button onClick={shareShortlist} title="Copy client shortlist link" style={{
+          display: 'flex', alignItems: 'center', gap: '4px',
+          fontSize: '12px', fontWeight: '600',
+          color: copied ? '#15803d' : '#7c3aed',
+          background: copied ? '#f0fdf4' : '#faf5ff',
+          border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
+          padding: '5px 10px', borderRadius: '6px', cursor: 'pointer',
+        }}>
+          {copied ? <><Copy size={11}/> Copied!</> : <><Link2 size={11}/> Share</>}
+        </button>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '4px' }}>
           <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{
             width: '30px', height: '30px', borderRadius: '7px',
@@ -232,13 +332,14 @@ export default function RequisitionsPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('open');
   const [priorityFilter, setPriorityFilter] = useState('');
   const [workModeFilter, setWorkModeFilter] = useState('');
   const [skillInput, setSkillInput] = useState('');
   const [error, setError] = useState('');
 
   const { data: rawReqs, loading, refetch } = useFetch<any>('/requisitions');
+  const { data: stageCounts } = useFetch<any>('/pipeline/req-stage-counts');
   const reqs: any[] = Array.isArray(rawReqs) ? rawReqs : (rawReqs?.items || []);
 
   const filtered = reqs.filter(r =>
@@ -278,6 +379,16 @@ export default function RequisitionsPage() {
     });
     setEditId(req.id); setError(''); setShowModal(true);
   };
+
+  // auto-open edit modal when URL has ?edit=<id>
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const eid = searchParams.get('edit');
+    if (!eid || !reqs.length) return;
+    const target = reqs.find((r) => r.id === eid);
+    if (target) openEdit(target);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, reqs]);
 
   const f = (key: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setForm(prev => ({ ...prev, [key]: e.target.value }));
@@ -434,7 +545,7 @@ export default function RequisitionsPage() {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(380px,1fr))', gap: '16px' }}>
           {filtered.map((req: any) => (
-            <JobCard key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} />
+            <JobCard key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} />
           ))}
         </div>
       )}

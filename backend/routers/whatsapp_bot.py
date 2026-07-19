@@ -115,8 +115,11 @@ async def send_message(phone: str, message: str, actor: Actor = Depends(get_acto
 async def bot_status(actor: Actor = Depends(get_actor)):
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{WAHA_URL}/api/health", headers={"X-Api-Key": WAHA_KEY})
-            waha_ok = r.status_code == 200
+            r = await client.get(f"{WAHA_URL}/api/sessions/default", headers={"X-Api-Key": WAHA_KEY})
+            if r.status_code == 200:
+                waha_ok = r.json().get("status") == "WORKING"
+            else:
+                waha_ok = False
     except Exception:
         waha_ok = False
     return {"waha_connected": waha_ok, "commands": ["HELP","STATUS","INTERVIEW","CALLBACK","ACCEPT","DECLINE"]}

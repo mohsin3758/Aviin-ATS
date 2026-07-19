@@ -297,3 +297,63 @@ async def create_notification(body: dict, actor: Actor=Depends(get_actor)):
              body.get('message'), body.get('type','info'),
              body.get('resource'), body.get('resource_id'))
     return dict(row)
+
+
+# ── Public Jobs Board (no auth) ───────────────────────────────────────────────
+import db as _db_public
+
+public_jobs_router = APIRouter(prefix="/public", tags=["public"])
+
+@public_jobs_router.get("/jobs")
+async def public_list_jobs(
+    tenant_id: str,
+    search: Optional[str] = None,
+    location: Optional[str] = None,
+):
+    """No-auth public job board endpoint — uses db.tenant_conn for RLS."""
+    async with _db_public.tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT r.id, r.title, r.location, r.employment_type, r.description,
+                   r.skills_required, r.positions_count, r.created_at
+            FROM requisitions r
+            WHERE r.tenant_id=$1::uuid AND r.status='open'
+              AND ($2::text IS NULL OR lower(r.title) LIKE '%'||lower($2)||'%')
+              AND ($3::text IS NULL OR lower(r.location) LIKE '%'||lower($3)||'%')
+            ORDER BY r.created_at DESC LIMIT 50
+        """, tenant_id, search, location)
+    return [dict(r) for r in rows]
+
+@public_jobs_router.post("/jobs/apply")
+async def public_apply(body: dict):
+    """No-auth public job application — uses db.tenant_conn for RLS."""
+    tenant_id = body.get('tenant_id', '')
+    job_id = body.get('job_id', '')
+    if not tenant_id or not job_id:
+        raise HTTPException(status_code=400, detail="tenant_id and job_id required")
+    async with _db_public.tenant_conn(tenant_id) as conn:
+        job = await conn.fetchrow(
+            "SELECT id FROM requisitions WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='open'",
+            job_id, tenant_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found or closed")
+        email = body.get('email', '').lower()
+        cand = await conn.fetchrow(
+            "SELECT id FROM candidates WHERE email=$1 AND tenant_id=$2::uuid",
+            email, tenant_id)
+        if not cand:
+            cand = await conn.fetchrow("""
+                INSERT INTO candidates
+                  (tenant_id, full_name, email, phone, location, current_employer, total_exp_mo, source)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, 'job_board') RETURNING id
+            """, tenant_id,
+                 body.get('full_name', ''), email,
+                 body.get('phone'), body.get('location'),
+                 body.get('current_employer'),
+                 int(body.get('experience_months', 0)))
+        await conn.execute("""
+            INSERT INTO applications (tenant_id, candidate_id, requisition_id, stage)
+            VALUES ($1::uuid, $2, $3::uuid, 'sourced')
+            ON CONFLICT DO NOTHING
+        """, tenant_id, cand['id'], job_id)
+    return {"applied": True, "candidate_id": str(cand['id'])}
+

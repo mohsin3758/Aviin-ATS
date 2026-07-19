@@ -38,7 +38,7 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                     await conn.execute(
                         """INSERT INTO candidates (tenant_id,full_name,email,phone,location,
                            total_exp_mo,current_employer,skills,source)
-                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,"csv_import")""",
+                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'csv_import')""",
                         actor.tenant_id, name, email or None,
                         (row.get("phone") or "").strip() or None,
                         (row.get("location") or "").strip() or None,

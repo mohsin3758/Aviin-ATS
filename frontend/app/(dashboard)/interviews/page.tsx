@@ -181,6 +181,15 @@ export default function InterviewsPage() {
                         const title=encodeURIComponent('Interview: '+(iv.candidate||'')+' - '+(iv.job_title||'Position'));
                         window.open('https://calendar.google.com/calendar/render?action=TEMPLATE&text='+title+'&dates='+fmt(dt)+'/'+fmt(end),'_blank');
                       }} title="Add to Google Calendar" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'800',color:'#4285F4'}}>G</button>}
+                        {iv.scheduled_at&&<button onClick={()=>{
+                        const dt=new Date(iv.scheduled_at);
+                        const end=new Date(dt.getTime()+(iv.duration_mins||60)*60000);
+                        const fmt2=(d:Date)=>d.toISOString().replace(/[-:.]/g,'').slice(0,15)+'Z';
+                        const title2=encodeURIComponent('Interview: '+(iv.candidate||'')+' - '+(iv.job_title||'Position'));
+                        const loc=iv.meeting_link?encodeURIComponent(iv.meeting_link):'';
+                        window.open('https://outlook.office.com/calendar/action/compose?rru=addevent&startdt='+fmt2(dt)+'&enddt='+fmt2(end)+'&subject='+title2+'&location='+loc,'_blank');
+                      }} title="Add to Outlook Calendar" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'9px',fontWeight:'800',color:'#0078d4'}}>OL</button>}
+                        {iv.calendar_id&&<a href={"/api/calendar/"+(iv.calendar_id||"")+"/download"} target="_blank" title="Download .ics" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',textDecoration:'none',fontSize:'10px',fontWeight:'800',color:'#64748b'}}>📅</a>}
                     {iv.meeting_link&&<button onClick={()=>window.open(iv.meeting_link,'_blank')} title="Join meeting" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}><Video size={12} color="#8b5cf6"/></button>}
                       </div>
                     </td>

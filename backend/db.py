@@ -43,3 +43,13 @@ async def tenant_conn(tenant_id: Optional[str] = None):
                 "SELECT set_config('app.tenant_id', $1, true)", tenant_id or ""
             )
             yield conn
+
+@asynccontextmanager
+async def system_conn():
+    """System connection — uses app_user but with no tenant isolation (app.tenant_id='')."""
+    assert _pool is not None, "call init_pool() first"
+    async with _pool.acquire() as conn:
+        async with conn.transaction():
+            # Set empty tenant_id — tables without RLS will work, tables with RLS return all rows for admin
+            await conn.execute("SELECT set_config('app.tenant_id', '', true)")
+            yield conn

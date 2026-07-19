@@ -78,6 +78,21 @@ async def get_me(actor: Actor = Depends(get_actor)):
         """, actor.tenant_id, actor.user_id)
     return dict(row) if row else {}
 
+@router.put("/me")
+async def update_me(body: dict, actor: Actor = Depends(get_actor)):
+    allowed = ['full_name','phone','department','designation','location']
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        return {"updated": False}
+    set_clause = ', '.join(f"{k}=${i+2}" for i, k in enumerate(updates.keys()))
+    vals = list(updates.values())
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute(
+            f"UPDATE users SET {set_clause} WHERE id=$1",
+            actor.user_id, *vals)
+    return {"updated": True}
+
+
 
 @router.post("")
 async def create_user(body: UserCreate, actor: Actor = Depends(get_actor)):
@@ -107,8 +122,61 @@ async def create_user(body: UserCreate, actor: Actor = Depends(get_actor)):
             body.full_name, body.role, body.department, body.designation,
             body.phone, body.employee_id, body.reporting_to,
             body.joining_date, body.location, body.capacity_weekly or 40)
+        # Read email settings INSIDE the connection block (before conn closes)
+        _cfg = await conn.fetchrow(
+            "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE",
+            actor.tenant_id)
+    # Send welcome email in background thread using pre-fetched SMTP settings
+    try:
+        import threading, smtplib as _smtp
+        from email.mime.text import MIMEText as _MIMEText
+        from email.mime.multipart import MIMEMultipart as _MIMEMulti
+        if _cfg and _cfg["smtp_host"]:
+            _h=_cfg["smtp_host"]; _p=_cfg["smtp_port"] or 587
+            _u=_cfg["smtp_user"] or ""; _pw=_cfg["smtp_password"] or ""
+            _f=_cfg["smtp_from"] or _u; _fn=_cfg["smtp_from_name"] or "AVIIN ATS"
+            _tls=_cfg["smtp_tls"] if _cfg["smtp_tls"] is not None else True
+            _to=body.email; _name=body.full_name; _pass=body.password; _role=body.role
+            def _go(h=_h,p=_p,u=_u,pw=_pw,f=_f,fn=_fn,tls=_tls,to=_to,nm=_name,pa=_pass,rl=_role):
+                try:
+                    msg=_MIMEMulti()
+                    msg["Subject"]="Your AVIIN ATS Login Credentials"
+                    msg["From"]=f"{fn} <{f}>"
+                    msg["To"]=to
+                    lines = [
+                        "Dear " + nm + ",",
+                        "",
+                        "Your AVIIN ATS account has been created.",
+                        "",
+                        "Login Details:",
+                        "Website : https://ats.aviinjobs.com/login",
+                        "Email   : " + to,
+                        "Password: " + pa,
+                        "Role    : " + rl,
+                        "",
+                        "Please login and change your password after first login.",
+                        "",
+                        "Best regards,",
+                        "AVIIN Jobs Services",
+                        "https://ats.aviinjobs.com",
+                    ]
+                    txt = chr(10).join(lines)
+                    msg.attach(_MIMEText(txt,"plain"))
+                    with _smtp.SMTP(h,p,timeout=10) as s:
+                        s.ehlo()
+                        if tls and p==587:
+                            s.starttls(); s.ehlo()
+                        if u: s.login(u,pw)
+                        s.sendmail(f,[to],msg.as_string())
+                    print(f"Invite sent to {to}")
+                except Exception as ex:
+                    print(f"Invite failed: {ex}")
+            threading.Thread(target=_go,daemon=True).start()
+        else:
+            print("No active SMTP config - invite email skipped")
+    except Exception as ex:
+        print(f"Invite setup error: {ex}")
     return dict(row)
-
 
 @router.get("/{user_id}")
 async def get_user(user_id: str, actor: Actor = Depends(get_actor)):

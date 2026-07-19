@@ -1,88 +1,56 @@
-# FinStack Staffing OS — Production Docker Compose Override
-# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-#
-# REQUIRED before running:
-#   1. Set DOMAIN in .env.prod (do NOT use finstack.aviinjobs.com — that may be taken)
-#   2. Run scripts/ssl-init.sh to obtain Let's Encrypt certificates
-#   3. Copy .env.prod.example to .env.prod and fill in all required values
-#   4. Run scripts/deploy-prod.sh for the full automated deploy
-
-name: finstack-prod
-
+version: '3.9'
+# Production: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 services:
-  # Nginx reverse proxy with SSL termination
   nginx:
-    image: nginx:1.27-alpine
-    container_name: finstack_nginx
-    restart: unless-stopped
+    image: nginx:1.25-alpine
+    container_name: airecruit_nginx
     ports:
-      - "80:80"
-      - "443:443"
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - certbot_www:/var/www/certbot:ro
-      - certbot_conf:/etc/letsencrypt:ro
+      - /home/dev/airecruit/nginx/nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
     depends_on:
-      - frontend
       - backend
-    networks: [finstack]
-    healthcheck:
-      test: ["CMD", "nginx", "-t"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - frontend
+    restart: unless-stopped
 
-  # Certbot for SSL certificate renewal
-  certbot:
-    image: certbot/certbot:latest
-    container_name: finstack_certbot
-    volumes:
-      - certbot_www:/var/www/certbot
-      - certbot_conf:/etc/letsencrypt
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot --webroot-path /var/www/certbot --quiet; sleep 12h & wait $${!}; done;'"
-    networks: [finstack]
-
-  # Frontend — production build (override dev CMD)
-  frontend:
-    environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://${DOMAIN}}
-      NODE_ENV: production
-    ports:
-      - "127.0.0.1:3001:3001"  # bind to loopback only — nginx proxies externally
-
-  # Backend — production hardening
   backend:
-    ports:
-      - "127.0.0.1:8080:8080"  # bind to loopback only — nginx proxies externally
+    ports: []
     environment:
-      ERP_ENCRYPT_KEY: ${ERP_ENCRYPT_KEY:?Set ERP_ENCRYPT_KEY in .env.prod — must be strong random key}
+      - NEXT_PUBLIC_API_URL=https://ats.aviinjobs.com/api
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1g
+    restart: unless-stopped
 
-  # DB — no external port in production
+  frontend:
+    ports: []
+    environment:
+      - NEXT_PUBLIC_API_URL=https://ats.aviinjobs.com/api
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    restart: unless-stopped
+
   db:
-    ports: []  # remove public port — accessible only inside finstack network
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    restart: unless-stopped
 
-  # n8n — internal only
-  n8n:
-    ports:
-      - "127.0.0.1:5678:5678"
-
-  # WAHA — internal only
-  waha:
-    ports:
-      - "127.0.0.1:3000:3000"
-
-  # Embed — internal only
   embed:
     ports: []
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    restart: unless-stopped
 
-  # Ollama — internal only
   ollama:
     ports: []
-
-volumes:
-  certbot_www:
-  certbot_conf:
+    restart: unless-stopped

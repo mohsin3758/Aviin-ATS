@@ -8,7 +8,7 @@ import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 
-const STAGES = ['sourced', 'screened', 'submitted', 'interview', 'offer', 'placed'] as const;
+const STAGES = ['sourced', 'contacted', 'interested', 'nda', 'screened', 'submitted', 'l1_interview', 'l2_interview', 'offer', 'offer_accepted', 'placed', 'rejected', 'hold'] as const;
 const STAGE_LABEL: Record<string, string> = {
   sourced: 'Sourced',
   screened: 'Screened',

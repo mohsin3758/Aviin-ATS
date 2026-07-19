@@ -321,3 +321,103 @@ was observed to mis-select "1. No, exit" on 2026-06-15).
 Do NOT use the systemd + ANTHROPIC_API_KEY installer pattern from the
 original blueprint (install-24x7.sh) — that's a different (paid API
 key) auth path and is unnecessary given the existing OAuth login.
+
+
+## Phase Status
+| Phase | Name | Status |
+|-------|------|--------|
+| P0  | Project Bootstrap & Auth | DONE |
+| P1  | Candidate & Requisition Core | DONE |
+| P2  | n8n Workflow Automation | DONE |
+| P3  | Zero-Token AI Engine | DONE |
+| P4  | Pipeline & Applications | DONE |
+| P5  | Recruiter Command Center | DONE |
+| P6  | Finance & ERP Module | DONE |
+| P7  | Assessment & Anti-cheat | DONE |
+| P8  | BGV & Compliance | DONE |
+| P9  | WhatsApp Chatbot (WAHA) | DONE |
+| P10 | Analytics & Reporting | DONE |
+| P11 | Offer Management | DONE |
+| P12 | ERP Extensions | DONE |
+| P13 | BGV Deep Checks | DONE |
+| P14 | Placements & Redeployment | DONE |
+| P15 | Recruiter Performance & Incentive Engine | DONE |
+| P16 | KAE Module & Account Ownership | DONE |
+| P17 | Account Financial Framework & CEO Dashboard | DONE |
+| P18 | Resume & JD Intelligence (Regex NER) | DONE |
+| P19 | Candidate Intelligence Engine | DONE |
+| P20 | Technical Assessment & Video Intelligence | DONE |
+| P21 | AI Shortlisting & Predictive Hiring (sklearn) | DONE |
+| P22 | Recruiter & Vendor Analytics | DONE |
+
+## New Tables (P15-P22)
+P15: recruiter_kpi_scores, recruiter_advanced_kpis, candidate_retention_tracking,
+     incentive_records, retention_bank, loyalty_milestones
+P16: client_owners, account_visibility, kae_kpi_scores, kae_incentives, kae_client_retention
+P17: account_pl, delivery_pool_allocations, contribution_margins,
+     collection_records, bu_eligibility
+P18: candidate_parsed_data, jd_parsed_data
+P19: candidate_scores (+ v_candidate_intelligence view)
+P20: technical_assessments
+P21: placement_predictions
+P22: vendor_agencies, source_attribution
+
+## New Routes (P15-P22)
+/incentives      — KPI scorecard, grade, payout, retention bank, loyalty
+/kae             — Account ownership, L1-L5 visibility, KAE scorecard
+/account-pl      — Account P&L with CM engine (trigger-computed)
+/collections     — Invoice collection tracking + aging
+/bu-tracker      — BU eligibility evaluation
+/ceo-dashboard   — Aggregated CEO view
+/intelligence    — Resume NER + semantic scoring (BGE-small)
+/assessments     — MCQ/video assessments + anti-cheat
+/predictions     — sklearn LogisticRegression placement probability
+/vendor-analytics — Vendor ROI, recruiter funnel, diversity
+/scheduler       — APScheduler jobs (retention bank release, loyalty checks)
+
+## Zero-Token Architecture
+Tier 0: SQL rules (triggers, views) — KPI grading, incentive calc, CM, aging
+Tier 1: BGE-small-en-v1.5 (http://embed:8081) — semantic candidate-JD matching
+Tier 2: scikit-learn LogisticRegression (local, in-process) — placement prediction
+Tier 3: Ollama Qwen2.5-1.5B (http://ollama:11434) — AI CFO, JD generation (cached)
+NEVER call external LLM APIs.
+
+## Scheduler (APScheduler in FastAPI)
+- Daily 02:00: process_retention_bank_releases() — release held amounts past due_date
+- Daily 02:15: check_loyalty_milestones() — flag achieved milestones for payment
+- Weekly Sun 03:00: refresh_kae_retention_months() — increment months_served
+- Monthly 1st 04:00: send_monthly_incentive_summary() — n8n webhook trigger
+
+## Production (docker-compose.prod.yml)
+- nginx with SSL termination (Let's Encrypt via certbot)
+- All services internal, only nginx exposed on 80/443
+- NEXT_PUBLIC_API_URL set to https://yourdomain.com/api
+
+## P23-P35 Features (added 2026-06-21)
+| Feature | Phase | Status |
+|---------|-------|--------|
+| Skills Taxonomy (71 skills + aliases) | P23 | DONE |
+| Bulk CV Upload + AI Parse + Dup Detection | P23 | DONE |
+| Email Template Engine (6 templates) | P24 | DONE |
+| Interview Scheduler | P24 | DONE |
+| Candidate Activity Timeline | P24 | DONE |
+| Client Portal (shortlist, feedback) | P25 | DONE |
+| SLA Dashboard + Time-to-fill | P26 | DONE |
+| Audit Log | P26 | DONE |
+| JD Template Library (10 templates) | P27 | DONE |
+| CSV Exports (4 reports) | P28 | DONE |
+| Public Job Board | P29 | DONE |
+| n8n Automation Workflows (10 triggers) | P30 | DONE |
+| Salary Benchmarking (26 benchmarks) | P31 | DONE |
+| Market Demand Intelligence | P31 | DONE |
+| In-app Notification Center | P32 | DONE |
+| Candidate Tags (12 default tags) | P33 | DONE |
+| Interview Question Bank (26 questions) | P34 | DONE |
+| Duplicate Candidate Detection | P35 | DONE |
+| User Management (27 staffing roles) | NEW | DONE |
+
+## New Routes (P23-P35)
+/skills, /bulk-cv, /email-templates, /interviews, /client-portal,
+/sla, /audit, /jd-templates, /export/*, /jobs, /salary-benchmark,
+/notifications, /automations, /candidate-tags, /question-bank, /duplicates
+/users, /roles

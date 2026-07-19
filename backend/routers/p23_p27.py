@@ -283,6 +283,80 @@ async def upcoming_interviews(actor: Actor=Depends(get_actor)):
             ORDER BY i.scheduled_at ASC LIMIT 20
         """, actor.tenant_id)
     return [dict(r) for r in rows]
+@interview_router.post("/{interview_id}/send-reminder")
+async def send_interview_reminder(interview_id: str, actor: Actor=Depends(get_actor)):
+    """Send an email reminder for a scheduled interview."""
+    import smtplib, asyncpg, os as _os
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            SELECT i.*, c.full_name AS candidate_name, c.email AS candidate_email,
+                   u.full_name AS interviewer_name
+            FROM interview_schedules i
+            JOIN candidates c ON c.id=i.candidate_id
+            LEFT JOIN users u ON u.id=i.interviewer_id
+            WHERE i.id=$1 AND i.tenant_id=$2
+        """, interview_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "Interview not found")
+        if row['status'] != 'scheduled':
+            raise HTTPException(400, "Interview is not in scheduled state")
+        # Update reminder_sent_at
+        await conn.execute(
+            "UPDATE interview_schedules SET reminder_sent_at=now() WHERE id=$1 AND tenant_id=$2",
+            interview_id, actor.tenant_id)
+    # Send email via tenant SMTP
+    sent = False
+    email = row['candidate_email']
+    if email:
+        try:
+            _db_url = _os.environ.get("DATABASE_URL", "postgresql://app_user:apppw@db:5432/ats")
+            _conn = await asyncpg.connect(_db_url)
+            try:
+                _cfg = await _conn.fetchrow(
+                    "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls "
+                    "FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE LIMIT 1", actor.tenant_id)
+                if _cfg and _cfg['smtp_host']:
+                    _h = _cfg['smtp_host']; _p = _cfg['smtp_port'] or 587
+                    _u = _cfg['smtp_user'] or ''; _pw = _cfg['smtp_password'] or ''
+                    _f = _cfg['smtp_from'] or _u; _fn = _cfg['smtp_from_name'] or 'AVIIN ATS'
+                    _tls = _cfg['smtp_tls'] if _cfg['smtp_tls'] is not None else True
+                    sched_str = str(row['scheduled_at'])
+                    _em = MIMEMultipart()
+                    _em['Subject'] = f"Interview Reminder: {row['interview_type'].title()} Interview"
+                    _em['From'] = f"{_fn} <{_f}>"
+                    _em['To'] = email
+                    body_parts = [
+                        f"Dear {row['candidate_name']},",
+                        "",
+                        f"This is a reminder for your upcoming {row['interview_type'].title()} interview.",
+                        "",
+                        f"Date & Time : {sched_str}",
+                        f"Duration    : {row['duration_mins']} minutes",
+                        f"Mode        : {row['mode'].replace('_', ' ').title()}",
+                    ]
+                    if row['meeting_link']:
+                        body_parts.append(f"Meeting Link: {row['meeting_link']}")
+                    if row['location']:
+                        body_parts.append(f"Location    : {row['location']}")
+                    if row['notes']:
+                        body_parts += ["", f"Notes: {row['notes']}"]
+                    body_parts += ["", "Best regards,", "AVIIN Jobs Services", "https://ats.aviinjobs.com"]
+                    _em.attach(MIMEText(chr(10).join(body_parts), "plain"))
+                    with smtplib.SMTP(_h, _p, timeout=10) as _s:
+                        _s.ehlo()
+                        if _tls and _p == 587:
+                            _s.starttls(); _s.ehlo()
+                        if _u:
+                            _s.login(_u, _pw)
+                        _s.sendmail(_f, [email], _em.as_string())
+                    sent = True
+            finally:
+                await _conn.close()
+        except Exception as exc:
+            print(f"Reminder email error: {exc}")
+    return {"sent": sent, "reminder_sent_at": str(row['scheduled_at']), "channel": "email" if sent else "none"}
 
 # ── P25: Client Portal ────────────────────────────────────────
 client_portal_router = APIRouter(prefix="/client-portal", tags=["client-portal"])
@@ -345,6 +419,62 @@ async def submit_feedback(body: dict, actor: Actor=Depends(get_actor)):
              body.get('requisition_id'), body['decision'],
              body.get('feedback_text'), body.get('rating'))
     return dict(row) if row else {"status": "already submitted"}
+
+# ── Public client-portal endpoints (no auth, token-based) ─────────────────
+import base64 as _b64
+import db as _cpdb
+
+@client_portal_router.get("/view/{token}")
+async def public_shortlist(token: str):
+    """No-auth shortlist view. token = base64url(tenant_id:req_id)."""
+    try:
+        decoded = _b64.urlsafe_b64decode(token + '==').decode()
+        tenant_id, req_id = decoded.split(':', 1)
+    except Exception:
+        raise HTTPException(400, "Invalid token")
+    async with _cpdb.tenant_conn(tenant_id) as conn:
+        req_row = await conn.fetchrow(
+            "SELECT id, title, client_name, status FROM requisitions WHERE id=$1::uuid AND tenant_id=$2::uuid",
+            req_id, tenant_id)
+        if not req_row:
+            raise HTTPException(404, "Requisition not found")
+        rows = await conn.fetch("""
+            SELECT a.id AS application_id, a.stage, a.created_at AS submitted_at,
+                   c.id AS candidate_id, c.full_name, c.total_exp_mo, c.skills,
+                   c.location, c.current_employer, c.current_designation,
+                   cs.readiness_index, cs.readiness_grade,
+                   cf.decision AS client_decision, cf.feedback_text
+            FROM applications a
+            JOIN candidates c ON c.id=a.candidate_id
+            LEFT JOIN candidate_scores cs ON cs.candidate_id=c.id AND cs.tenant_id=c.tenant_id
+            LEFT JOIN client_feedback cf ON cf.application_id=a.id
+            WHERE a.requisition_id=$1 AND a.tenant_id=$2
+            ORDER BY cs.readiness_index DESC NULLS LAST
+        """, req_id, tenant_id)
+    return {
+        "requisition": dict(req_row),
+        "candidates": [dict(r) for r in rows],
+        "tenant_id": tenant_id,
+    }
+
+@client_portal_router.post("/feedback-public")
+async def public_feedback(body: dict):
+    """No-auth feedback submission. body must include token."""
+    token = body.get('token', '')
+    try:
+        decoded = _b64.urlsafe_b64decode(token + '==').decode()
+        tenant_id, req_id = decoded.split(':', 1)
+    except Exception:
+        raise HTTPException(400, "Invalid token")
+    async with _cpdb.tenant_conn(tenant_id) as conn:
+        await conn.execute("""
+            INSERT INTO client_feedback
+              (tenant_id, application_id, candidate_id, requisition_id, decision, feedback_text, rating)
+            VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7)
+            ON CONFLICT DO NOTHING
+        """, tenant_id, body.get('application_id'), body['candidate_id'],
+             req_id, body['decision'], body.get('feedback_text'), body.get('rating'))
+    return {"status": "ok"}
 
 # ── P26: SLA Dashboard ────────────────────────────────────────
 sla_router = APIRouter(prefix="/sla", tags=["sla"])

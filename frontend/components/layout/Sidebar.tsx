@@ -1,8 +1,10 @@
 'use client';
 import Link from 'next/link';
+import { getTokenPayload } from '@/lib/auth';
 import { useState, useEffect } from 'react';
+import { usePathname } from 'next/navigation';
 import {
-  LayoutDashboard, Users, Building2, Briefcase, KanbanSquare,
+  Inbox, LayoutDashboard, Users, Building2, Briefcase, KanbanSquare,
   Brain, Sparkles, TrendingUp, ClipboardCheck,
   Calendar, FileText, BookOpen, Globe, Share2, ClipboardList,
   BarChart3, PieChart, AlertTriangle, Heart, Target,
@@ -18,10 +20,10 @@ const NAV_GROUPS = [
   { id:'core', label:'CORE', defaultOpen:true, items:[
     { icon:LayoutDashboard, href:'/dashboard',    label:'Dashboard' },
     { icon:Users,           href:'/candidates',   label:'Candidates' },
-    { icon:Building2,       href:'/companies',    label:'Companies' },
-    { icon:Briefcase,       href:'/requisitions', label:'Jobs / Requisitions' },
+    { icon:Building2,       href:'/companies',    label:'Companies', roles:['admin','super_admin','kae','kae_manager','lead_recruiter'] },
+    { icon:Briefcase,       href:'/requisitions', label:'Jobs / Requisitions', roles:['admin','super_admin','kae','kae_manager','lead_recruiter'] },
     { icon:KanbanSquare,    href:'/pipeline',     label:'Pipeline (Kanban)' },
-    { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity' },
+    { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity', roles:['admin','super_admin','lead_recruiter'] },
   ]},
   { id:'ai', label:'AI & INTELLIGENCE', defaultOpen:true, items:[
     { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },
@@ -30,6 +32,7 @@ const NAV_GROUPS = [
     { icon:ClipboardCheck,  href:'/assessments',  label:'Assessments' },
   ]},
   { id:'recruitment', label:'RECRUITMENT', defaultOpen:true, items:[
+    { icon:Inbox,           href:'/resume-inbox',  label:'Resume Inbox' },
     { icon:Calendar,        href:'/interviews',   label:'Interviews' },
     { icon:FileText,       href:'/offers',       label:'Offer Engine' },
     { icon:FileText,        href:'/jd-templates', label:'JD Templates' },
@@ -44,6 +47,7 @@ const NAV_GROUPS = [
     { icon:AlertTriangle,   href:'/sla',               label:'SLA Dashboard' },
     { icon:TrendingUp,      href:'/revenue-forecast',  label:'Revenue Forecast' },
     { icon:Heart,           href:'/client-health',     label:'Client Health' },
+    { icon:Building2,       href:'/clients',           label:'Clients & Packs' },
     { icon:Target,          href:'/headcount',         label:'Headcount Plan' },
   ]},
   { id:'finance', label:'FINANCE', defaultOpen:false, items:[
@@ -75,19 +79,31 @@ const NAV_GROUPS = [
     { icon:Truck,           href:'/vendor-analytics', label:'Vendor Analytics' },
   ]},
   { id:'settings', label:'SETTINGS', defaultOpen:false, items:[
-    { icon:UserCog,         href:'/settings/users',  label:'Users & Roles' },
-    { icon:Lock,            href:'/security',        label:'Security / 2FA' },
-    { icon:BookMarked,      href:'/settings/skills', label:'Skills Taxonomy' },
-    { icon:Palette,         href:'/themes',          label:'6 Themes' },
+    { icon:UserCog,         href:'/settings/users',       label:'Users & Roles' },
+    { icon:Mail,            href:'/settings/email',           label:'Company Email (SMTP)' },
+    { icon:MessageSquare,   href:'/settings/signatures',       label:'Email Signatures', roles:['admin','lead_recruiter','recruiter','delivery','kae','kae_manager'] },
+    { icon:Lock,            href:'/security',             label:'Security / 2FA' },
+    { icon:BookMarked,      href:'/settings/skills',      label:'Skills Taxonomy' },
+    { icon:Palette,         href:'/themes',               label:'6 Themes' },
+  ]},
+  { id:'my_account', label:'MY ACCOUNT', defaultOpen:true, items:[
+    { icon:Mail,            href:'/settings/mail-accounts', label:'My Email Accounts' },
+    { icon:MessageSquare,   href:'/settings/signatures',     label:'Email Signatures' },
+    { icon:MessageSquare,   href:'/conversations',           label:'My Mailbox' },
+    { icon:UserCog,         href:'/profile',                 label:'My Profile' },
   ]},
 ];
 
 export function Sidebar() {
-  // Client-only path — server always renders '' (no active state), avoids hydration mismatch
-  const [pathname, setPathname] = useState('');
-  useEffect(() => { setPathname(window.location.pathname); }, []);
+  // usePathname auto-updates on every navigation change
+  const pathname = usePathname() || '';
 
   const [collapsed, setCollapsed] = useState(false);
+  const [_mounted2, set_Mounted2] = useState(false);
+  useEffect(() => { set_Mounted2(true); }, []);
+  const userRole = _mounted2 ? (getTokenPayload()?.role || 'admin') : 'admin';
+  const isAdmin = ['admin','super_admin'].includes(userRole);
+  const isLead = ['admin','super_admin','lead_recruiter'].includes(userRole);
   const [openGroups, setOpenGroups] = useState<Record<string,boolean>>(
     () => Object.fromEntries(NAV_GROUPS.map(g => [g.id, g.defaultOpen]))
   );
@@ -96,6 +112,9 @@ export function Sidebar() {
     pathname === href || (href !== '/dashboard' && pathname.startsWith(href));
 
   // Auto-open group containing active page
+  useEffect(() => {
+    // no-op: usePathname handles updates
+  }, []);
   useEffect(() => {
     NAV_GROUPS.forEach(group => {
       if (group.items.some(item => isActive(item.href))) {
@@ -154,7 +173,19 @@ export function Sidebar() {
 
         {/* Nav items */}
         <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '8px 6px 16px', }} suppressHydrationWarning>
-          {NAV_GROUPS.map(group => {
+          {_mounted2 ? NAV_GROUPS.filter(group => {
+            // Role-based sidebar filtering
+            if (userRole === 'recruiter' || userRole === 'delivery') {
+              return ['core','recruitment','ai','communication','my_account'].includes(group.id);
+            }
+            if (userRole === 'kae' || userRole === 'kae_manager') {
+              return ['core','recruitment','finance','settings','communication','my_account'].includes(group.id);
+            }
+            if (userRole === 'lead_recruiter') {
+              return !['finance','incentives','vendors'].includes(group.id);
+            }
+            return true; // admin/super_admin see everything
+          }).map(group => {
             const isOpen = openGroups[group.id];
             const hasActive = group.items.some(item => isActive(item.href));
 
@@ -205,12 +236,17 @@ export function Sidebar() {
                 )}
 
                 {/* Items */}
-                <div style={{
+                <div suppressHydrationWarning style={{
                   overflow: 'hidden',
                   maxHeight: collapsed ? '1000px' : (isOpen ? '600px' : '0px'),
                   transition: collapsed ? 'none' : 'max-height 0.22s ease',
                 }}>
-                  {group.items.map(item => {
+                  {group.items.filter((item:any) => {
+                    if (!item.roles) return true;
+                    // Only filter AFTER client is mounted (prevents hydration mismatch)
+                    if (!_mounted2) return true;
+                    return item.roles.includes(userRole);
+                  }).map(item => {
                     const active = isActive(item.href);
                     return (
                       <Link
@@ -266,7 +302,7 @@ export function Sidebar() {
                 </div>
               </div>
             );
-          })}
+          }) : null}
         </div>
 
         {/* Version footer */}

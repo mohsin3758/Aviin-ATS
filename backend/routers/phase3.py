@@ -1,3 +1,4 @@
+import os
 """Phase 3: Auto Interview Engine, Auto Offer Engine, Self-Scheduling, WhatsApp Integration."""
 import json, uuid, secrets, logging
 from datetime import datetime, timezone, timedelta
@@ -44,7 +45,11 @@ async def send_email(to: str, subject: str, body: str):
         msg["From"] = smtp_from
         msg["To"] = to
         msg.attach(MIMEText(body, "plain"))
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=5) as s:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as s:
+            s.ehlo()
+            if smtp_port == 587:
+                s.starttls()
+                s.ehlo()
             u = os.environ.get("SMTP_USER","")
             if u: s.login(u, os.environ.get("SMTP_PASS",""))
             s.sendmail(smtp_from, [to], msg.as_string())
@@ -166,7 +171,7 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
 
         # Move to interview stage if not already
         if app["stage"] != "interview":
-            await conn.execute("UPDATE applications SET stage='interview', updated_at=NOW() WHERE id=$1", body.application_id)
+            await conn.execute("UPDATE applications SET stage='l1_interview', updated_at=NOW() WHERE id=$1", body.application_id)
 
         # Update invite_sent_at
         await conn.execute("UPDATE interview_schedules SET invite_sent_at=NOW() WHERE id=$1", sched_id)
@@ -199,10 +204,12 @@ async def list_interviews(actor: Actor = Depends(get_actor)):
                    s.mode, s.meeting_link, s.location, s.status, s.rating, s.feedback,
                    c.full_name as candidate_name, c.email, c.phone,
                    r.title as job_title,
-                   EXTRACT(EPOCH FROM (s.scheduled_at - NOW()))/3600 as hours_until
+                   EXTRACT(EPOCH FROM (s.scheduled_at - NOW()))/3600 as hours_until,
+                   ce.id as calendar_id
             FROM interview_schedules s
             JOIN candidates c ON c.id=s.candidate_id
             LEFT JOIN requisitions r ON r.id=s.requisition_id
+            LEFT JOIN calendar_events ce ON ce.interview_id=s.id AND ce.tenant_id=s.tenant_id
             WHERE s.tenant_id=$1
             ORDER BY s.scheduled_at DESC LIMIT 100
         """, actor.tenant_id)
@@ -214,6 +221,7 @@ async def list_interviews(actor: Actor = Depends(get_actor)):
             "meeting_link": r["meeting_link"], "location": r["location"],
             "status": r["status"], "rating": r["rating"],
             "hours_until": round(float(r["hours_until"] or 0), 1),
+            "calendar_id": str(r["calendar_id"]) if r["calendar_id"] else None,
         } for r in rows]
 
 @auto_interview_router.post("/send-reminder/{schedule_id}")
@@ -310,10 +318,10 @@ HR Team, {company}"""
         await conn.execute("DELETE FROM offers WHERE application_id=$1 AND tenant_id=$2",
                            body.application_id, actor.tenant_id)
         await conn.execute("""
-            INSERT INTO offers (id,tenant_id,application_id,status,ctc_offered,currency,joining_date)
-            VALUES ($1,$2,$3,'issued',$4,$5,$6)
+            INSERT INTO offers (id,tenant_id,application_id,status,ctc_offered,currency,joining_date,offer_letter_text)
+            VALUES ($1,$2,$3,'issued',$4,$5,$6,$7)
         """, offer_id, actor.tenant_id, body.application_id,
-             body.ctc_offered, body.currency, joining_date_obj)
+             body.ctc_offered, body.currency, joining_date_obj, offer_text)
 
         # Move to offer stage
         await conn.execute("UPDATE applications SET stage='offer', updated_at=NOW() WHERE id=$1", body.application_id)
@@ -401,21 +409,13 @@ async def get_available_slots(actor: Actor = Depends(get_actor)):
 
 @schedule_router.get("/public/{token}")
 async def get_public_schedule(token: str):
-    """Public endpoint — candidate visits this to see their status and book slot."""
-    async with db.tenant_conn(None) as conn:
-        row = await conn.fetchrow("""
-            SELECT cst.candidate_id, cst.expires_at, cst.tenant_id,
-                   c.full_name, c.email,
-                   a.stage, a.id as application_id,
-                   r.title as job_title
-            FROM candidate_status_tokens cst
-            JOIN candidates c ON c.id=cst.candidate_id
-            LEFT JOIN applications a ON a.candidate_id=cst.candidate_id AND a.tenant_id=cst.tenant_id
-            LEFT JOIN requisitions r ON r.id=a.requisition_id
-            WHERE cst.token=$1 AND cst.expires_at > NOW()
-            ORDER BY a.updated_at DESC LIMIT 1
-        """, token)
-        if not row: raise HTTPException(404, "Link expired or invalid")
+    """Public endpoint — no auth, uses SECURITY DEFINER to bypass RLS UUID cast."""
+    async with db.system_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM get_schedule_by_token($1)", token
+        )
+    if not row:
+        raise HTTPException(404, "Link expired or invalid")
 
         # Get upcoming slots
         slots = []
@@ -443,29 +443,25 @@ async def get_public_schedule(token: str):
 
 @schedule_router.post("/book/{token}")
 async def book_slot(token: str, slot_datetime: str, mode: str = "video"):
-    """Candidate books an interview slot via public link."""
-    async with db.tenant_conn(None) as conn:
-        row = await conn.fetchrow("""
-            SELECT cst.candidate_id, cst.tenant_id,
-                   a.id as application_id, c.full_name, c.email, c.phone, r.title as job_title
-            FROM candidate_status_tokens cst
-            JOIN candidates c ON c.id=cst.candidate_id
-            LEFT JOIN applications a ON a.candidate_id=cst.candidate_id AND a.tenant_id=cst.tenant_id
-            LEFT JOIN requisitions r ON r.id=a.requisition_id
-            WHERE cst.token=$1 AND cst.expires_at > NOW()
-            ORDER BY a.updated_at DESC LIMIT 1
-        """, token)
-        if not row: raise HTTPException(404, "Link expired or invalid")
-
-        scheduled_dt = datetime.fromisoformat(slot_datetime.replace("Z","+00:00"))
-        ics = await generate_ics(
-            title=f"Interview: {row['full_name']} - {row['job_title'] or 'Position'}",
-            start=scheduled_dt, duration_mins=60,
-            location="Video Call", description=f"Self-scheduled interview for {row['job_title']}",
-            attendees=[row["email"]] if row["email"] else []
+    """Candidate books an interview slot via public link — no auth, uses SECURITY DEFINER."""
+    async with db.system_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM get_schedule_by_token($1)", token
         )
+    if not row:
+        raise HTTPException(404, "Link expired or invalid")
 
-        sched_id = str(uuid.uuid4())
+    scheduled_dt = datetime.fromisoformat(slot_datetime.replace("Z", "+00:00"))
+    ics = await generate_ics(
+        title=f"Interview: {row['full_name']} - {row['job_title'] or 'Position'}",
+        start=scheduled_dt, duration_mins=60,
+        location="Video Call",
+        description=f"Self-scheduled interview for {row['job_title'] or 'Position'}",
+        attendees=[row["email"]] if row["email"] else []
+    )
+
+    sched_id = str(uuid.uuid4())
+    async with db.tenant_conn(str(row["tenant_id"])) as conn:
         await conn.execute("""
             INSERT INTO interview_schedules
             (id,tenant_id,application_id,candidate_id,interview_type,scheduled_at,
@@ -474,18 +470,19 @@ async def book_slot(token: str, slot_datetime: str, mode: str = "video"):
         """, sched_id, row["tenant_id"], row["application_id"], row["candidate_id"],
              scheduled_dt, mode)
 
-        return {
-            "booked": True,
-            "schedule_id": sched_id,
-            "datetime": slot_datetime,
-            "ics_content": ics,
-            "message": f"Interview confirmed for {scheduled_dt.strftime('%d %b at %I:%M %p')}. You will receive a calendar invite.",
-        }
+    return {
+        "booked": True,
+        "schedule_id": sched_id,
+        "datetime": slot_datetime,
+        "ics_content": ics,
+        "message": f"Interview confirmed for {scheduled_dt.strftime('%d %b at %I:%M %p')}. You will receive a calendar invite.",
+    }
+
 
 # ── WAHA Proxy Endpoints (for frontend WhatsApp Setup page) ──────────────────
 waha_router = APIRouter(prefix="/waha", tags=["waha"])
 WAHA_BASE = "http://waha:3000"
-WAHA_KEY  = "2037c635e42c471a9f2032800ee6ff5b"
+WAHA_KEY  = os.getenv("WAHA_API_KEY", "aviinATS2026secure")
 
 @waha_router.get("/status")
 async def waha_status():
@@ -509,16 +506,22 @@ async def waha_start():
     """Start WAHA session."""
     try:
         import httpx
+        BACKEND_URL = os.getenv("BACKEND_INTERNAL_URL", "http://aviin_backend:8080")
+        webhook_url = f"{BACKEND_URL}/whatsapp-bot/webhook"
         async with httpx.AsyncClient(timeout=10.0) as cli:
+            # Ensure session exists with correct webhook
+            await cli.post(f"{WAHA_BASE}/api/sessions",
+                          headers={"X-Api-Key": WAHA_KEY},
+                          json={"name": "default", "config": {"webhooks": [{"url": webhook_url, "events": ["message", "session.status"]}]}})
             # Start session
             r = await cli.post(f"{WAHA_BASE}/api/sessions/default/start",
                                headers={"X-Api-Key": WAHA_KEY})
-            started = r.status_code in (200,201)
+            started = r.status_code in (200,201,422)
             # Get status
             s = await cli.get(f"{WAHA_BASE}/api/sessions/default",
                               headers={"X-Api-Key": WAHA_KEY})
             status = s.json().get("status","UNKNOWN") if s.status_code==200 else "STARTING"
-            return {"started": started, "status": status}
+            return {"started": started, "status": status, "webhook": webhook_url}
     except Exception as e:
         return {"started": False, "error": str(e)}
 
@@ -595,3 +598,33 @@ async def waha_send(phone: str, message: str):
             return {"sent": r.status_code in (200,201), "status": r.status_code}
     except Exception as e:
         return {"sent": False, "error": str(e)}
+
+
+@auto_offer_router.get("/candidate/{candidate_id}")
+async def offers_by_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
+    """List all offers for a specific candidate."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT o.id, o.status, o.ctc_offered, o.currency, o.joining_date,
+                   o.offer_letter_text, o.created_at, o.updated_at,
+                   r.title as job_title, a.id as application_id, a.stage as app_stage
+            FROM offers o
+            JOIN applications a ON a.id=o.application_id
+            JOIN candidates c ON c.id=a.candidate_id
+            LEFT JOIN requisitions r ON r.id=a.requisition_id
+            WHERE o.tenant_id=$1 AND c.id=$2::uuid
+            ORDER BY o.created_at DESC
+        """, actor.tenant_id, candidate_id)
+        return [{
+            "id": str(r["id"]),
+            "status": r["status"],
+            "job_title": r["job_title"],
+            "ctc_offered": float(r["ctc_offered"] or 0),
+            "currency": r["currency"],
+            "joining_date": str(r["joining_date"]) if r["joining_date"] else None,
+            "offer_letter_text": r["offer_letter_text"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "application_id": str(r["application_id"]),
+            "app_stage": r["app_stage"],
+        } for r in rows]
+

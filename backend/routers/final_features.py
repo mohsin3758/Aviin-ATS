@@ -646,3 +646,44 @@ async def notify_all(event: str, message: str, data: dict = {},
                 """, h['id'])
                 sent += 1
     return {"event": event, "webhooks_notified": sent}
+
+
+@nurture_router.post('/{seq_id}/run-now')
+async def run_sequence_now(seq_id: str, actor: Actor = Depends(get_actor)):
+    '''Manually trigger a nurture sequence — returns count of candidates it would reach.'''
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        seq = await conn.fetchrow(
+            'SELECT * FROM nurture_sequences WHERE id=$1::uuid AND tenant_id=$2',
+            seq_id, actor.tenant_id)
+        if not seq:
+            raise HTTPException(404, 'Sequence not found')
+        import json as _json
+        steps = seq['steps'] if isinstance(seq['steps'], list) else _json.loads(seq['steps'] or '[]')
+        stage_map = {
+            'offer_made': 'offer', 'offer_accepted': 'offer_accepted',
+            'interview_scheduled': 'l1_interview', 'candidate_placed': 'placed',
+            'candidate_rejected': 'rejected', 'application_received': 'sourced',
+            'stage_change': None,
+        }
+        stage = stage_map.get(seq['trigger_event'])
+        if not stage:
+            return {'triggered': 0, 'message': 'No matching stage for trigger'}
+        rows = await conn.fetch('''
+            SELECT a.candidate_id, c.full_name, c.email
+            FROM applications a JOIN candidates c ON c.id=a.candidate_id
+            WHERE a.tenant_id=$1 AND a.stage=$2 AND c.email IS NOT NULL LIMIT 50
+        ''', actor.tenant_id, stage)
+        triggered = 0
+        for r in rows:
+            try:
+                await conn.execute('''
+                    INSERT INTO nurture_executions (tenant_id, sequence_id, candidate_id, step_idx, channel, sent_at)
+                    VALUES ($1, $2::uuid, $3, 0, $4, now())
+                    ON CONFLICT (sequence_id, candidate_id) DO UPDATE SET sent_at=now(), step_idx=0
+                ''', actor.tenant_id, seq_id, r['candidate_id'],
+                     steps[0].get('type', 'email') if steps else 'email')
+                triggered += 1
+            except Exception:
+                pass
+        return {'triggered': triggered, 'sequence': seq['name'],
+                'message': f'Sequence queued for {triggered} candidates in stage: {stage}'}
