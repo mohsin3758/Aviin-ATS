@@ -157,7 +157,11 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
 
     board: dict[str, list] = {stage: [] for stage in PIPELINE_STAGES}
     for row in rows:
-        board.setdefault(row["stage"], []).append(dict(row))
+        app = dict(row)
+        for key in ("app_notes", "app_tags"):
+            if isinstance(app.get(key), str):
+                app[key] = json.loads(app[key])
+        board.setdefault(row["stage"], []).append(app)
     return board
 
 

@@ -388,6 +388,7 @@ function PipelineInner() {
 function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const skills: string[] = app.skills || [];
+  const notesCount = Array.isArray(app.app_notes) ? app.app_notes.length : 0;
   return (
     <div draggable onDragStart={onDragStart} onClick={onClick}
       style={{ background: '#fff', border: '1px solid #EDF0F4', borderRadius: 10, padding: '11px 12px 9px', cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s', position: 'relative', userSelect: 'none' }}
@@ -428,6 +429,11 @@ function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
         {app.scorecard_count > 0 && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#EFF6FF', color: '#2563EB', border: '1px solid #BFDBFE' }}>
             <Star size={8} fill="#2563EB" /> {app.scorecard_count}
+          </span>
+        )}
+        {notesCount > 0 && (
+          <span title={`${notesCount} note${notesCount !== 1 ? 's' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#FFFBEB', color: '#CA8A04', border: '1px solid #FDE68A' }}>
+            <MessageSquare size={8} /> {notesCount}
           </span>
         )}
       </div>
