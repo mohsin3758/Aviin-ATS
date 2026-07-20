@@ -23,15 +23,17 @@
 -- -------------------------------------------------------------
 CREATE OR REPLACE FUNCTION match_candidates(p_req_id UUID, p_limit INT DEFAULT 10)
 RETURNS TABLE (
-  candidate_id      UUID,
-  full_name         TEXT,
-  email             TEXT,
-  skills            TEXT[],
-  total_exp_mo      INT,
-  location          TEXT,
-  cosine_similarity NUMERIC,
-  skill_overlap     INT,
-  fit_score         NUMERIC
+  candidate_id        UUID,
+  full_name           TEXT,
+  email               TEXT,
+  skills              TEXT[],
+  total_exp_mo        INT,
+  location            TEXT,
+  current_designation TEXT,
+  current_employer    TEXT,
+  cosine_similarity   NUMERIC,
+  skill_overlap       INT,
+  fit_score           NUMERIC
 )
 LANGUAGE sql STABLE AS $$
   WITH req AS (
@@ -44,6 +46,8 @@ LANGUAGE sql STABLE AS $$
     c.skills,
     c.total_exp_mo,
     c.location,
+    c.current_designation,
+    c.current_employer,
     ROUND(COALESCE(1 - (c.resume_embedding <=> req.jd_embedding), 0)::numeric, 4) AS cosine_similarity,
     COALESCE(cardinality(ARRAY(
       SELECT unnest(c.skills) INTERSECT SELECT unnest(req.skills_required)

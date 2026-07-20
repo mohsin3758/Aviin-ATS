@@ -369,7 +369,7 @@ function PipelineInner() {
 
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
       {addCandidateOpen && selectedJobId && (
-        <AddCandidateModal jobId={selectedJobId}
+        <AddCandidateModal jobId={selectedJobId} board={board}
           onClose={() => setAddCandidateOpen(false)}
           onAdded={() => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast('Candidate(s) added to pipeline'); }} />
       )}
@@ -707,12 +707,27 @@ function ActivityTab({ candidateId }: any) {
 }
 
 // ── Add Candidate Modal ──────────────────────────────────────────────────────
-function AddCandidateModal({ jobId, onClose, onAdded }: any) {
+// Shows candidates ranked by JD-match score (match_candidates(): 60% resume/JD
+// embedding similarity + 40% skill overlap, pre-sorted highest→lowest), not a
+// plain alphabetical/text search — matches how a recruiter actually shortlists.
+function AddCandidateModal({ jobId, board, onClose, onAdded }: any) {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
-  const { data, loading } = useFetch<any>(`/candidates?search=${encodeURIComponent(search)}&limit=20`);
-  const items: any[] = data?.items || [];
+  const { data: matches, loading } = useFetch<any[]>(`/requisitions/${jobId}/match-candidates?limit=50`);
+
+  const alreadyIn = new Set<string>(
+    Object.values(board || {}).flat().map((a: any) => a.candidate_id)
+  );
+
+  const q = search.trim().toLowerCase();
+  const items: any[] = (matches || []).filter((c: any) =>
+    !q ||
+    c.full_name?.toLowerCase().includes(q) ||
+    c.current_designation?.toLowerCase().includes(q) ||
+    c.current_employer?.toLowerCase().includes(q) ||
+    c.skills?.some((s: string) => s.toLowerCase().includes(q))
+  );
 
   function toggle(id: string) {
     setSelected(prev => {
@@ -740,37 +755,57 @@ function AddCandidateModal({ jobId, onClose, onAdded }: any) {
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
-      <div style={{ width: 480, maxWidth: '92vw', maxHeight: '80vh', background: '#fff', borderRadius: 14, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
-        <div style={{ padding: '16px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Add Candidate to Pipeline</div>
+      <div style={{ width: 560, maxWidth: '94vw', maxHeight: '84vh', background: '#fff', borderRadius: 14, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '16px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Add Candidate to Pipeline</div>
+            <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Ranked by JD match — highest score first</div>
+          </div>
           <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8' }}><X size={14} /></button>
         </div>
         <div style={{ padding: '12px 18px 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '7px 10px' }}>
             <Search size={13} color="#94A3B8" />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search candidates by name, skill, employer…" autoFocus
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter by name, skill, employer…" autoFocus
               style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', flex: 1 }} />
           </div>
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '10px 18px' }}>
-          {loading && <div style={{ textAlign: 'center', color: '#94A3B8', fontSize: 12, padding: 20 }}>Searching…</div>}
-          {!loading && items.length === 0 && <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>No candidates found</div>}
-          {items.map((c: any) => (
-            <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 6px', borderRadius: 8, cursor: 'pointer', background: selected.has(c.id) ? '#EFF6FF' : 'transparent' }}>
-              <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{c.full_name}</div>
-                <div style={{ fontSize: 11, color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ')}
+          {loading && <div style={{ textAlign: 'center', color: '#94A3B8', fontSize: 12, padding: 20 }}>Scoring candidates against this JD…</div>}
+          {!loading && items.length === 0 && <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>No matching candidates found</div>}
+          {items.map((c: any) => {
+            const isIn = alreadyIn.has(c.candidate_id);
+            const isSelected = selected.has(c.candidate_id);
+            return (
+              <label key={c.candidate_id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 8px', borderRadius: 10, cursor: isIn ? 'default' : 'pointer', background: isSelected ? '#EFF6FF' : 'transparent', opacity: isIn ? 0.55 : 1, marginBottom: 2 }}>
+                <input type="checkbox" checked={isSelected} disabled={isIn} onChange={() => toggle(c.candidate_id)} style={{ marginTop: 3 }} />
+                <div style={{ width: 40, height: 40, borderRadius: '50%', border: `2px solid ${scoreColor(c.fit_score)}`, background: scoreBg(c.fit_score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 900, color: scoreColor(c.fit_score), flexShrink: 0 }}>
+                  {Math.round(c.fit_score)}%
                 </div>
-              </div>
-              {c.pipeline_stage && (
-                <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>
-                  already: {c.pipeline_stage}
-                </span>
-              )}
-            </label>
-          ))}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{c.full_name}</span>
+                    {isIn && (
+                      <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>already in pipeline</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#64748B', marginTop: 1 }}>
+                    {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ') || '—'}
+                    {c.total_exp_mo > 0 && ` · ${gx(c.total_exp_mo)} exp`}
+                    {c.location && ` · ${c.location}`}
+                  </div>
+                  {c.skills?.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
+                      {c.skills.slice(0, 5).map((sk: string) => (
+                        <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>
+                      ))}
+                      {c.skills.length > 5 && <span style={{ fontSize: 9, color: '#94A3B8', padding: '2px 4px' }}>+{c.skills.length - 5}</span>}
+                    </div>
+                  )}
+                </div>
+              </label>
+            );
+          })}
         </div>
         <div style={{ padding: '12px 18px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: '#94A3B8' }}>{selected.size} selected</span>
