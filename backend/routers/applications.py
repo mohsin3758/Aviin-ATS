@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -282,7 +283,7 @@ async def get_app_notes(application_id: str, actor: Actor = Depends(get_actor)):
 
 @router.post("/{application_id}/notes")
 async def add_app_note(application_id: str, body: dict, actor: Actor = Depends(get_actor)):
-    import json as _json, uuid as _uuid
+    import uuid as _uuid
     from datetime import datetime, timezone
     text = body.get("note", "").strip()
     if not text:
@@ -294,7 +295,7 @@ async def add_app_note(application_id: str, body: dict, actor: Actor = Depends(g
             raise HTTPException(status_code=404, detail="Application not found")
         notes = row["app_notes"] or []
         if isinstance(notes, str):
-            notes = _json.loads(notes)
+            notes = json.loads(notes)
         new_note = {
             "id": str(_uuid.uuid4()),
             "text": text,
@@ -304,6 +305,6 @@ async def add_app_note(application_id: str, body: dict, actor: Actor = Depends(g
         notes = [new_note] + list(notes)
         await conn.execute(
             "UPDATE applications SET app_notes = $1 WHERE id = $2",
-            _json.dumps(notes), application_id,
+            json.dumps(notes), application_id,
         )
     return new_note

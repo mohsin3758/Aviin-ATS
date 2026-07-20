@@ -347,6 +347,7 @@ function PipelineInner() {
                     {apps.map(app => (
                       <KanbanCard key={app.id} app={app} stageColor={stage.color}
                         onClick={() => { setSelected(app); setDrawerTab('profile'); }}
+                        onNotesClick={() => { setSelected(app); setDrawerTab('notes'); }}
                         onDragStart={(e: React.DragEvent) => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }} />
                     ))}
                     {apps.length === 0 && (
@@ -385,15 +386,16 @@ function PipelineInner() {
 }
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
-function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
+function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart }: any) {
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const skills: string[] = app.skills || [];
   const notesCount = Array.isArray(app.app_notes) ? app.app_notes.length : 0;
+  const [hovered, setHovered] = useState(false);
   return (
     <div draggable onDragStart={onDragStart} onClick={onClick}
       style={{ background: '#fff', border: '1px solid #EDF0F4', borderRadius: 10, padding: '11px 12px 9px', cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s', position: 'relative', userSelect: 'none' }}
-      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 20px rgba(15,23,42,0.09)'; }}
-      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
+      onMouseEnter={e => { setHovered(true); (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 20px rgba(15,23,42,0.09)'; }}
+      onMouseLeave={e => { setHovered(false); (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
       <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: stageColor, borderRadius: '10px 0 0 10px' }} />
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 7 }}>
         <div style={{ width: 32, height: 32, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(app.candidate_name)},${avatarColor(app.candidate_name)}aa)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
@@ -431,9 +433,17 @@ function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
             <Star size={8} fill="#2563EB" /> {app.scorecard_count}
           </span>
         )}
-        {notesCount > 0 && (
-          <span title={`${notesCount} note${notesCount !== 1 ? 's' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#FFFBEB', color: '#CA8A04', border: '1px solid #FDE68A' }}>
+        {notesCount > 0 ? (
+          <span onClick={e => { e.stopPropagation(); onNotesClick?.(); }}
+            title={`${notesCount} note${notesCount !== 1 ? 's' : ''} — click to view`}
+            style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#FFFBEB', color: '#CA8A04', border: '1px solid #FDE68A', cursor: 'pointer' }}>
             <MessageSquare size={8} /> {notesCount}
+          </span>
+        ) : (
+          <span onClick={e => { e.stopPropagation(); onNotesClick?.(); }}
+            title="Add a note"
+            style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: '#F8FAFC', color: '#94A3B8', border: '1px solid #E2E8F0', cursor: 'pointer', marginLeft: 'auto', opacity: hovered ? 1 : 0, transition: 'opacity 0.15s' }}>
+            <MessageSquare size={8} /> Note
           </span>
         )}
       </div>
@@ -495,13 +505,16 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
           <div style={{ display: 'flex', gap: 0, marginBottom: -1 }}>
             {[
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
-              { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes' },
+              { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes', count: Array.isArray(app.app_notes) ? app.app_notes.length : 0 },
               { key: 'scorecards', icon: <Star size={12} />, label: 'Scorecards' },
               { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
             ].map(t => (
               <button key={t.key} onClick={() => setDrawerTab(t.key)}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', borderBottom: `2px solid ${drawerTab === t.key ? '#2563EB' : 'transparent'}`, color: drawerTab === t.key ? '#2563EB' : '#64748B' }}>
                 {t.icon}{t.label}
+                {!!t.count && (
+                  <span style={{ fontSize: 9, fontWeight: 800, padding: '0px 5px', borderRadius: 999, background: drawerTab === t.key ? '#2563EB' : '#E2E8F0', color: drawerTab === t.key ? '#fff' : '#64748B' }}>{t.count}</span>
+                )}
               </button>
             ))}
           </div>
@@ -573,9 +586,11 @@ function NotesTab({ appId, showToast }: any) {
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   useEffect(() => {
     setLoading(true);
-    apiFetch(`/applications/${appId}/notes`).then(d => setNotes(Array.isArray(d) ? d : [])).catch(() => {}).finally(() => setLoading(false));
+    setLoadError(false);
+    apiFetch(`/applications/${appId}/notes`).then(d => setNotes(Array.isArray(d) ? d : [])).catch(() => setLoadError(true)).finally(() => setLoading(false));
   }, [appId]);
   async function addNote() {
     if (!text.trim()) return;
@@ -594,7 +609,12 @@ function NotesTab({ appId, showToast }: any) {
         <Send size={12} /> {saving ? 'Saving…' : 'Add Note'}
       </button>
       {loading && <div style={{ color: '#94A3B8', fontSize: 12, textAlign: 'center', padding: 20 }}>Loading…</div>}
-      {!loading && notes.length === 0 && <div style={{ color: '#CBD5E1', fontSize: 12, textAlign: 'center', padding: 20, fontStyle: 'italic' }}>No notes yet</div>}
+      {!loading && loadError && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#DC2626', fontSize: 12, textAlign: 'center', padding: 14, background: '#FEF2F2', border: '1px solid #FCA5A4', borderRadius: 8, justifyContent: 'center' }}>
+          <AlertTriangle size={13} /> Couldn't load notes — try reopening this candidate
+        </div>
+      )}
+      {!loading && !loadError && notes.length === 0 && <div style={{ color: '#CBD5E1', fontSize: 12, textAlign: 'center', padding: 20, fontStyle: 'italic' }}>No notes yet</div>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {notes.map((n: any) => (
           <div key={n.id} style={{ background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, padding: '10px 12px' }}>
