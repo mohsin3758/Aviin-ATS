@@ -305,7 +305,7 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
         score_rows = await conn.fetch(
             "SELECT candidate_id, fit_score FROM match_candidates($1, 100000)",
             body.requisition_id)
-        scores = {r["candidate_id"]: r["fit_score"] for r in score_rows}
+        scores = {str(r["candidate_id"]): r["fit_score"] for r in score_rows}
 
         created = 0
         skipped = 0
