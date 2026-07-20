@@ -313,7 +313,13 @@ async def list_health_scores(actor: Actor=Depends(get_actor)):
             FROM client_health_scores WHERE tenant_id=$1
             ORDER BY client_name, score_date DESC
         """, actor.tenant_id)
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("insights"), str):
+            d["insights"] = json.loads(d["insights"])
+        out.append(d)
+    return out
 
 # ── P40: Revenue Forecast ─────────────────────────────────────
 forecast_router = APIRouter(prefix="/revenue-forecast", tags=["forecast"])
