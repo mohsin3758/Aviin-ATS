@@ -5,7 +5,8 @@ import { useFetch, apiFetch } from '@/lib/useFetch';
 import {
   Search, Plus, X, RotateCcw, ChevronDown, MapPin, Users, Briefcase,
   Clock, CheckCircle, AlertTriangle, Send, Star, MessageSquare,
-  Activity, Download, ExternalLink, ArrowRight
+  Activity, Download, ExternalLink, ArrowRight, Inbox, LayoutGrid,
+  KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
 } from 'lucide-react';
 
 // ── Stage config ──────────────────────────────────────────────────────────────
@@ -156,8 +157,8 @@ function PipelineInner() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden', background: '#F1F5F9' }}>
 
       {/* ── TOP HEADER ──────────────────────────────────────────────────── */}
-      <div style={{ background: 'linear-gradient(135deg,#0F172A 0%,#1E3A8A 60%,#1E40AF 100%)', flexShrink: 0 }}>
-        <div style={{ padding: '12px 20px 0' }}>
+      <div style={{ background: '#0F172A', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
+        <div style={{ padding: '14px 20px 0' }}>
 
           {/* Row 1: Job picker + KPIs */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 12 }}>
@@ -166,8 +167,8 @@ function PipelineInner() {
             <div style={{ position: 'relative' }}>
               <button onClick={() => setJobPickerOpen(v => !v)}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 10, color: '#fff', cursor: 'pointer', minWidth: 280, maxWidth: 400 }}>
-                <div style={{ width: 32, height: 32, borderRadius: 8, background: selectedJob ? `linear-gradient(135deg,${avatarColor(selectedJob.client_name||selectedJob.title)},#1E40AF)` : 'rgba(255,255,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 900, color: '#fff', flexShrink: 0 }}>
-                  {selectedJob ? (selectedJob.client_name?.[0] || selectedJob.title?.[0] || 'J') : '🎯'}
+                <div style={{ width: 32, height: 32, borderRadius: 8, background: selectedJob ? `linear-gradient(135deg,${avatarColor(selectedJob.client_name||selectedJob.title)},#1E40AF)` : 'rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 900, color: '#fff', flexShrink: 0 }}>
+                  {selectedJob ? (selectedJob.client_name?.[0] || selectedJob.title?.[0] || 'J') : <Briefcase size={15} color="rgba(255,255,255,0.65)" />}
                 </div>
                 <div style={{ flex: 1, textAlign: 'left', minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -237,9 +238,9 @@ function PipelineInner() {
                   { label: 'In Pipeline', val: stats?.in_pipeline ?? 0, num: '#C4B5FD', bg: 'rgba(99,102,241,0.15)', border: 'rgba(99,102,241,0.3)' },
                   { label: 'Dropped', val: stats?.dropped ?? 0, num: '#94A3B8', bg: 'rgba(148,163,184,0.1)', border: 'rgba(148,163,184,0.25)' },
                 ].map(k => (
-                  <div key={k.label} style={{ textAlign: 'center', padding: '7px 14px', borderRadius: 10, background: k.bg, border: `1px solid ${k.border}`, minWidth: 64 }}>
-                    <div style={{ fontSize: 20, fontWeight: 900, color: k.num, lineHeight: 1 }}>{k.val}</div>
-                    <div style={{ fontSize: 9, fontWeight: 600, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 2 }}>{k.label}</div>
+                  <div key={k.label} style={{ textAlign: 'center', padding: '8px 16px', borderRadius: 10, background: k.bg, border: `1px solid ${k.border}`, minWidth: 68 }}>
+                    <div style={{ fontSize: 19, fontWeight: 800, color: k.num, lineHeight: 1 }}>{k.val}</div>
+                    <div style={{ fontSize: 9, fontWeight: 600, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 3 }}>{k.label}</div>
                   </div>
                 ))}
               </div>
@@ -249,9 +250,9 @@ function PipelineInner() {
           {/* Stage tab bar */}
           <div style={{ display: 'flex', gap: 0, overflowX: 'auto' }}>
             <button onClick={() => setActiveStage('all')}
-              style={{ padding: '8px 16px', fontSize: 12, fontWeight: 700, cursor: 'pointer', background: 'none', border: 'none', color: activeStage === 'all' ? '#fff' : 'rgba(255,255,255,0.6)', borderBottom: activeStage === 'all' ? '2px solid #60A5FA' : '2px solid transparent', whiteSpace: 'nowrap' }}>
-              🗂 All Stages
-              {totalCandidates > 0 && <span style={{ marginLeft: 6, background: '#2563EB', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 999 }}>{totalCandidates}</span>}
+              style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px', fontSize: 12, fontWeight: 700, cursor: 'pointer', background: 'none', border: 'none', color: activeStage === 'all' ? '#fff' : 'rgba(255,255,255,0.6)', borderBottom: activeStage === 'all' ? '2px solid #60A5FA' : '2px solid transparent', whiteSpace: 'nowrap' }}>
+              <LayoutGrid size={13} /> All Stages
+              {totalCandidates > 0 && <span style={{ marginLeft: 2, background: '#2563EB', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 999 }}>{totalCandidates}</span>}
             </button>
             {STAGES.filter(s => (board[s.key]?.length || 0) > 0).map(s => (
               <button key={s.key} onClick={() => setActiveStage(s.key)}
@@ -269,7 +270,9 @@ function PipelineInner() {
       {!selectedJobId && (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 24 }}>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 48, marginBottom: 12 }}>🗂</div>
+            <div style={{ width: 64, height: 64, borderRadius: 16, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <KanbanSquare size={30} color="#60A5FA" />
+            </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: '#1E293B', marginBottom: 8 }}>Select a Job to View Pipeline</div>
             <div style={{ fontSize: 14, color: '#64748B', marginBottom: 24 }}>Click the job selector above or choose from the list below</div>
           </div>
@@ -311,7 +314,7 @@ function PipelineInner() {
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
             <a href={`/resume-inbox?req=${selectedJobId}`}
               style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: '1px solid #DDD6FE', borderRadius: 8, background: '#FAF5FF', fontSize: 12, fontWeight: 700, color: '#7C3AED', textDecoration: 'none', cursor: 'pointer' }}>
-              📬 Inbox Matches
+              <Inbox size={13} /> Inbox Matches
             </a>
             <button onClick={() => setAddCandidateOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: 'none', borderRadius: 8, background: '#2563EB', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
               <Plus size={13} /> Add Candidate
@@ -323,37 +326,32 @@ function PipelineInner() {
       {/* ── KANBAN BOARD ────────────────────────────────────────────────── */}
       {selectedJobId && (
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '14px 16px', display: 'flex', gap: 12 }}
+          <div style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '16px 18px', display: 'flex', gap: 14 }}
             onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}>
             {(activeStage === 'all' ? STAGES : STAGES.filter(s => s.key === activeStage)).map(stage => {
               const apps = filteredApps(board[stage.key] || []);
               const total = (board[stage.key] || []).length;
               return (
-                <div key={stage.key} style={{ flexShrink: 0, width: 242, display: 'flex', flexDirection: 'column' }}
+                <div key={stage.key} style={{ flexShrink: 0, width: 246, display: 'flex', flexDirection: 'column', background: '#F8FAFC', border: '1px solid #E5E9F0', borderTop: `3px solid ${stage.color}`, borderRadius: 12, overflow: 'hidden' }}
                   onDragOver={e => e.preventDefault()}
                   onDrop={e => { e.preventDefault(); if (!dragRef.current) return; const { id, fromStage } = dragRef.current; dragRef.current = null; moveStage(id, fromStage, stage.key); }}>
 
                   {/* Column header */}
-                  <div style={{ display: 'flex', alignItems: 'center', padding: '7px 10px', background: '#fff', border: '1px solid #E2E8F0', borderBottom: 'none', borderRadius: '10px 10px 0 0' }}>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: stage.color, marginRight: 7, flexShrink: 0 }} />
-                    <span style={{ fontSize: 11, fontWeight: 700, color: '#1E293B', flex: 1 }}>{stage.label}</span>
-                    <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: stage.light, color: stage.color, border: `1px solid ${stage.color}30`, marginRight: 5 }}>{total}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', background: '#fff', borderBottom: '1px solid #F1F5F9', flexShrink: 0 }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', flex: 1 }}>{stage.label}</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: stage.light, color: stage.color }}>{total}</span>
                   </div>
 
                   {/* Column body */}
-                  <div style={{ flex: 1, overflowY: 'auto', border: `1px solid ${stage.color}`, borderTop: `2px solid ${stage.color}`, background: '#F8FAFC', borderRadius: '0 0 10px 10px', padding: 7, display: 'flex', flexDirection: 'column', gap: 7, minHeight: 80, maxHeight: 'calc(100vh - 280px)' }}>
+                  <div style={{ flex: 1, overflowY: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 8, minHeight: 90, maxHeight: 'calc(100vh - 262px)' }}>
                     {apps.map(app => (
                       <KanbanCard key={app.id} app={app} stageColor={stage.color}
                         onClick={() => { setSelected(app); setDrawerTab('profile'); }}
                         onDragStart={(e: React.DragEvent) => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }} />
                     ))}
                     {apps.length === 0 && (
-                      <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 11, padding: '20px 8px', fontStyle: 'italic' }}>Drop candidates here</div>
+                      <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 11, padding: '24px 8px', fontStyle: 'italic' }}>Drop candidates here</div>
                     )}
-                  </div>
-
-                  <div style={{ padding: '4px 10px', fontSize: 10, fontWeight: 600, color: '#94A3B8', background: '#fff', border: '1px solid #E2E8F0', borderTop: 'none', borderRadius: '0 0 10px 10px' }}>
-                    {total} total
                   </div>
                 </div>
               );
@@ -392,10 +390,10 @@ function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
   const skills: string[] = app.skills || [];
   return (
     <div draggable onDragStart={onDragStart} onClick={onClick}
-      style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 10, padding: '10px 10px 8px', cursor: 'pointer', transition: 'all 0.15s', position: 'relative', userSelect: 'none' }}
-      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = '#93C5FD'; (e.currentTarget as HTMLElement).style.boxShadow = '0 4px 12px rgba(37,99,235,0.12)'; }}
-      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#E2E8F0'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
-      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: stageColor, borderRadius: '10px 0 0 10px', opacity: 0.7 }} />
+      style={{ background: '#fff', border: '1px solid #EDF0F4', borderRadius: 10, padding: '11px 12px 9px', cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s', position: 'relative', userSelect: 'none' }}
+      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 20px rgba(15,23,42,0.09)'; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
+      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: stageColor, borderRadius: '10px 0 0 10px' }} />
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 7 }}>
         <div style={{ width: 32, height: 32, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(app.candidate_name)},${avatarColor(app.candidate_name)}aa)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
           {initials(app.candidate_name)}
@@ -421,9 +419,17 @@ function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
         </div>
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {app.total_exp_mo > 0 && <span style={{ fontSize: 9, color: '#94A3B8', background: '#F8FAFC', padding: '2px 5px', borderRadius: 4 }}>⏱ {gx(app.total_exp_mo)}</span>}
+        {app.total_exp_mo > 0 && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#94A3B8', background: '#F8FAFC', padding: '2px 6px', borderRadius: 4 }}>
+            <Clock size={9} /> {gx(app.total_exp_mo)}
+          </span>
+        )}
         <span style={{ fontSize: 9, color: '#CBD5E1' }}>{ago(app.updated_at)}</span>
-        {app.scorecard_count > 0 && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4, background: '#EFF6FF', color: '#2563EB', border: '1px solid #BFDBFE' }}>S×{app.scorecard_count}</span>}
+        {app.scorecard_count > 0 && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#EFF6FF', color: '#2563EB', border: '1px solid #BFDBFE' }}>
+            <Star size={8} fill="#2563EB" /> {app.scorecard_count}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -458,7 +464,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
                   <div style={{ fontSize: 9, color: '#94A3B8', fontWeight: 600 }}>AI MATCH</div>
                 </div>
               )}
-              <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8', fontSize: 18 }}>✕</button>
+              <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8' }}><X size={15} /></button>
             </div>
           </div>
 
@@ -513,12 +519,12 @@ function ProfileTab({ app, apiUrl }: any) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <InfoCard title="Contact Info">
-        {app.email && <InfoRow label={`📧 ${app.email}`} />}
-        {app.phone && <InfoRow label={`📱 ${app.phone}`} />}
-        {app.location && <InfoRow label={`📍 ${app.location}`} />}
-        {app.total_exp_mo > 0 && <InfoRow label={`💼 ${gx(app.total_exp_mo)} experience`} />}
-        {app.notice_period_days != null && <InfoRow label={`⏰ ${app.notice_period_days}d notice period`} />}
-        {app.expected_ctc && <InfoRow label={`💰 Expected ₹${(app.expected_ctc / 100000).toFixed(1)}L`} />}
+        {app.email && <InfoRow icon={<Mail size={12} />} label={app.email} />}
+        {app.phone && <InfoRow icon={<Phone size={12} />} label={app.phone} />}
+        {app.location && <InfoRow icon={<MapPin size={12} />} label={app.location} />}
+        {app.total_exp_mo > 0 && <InfoRow icon={<Briefcase size={12} />} label={`${gx(app.total_exp_mo)} experience`} />}
+        {app.notice_period_days != null && <InfoRow icon={<Clock size={12} />} label={`${app.notice_period_days}d notice period`} />}
+        {app.expected_ctc && <InfoRow icon={<IndianRupee size={12} />} label={`Expected ${(app.expected_ctc / 100000).toFixed(1)}L`} />}
       </InfoCard>
       {skills.length > 0 && (
         <InfoCard title={`Skills (${skills.length})`}>
@@ -651,7 +657,11 @@ function ScorecardsTab({ appId, showToast }: any) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 13, fontWeight: 800, color: '#1E293B' }}>{sc.round}</span>
-                {sc.overall_rating && <span style={{ background: '#FFFBEB', color: '#CA8A04', fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 999, border: '1px solid #FDE68A' }}>⭐ {sc.overall_rating}/5</span>}
+                {sc.overall_rating && (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 3, background: '#FFFBEB', color: '#CA8A04', fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 999, border: '1px solid #FDE68A' }}>
+                    <Star size={10} fill="#CA8A04" /> {sc.overall_rating}/5
+                  </span>
+                )}
               </div>
               {sc.recommendation && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: (RECO_COLORS[sc.recommendation] || '#94A3B8') + '20', color: RECO_COLORS[sc.recommendation] || '#94A3B8' }}>{sc.recommendation.replace('_', ' ')}</span>}
             </div>
@@ -668,7 +678,10 @@ function ScorecardsTab({ appId, showToast }: any) {
 // ── Activity Tab ──────────────────────────────────────────────────────────────
 function ActivityTab({ candidateId }: any) {
   const { data: activities } = useFetch<any[]>(`/activities/${candidateId}`);
-  const ACT_ICONS: Record<string, string> = { note: '📝', email_sent: '📧', status_change: '🔄', interview_scheduled: '📅', offer_made: '💼', call_logged: '📞' };
+  const ACT_ICONS: Record<string, React.ReactNode> = {
+    note: <FileText size={13} />, email_sent: <Mail size={13} />, status_change: <RefreshCw size={13} />,
+    interview_scheduled: <Calendar size={13} />, offer_made: <Briefcase size={13} />, call_logged: <Phone size={13} />,
+  };
   return (
     <div>
       {(!activities || activities.length === 0) && <div style={{ color: '#CBD5E1', fontSize: 12, textAlign: 'center', padding: 30, fontStyle: 'italic' }}>No activities recorded</div>}
@@ -676,8 +689,8 @@ function ActivityTab({ candidateId }: any) {
         {(activities || []).map((act: any, i: number) => (
           <div key={act.id} style={{ display: 'flex', gap: 10, paddingBottom: 14 }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-              <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#F1F5F9', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, flexShrink: 0 }}>
-                {ACT_ICONS[act.activity_type] || '●'}
+              <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#F1F5F9', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B', flexShrink: 0 }}>
+                {ACT_ICONS[act.activity_type] || <Activity size={13} />}
               </div>
               {i < (activities?.length || 0) - 1 && <div style={{ width: 1, flex: 1, background: '#E2E8F0', marginTop: 3 }} />}
             </div>
@@ -730,7 +743,7 @@ function AddCandidateModal({ jobId, onClose, onAdded }: any) {
       <div style={{ width: 480, maxWidth: '92vw', maxHeight: '80vh', background: '#fff', borderRadius: 14, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
         <div style={{ padding: '16px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Add Candidate to Pipeline</div>
-          <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, cursor: 'pointer', color: '#94A3B8' }}>✕</button>
+          <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8' }}><X size={14} /></button>
         </div>
         <div style={{ padding: '12px 18px 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '7px 10px' }}>
@@ -780,8 +793,13 @@ function InfoCard({ title, children }: { title: string; children: React.ReactNod
     </div>
   );
 }
-function InfoRow({ label }: { label: string }) {
-  return <div style={{ fontSize: 12, color: '#374151', marginBottom: 6 }}>{label}</div>;
+function InfoRow({ label, icon }: { label: string; icon?: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151', marginBottom: 8 }}>
+      {icon && <span style={{ color: '#94A3B8', display: 'flex', flexShrink: 0 }}>{icon}</span>}
+      {label}
+    </div>
+  );
 }
 
 // ── Export with Suspense wrapper ──────────────────────────────────────────────
