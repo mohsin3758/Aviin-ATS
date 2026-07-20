@@ -298,6 +298,15 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
             from fastapi import HTTPException
             raise HTTPException(404, "Requisition not found")
 
+        # Job-specific fit_score (same formula as match_candidates()/the Add
+        # Candidate modal) so the score a recruiter picked from persists onto
+        # the application, instead of falling back to the candidate's stale,
+        # non-job-specific jd_match_score on the pipeline board.
+        score_rows = await conn.fetch(
+            "SELECT candidate_id, fit_score FROM match_candidates($1, 100000)",
+            body.requisition_id)
+        scores = {r["candidate_id"]: r["fit_score"] for r in score_rows}
+
         created = 0
         skipped = 0
         for cid in body.candidate_ids:
@@ -310,10 +319,10 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
                 continue
             await conn.execute("""
                 INSERT INTO applications
-                  (tenant_id, candidate_id, requisition_id, stage)
-                VALUES ($1, $2, $3, 'sourced')
+                  (tenant_id, candidate_id, requisition_id, stage, fit_score)
+                VALUES ($1, $2, $3, 'sourced', $4)
                 ON CONFLICT DO NOTHING
-            """, actor.tenant_id, cid, body.requisition_id)
+            """, actor.tenant_id, cid, body.requisition_id, scores.get(cid))
             # Log activity
             await conn.execute("""
                 INSERT INTO candidate_activities

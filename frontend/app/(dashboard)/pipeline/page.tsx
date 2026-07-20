@@ -386,7 +386,7 @@ function PipelineInner() {
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
 function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
-  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
+  const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const skills: string[] = app.skills || [];
   return (
     <div draggable onDragStart={onDragStart} onClick={onClick}
@@ -438,7 +438,7 @@ function KanbanCard({ app, stageColor, onClick, onDragStart }: any) {
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
 function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast }: any) {
   const stageCfg = STAGES.find(s => s.key === app.stage);
-  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
+  const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
   return (
