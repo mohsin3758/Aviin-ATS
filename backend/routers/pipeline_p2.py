@@ -438,10 +438,20 @@ async def get_stage_analytics(req_id: str = None, actor: Actor = Depends(get_act
             moves_from.setdefault(sf, 0)
             moves_from[sf] += int(m["cnt"])
 
+        # Stage order/label/color from this tenant's live config (includes
+        # any custom stages) instead of the fixed 13-value STAGES list, which
+        # was silently dropping l1_interview/l2_interview/nda/contacted/
+        # interested/offer_accepted/hold/custom stages from this response.
+        stage_cfg_rows = await conn.fetch(
+            "SELECT stage_key, label, color FROM pipeline_stage_config "
+            "WHERE tenant_id=$1 AND is_visible=TRUE ORDER BY display_order", actor.tenant_id)
+        stage_cfg = [(r["stage_key"], r["label"], r["color"]) for r in stage_cfg_rows]
+        if not stage_cfg:
+            stage_cfg = [(st, st.replace("_", " ").title(), "#64748b") for st in STAGES]
+
         # Total entered each stage = current + moved out
-        stage_order = STAGES
         result = []
-        for i, st in enumerate(stage_order):
+        for st, label, color in stage_cfg:
             v = velocity.get(st, {})
             count = int(v.get("count", 0))
             avg_days = float(v.get("avg_days_in_stage", 0) or 0)
@@ -453,6 +463,8 @@ async def get_stage_analytics(req_id: str = None, actor: Actor = Depends(get_act
             sla_status = "ok" if avg_days <= sla_limit else ("warn" if avg_days <= sla_limit * 1.5 else "breach")
             result.append({
                 "stage": st,
+                "label": label,
+                "color": color,
                 "count": count,
                 "avg_days": round(avg_days, 1),
                 "stale_count": stale,
