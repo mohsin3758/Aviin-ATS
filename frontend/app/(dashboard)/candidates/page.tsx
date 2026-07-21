@@ -108,10 +108,41 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
 }
 
 // ── Quick-View Drawer ─────────────────────────────────────────────────────────
-function CandidateDrawer({candidate,onClose,onEdit,stageMap}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void;stageMap:Record<string,{bg:string;color:string;label:string}>}) {
+function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChanged}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void;stageMap:Record<string,{bg:string;color:string;label:string}>;allTags:any[];onTagsChanged:()=>void}) {
   const {data:apps} = useFetch<any>(`/candidates/${candidate.id}/applications`);
+  const {data:candTagsRaw,refetch:refetchCandTags} = useFetch<any[]>(`/candidate-tags/candidate/${candidate.id}`);
+  const candTags:any[] = Array.isArray(candTagsRaw)?candTagsRaw:[];
+  const [showTagPicker,setShowTagPicker] = useState(false);
+  const [newTagName,setNewTagName] = useState('');
+  const [tagBusy,setTagBusy] = useState(false);
   const exp = gx(candidate.total_exp_mo);
   const sc = candidate.pipeline_stage ? (stageMap[candidate.pipeline_stage]||null) : null;
+  const availableTags = allTags.filter((t:any)=>!candTags.some((ct:any)=>ct.id===t.id));
+
+  const addTag = async(tagId:string)=>{
+    setTagBusy(true);
+    try{
+      await apiFetch(`/candidate-tags/assign?candidate_id=${candidate.id}`,{method:'POST',body:JSON.stringify([tagId])});
+      refetchCandTags(); onTagsChanged();
+    }catch{} finally{setTagBusy(false);}
+  };
+  const removeTag = async(tagId:string)=>{
+    setTagBusy(true);
+    try{
+      await apiFetch(`/candidate-tags/remove?candidate_id=${candidate.id}&tag_id=${tagId}`,{method:'DELETE'});
+      refetchCandTags(); onTagsChanged();
+    }catch{} finally{setTagBusy(false);}
+  };
+  const createAndAddTag = async()=>{
+    const name = newTagName.trim();
+    if(!name) return;
+    setTagBusy(true);
+    try{
+      const t = await apiFetch('/candidate-tags',{method:'POST',body:JSON.stringify({name})});
+      await apiFetch(`/candidate-tags/assign?candidate_id=${candidate.id}`,{method:'POST',body:JSON.stringify([t.id])});
+      setNewTagName(''); refetchCandTags(); onTagsChanged();
+    }catch{} finally{setTagBusy(false);}
+  };
 
   return (
     <div style={{position:'fixed',inset:0,zIndex:500,display:'flex'}}>
@@ -139,6 +170,34 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap}:{candidate:any;onCl
             {candidate.pipeline_job && <span style={{fontSize:'11px',color:'#78350f',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{candidate.pipeline_job}</span>}
           </div>
         )}
+        {/* Tags */}
+        <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9',position:'relative'}}>
+          <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>TAGS</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:'6px',alignItems:'center'}}>
+            {candTags.map((t:any)=>(
+              <span key={t.id} style={{display:'inline-flex',alignItems:'center',gap:'4px',fontSize:'11px',fontWeight:'600',padding:'3px 8px',borderRadius:'8px',background:`${t.color}1a`,color:t.color}}>
+                {t.name}
+                <button onClick={()=>removeTag(t.id)} disabled={tagBusy} style={{border:'none',background:'none',cursor:'pointer',color:'inherit',padding:0,display:'flex',opacity:0.7}}><X size={10}/></button>
+              </span>
+            ))}
+            <button onClick={()=>setShowTagPicker(v=>!v)} style={{fontSize:'11px',fontWeight:'600',padding:'3px 9px',borderRadius:'8px',border:'1px dashed #cbd5e1',background:'white',color:'#64748b',cursor:'pointer'}}>+ Add tag</button>
+          </div>
+          {showTagPicker && (
+            <div style={{marginTop:'10px',padding:'10px',background:'#f8fafc',borderRadius:'8px',border:'1px solid #e2e8f0'}}>
+              {availableTags.length>0 && (
+                <div style={{display:'flex',flexWrap:'wrap',gap:'6px',marginBottom:'8px'}}>
+                  {availableTags.map((t:any)=>(
+                    <button key={t.id} onClick={()=>addTag(t.id)} disabled={tagBusy} style={{fontSize:'11px',fontWeight:'600',padding:'3px 8px',borderRadius:'8px',border:'none',background:`${t.color}1a`,color:t.color,cursor:'pointer'}}>{t.name}</button>
+                  ))}
+                </div>
+              )}
+              <div style={{display:'flex',gap:'6px'}}>
+                <input value={newTagName} onChange={e=>setNewTagName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&createAndAddTag()} placeholder="New tag name..." style={{flex:1,padding:'6px 9px',border:'1px solid #e2e8f0',borderRadius:'6px',fontSize:'12px',outline:'none'}}/>
+                <button onClick={createAndAddTag} disabled={tagBusy||!newTagName.trim()} style={{padding:'6px 12px',borderRadius:'6px',border:'none',background:'#1e40af',color:'white',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>Create</button>
+              </div>
+            </div>
+          )}
+        </div>
         {/* Info grid */}
         <div style={{padding:'18px 22px',borderBottom:'1px solid #f1f5f9'}}>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px'}}>
@@ -296,6 +355,7 @@ export default function CandidatesPage() {
   const [locationFilter,setLocationFilter] = useState('');
   const [minExpYr,setMinExpYr] = useState('');
   const [maxExpYr,setMaxExpYr] = useState('');
+  const [tagFilter,setTagFilter] = useState('');
   const [showFilters,setShowFilters] = useState(false);
   const [appliedFilters,setAppliedFilters] = useState<Record<string,string>>({});
 
@@ -328,7 +388,7 @@ export default function CandidatesPage() {
   const showStatus = (m:string,ms=3000)=>{setStatusMsg(m);setTimeout(()=>setStatusMsg(''),ms);};
 
   // reset page on filter/sort/source change
-  useEffect(()=>{ setPage(0); }, [appliedFilters, sort, srcFilter]);
+  useEffect(()=>{ setPage(0); }, [appliedFilters, sort, srcFilter, tagFilter]);
 
   const apiQuery = useMemo(()=>{
     const p = new URLSearchParams({limit:String(PAGE_SIZE), offset:String(page*PAGE_SIZE), sort_by:sort.by, sort_dir:sort.dir});
@@ -339,8 +399,9 @@ export default function CandidatesPage() {
     if (appliedFilters.minExp)   p.set('min_exp', String(Number(appliedFilters.minExp)*12));
     if (appliedFilters.maxExp)   p.set('max_exp', String(Number(appliedFilters.maxExp)*12));
     if (srcFilter) p.set('source',srcFilter);
+    if (tagFilter) p.set('tag_id',tagFilter);
     return `/candidates?${p.toString()}`;
-  },[appliedFilters,sort,page,srcFilter]);
+  },[appliedFilters,sort,page,srcFilter,tagFilter]);
 
   const {data:cr,loading,refetch} = useFetch<any>(apiQuery);
   const items:any[] = (cr as any)?.items||[];
@@ -351,6 +412,9 @@ export default function CandidatesPage() {
   const stageMap:Record<string,{bg:string;color:string;label:string}> = (stageConfig && stageConfig.length>0)
     ? Object.fromEntries(stageConfig.map((s:any)=>[s.stage_key,{bg:`${s.color}1a`,color:s.color,label:s.label}]))
     : DEFAULT_STAGE_C;
+
+  const {data:allTagsRaw,refetch:refetchTags} = useFetch<any[]>('/candidate-tags');
+  const allTags:any[] = Array.isArray(allTagsRaw)?allTagsRaw:[];
 
   const handleSort = (col:string) => {
     setSort(s => s.by===col ? {...s,dir:s.dir==='asc'?'desc':'asc'} : {by:col,dir:'desc'});
@@ -491,8 +555,8 @@ export default function CandidatesPage() {
   };
 
   const applyFilters=()=>{setAppliedFilters({search,skill:skillFilter,location:locationFilter,employer:employerFilter,minExp:minExpYr,maxExp:maxExpYr});};
-  const clearFilters=()=>{setSearch('');setSkillFilter('');setLocationFilter('');setEmployerFilter('');setMinExpYr('');setMaxExpYr('');setSrcFilter('');setAppliedFilters({});};
-  const hasActiveFilters = Boolean(Object.values(appliedFilters).some(Boolean)||srcFilter);
+  const clearFilters=()=>{setSearch('');setSkillFilter('');setLocationFilter('');setEmployerFilter('');setMinExpYr('');setMaxExpYr('');setSrcFilter('');setTagFilter('');setAppliedFilters({});};
+  const hasActiveFilters = Boolean(Object.values(appliedFilters).some(Boolean)||srcFilter||tagFilter);
 
   return (
     <div style={{padding:'24px',maxWidth:'1600px'}}>
@@ -549,6 +613,11 @@ export default function CandidatesPage() {
               <select value={srcFilter} onChange={e=>setSrcFilter(e.target.value)} style={{width:'100%',padding:'7px 10px',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}>
                 <option value="">All sources</option>
                 {SRC.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
+              </select></div>
+            <div><label style={{fontSize:'11px',fontWeight:'600',color:'#64748b',display:'block',marginBottom:'4px'}}>TAG</label>
+              <select value={tagFilter} onChange={e=>setTagFilter(e.target.value)} style={{width:'100%',padding:'7px 10px',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}>
+                <option value="">All tags</option>
+                {allTags.map((t:any)=><option key={t.id} value={t.id}>{t.name} ({t.usage_count||0})</option>)}
               </select></div>
           </div>
         )}
@@ -608,6 +677,11 @@ export default function CandidatesPage() {
                             <div style={{fontSize:'13px',fontWeight:'600',color:'#1e40af',textDecoration:'underline',textDecorationStyle:'dotted'}}>{d.full_name}</div>
                             <div style={{fontSize:'11px',color:'#94a3b8',display:'flex',alignItems:'center',gap:'4px',marginTop:'1px'}}><Mail size={10}/>{d.email||'—'}</div>
                             {d.current_designation&&<div style={{fontSize:'10px',color:'#64748b',marginTop:'1px'}}>{d.current_designation}</div>}
+                            {(d.tags||[]).length>0&&(
+                              <div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'3px'}}>
+                                {d.tags.map((t:any)=><span key={t.id} style={{fontSize:'9px',fontWeight:'600',padding:'1px 6px',borderRadius:'8px',background:`${t.color}1a`,color:t.color}}>{t.name}</span>)}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -713,7 +787,7 @@ export default function CandidatesPage() {
       )}
 
       {/* ── Quick-view drawer ─────────────────────────────────────────────── */}
-      {drawer && <CandidateDrawer candidate={drawer} onClose={()=>setDrawer(null)} onEdit={(c)=>{setDrawer(null);openEdit(c);}} stageMap={stageMap}/>}
+      {drawer && <CandidateDrawer candidate={drawer} onClose={()=>setDrawer(null)} onEdit={(c)=>{setDrawer(null);openEdit(c);}} stageMap={stageMap} allTags={allTags} onTagsChanged={()=>{refetch();refetchTags();}}/>}
 
       {/* ── Duplicates modal ─────────────────────────────────────────────── */}
       {showDups && <DuplicatesModal onClose={()=>setShowDups(false)} onRefetch={refetch}/>}

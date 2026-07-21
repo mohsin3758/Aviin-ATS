@@ -14,7 +14,7 @@ import {
   Mail, MessageCircle, MessageSquare, Zap, Webhook,
   Truck, UserCog, Lock, BookMarked, Palette,
   ChevronDown, ChevronLeft, ChevronRight,
-  FileSignature, Send,
+  FileSignature, Send, GitMerge,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -25,6 +25,7 @@ const NAV_GROUPS = [
     { icon:Briefcase,       href:'/requisitions', label:'Jobs / Requisitions', roles:['admin','super_admin','kae','kae_manager','lead_recruiter'] },
     { icon:KanbanSquare,    href:'/pipeline',     label:'Pipeline (Kanban)' },
     { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity', roles:['admin','super_admin','lead_recruiter'] },
+    { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates' },
   ]},
   { id:'ai', label:'AI & INTELLIGENCE', defaultOpen:true, items:[
     { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },

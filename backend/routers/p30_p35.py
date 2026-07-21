@@ -212,6 +212,7 @@ async def scan_duplicates(background_tasks: BackgroundTasks,
             JOIN candidates c2 ON c1.email=c2.email
               AND c1.id < c2.id AND c2.tenant_id=c1.tenant_id
             WHERE c1.tenant_id=$1 AND c1.email IS NOT NULL
+              AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
         """, actor.tenant_id)
         # Phone duplicates
         phone_dups = await conn.fetch("""
@@ -220,6 +221,7 @@ async def scan_duplicates(background_tasks: BackgroundTasks,
             JOIN candidates c2 ON c1.phone=c2.phone
               AND c1.id < c2.id AND c2.tenant_id=c1.tenant_id
             WHERE c1.tenant_id=$1 AND c1.phone IS NOT NULL AND c1.phone != ''
+              AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
         """, actor.tenant_id)
         # Insert into log
         count = 0
@@ -231,8 +233,8 @@ async def scan_duplicates(background_tasks: BackgroundTasks,
                     VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING
                 """, actor.tenant_id, row['id1'], row['id2'], row['field'])
                 count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[duplicates/scan] insert failed for {row['id1']}/{row['id2']}: {e}")
     return {"duplicates_found": count, "status": "scan_complete"}
 
 @dup_router.get("")
@@ -257,4 +259,28 @@ async def dismiss_duplicate(dup_id: str, actor: Actor=Depends(get_actor)):
               resolved_by=$1 WHERE id=$2 AND tenant_id=$3 RETURNING *
         """, actor.user_id, dup_id, actor.tenant_id)
         if not row: raise HTTPException(404,"Not found")
+    return dict(row)
+
+@dup_router.patch("/{dup_id}/merge")
+async def merge_duplicate(dup_id: str, actor: Actor=Depends(get_actor)):
+    """Keep candidate_id_1, transfer candidate_id_2's applications, deactivate it."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        dup = await conn.fetchrow(
+            "SELECT candidate_id_1, candidate_id_2 FROM duplicate_candidates WHERE id=$1 AND tenant_id=$2",
+            dup_id, actor.tenant_id)
+        if not dup: raise HTTPException(404, "Not found")
+        keep_id, discard_id = dup["candidate_id_1"], dup["candidate_id_2"]
+        await conn.execute("""
+            UPDATE applications SET candidate_id=$1
+            WHERE candidate_id=$2 AND tenant_id=$3
+              AND requisition_id NOT IN (
+                  SELECT requisition_id FROM applications WHERE candidate_id=$1)
+        """, keep_id, discard_id, actor.tenant_id)
+        await conn.execute(
+            "UPDATE candidates SET is_active=false WHERE id=$1 AND tenant_id=$2",
+            discard_id, actor.tenant_id)
+        row = await conn.fetchrow("""
+            UPDATE duplicate_candidates SET status='merged', resolved_at=now(),
+              resolved_by=$1 WHERE id=$2 AND tenant_id=$3 RETURNING *
+        """, actor.user_id, dup_id, actor.tenant_id)
     return dict(row)

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import List
 from typing import Optional
+import json
 import db, events
 from deps import Actor, get_actor
 from schemas import CandidateCreate, CandidateUpdate
@@ -25,6 +26,7 @@ async def list_candidates(
     source:   Optional[str] = Query(None),
     min_exp:  Optional[int] = Query(None),
     max_exp:  Optional[int] = Query(None),
+    tag_id:   Optional[str] = Query(None),
     limit:    int = Query(100, le=500),
     offset:   int = Query(0, ge=0),
     sort_by:  str = Query('created_at'),
@@ -54,6 +56,11 @@ async def list_candidates(
         params.append(min_exp); conditions.append(f"total_exp_mo >= ${len(params)}")
     if max_exp is not None:
         params.append(max_exp); conditions.append(f"total_exp_mo <= ${len(params)}")
+    if tag_id:
+        params.append(tag_id)
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM candidate_tag_map ctm WHERE ctm.candidate_id=c.id AND ctm.tag_id=${len(params)})"
+        )
 
     ALLOWED = {"full_name","total_exp_mo","expected_ctc","created_at","last_activity","updated_at"}
     if sort_by not in ALLOWED: sort_by = "created_at"
@@ -64,11 +71,14 @@ async def list_candidates(
     pl_sub = ("(SELECT a.stage || '|' || COALESCE(r.title,'')"
               " FROM applications a JOIN requisitions r ON r.id=a.requisition_id"
               " WHERE a.candidate_id=c.id ORDER BY a.updated_at DESC LIMIT 1) AS pipeline_status")
+    tags_sub = ("(SELECT json_agg(json_build_object('id',ct.id,'name',ct.name,'color',ct.color) ORDER BY ct.name)"
+                " FROM candidate_tag_map ctm JOIN candidate_tags ct ON ct.id=ctm.tag_id"
+                " WHERE ctm.candidate_id=c.id) AS tags_json")
     flds = ", ".join("c." + f.strip() for f in FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
         rows  = await conn.fetch(
-            f"SELECT {flds}, {pl_sub} FROM candidates c {where} ORDER BY c.{sort_by} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
+            f"SELECT {flds}, {pl_sub}, {tags_sub} FROM candidates c {where} ORDER BY c.{sort_by} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
             *params, limit, offset)
     items = []
     for r in rows:
@@ -81,6 +91,8 @@ async def list_candidates(
         else:
             d["pipeline_stage"] = None
             d["pipeline_job"]   = None
+        tj = d.pop("tags_json", None)
+        d["tags"] = json.loads(tj) if tj else []
         items.append(d)
     return {"items": items, "total": int(total), "limit": limit, "offset": offset}
 
