@@ -12,6 +12,11 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 FIELDS = """id, tenant_id, requisition_id, candidate_id, stage, fit_score,
             assigned_recruiter_id, created_at, updated_at"""
 
+_DEFAULT_STAGE_KEYS = frozenset({
+    "sourced", "contacted", "interested", "nda", "screened", "submitted",
+    "l1_interview", "l2_interview", "offer", "offer_accepted", "placed", "rejected", "hold",
+})
+
 
 
 @router.get("")
@@ -200,13 +205,16 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
     except Exception:
         pass
 
-    # Email notification for key stages - reads SMTP from email_settings DB
+    # Email notification for key stages - reads SMTP from email_settings DB.
+    # Uses db.tenant_conn (not a raw asyncpg connection) because it also
+    # needs to read document_templates, which has FORCE ROW LEVEL SECURITY.
     if email and stage in SUBJS and msg_text:
         try:
-            import asyncpg, os as _os
-            _db_url = _os.environ.get("DATABASE_URL","postgresql://app_user:apppw@db:5432/ats")
-            _conn = await asyncpg.connect(_db_url)
-            try:
+            from email import encoders as _encoders
+            from email.mime.base import MIMEBase as _MIMEBase
+            from pathlib import Path as _Path
+
+            async with db.tenant_conn(tenant_id) as _conn:
                 _cfg = await _conn.fetchrow(
                     "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls,stage_templates "
                     "FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE LIMIT 1", tenant_id)
@@ -229,6 +237,27 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _em["To"]=email
                     _body = "Dear " + str(name) + "," + chr(10) + chr(10) + str(msg_text) + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviinjobs.com"
                     _em.attach(MIMEText(_body,"plain"))
+
+                    _attach_choice = _tmpl.get("attachment")
+                    if _attach_choice in ("nda_template", "contract_template"):
+                        _doc_type = "nda" if _attach_choice == "nda_template" else "contract"
+                        _doc = await _conn.fetchrow(
+                            "SELECT file_path, file_name, mime_type FROM document_templates WHERE tenant_id=$1 AND doc_type=$2",
+                            tenant_id, _doc_type)
+                        if _doc:
+                            _abs_path = _Path("/app") / _doc["file_path"].lstrip("/")
+                            if _abs_path.exists():
+                                _maintype, _, _subtype = (_doc["mime_type"] or "application/octet-stream").partition("/")
+                                _part = _MIMEBase(_maintype or "application", _subtype or "octet-stream")
+                                _part.set_payload(_abs_path.read_bytes())
+                                _encoders.encode_base64(_part)
+                                _part.add_header("Content-Disposition", f'attachment; filename="{_doc["file_name"]}"')
+                                _em.attach(_part)
+                            else:
+                                print(f"Stage email [{stage}]: {_doc_type} template file missing from disk")
+                        else:
+                            print(f"Stage email [{stage}]: no {_doc_type} template uploaded — sending without attachment")
+
                     with smtplib.SMTP(_h, _p, timeout=10) as _s:
                         _s.ehlo()
                         if _tls and _p==587: _s.starttls(); _s.ehlo()
@@ -237,8 +266,6 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     print(f"Stage email [{stage}] sent to {email} ({name})")
                 else:
                     print("Stage email: no active SMTP config found")
-            finally:
-                await _conn.close()
         except Exception as _ex:
             print(f"Stage email failed [{stage}] to {email}: {_ex}")
 
@@ -252,6 +279,21 @@ async def update_stage(application_id: str, body: StageUpdate, actor: Actor = De
         old = await conn.fetchrow("SELECT stage FROM applications WHERE id = $1", application_id)
         if old is None:
             raise HTTPException(status_code=404, detail="Application not found")
+
+        # Stage keys are no longer a fixed Literal (sql/16_custom_stages.sql
+        # lets tenants add custom stages) — validate against this tenant's
+        # configured stages instead, at the app layer. Falls back to the
+        # original 13 if this tenant's config hasn't been lazy-seeded yet
+        # (brand-new tenant that's never opened Settings > Pipeline Stages),
+        # so this check can never become an accidental blocker.
+        valid_stage = await conn.fetchval(
+            "SELECT 1 FROM pipeline_stage_config WHERE tenant_id=$1 AND stage_key=$2",
+            actor.tenant_id, body.stage)
+        if not valid_stage:
+            has_any_config = await conn.fetchval(
+                "SELECT 1 FROM pipeline_stage_config WHERE tenant_id=$1 LIMIT 1", actor.tenant_id)
+            if has_any_config or body.stage not in _DEFAULT_STAGE_KEYS:
+                raise HTTPException(status_code=400, detail=f"Unknown stage '{body.stage}' — add it under Settings > Pipeline Stages first")
 
         row = await conn.fetchrow(
             f"""UPDATE applications SET stage = $1, updated_at = now()

@@ -123,7 +123,10 @@ class ApplicationCreate(BaseModel):
 
 
 class StageUpdate(BaseModel):
-    stage: ApplicationStage
+    # Plain str, not the ApplicationStage Literal — tenants can add custom
+    # stages beyond the original 13 (see sql/16_custom_stages.sql). Validated
+    # against that tenant's pipeline_stage_config in applications.py instead.
+    stage: str
     reason: Optional[str] = None
     custom_message: Optional[str] = None
     send_email: bool = True

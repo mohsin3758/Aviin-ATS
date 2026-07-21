@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical } from 'lucide-react';
+import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2 } from 'lucide-react';
 
 interface StageRow {
   stage_key: string;
@@ -9,6 +9,7 @@ interface StageRow {
   color: string;
   display_order: number;
   is_visible: boolean;
+  is_custom?: boolean;
 }
 
 const SWATCHES = ['#6366F1', '#06B6D4', '#3B82F6', '#F59E0B', '#0891B2', '#64748B', '#7C3AED', '#9333EA', '#CA8A04', '#059669', '#16A34A', '#94A3B8', '#DC2626', '#EC4899', '#14B8A6'];
@@ -20,6 +21,10 @@ export default function PipelineStagesSettings() {
   const [resetting, setResetting] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
+  const [addingStage, setAddingStage] = useState(false);
+  const [newLabel, setNewLabel] = useState('');
+  const [newColor, setNewColor] = useState(SWATCHES[0]);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (data) setRows([...data].sort((a, b) => a.display_order - b.display_order));
@@ -59,6 +64,31 @@ export default function PipelineStagesSettings() {
     } finally { setResetting(false); }
   }
 
+  async function addStage() {
+    if (!newLabel.trim()) return;
+    setAddingStage(true); setMsg(null);
+    try {
+      await apiFetch('/settings/pipeline-stages', { method: 'POST', body: JSON.stringify({ label: newLabel.trim(), color: newColor }) });
+      setMsg({ text: `"${newLabel.trim()}" stage added`, ok: true });
+      setNewLabel(''); setNewColor(SWATCHES[0]);
+      refetch();
+    } catch (e: any) {
+      setMsg({ text: e?.message || 'Add stage failed', ok: false });
+    } finally { setAddingStage(false); }
+  }
+
+  async function deleteStage(key: string, label: string) {
+    if (!confirm(`Delete the "${label}" stage? This only works if no candidates are currently in it.`)) return;
+    setDeletingKey(key); setMsg(null);
+    try {
+      await apiFetch(`/settings/pipeline-stages/${key}`, { method: 'DELETE' });
+      setMsg({ text: `"${label}" stage deleted`, ok: true });
+      refetch();
+    } catch (e: any) {
+      setMsg({ text: e?.message || 'Delete failed', ok: false });
+    } finally { setDeletingKey(null); }
+  }
+
   return (
     <div style={{ maxWidth: 780 }} className="anim-fade-up">
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
@@ -68,7 +98,7 @@ export default function PipelineStagesSettings() {
         <div>
           <h1 style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', margin: 0 }}>Pipeline Stages</h1>
           <p style={{ fontSize: 13, color: '#64748b', margin: '2px 0 0' }}>
-            Reorder, rename, recolor, or hide stages on the Kanban board — the underlying stage never changes, so nothing else (analytics, SLA, offers) is affected.
+            Reorder, rename, recolor, hide, or add stages on the Kanban board. The 13 built-in stages can't be deleted (some drive HITL/analytics rules) — custom stages you add can be.
           </p>
         </div>
       </div>
@@ -112,11 +142,46 @@ export default function PipelineStagesSettings() {
               style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: r.is_visible ? '#f0fdf4' : '#f8fafc', color: r.is_visible ? '#16a34a' : '#94a3b8', fontSize: 11, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}>
               {r.is_visible ? <Eye size={12} /> : <EyeOff size={12} />} {r.is_visible ? 'Visible' : 'Hidden'}
             </button>
+
+            {r.is_custom && (
+              <button onClick={() => deleteStage(r.stage_key, r.label)} disabled={deletingKey === r.stage_key}
+                title="Delete this custom stage"
+                style={{ width: 28, height: 28, borderRadius: 6, border: '1px solid #fee2e2', background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0, padding: 0 }}>
+                <Trash2 size={12} style={{ color: '#dc2626' }} />
+              </button>
+            )}
           </div>
         ))}
         {rows.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>Loading…</div>
         )}
+      </div>
+
+      <div style={{ background: 'white', borderRadius: 12, border: '1px dashed #cbd5e1', padding: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Plus size={14} /> Add a New Stage
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ position: 'relative', flexShrink: 0 }}>
+            <button onClick={() => setColorPickerFor(p => p === '__new__' ? null : '__new__')}
+              style={{ width: 30, height: 30, borderRadius: 6, background: newColor, border: '1px solid rgba(0,0,0,0.1)', cursor: 'pointer' }} />
+            {colorPickerFor === '__new__' && (
+              <div style={{ position: 'absolute', top: 34, left: 0, zIndex: 20, background: 'white', border: '1px solid #e2e8f0', borderRadius: 8, padding: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 5, width: 130 }}>
+                {SWATCHES.map(sw => (
+                  <button key={sw} onClick={() => { setNewColor(sw); setColorPickerFor(null); }}
+                    style={{ width: 20, height: 20, borderRadius: 5, background: sw, border: sw === newColor ? '2px solid #0f172a' : '1px solid rgba(0,0,0,0.1)', cursor: 'pointer' }} />
+                ))}
+              </div>
+            )}
+          </div>
+          <input value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="e.g. Panel Interview, Background Check"
+            onKeyDown={e => e.key === 'Enter' && addStage()}
+            style={{ flex: 1, minWidth: 220, border: '1px solid #e2e8f0', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#1e293b', outline: 'none' }} />
+          <button onClick={addStage} disabled={addingStage || !newLabel.trim()}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 16px', background: newLabel.trim() ? '#1e40af' : '#94a3b8', color: 'white', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: newLabel.trim() ? 'pointer' : 'not-allowed' }}>
+            <Plus size={13} /> {addingStage ? 'Adding…' : 'Add Stage'}
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 10 }}>

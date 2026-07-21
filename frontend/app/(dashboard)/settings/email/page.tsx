@@ -57,6 +57,7 @@ const PRESETS: Record<string, object> = {
 
 export default function EmailSettingsPage() {
   const { data: saved, refetch } = useFetch<any>('/settings/email');
+  const { data: docTemplates } = useFetch<any>('/settings/document-templates');
   const [form, setForm] = useState({
     smtp_host:'', smtp_port:587, smtp_user:'', smtp_password:'',
     smtp_from:'', smtp_from_name:'AVIIN ATS', smtp_tls:true,
@@ -73,7 +74,7 @@ export default function EmailSettingsPage() {
   const [sendResult, setSendResult] = useState<any>(null);
   const [msg, setMsg] = useState<{ text:string; ok:boolean }|null>(null);
   const [notifMode, setNotifMode] = useState<'auto'|'manual'>('manual');
-  const [templates, setTemplates] = useState<Record<string, {subject:string;message:string}>>({});
+  const [templates, setTemplates] = useState<Record<string, {subject:string;message:string;attachment?:string}>>({});
   const [activeStage, setActiveStage] = useState<string>('contacted');
   const [savingTemplates, setSavingTemplates] = useState(false);
 
@@ -343,7 +344,7 @@ export default function EmailSettingsPage() {
         {/* Stage list */}
         <div style={{width:'160px',flexShrink:0,borderRight:'1px solid #e2e8f0',background:'#f8fafc'}}>
           {EMAIL_STAGES.map(st=>{
-            const hasCustom=!!(templates[st.key]?.message||templates[st.key]?.subject);
+            const hasCustom=!!(templates[st.key]?.message||templates[st.key]?.subject||(templates[st.key]?.attachment&&templates[st.key]?.attachment!=='none'));
             return(
               <button key={st.key} onClick={()=>setActiveStage(st.key)}
                 style={{width:'100%',padding:'10px 12px',textAlign:'left',border:'none',borderBottom:'1px solid #e2e8f0',background:activeStage===st.key?'white':'transparent',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
@@ -364,12 +365,24 @@ export default function EmailSettingsPage() {
                   onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:e.target.value,message:(t[st.key]?.message)||''}}))}/>
                 <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Leave blank to use default subject</div>
               </div>
-              <div>
+              <div style={{marginBottom:'12px'}}>
                 <label style={LBL}>Message Body</label>
                 <textarea rows={6} style={{...INP,resize:'vertical',lineHeight:'1.6'}}
                   value={templates[st.key]?.message||''} placeholder={DEFAULT_MSGS[st.key]||'Message...'}
                   onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:(t[st.key]?.subject)||'',message:e.target.value}}))}/>
                 <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Leave blank to use the built-in default message</div>
+              </div>
+              <div style={{marginBottom:'4px'}}>
+                <label style={LBL}>Attachment</label>
+                <select style={INP} value={templates[st.key]?.attachment||'none'}
+                  onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:(t[st.key]?.subject)||'',message:(t[st.key]?.message)||'',attachment:e.target.value}}))}>
+                  <option value="none">No attachment</option>
+                  <option value="nda_template" disabled={!docTemplates?.nda}>{docTemplates?.nda ? `NDA Template (${docTemplates.nda.file_name})` : 'NDA Template — none uploaded'}</option>
+                  <option value="contract_template" disabled={!docTemplates?.contract}>{docTemplates?.contract ? `Contract Template (${docTemplates.contract.file_name})` : 'Contract Template — none uploaded'}</option>
+                </select>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>
+                  Manage the uploaded files on the <a href="/nda-documents" style={{color:'#1e40af',fontWeight:600}}>NDA Documents</a> page
+                </div>
               </div>
               <button onClick={()=>setTemplates(t=>{const n={...t};delete n[st.key];return n;})}
                 style={{marginTop:'10px',padding:'6px 12px',border:'1px solid #fee2e2',borderRadius:'6px',background:'#fef2f2',color:'#dc2626',fontSize:'12px',cursor:'pointer'}}>
