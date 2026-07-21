@@ -14,6 +14,7 @@ import {
   Mail, MessageCircle, MessageSquare, Zap, Webhook,
   Truck, UserCog, Lock, BookMarked, Palette,
   ChevronDown, ChevronLeft, ChevronRight,
+  FileSignature, Send,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -35,6 +36,7 @@ const NAV_GROUPS = [
     { icon:Inbox,           href:'/resume-inbox',  label:'Resume Inbox' },
     { icon:Calendar,        href:'/interviews',   label:'Interviews' },
     { icon:FileText,       href:'/offers',       label:'Offer Engine' },
+    { icon:FileSignature,   href:'/nda-documents', label:'NDA Documents' },
     { icon:FileText,        href:'/jd-templates', label:'JD Templates' },
     { icon:BookOpen,        href:'/question-bank',label:'Question Bank' },
     { icon:Globe,           href:'/jobs',         label:'Job Board' },
@@ -70,6 +72,7 @@ const NAV_GROUPS = [
   { id:'communication', label:'COMMUNICATION', defaultOpen:false, items:[
     { icon:Mail,            href:'/conversations', label:'Email / Conversations' },
     { icon:MessageCircle,   href:'/whatsapp',      label:'WhatsApp Bot' },
+    { icon:Send,            href:'/whatsapp?tab=stage-notifications', label:'WhatsApp Stage Notifications' },
     { icon:Globe,            href:'/whatsapp-setup', label:'WhatsApp Setup' },
     { icon:MessageSquare,   href:'/sms',           label:'SMS Notifications' },
     { icon:Zap,             href:'/automations',   label:'Automations' },

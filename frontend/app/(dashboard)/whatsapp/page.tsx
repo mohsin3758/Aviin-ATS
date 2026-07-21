@@ -1,5 +1,6 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Save } from 'lucide-react';
 
@@ -31,8 +32,9 @@ const COMMANDS = [
   { cmd: 'DECLINE', desc: 'Decline your offer' },
 ];
 
-export default function WhatsAppPage() {
-  const [activeTab, setActiveTab] = useState('session');
+function WhatsAppPageInner() {
+  const searchParams = useSearchParams();
+  const [activeTab, setActiveTab] = useState(searchParams?.get('tab') || 'session');
   const { data: status } = useFetch<any>('/whatsapp-bot/status');
   const [phone, setPhone] = useState('');
   const [msg, setMsg] = useState('');
@@ -278,5 +280,17 @@ export default function WhatsAppPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function WhatsAppPage() {
+  return (
+    <Suspense fallback={
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', color: '#64748b', fontSize: 13 }}>
+        Loading…
+      </div>
+    }>
+      <WhatsAppPageInner />
+    </Suspense>
   );
 }

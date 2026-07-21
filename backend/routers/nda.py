@@ -346,6 +346,26 @@ async def manual_sign_nda(application_id: str, file: UploadFile = File(...),
     return {"signed": True, "method": "manual"}
 
 
+@nda_router.get("")
+async def list_nda_documents(status: Optional[str] = None, actor: Actor = Depends(get_actor)):
+    """All NDA documents for this tenant — powers the /nda-documents list page."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            """SELECT nd.id, nd.application_id, nd.status, nd.sign_method, nd.signatory_name,
+                      nd.sent_at, nd.signed_at, nd.created_at, nd.manual_file_path,
+                      a.candidate_id, c.full_name AS candidate_name, c.email AS candidate_email,
+                      r.title AS job_title, r.id AS requisition_id
+               FROM nda_documents nd
+               JOIN applications a ON a.id = nd.application_id
+               JOIN candidates c ON c.id = a.candidate_id
+               JOIN requisitions r ON r.id = a.requisition_id
+               WHERE ($1::text IS NULL OR nd.status = $1)
+               ORDER BY nd.created_at DESC""",
+            status,
+        )
+    return [dict(r) for r in rows]
+
+
 @nda_router.get("/{nda_id}/manual-file")
 async def download_manual_nda_file(nda_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
