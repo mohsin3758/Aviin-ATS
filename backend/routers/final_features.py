@@ -415,6 +415,12 @@ async def public_status(token: str):
             WHERE i.candidate_id=$1 AND i.tenant_id=$2 AND i.scheduled_at >= now()-INTERVAL '7 days'
             ORDER BY i.scheduled_at
         """, cand_id, tenant_id)
+        # Public, no-auth page has no JWT to call /settings/pipeline-stages
+        # with — piggyback this tenant's stage labels/colors/order onto the
+        # existing response instead of adding a second public endpoint.
+        stage_cfg = await conn.fetch(
+            "SELECT stage_key, label, color, display_order FROM pipeline_stage_config "
+            "WHERE tenant_id=$1 AND is_visible=TRUE ORDER BY display_order", tenant_id)
     formatted = []
     for a in apps:
         msg, label, color = STAGE_MSG.get(a["stage"], (a["stage"].title(), "", "#64748b"))
@@ -433,6 +439,7 @@ async def public_status(token: str):
             for i in ivs
         ],
         "message": "Updated in real-time. Contact your recruiter for queries.",
+        "stage_config": [dict(r) for r in stage_cfg],
     }
 
 

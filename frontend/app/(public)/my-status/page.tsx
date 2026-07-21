@@ -5,18 +5,19 @@ import { CheckCircle2, Clock, XCircle, Calendar, Video, Phone, MapPin, ChevronRi
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '/api';
 
-const STAGES = [
+// Fallback (used only until the API response's stage_config arrives)
+const DEFAULT_STAGES = [
   'sourced','contacted','interested','nda','screened','submitted',
   'l1_interview','l2_interview','offer','offer_accepted','placed',
 ];
-const STAGE_LABEL: Record<string,string> = {
+const DEFAULT_STAGE_LABEL: Record<string,string> = {
   sourced:'Profile Sourced', contacted:'Contacted', interested:'Showed Interest',
   nda:'NDA / Pre-Contract', screened:'Screened', submitted:'Submitted to Client',
   l1_interview:'L1 Interview', l2_interview:'L2 Interview',
   offer:'Offer Released', offer_accepted:'Offer Accepted', placed:'Placed 🎉',
   rejected:'Not Moving Forward', hold:'On Hold',
 };
-const STAGE_COLOR: Record<string,{bg:string,text:string,ring:string}> = {
+const DEFAULT_STAGE_COLOR: Record<string,{bg:string,text:string,ring:string}> = {
   placed:       {bg:'#d1fae5',text:'#065f46',ring:'#10b981'},
   offer_accepted:{bg:'#dbeafe',text:'#1e40af',ring:'#3b82f6'},
   offer:        {bg:'#ede9fe',text:'#5b21b6',ring:'#8b5cf6'},
@@ -28,7 +29,9 @@ const STAGE_COLOR: Record<string,{bg:string,text:string,ring:string}> = {
   rejected:     {bg:'#fee2e2',text:'#991b1b',ring:'#ef4444'},
 };
 
-function stageIdx(s: string) { return STAGES.indexOf(s); }
+function hexToColorSet(hex: string): {bg:string,text:string,ring:string} {
+  return { bg: hex + '1a', text: hex, ring: hex };
+}
 
 function MyStatusPageInner() {
   const params = useSearchParams();
@@ -85,6 +88,18 @@ function MyStatusPageInner() {
   const apps: any[] = data?.applications || [];
   const interviews: any[] = data?.upcoming_interviews || [];
   const msg = data?.message || '';
+
+  const stageCfg: any[] = data?.stage_config || [];
+  const STAGES = stageCfg.length > 0
+    ? stageCfg.filter((s: any) => !['rejected', 'hold'].includes(s.stage_key)).map((s: any) => s.stage_key)
+    : DEFAULT_STAGES;
+  const STAGE_LABEL: Record<string, string> = stageCfg.length > 0
+    ? Object.fromEntries(stageCfg.map((s: any) => [s.stage_key, s.stage_key === 'placed' ? `${s.label} 🎉` : s.label]))
+    : DEFAULT_STAGE_LABEL;
+  const STAGE_COLOR: Record<string, {bg:string,text:string,ring:string}> = stageCfg.length > 0
+    ? Object.fromEntries(stageCfg.map((s: any) => [s.stage_key, hexToColorSet(s.color)]))
+    : DEFAULT_STAGE_COLOR;
+  const stageIdx = (s: string) => STAGES.indexOf(s);
 
   const primaryApp = apps[0];
   const currentStage = primaryApp?.stage || '';

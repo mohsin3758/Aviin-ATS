@@ -158,6 +158,12 @@ const PIPELINE_STAGES = [
 ];
 
 function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, onCheckDups }: { item: ResumeItem; onClose: () => void; onApprove: () => void; onReject: () => void; onReparse: () => void; onEdit: () => void; onCheckDups?: () => void; }) {
+  const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
+  const LIVE_STAGES = (stageConfig || [])
+    .filter((s: any) => s.is_visible && !['rejected', 'hold'].includes(s.stage_key))
+    .sort((a: any, b: any) => a.display_order - b.display_order)
+    .map((s: any) => ({ key: s.stage_key, label: s.label, color: s.color }));
+  const PIPELINE_STAGES_LIVE = LIVE_STAGES.length > 0 ? LIVE_STAGES : PIPELINE_STAGES;
   const pd = item.parsed_data || {};
   const skills = item.skills || pd.skills || [];
   const matchScore = item.jd_match_score ?? pd.jd_match_score;
@@ -177,7 +183,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
     try {
       await apiFetch('/applications', { method: 'POST', body: JSON.stringify({ candidate_id: item.candidate_id, requisition_id: reqId, stage }) });
       setPipelineStatus('success');
-      setPipelineMsg('Moved to ' + (PIPELINE_STAGES.find(s => s.key === stage)?.label || stage));
+      setPipelineMsg('Moved to ' + (PIPELINE_STAGES_LIVE.find((s: any) => s.key === stage)?.label || stage));
     } catch(e: any) {
       const msg = (e?.message || String(e)).toLowerCase();
       if (msg.includes('409') || msg.includes('already')) {
@@ -315,7 +321,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
             )}
             {reqId && pipelineStatus !== 'success' && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {PIPELINE_STAGES.map(s => (
+                {PIPELINE_STAGES_LIVE.map((s: any) => (
                   <button key={s.key} onClick={() => handleMoveToStage(s.key)}
                     disabled={pipelineStatus === 'loading'}
                     style={{ fontSize: 11, fontWeight: 700, padding: '5px 11px', borderRadius: 20,

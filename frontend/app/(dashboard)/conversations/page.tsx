@@ -1141,7 +1141,11 @@ export default function MailboxPage() {
     finally{setSendingReply(false);}
   };
 
-  const STAGES = ['sourced','contacted','interested','nda','screened','submitted','l1_interview','l2_interview','offer','offer_accepted','placed','rejected','hold'];
+  const { data: stageConfigForBulk } = useFetch<any[]>('/settings/pipeline-stages');
+  const STAGE_OPTIONS = (stageConfigForBulk && stageConfigForBulk.length > 0)
+    ? [...stageConfigForBulk].sort((a: any, b: any) => a.display_order - b.display_order).map((s: any) => ({ key: s.stage_key, label: s.label }))
+    : ['sourced','contacted','interested','nda','screened','submitted','l1_interview','l2_interview','offer','offer_accepted','placed','rejected','hold']
+        .map(k => ({ key: k, label: k.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()) }));
   const fetchNowImap = async (fullSync?: boolean) => {
     setFetchingImap(true);
     setSyncProgress('Connecting to mailbox...');
@@ -1829,7 +1833,7 @@ export default function MailboxPage() {
             <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
               <select value={bulk.stage} onChange={e=>setBulk(p=>({...p,stage:e.target.value}))} style={{padding:'9px 12px',border:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'13px',outline:'none',color:'#1e293b'}}>
                 <option value="">Select stage...</option>
-                {STAGES.map(s=><option key={s} value={s}>{s.replace(/_/g,' ').replace(/\b\w/g,(c:string)=>c.toUpperCase())}</option>)}
+                {STAGE_OPTIONS.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}
               </select>
               <div style={{display:'flex',gap:'7px'}}>
                 {([['email','Email'],['whatsapp','WhatsApp'],['both','Both']] as [string,string][]).map(([v,l])=>(

@@ -58,6 +58,12 @@ const PRESETS: Record<string, object> = {
 export default function EmailSettingsPage() {
   const { data: saved, refetch } = useFetch<any>('/settings/email');
   const { data: docTemplates } = useFetch<any>('/settings/document-templates');
+  const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
+  const stageList = (stageConfig || [])
+    .filter((s: any) => s.stage_key !== 'sourced')
+    .sort((a: any, b: any) => a.display_order - b.display_order)
+    .map((s: any) => ({ key: s.stage_key, label: s.label }));
+  const EMAIL_STAGES_LIVE = stageList.length > 0 ? stageList : EMAIL_STAGES;
   const [form, setForm] = useState({
     smtp_host:'', smtp_port:587, smtp_user:'', smtp_password:'',
     smtp_from:'', smtp_from_name:'AVIIN ATS', smtp_tls:true,
@@ -343,7 +349,7 @@ export default function EmailSettingsPage() {
       <div style={{display:'flex',gap:'0',border:'1px solid #e2e8f0',borderRadius:'10px',overflow:'hidden'}}>
         {/* Stage list */}
         <div style={{width:'160px',flexShrink:0,borderRight:'1px solid #e2e8f0',background:'#f8fafc'}}>
-          {EMAIL_STAGES.map(st=>{
+          {EMAIL_STAGES_LIVE.map(st=>{
             const hasCustom=!!(templates[st.key]?.message||templates[st.key]?.subject||(templates[st.key]?.attachment&&templates[st.key]?.attachment!=='none'));
             return(
               <button key={st.key} onClick={()=>setActiveStage(st.key)}
@@ -356,7 +362,7 @@ export default function EmailSettingsPage() {
         </div>
         {/* Template editor */}
         <div style={{flex:1,padding:'16px'}}>
-          {EMAIL_STAGES.filter(s=>s.key===activeStage).map(st=>(
+          {EMAIL_STAGES_LIVE.filter((s: any)=>s.key===activeStage).map((st: any)=>(
             <div key={st.key}>
               <div style={{fontSize:'13px',fontWeight:'700',color:'#1e293b',marginBottom:'14px'}}>{st.label} — Email Template</div>
               <div style={{marginBottom:'12px'}}>

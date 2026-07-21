@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import {
@@ -9,8 +9,8 @@ import {
   RotateCcw, CheckCircle, AlertTriangle, Send
 } from 'lucide-react';
 
-// ── Stage config ──────────────────────────────────────────────────────────────
-const STAGES = [
+// ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
+const DEFAULT_STAGES = [
   { key: 'sourced',        label: 'Sourced',        color: '#6366F1', light: '#EEF2FF' },
   { key: 'contacted',      label: 'Contacted',      color: '#06B6D4', light: '#ECFEFF' },
   { key: 'interested',     label: 'Interested',     color: '#3B82F6', light: '#EFF6FF' },
@@ -84,6 +84,18 @@ export default function RequisitionPipelinePage() {
   const { data: req } = useFetch<any>(`/requisitions/${reqId}`);
   const { data: rawBoard, refetch: refreshBoard } = useFetch<Record<string, any[]>>(`/requisitions/${reqId}/pipeline`);
   const { data: stats, refetch: refreshStats } = useFetch<any>(`/requisitions/${reqId}/pipeline-stats`);
+  const { data: stageConfigData } = useFetch<any[]>('/settings/pipeline-stages');
+  const ALL_STAGES = useMemo(() => {
+    if (!stageConfigData || stageConfigData.length === 0) return DEFAULT_STAGES;
+    return [...stageConfigData]
+      .sort((a: any, b: any) => a.display_order - b.display_order)
+      .map((s: any) => ({ key: s.stage_key, label: s.label, color: s.color, light: `${s.color}1A` }));
+  }, [stageConfigData]);
+  const STAGES = useMemo(() => {
+    if (!stageConfigData || stageConfigData.length === 0) return DEFAULT_STAGES;
+    const visibleKeys = new Set(stageConfigData.filter((s: any) => s.is_visible).map((s: any) => s.stage_key));
+    return ALL_STAGES.filter((s: any) => visibleKeys.has(s.key));
+  }, [stageConfigData, ALL_STAGES]);
 
   const [board, setBoard] = useState<Record<string, any[]>>({});
   const [selected, setSelected] = useState<any | null>(null);
@@ -119,13 +131,13 @@ export default function RequisitionPipelinePage() {
         method: 'PATCH',
         body: JSON.stringify({ stage: toStage, send_email: sendEmail }),
       });
-      showToast(`Moved to ${STAGES.find(s => s.key === toStage)?.label || toStage}`);
+      showToast(`Moved to ${ALL_STAGES.find((s: any) => s.key === toStage)?.label || toStage}`);
       refreshStats();
     } catch (e: any) {
       showToast(String(e?.message || 'Move failed'), false);
       if (rawBoard) setBoard(rawBoard);
     }
-  }, [rawBoard, selected, showToast, refreshStats]);
+  }, [rawBoard, selected, showToast, refreshStats, ALL_STAGES]);
 
   // ── Drag & drop ─────────────────────────────────────────────────────────────
   function onDragStart(e: React.DragEvent, appId: string, fromStage: string) {
@@ -316,7 +328,7 @@ export default function RequisitionPipelinePage() {
       {/* ── SUMMARY TAB ───────────────────────────────────────────────────── */}
       {activeTab === 'summary' && (
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', maxWidth: 800 }}>
-          <SummaryTab req={req} stats={stats} board={board} />
+          <SummaryTab req={req} stats={stats} board={board} stages={STAGES} />
         </div>
       )}
 
@@ -343,6 +355,8 @@ export default function RequisitionPipelinePage() {
           drawerTab={drawerTab}
           setDrawerTab={setDrawerTab}
           showToast={showToast}
+          stages={STAGES}
+          allStages={ALL_STAGES}
         />
       )}
 
@@ -411,8 +425,8 @@ function CandidateCard({ app, stageColor, onClick, onDragStart, onMoveStage }: a
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast }: any) {
-  const stageCfg = STAGES.find(s => s.key === app.stage);
+function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+  const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
 
   return (
@@ -450,7 +464,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
               Current Stage: <span style={{ color: stageCfg?.color }}>{stageCfg?.label}</span>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {STAGES.filter(s => s.key !== 'rejected' && s.key !== 'hold').map(s => (
+              {stages.filter((s: any) => s.key !== 'rejected' && s.key !== 'hold').map((s: any) => (
                 <button key={s.key} onClick={() => onMoveStage(s.key)}
                   style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: `1px solid ${s.color}40`, background: app.stage === s.key ? s.color : `${s.color}15`, color: app.stage === s.key ? '#fff' : s.color, transition: 'all 0.15s' }}>
                   {s.label}
@@ -756,8 +770,8 @@ function ActivityTab({ candidateId }: any) {
 }
 
 // ── Summary Tab ───────────────────────────────────────────────────────────────
-function SummaryTab({ req, stats, board }: any) {
-  const stageBreakdown = STAGES.map(s => ({ ...s, count: (board[s.key] || []).length })).filter(s => s.count > 0);
+function SummaryTab({ req, stats, board, stages }: any) {
+  const stageBreakdown = stages.map((s: any) => ({ ...s, count: (board[s.key] || []).length })).filter((s: any) => s.count > 0);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <Card title="Job Details">
@@ -765,7 +779,7 @@ function SummaryTab({ req, stats, board }: any) {
       </Card>
       <Card title="Pipeline Breakdown">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {stageBreakdown.map(s => (
+          {stageBreakdown.map((s: any) => (
             <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ width: 8, height: 8, borderRadius: '50%', background: s.color, flexShrink: 0 }} />
               <span style={{ fontSize: 12, color: '#374151', minWidth: 120 }}>{s.label}</span>
