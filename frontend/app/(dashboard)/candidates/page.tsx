@@ -30,18 +30,24 @@ const timeAgo = (ts:string|null|undefined) => {
   return 'just now';
 };
 
-const STAGE_C: Record<string,{bg:string;color:string;label:string}> = {
+// Fallback (used only until /settings/pipeline-stages loads). Also the
+// live keys were wrong here before this fix (nda_pre_contract/hired don't
+// match the real stage keys nda/placed, so candidates in those stages —
+// and any custom stage — silently got no badge at all).
+const DEFAULT_STAGE_C: Record<string,{bg:string;color:string;label:string}> = {
   sourced:          {bg:'#eff6ff',color:'#1e40af',label:'Sourced'},
   contacted:        {bg:'#f0fdf4',color:'#166534',label:'Contacted'},
   interested:       {bg:'#fef9c3',color:'#854d0e',label:'Interested'},
-  nda_pre_contract: {bg:'#fdf4ff',color:'#7e22ce',label:'NDA/Pre'},
+  nda:              {bg:'#fdf4ff',color:'#7e22ce',label:'NDA'},
   screened:         {bg:'#fff7ed',color:'#9a3412',label:'Screened'},
   submitted:        {bg:'#f0fdfa',color:'#134e4a',label:'Submitted'},
   l1_interview:     {bg:'#fee2e2',color:'#991b1b',label:'L1 Interview'},
   l2_interview:     {bg:'#fff1f2',color:'#9f1239',label:'L2 Interview'},
   offer:            {bg:'#dcfce7',color:'#14532d',label:'Offer'},
-  hired:            {bg:'#bbf7d0',color:'#166534',label:'Hired'},
-  rejected:         {bg:'#f1f5f9',color:'#64748b',label:'Rejected'},
+  offer_accepted:   {bg:'#d1fae5',color:'#065f46',label:'Offer Accepted'},
+  placed:           {bg:'#bbf7d0',color:'#166534',label:'Placed'},
+  hold:             {bg:'#f1f5f9',color:'#64748b',label:'On Hold'},
+  rejected:         {bg:'#fee2e2',color:'#991b1b',label:'Rejected'},
 };
 
 const EMPTY = {
@@ -102,10 +108,10 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
 }
 
 // ── Quick-View Drawer ─────────────────────────────────────────────────────────
-function CandidateDrawer({candidate,onClose,onEdit}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void}) {
+function CandidateDrawer({candidate,onClose,onEdit,stageMap}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void;stageMap:Record<string,{bg:string;color:string;label:string}>}) {
   const {data:apps} = useFetch<any>(`/candidates/${candidate.id}/applications`);
   const exp = gx(candidate.total_exp_mo);
-  const sc = candidate.pipeline_stage ? (STAGE_C[candidate.pipeline_stage]||null) : null;
+  const sc = candidate.pipeline_stage ? (stageMap[candidate.pipeline_stage]||null) : null;
 
   return (
     <div style={{position:'fixed',inset:0,zIndex:500,display:'flex'}}>
@@ -171,7 +177,7 @@ function CandidateDrawer({candidate,onClose,onEdit}:{candidate:any;onClose:()=>v
           <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9'}}>
             <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>PIPELINE HISTORY ({apps.length})</div>
             {apps.map((a:any)=>{
-              const st = STAGE_C[a.stage]||{bg:'#f1f5f9',color:'#64748b',label:a.stage};
+              const st = stageMap[a.stage]||{bg:'#f1f5f9',color:'#64748b',label:a.stage};
               return (
                 <div key={a.id} style={{padding:'8px 0',borderBottom:'1px solid #f8fafc',display:'flex',alignItems:'center',gap:'10px'}}>
                   <span style={{padding:'2px 8px',borderRadius:'8px',fontSize:'11px',fontWeight:'600',background:st.bg,color:st.color}}>{st.label}</span>
@@ -340,6 +346,11 @@ export default function CandidatesPage() {
   const items:any[] = (cr as any)?.items||[];
   const total:number = (cr as any)?.total||0;
   const totalPages = Math.max(1,Math.ceil(total/PAGE_SIZE));
+
+  const {data:stageConfig} = useFetch<any[]>('/settings/pipeline-stages');
+  const stageMap:Record<string,{bg:string;color:string;label:string}> = (stageConfig && stageConfig.length>0)
+    ? Object.fromEntries(stageConfig.map((s:any)=>[s.stage_key,{bg:`${s.color}1a`,color:s.color,label:s.label}]))
+    : DEFAULT_STAGE_C;
 
   const handleSort = (col:string) => {
     setSort(s => s.by===col ? {...s,dir:s.dir==='asc'?'desc':'asc'} : {by:col,dir:'desc'});
@@ -578,7 +589,7 @@ export default function CandidatesPage() {
               </thead>
               <tbody data-testid="candidate-list">
                 {items.map((d:any)=>{
-                  const sc = d.pipeline_stage ? (STAGE_C[d.pipeline_stage]||null) : null;
+                  const sc = d.pipeline_stage ? (stageMap[d.pipeline_stage]||null) : null;
                   const exp = gx(d.total_exp_mo);
                   const activity = timeAgo(d.last_activity) || timeAgo(d.updated_at);
                   const isSel = selected.has(d.id);
@@ -702,7 +713,7 @@ export default function CandidatesPage() {
       )}
 
       {/* ── Quick-view drawer ─────────────────────────────────────────────── */}
-      {drawer && <CandidateDrawer candidate={drawer} onClose={()=>setDrawer(null)} onEdit={(c)=>{setDrawer(null);openEdit(c);}}/>}
+      {drawer && <CandidateDrawer candidate={drawer} onClose={()=>setDrawer(null)} onEdit={(c)=>{setDrawer(null);openEdit(c);}} stageMap={stageMap}/>}
 
       {/* ── Duplicates modal ─────────────────────────────────────────────── */}
       {showDups && <DuplicatesModal onClose={()=>setShowDups(false)} onRefetch={refetch}/>}
