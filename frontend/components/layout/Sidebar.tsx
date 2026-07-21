@@ -80,6 +80,7 @@ const NAV_GROUPS = [
   ]},
   { id:'settings', label:'SETTINGS', defaultOpen:false, items:[
     { icon:UserCog,         href:'/settings/users',       label:'Users & Roles' },
+    { icon:KanbanSquare,    href:'/settings/pipeline',    label:'Pipeline Stages' },
     { icon:Mail,            href:'/settings/email',           label:'Company Email (SMTP)' },
     { icon:MessageSquare,   href:'/settings/signatures',       label:'Email Signatures', roles:['admin','lead_recruiter','recruiter','delivery','kae','kae_manager'] },
     { icon:Lock,            href:'/security',             label:'Security / 2FA' },

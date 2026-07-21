@@ -1,5 +1,11 @@
 FROM python:3.12-slim
 
+# Unbuffered stdout — without this, print() output sits in Python's block
+# buffer (Docker's stdout isn't a TTY) and doesn't reach `docker logs`
+# reliably, which was silently hiding background-task diagnostics
+# (stage-change email/WhatsApp send results) well before this comment.
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # System deps: ffmpeg for audio, tesseract+poppler for OCR (Phase D)

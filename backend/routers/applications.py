@@ -151,27 +151,54 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
         "rejected":       "AVIIN Jobs - Update on Your Application",
     }
 
-    async with httpx.AsyncClient(timeout=5.0) as cli:
-        # WhatsApp via WAHA
-        try:
-            waha_key = os.environ.get("WAHA_API_KEY","2037c635e42c471a9f2032800ee6ff5b")
-            waha_url = os.environ.get("WAHA_URL","http://waha:3000")
-            if msg_text:
-                phone = "91" + str(candidate_id)[:10]  # placeholder
-                # Try to get real phone from DB in background
-                await cli.post(f"{waha_url}/api/sendText",
-                    headers={"X-Api-Key": waha_key},
-                    json={"chatId": "status@broadcast", "text": f"Stage: {name} -> {stage}", "session": "default"},
-                    timeout=3.0)
-        except Exception:
-            pass
-        # n8n webhook
-        try:
+    # WhatsApp via WAHA — HARD RULE #7/#12: consent-gated, real recipient,
+    # real per-stage template (previously broadcast a placeholder to a fixed
+    # "status@broadcast" chat with a fake candidate_id-derived phone number).
+    try:
+        from routers.whatsapp import _ensure_consent, _waha_headers, _check_waha, WAHA_BASE, WAHA_SESSION
+        async with db.tenant_conn(tenant_id) as conn:
+            has_consent = await _ensure_consent(conn, tenant_id, str(candidate_id))
+            cand_row = await conn.fetchrow("SELECT phone FROM candidates WHERE id=$1", candidate_id)
+            wa_row = await conn.fetchrow(
+                "SELECT stage_templates FROM whatsapp_settings WHERE tenant_id=$1", tenant_id)
+        phone = cand_row["phone"] if cand_row else None
+        wa_templates = {}
+        if wa_row and wa_row["stage_templates"]:
+            wa_templates = wa_row["stage_templates"]
+            if isinstance(wa_templates, str):
+                wa_templates = json.loads(wa_templates)
+        wa_text = (wa_templates.get(stage, {}) or {}).get("message") or msg_text
+        if wa_text:
+            wa_text = wa_text.replace("{name}", str(name))
+
+        if has_consent and phone and wa_text:
+            session_info = await _check_waha()
+            if session_info.get("status") in ("WORKING", "CONNECTED"):
+                digits = "".join(c for c in phone if c.isdigit())
+                if len(digits) == 10:
+                    digits = "91" + digits  # bare 10-digit Indian mobile — assume +91
+                chat_id = digits + "@c.us"
+                async with httpx.AsyncClient(timeout=10.0) as cli:
+                    await cli.post(f"{WAHA_BASE}/api/sendText", headers=_waha_headers(),
+                        json={"session": WAHA_SESSION, "chatId": chat_id, "text": wa_text})
+                print(f"Stage WhatsApp [{stage}] sent to {chat_id} ({name})")
+            else:
+                print(f"Stage WhatsApp [{stage}] skipped: WAHA session not connected")
+        elif not has_consent:
+            print(f"Stage WhatsApp [{stage}] skipped for {name}: no WhatsApp consent on file (HARD RULE #7)")
+        elif not phone:
+            print(f"Stage WhatsApp [{stage}] skipped for {name}: no phone number on file")
+    except Exception as _ex:
+        print(f"Stage WhatsApp failed [{stage}]: {_ex}")
+
+    # n8n webhook
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as cli:
             await cli.post("http://n8n:5678/webhook/aviin-stage-change",
                 json={"candidate_name": name, "stage_to": stage, "candidate_id": str(candidate_id)},
                 timeout=3.0)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     # Email notification for key stages - reads SMTP from email_settings DB
     if email and stage in SUBJS and msg_text:
@@ -181,7 +208,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
             _conn = await asyncpg.connect(_db_url)
             try:
                 _cfg = await _conn.fetchrow(
-                    "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls "
+                    "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls,stage_templates "
                     "FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE LIMIT 1", tenant_id)
                 if _cfg and _cfg["smtp_host"]:
                     _h=_cfg["smtp_host"]; _p=_cfg["smtp_port"] or 587
@@ -189,7 +216,10 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _f=_cfg["smtp_from"] or _u; _fn=_cfg["smtp_from_name"] or "AVIIN ATS"
                     _tls=_cfg["smtp_tls"] if _cfg["smtp_tls"] is not None else True
                     _em=MIMEMultipart()
-                    _tmpl=(_cfg.get("stage_templates") or {}).get(stage,{}) if _cfg.get("stage_templates") else {}
+                    _raw_tmpls = _cfg["stage_templates"]
+                    if isinstance(_raw_tmpls, str):
+                        _raw_tmpls = json.loads(_raw_tmpls or "{}")
+                    _tmpl=(_raw_tmpls or {}).get(stage,{})
                     _subj=_tmpl.get("subject") or SUBJS.get(stage,"AVIIN Jobs - Update")
                     if not msg_text or msg_text==MSGS.get(stage,""):
                         _tmpl_msg=_tmpl.get("message","")

@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { authHeaders, API } from '@/lib/auth';
@@ -11,8 +11,8 @@ import {
   FileSignature, Upload, ShieldCheck, Copy,
 } from 'lucide-react';
 
-// ── Stage config ──────────────────────────────────────────────────────────────
-const STAGES = [
+// ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
+const DEFAULT_STAGES = [
   { key: 'sourced',        label: 'Sourced',        color: '#6366F1', light: '#EEF2FF' },
   { key: 'contacted',      label: 'Contacted',      color: '#06B6D4', light: '#ECFEFF' },
   { key: 'interested',     label: 'Interested',     color: '#3B82F6', light: '#EFF6FF' },
@@ -94,6 +94,19 @@ function PipelineInner() {
   const { toast, show: showToast } = useToast();
   const dragRef = useRef<{ id: string; fromStage: string } | null>(null);
 
+  const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
+  const ALL_STAGES = useMemo(() => {
+    if (!stageConfig || stageConfig.length === 0) return DEFAULT_STAGES;
+    return [...stageConfig]
+      .sort((a: any, b: any) => a.display_order - b.display_order)
+      .map((s: any) => ({ key: s.stage_key, label: s.label, color: s.color, light: `${s.color}1A` }));
+  }, [stageConfig]);
+  const STAGES = useMemo(() => {
+    if (!stageConfig || stageConfig.length === 0) return DEFAULT_STAGES;
+    const visibleKeys = new Set(stageConfig.filter((s: any) => s.is_visible).map((s: any) => s.stage_key));
+    return ALL_STAGES.filter((s: any) => visibleKeys.has(s.key));
+  }, [stageConfig, ALL_STAGES]);
+
   const { data: reqs } = useFetch<any[]>('/requisitions?limit=200&status=open');
   const { data: rawBoard, refetch: refreshBoard } = useFetch<Record<string, any[]>>(
     selectedJobId ? `/requisitions/${selectedJobId}/pipeline` : null
@@ -135,13 +148,13 @@ function PipelineInner() {
     if (selected?.id === appId) setSelected((s: any) => s ? { ...s, stage: toStage } : s);
     try {
       await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify({ stage: toStage, send_email: false }) });
-      showToast(`Moved to ${STAGES.find(s => s.key === toStage)?.label || toStage}`);
+      showToast(`Moved to ${ALL_STAGES.find((s: any) => s.key === toStage)?.label || toStage}`);
       refreshStats();
     } catch (e: any) {
       showToast(String(e?.message || 'Move failed'), false);
       if (rawBoard) setBoard(rawBoard);
     }
-  }, [rawBoard, selected, showToast, refreshStats]);
+  }, [rawBoard, selected, showToast, refreshStats, ALL_STAGES]);
 
   const filteredApps = useCallback((apps: any[]) => {
     if (!candSearch.trim()) return apps;
@@ -367,7 +380,7 @@ function PipelineInner() {
       {selected && (
         <CandidateDrawer app={selected} onClose={() => setSelected(null)}
           onMoveStage={(toStage: string) => moveStage(selected.id, selected.stage, toStage)}
-          drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} />
+          drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES} />
       )}
 
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
@@ -454,8 +467,8 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart }: any
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast }: any) {
-  const stageCfg = STAGES.find(s => s.key === app.stage);
+function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+  const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -492,7 +505,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
               Current Stage: <span style={{ color: stageCfg?.color }}>{stageCfg?.label}</span>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {STAGES.filter(s => s.key !== 'rejected' && s.key !== 'hold').map(s => (
+              {stages.filter((s: any) => s.key !== 'rejected' && s.key !== 'hold').map((s: any) => (
                 <button key={s.key} onClick={() => onMoveStage(s.key)}
                   style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: `1px solid ${s.color}40`, background: app.stage === s.key ? s.color : `${s.color}15`, color: app.stage === s.key ? '#fff' : s.color, transition: 'all 0.15s' }}>
                   {s.label}
