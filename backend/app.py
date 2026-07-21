@@ -214,6 +214,7 @@ from routers import nda
 app.include_router(nda.router)
 app.include_router(nda.nda_router)
 app.include_router(nda.nda_sign_public)
+app.include_router(nda.doc_templates_router)
 from routers import pipeline_stages
 app.include_router(pipeline_stages.router)
 from routers import whatsapp_settings

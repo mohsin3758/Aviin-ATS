@@ -37,12 +37,15 @@ from deps import Actor, get_actor
 router = APIRouter(prefix="/applications", tags=["nda"])
 nda_router = APIRouter(prefix="/nda", tags=["nda"])
 nda_sign_public = APIRouter(prefix="/nda-sign", tags=["nda-sign"])
+doc_templates_router = APIRouter(prefix="/settings/document-templates", tags=["document-templates"])
 
 NDA_FIELDS = """id, tenant_id, application_id, candidate_id, draft_text, final_text,
                 status, sign_method, signatory_name, sent_at, signed_at, created_at,
-                manual_file_path"""
+                manual_file_path, attachment_source, attached_file_name"""
 
 UPLOAD_DIR = Path("/app/uploads/nda")
+TEMPLATE_UPLOAD_DIR = Path("/app/uploads/document_templates")
+ALLOWED_TEMPLATE_EXTS = {".pdf", ".doc", ".docx"}
 
 
 def _default_nda_text(candidate_name: str, job_title: str, company_name: str) -> str:
@@ -97,6 +100,83 @@ async def _get_or_create_nda(conn, tenant_id: str, application_id: str):
             VALUES ($1,$2,$3,$4,'draft') RETURNING {NDA_FIELDS}""",
         tenant_id, application_id, app_row["candidate_id"], draft,
     )
+
+
+# ─── Document Templates (upload your own NDA / Contract file, PDF or Word) ───
+# Reusable per tenant: upload once, replace or remove any time, used as the
+# attachment when sending a candidate's NDA instead of the auto-generated PDF.
+
+MIME_BY_EXT = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+@doc_templates_router.get("")
+async def list_document_templates(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT doc_type, file_name, mime_type, uploaded_at FROM document_templates WHERE tenant_id=$1",
+            actor.tenant_id)
+    by_type = {r["doc_type"]: dict(r) for r in rows}
+    return {"nda": by_type.get("nda"), "contract": by_type.get("contract")}
+
+
+@doc_templates_router.post("/{doc_type}")
+async def upload_document_template(doc_type: str, file: UploadFile = File(...), actor: Actor = Depends(get_actor)):
+    if doc_type not in ("nda", "contract"):
+        raise HTTPException(400, "doc_type must be 'nda' or 'contract'")
+    ext = "." + (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in ALLOWED_TEMPLATE_EXTS:
+        raise HTTPException(400, f"Unsupported file type: {ext}. Use PDF or Word (.pdf, .doc, .docx)")
+    file_bytes = await file.read()
+
+    folder = TEMPLATE_UPLOAD_DIR / actor.tenant_id
+    folder.mkdir(parents=True, exist_ok=True)
+    rel_path = f"/uploads/document_templates/{actor.tenant_id}/{doc_type}{ext}"
+    (folder / f"{doc_type}{ext}").write_bytes(file_bytes)
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO document_templates (tenant_id, doc_type, file_path, file_name, mime_type, uploaded_by)
+               VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT (tenant_id, doc_type) DO UPDATE SET
+                 file_path=EXCLUDED.file_path, file_name=EXCLUDED.file_name,
+                 mime_type=EXCLUDED.mime_type, uploaded_by=EXCLUDED.uploaded_by, uploaded_at=now()
+               RETURNING doc_type, file_name, mime_type, uploaded_at""",
+            actor.tenant_id, doc_type, rel_path, file.filename or f"{doc_type}{ext}",
+            MIME_BY_EXT.get(ext, "application/octet-stream"), actor.user_id,
+        )
+    return dict(row)
+
+
+@doc_templates_router.delete("/{doc_type}")
+async def remove_document_template(doc_type: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM document_templates WHERE tenant_id=$1 AND doc_type=$2 RETURNING file_path",
+            actor.tenant_id, doc_type)
+    if row and row["file_path"]:
+        try:
+            (Path("/app") / row["file_path"].lstrip("/")).unlink(missing_ok=True)
+        except Exception:
+            pass
+    return {"removed": bool(row)}
+
+
+@doc_templates_router.get("/{doc_type}/download")
+async def download_document_template(doc_type: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT file_path, file_name FROM document_templates WHERE tenant_id=$1 AND doc_type=$2",
+            actor.tenant_id, doc_type)
+    if not row:
+        raise HTTPException(404, "No template uploaded for this type")
+    abs_path = Path("/app") / row["file_path"].lstrip("/")
+    if not abs_path.exists():
+        raise HTTPException(404, "File missing from disk")
+    return FileResponse(str(abs_path), filename=row["file_name"])
 
 
 # ─── PDF / DOCX generation (reportlab / python-docx, zero-token — static template) ──
@@ -217,7 +297,8 @@ async def download_nda_docx(application_id: str, actor: Actor = Depends(get_acto
 # ─── Send for signature ─────────────────────────────────────────────────────
 
 async def _send_email_with_pdf(tenant_id: str, to_email: str, to_name: str, subject: str, body_text: str,
-                                pdf_bytes: Optional[bytes] = None, pdf_filename: str = "document.pdf"):
+                                pdf_bytes: Optional[bytes] = None, pdf_filename: str = "document.pdf",
+                                attachment_mime: str = "application/pdf"):
     """Best-effort SMTP send using this tenant's active email_settings row.
 
     Mirrors the working pattern in applications.py::_notify_stage_change_bg
@@ -242,7 +323,8 @@ async def _send_email_with_pdf(tenant_id: str, to_email: str, to_name: str, subj
         msg["To"] = to_email
         msg.attach(MIMEText(body_text, "plain"))
         if pdf_bytes:
-            part = MIMEBase('application', 'pdf')
+            maintype, _, subtype = attachment_mime.partition('/')
+            part = MIMEBase(maintype or 'application', subtype or 'octet-stream')
             part.set_payload(pdf_bytes)
             encoders.encode_base64(part)
             part.add_header('Content-Disposition', f'attachment; filename="{pdf_filename}"')
@@ -263,26 +345,53 @@ async def _send_email_with_pdf(tenant_id: str, to_email: str, to_name: str, subj
 
 
 class NdaSendRequest(BaseModel):
-    sign_method: str = "type_name"  # 'type_name' | 'otp'
+    sign_method: str = "type_name"        # 'type_name' | 'otp'
+    attachment: str = "generated"          # 'generated' | 'nda_template' | 'contract_template'
 
 
 @router.post("/{application_id}/nda/send")
 async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Depends(get_actor)):
     if body.sign_method not in ("type_name", "otp"):
         raise HTTPException(400, "sign_method must be 'type_name' or 'otp'")
+    if body.attachment not in ("generated", "nda_template", "contract_template"):
+        raise HTTPException(400, "attachment must be 'generated', 'nda_template', or 'contract_template'")
+
     async with db.tenant_conn(actor.tenant_id) as conn:
         nda = await _get_or_create_nda(conn, actor.tenant_id, application_id)
         ctx = await _nda_context(conn, application_id)
         if not ctx.get("candidate_email"):
             raise HTTPException(400, "Candidate has no email address")
 
+        attach_bytes: Optional[bytes] = None
+        attach_filename = "nda_agreement.pdf"
+        attach_mime = "application/pdf"
+        attached_path: Optional[str] = None
+        attached_name: Optional[str] = None
+
+        if body.attachment != "generated":
+            tmpl_type = "nda" if body.attachment == "nda_template" else "contract"
+            tmpl = await conn.fetchrow(
+                "SELECT file_path, file_name, mime_type FROM document_templates WHERE tenant_id=$1 AND doc_type=$2",
+                actor.tenant_id, tmpl_type)
+            if not tmpl:
+                raise HTTPException(400, f"No {tmpl_type} template uploaded — upload one first or send the auto-generated document")
+            abs_path = Path("/app") / tmpl["file_path"].lstrip("/")
+            if not abs_path.exists():
+                raise HTTPException(400, "Template file missing from disk — re-upload it")
+            attach_bytes = abs_path.read_bytes()
+            attach_filename = tmpl["file_name"]
+            attach_mime = tmpl["mime_type"]
+            attached_path = tmpl["file_path"]
+            attached_name = tmpl["file_name"]
+
         token = secrets.token_urlsafe(32)
         final_text = nda["final_text"] or nda["draft_text"]
         nda = await conn.fetchrow(
             f"""UPDATE nda_documents
-                SET final_text=$1, status='sent', sign_method=$2, signing_token=$3, sent_at=now()
-                WHERE application_id=$4 RETURNING {NDA_FIELDS}""",
-            final_text, body.sign_method, token, application_id,
+                SET final_text=$1, status='sent', sign_method=$2, signing_token=$3, sent_at=now(),
+                    attachment_source=$4, attached_file_path=$5, attached_file_name=$6
+                WHERE application_id=$7 RETURNING {NDA_FIELDS}""",
+            final_text, body.sign_method, token, body.attachment, attached_path, attached_name, application_id,
         )
 
         # HARD RULE #12: consent record before sharing/processing candidate PII.
@@ -295,7 +404,8 @@ async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Dep
 
     base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
     sign_url = f"{base}/sign-nda/{token}"
-    pdf_bytes = _build_nda_pdf(final_text, ctx["candidate_name"], ctx.get("company_name", "AVIIN Jobs Services"))
+    if attach_bytes is None:
+        attach_bytes = _build_nda_pdf(final_text, ctx["candidate_name"], ctx.get("company_name", "AVIIN Jobs Services"))
     body_text = (
         f'Dear {ctx["candidate_name"]},\n\n'
         f'As part of our recruitment process for {ctx.get("job_title", "this role")}, please review and '
@@ -307,7 +417,7 @@ async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Dep
     asyncio.create_task(_send_email_with_pdf(
         actor.tenant_id, ctx["candidate_email"], ctx["candidate_name"],
         f'{ctx.get("company_name", "AVIIN Jobs Services")} - NDA / Pre-Contract Agreement',
-        body_text, pdf_bytes, "nda_agreement.pdf",
+        body_text, attach_bytes, attach_filename, attach_mime,
     ))
     return {"sent": True, "sign_url": sign_url, "recipient": ctx["candidate_email"]}
 
@@ -476,7 +586,23 @@ async def get_nda_for_signing(token: str):
         "company_name": row["company_name"],
         "letter_text": row["final_text"] or row["draft_text"],
         "otp_required": row["sign_method"] == "otp",
+        "has_attached_file": row["attachment_source"] != "generated",
+        "attached_file_name": row["attached_file_name"],
     }
+
+
+@nda_sign_public.get("/attached-file")
+async def download_attached_file(token: str):
+    """Public, token-gated download of the custom NDA/Contract file (if the
+    recruiter chose to attach one instead of the auto-generated PDF)."""
+    async with db.system_conn() as conn:
+        row = await conn.fetchrow("SELECT * FROM get_nda_attached_file_by_token($1)", token)
+    if not row or not row["attached_file_path"]:
+        raise HTTPException(404, "No attached file for this signing link")
+    abs_path = Path("/app") / row["attached_file_path"].lstrip("/")
+    if not abs_path.exists():
+        raise HTTPException(404, "File missing from disk")
+    return FileResponse(str(abs_path), filename=row["attached_file_name"] or abs_path.name)
 
 
 @nda_sign_public.post("/request-otp")

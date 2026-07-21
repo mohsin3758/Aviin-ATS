@@ -619,9 +619,11 @@ async function downloadNdaFile(appId: string, kind: 'pdf' | 'docx') {
 
 function NdaTab({ appId, showToast }: any) {
   const { data: nda, refetch } = useFetch<any>(`/applications/${appId}/nda`);
+  const { data: templates } = useFetch<any>('/settings/document-templates');
   const [draftText, setDraftText] = useState('');
   const [initialized, setInitialized] = useState(false);
   const [signMethod, setSignMethod] = useState<'type_name' | 'otp'>('type_name');
+  const [attachment, setAttachment] = useState<'generated' | 'nda_template' | 'contract_template'>('generated');
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -648,7 +650,7 @@ function NdaTab({ appId, showToast }: any) {
   async function sendForSignature() {
     setSending(true);
     try {
-      const res = await apiFetch(`/applications/${appId}/nda/send`, { method: 'POST', body: JSON.stringify({ sign_method: signMethod }) });
+      const res = await apiFetch(`/applications/${appId}/nda/send`, { method: 'POST', body: JSON.stringify({ sign_method: signMethod, attachment }) });
       setSignUrl(res.sign_url || '');
       showToast(`NDA emailed to ${res.recipient}`); refetch();
     } catch (e: any) { showToast(String(e?.message || 'Send failed'), false); } finally { setSending(false); }
@@ -717,6 +719,18 @@ function NdaTab({ appId, showToast }: any) {
               <input type="radio" checked={signMethod === 'otp'} onChange={() => setSignMethod('otp')} /> Type-name + Email OTP
             </label>
           </div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#1E40AF', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Attach</div>
+          <select value={attachment} onChange={e => setAttachment(e.target.value as any)}
+            style={{ width: '100%', padding: '7px 10px', border: '1px solid #BFDBFE', borderRadius: 6, fontSize: 12, color: '#374151', marginBottom: 10, background: '#fff' }}>
+            <option value="generated">Auto-generated NDA document</option>
+            <option value="nda_template" disabled={!templates?.nda}>{templates?.nda ? `NDA Template (${templates.nda.file_name})` : 'NDA Template — none uploaded'}</option>
+            <option value="contract_template" disabled={!templates?.contract}>{templates?.contract ? `Contract Template (${templates.contract.file_name})` : 'Contract Template — none uploaded'}</option>
+          </select>
+          {attachment !== 'generated' && (
+            <div style={{ fontSize: 10, color: '#64748B', marginBottom: 10 }}>
+              Manage uploaded templates on the <a href="/nda-documents" style={{ color: '#2563EB', fontWeight: 700 }}>NDA Documents</a> page.
+            </div>
+          )}
           <button onClick={sendForSignature} disabled={sending}
             style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
             <Send size={12} /> {sending ? 'Sending…' : 'Send for Signature'}

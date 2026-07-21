@@ -10,6 +10,8 @@ interface NdaData {
   company_name?: string;
   letter_text?: string;
   otp_required?: boolean;
+  has_attached_file?: boolean;
+  attached_file_name?: string;
 }
 
 export default function SignNdaPage({ params }: { params: { token: string } }) {
@@ -137,12 +139,25 @@ export default function SignNdaPage({ params }: { params: { token: string } }) {
         </div>
 
         {/* NDA body */}
-        <div style={{ background: 'white', borderRadius: '12px', border: '1px solid #e2e8f0', padding: '28px', marginBottom: '20px' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '700', color: '#374151', marginBottom: '16px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Agreement Text</h3>
-          <div style={{ fontSize: '14px', lineHeight: '1.8', color: '#374151', whiteSpace: 'pre-wrap', fontFamily: 'Georgia,serif' }}>
-            {nda.letter_text}
+        {nda.has_attached_file ? (
+          <div style={{ background: 'white', borderRadius: '12px', border: '2px solid #1e40af', padding: '28px', marginBottom: '20px', textAlign: 'center' }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '700', color: '#374151', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Document to Review</h3>
+            <p style={{ fontSize: '13px', color: '#64748b', marginBottom: '16px' }}>
+              Please download and read the full document before signing below.
+            </p>
+            <a href={`${API_BASE}/nda-sign/attached-file?token=${encodeURIComponent(token)}`} target="_blank" rel="noreferrer"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '12px 24px', background: '#1e40af', color: 'white', borderRadius: '10px', textDecoration: 'none', fontSize: '14px', fontWeight: '700' }}>
+              📄 Download {nda.attached_file_name || 'Document'}
+            </a>
           </div>
-        </div>
+        ) : (
+          <div style={{ background: 'white', borderRadius: '12px', border: '1px solid #e2e8f0', padding: '28px', marginBottom: '20px' }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '700', color: '#374151', marginBottom: '16px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Agreement Text</h3>
+            <div style={{ fontSize: '14px', lineHeight: '1.8', color: '#374151', whiteSpace: 'pre-wrap', fontFamily: 'Georgia,serif' }}>
+              {nda.letter_text}
+            </div>
+          </div>
+        )}
 
         {/* Signature section */}
         <div style={{ background: 'white', borderRadius: '12px', border: '2px solid #1e40af', padding: '28px', marginBottom: '24px' }}>
