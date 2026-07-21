@@ -434,25 +434,18 @@ async def update_candidate(candidate_id: str, body: CandidateUpdate, actor: Acto
 
 @router.delete("/{candidate_id}")
 async def delete_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
-    CHILD_TABLES = [
-        "consent_records", "candidate_scores", "candidate_parsed_data",
-        "candidate_activities", "candidate_tag_map", "candidate_status_tokens",
-        "placement_predictions", "source_attribution", "bgv_checks",
-        "technical_assessments", "hotlist", "candidate_retention_tracking",
-        "compliance_records", "candidate_onboarding",
-    ]
+    """Soft-delete (matches bulk_delete_candidates/merge_candidate below, and
+    the frontend's own confirm copy: 'They will be hidden from the list').
+    This used to be a real DELETE that tried to clean up 14 child tables but
+    missed 18 others with a candidate_id FK (applications, resume_files,
+    placements, timesheets, payslips, offer_letters, ...) - so it silently
+    failed with a ForeignKeyViolationError for any candidate that had ever
+    been added to a pipeline or had a resume uploaded, i.e. most candidates."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        async with conn.transaction():
-            for tbl in CHILD_TABLES:
-                try:
-                    async with conn.transaction():
-                        await conn.execute(f"DELETE FROM {tbl} WHERE candidate_id=$1", candidate_id)
-                except Exception:
-                    pass
-            r = await conn.execute(
-                "DELETE FROM candidates WHERE id=$1 AND tenant_id=$2",
-                candidate_id, actor.tenant_id)
-    if not int((r or "DELETE 0").split()[-1]):
+        r = await conn.execute(
+            "UPDATE candidates SET is_active=false WHERE id=$1 AND tenant_id=$2",
+            candidate_id, actor.tenant_id)
+    if not int((r or "UPDATE 0").split()[-1]):
         raise HTTPException(404, "Not found")
     return {"ok": True, "deleted": candidate_id}
 
