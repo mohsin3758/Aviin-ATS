@@ -91,7 +91,7 @@ async def bulk_delete_candidates(body: dict, actor: Actor = Depends(get_actor)):
     if not ids: return {"deleted": 0}
     async with db.tenant_conn(actor.tenant_id) as conn:
         await conn.execute(
-            "UPDATE candidates SET is_active=false WHERE id=ANY(::uuid[]) AND tenant_id=",
+            "UPDATE candidates SET is_active=false WHERE id=ANY($1::uuid[]) AND tenant_id=$2",
             ids, actor.tenant_id)
     return {"deleted": len(ids)}
 
@@ -113,25 +113,6 @@ async def list_duplicates(actor: Actor = Depends(get_actor)):
     )
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(q, actor.tenant_id)
-    return {"groups": [dict(r) for r in rows]}
-
-
-async def list_duplicates(actor: Actor = Depends(get_actor)):
-    sql = (
-        "SELECT full_name, COUNT(*) AS cnt,"
-        " array_agg(id::text ORDER BY created_at) AS ids,"
-        " array_agg(COALESCE(email, '') ORDER BY created_at) AS emails,"
-        " array_agg(COALESCE(phone, '') ORDER BY created_at) AS phones,"
-        " array_agg(COALESCE(current_employer, '') ORDER BY created_at) AS employers,"
-        " array_agg(total_exp_mo ORDER BY created_at) AS exps,"
-        " array_agg(created_at::date::text ORDER BY created_at) AS dates"
-        " FROM candidates"
-        " WHERE tenant_id= AND is_active IS NOT FALSE AND full_name IS NOT NULL"
-        " GROUP BY full_name HAVING COUNT(*) > 1"
-        " ORDER BY cnt DESC, full_name"
-    )
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch(sql, actor.tenant_id)
     return {"groups": [dict(r) for r in rows]}
 
 
@@ -469,16 +450,16 @@ async def merge_candidate(candidate_id: str, body: dict, actor: Actor = Depends(
     discard_id = body.get("discard_id")
     if not discard_id: raise HTTPException(400, "discard_id required")
     async with db.tenant_conn(actor.tenant_id) as conn:
-        keep    = await conn.fetchrow("SELECT id FROM candidates WHERE id= AND tenant_id=", candidate_id, actor.tenant_id)
-        discard = await conn.fetchrow("SELECT id FROM candidates WHERE id= AND tenant_id=", discard_id, actor.tenant_id)
+        keep    = await conn.fetchrow("SELECT id FROM candidates WHERE id=$1 AND tenant_id=$2", candidate_id, actor.tenant_id)
+        discard = await conn.fetchrow("SELECT id FROM candidates WHERE id=$1 AND tenant_id=$2", discard_id, actor.tenant_id)
         if not keep or not discard: raise HTTPException(404, "Candidate not found")
         await conn.execute("""
-            UPDATE applications SET candidate_id=
-            WHERE candidate_id= AND tenant_id=
+            UPDATE applications SET candidate_id=$1
+            WHERE candidate_id=$2 AND tenant_id=$3
               AND requisition_id NOT IN (
-                  SELECT requisition_id FROM applications WHERE candidate_id=)
+                  SELECT requisition_id FROM applications WHERE candidate_id=$1)
         """, candidate_id, discard_id, actor.tenant_id)
-        await conn.execute("UPDATE candidates SET is_active=false WHERE id=", discard_id)
+        await conn.execute("UPDATE candidates SET is_active=false WHERE id=$1 AND tenant_id=$2", discard_id, actor.tenant_id)
     return {"merged": True, "kept": candidate_id, "discarded": discard_id}
 
 
