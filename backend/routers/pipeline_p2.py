@@ -89,9 +89,17 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
                 req_id) or 0
         else:
             stage_rows = await conn.fetch("SELECT stage, COUNT(*) as cnt FROM applications WHERE 1=1 GROUP BY stage")
-        by_stage   = {s: 0 for s in STAGES}
+
+        # Pre-seed from this tenant's live stage config (includes custom
+        # stages), not the fixed STAGES list — same bug class fixed in
+        # get_stage_analytics: any stage_key not in a hardcoded list was
+        # silently dropped from by_stage even though stage_rows had the
+        # real count.
+        stage_keys = [r["stage_key"] for r in await conn.fetch(
+            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1", actor.tenant_id)]
+        by_stage = {s: 0 for s in (stage_keys or STAGES)}
         for r in stage_rows:
-            if r["stage"] in by_stage: by_stage[r["stage"]] = int(r["cnt"])
+            by_stage[r["stage"]] = int(r["cnt"])
 
         screened  = by_stage.get("screened",0)
         interview = by_stage.get("interview",0)

@@ -8,19 +8,20 @@ import { getTokenPayload } from '@/lib/auth';
 import Link from 'next/link';
 
 const CHECKLIST = [
-  { id:1, icon:'👤', title:'Import Candidates',          desc:'Upload your candidate database',                done:false },
-  { id:2, icon:'🏢', title:'Add Companies & Clients',    desc:'Set up your client accounts',                   done:false },
-  { id:3, icon:'💼', title:'Create Job Requisitions',    desc:'Post your first open position',                 done:false },
-  { id:4, icon:'✉️', title:'Connect Email Account',      desc:'Enable email communication',                    done:false },
-  { id:5, icon:'🤖', title:'Try AI Candidate Matching',  desc:'Let AI find the best candidates for your jobs', done:false },
-  { id:6, icon:'📊', title:'Explore Reports & Analytics', desc:'Get insights on your recruitment',             done:false },
+  { id:1, icon:'👤', title:'Import Candidates',          desc:'Upload your candidate database',                href:'/candidates' },
+  { id:2, icon:'🏢', title:'Add Companies & Clients',    desc:'Set up your client accounts',                   href:'/companies' },
+  { id:3, icon:'💼', title:'Create Job Requisitions',    desc:'Post your first open position',                 href:'/requisitions' },
+  { id:4, icon:'✉️', title:'Connect Email Account',      desc:'Enable email communication',                    href:'/settings/email' },
+  { id:5, icon:'🤖', title:'Try AI Candidate Matching',  desc:'Let AI find the best candidates for your jobs', href:'/ai-tools' },
+  { id:6, icon:'📊', title:'Explore Reports & Analytics', desc:'Get insights on your recruitment',             href:'/reports' },
 ];
 
-const PIPELINE_STAGE_CONFIG = [
+// Fallback (used only until /settings/pipeline-stages loads)
+const DEFAULT_PIPELINE_STAGE_CONFIG = [
   { key:'sourced',     label:'Sourced',     color:'#64748b' },
   { key:'screened',    label:'Screened',    color:'#3b82f6' },
   { key:'submitted',   label:'Submitted',   color:'#8b5cf6' },
-  { key:'l1_interview',label:'Interview',   color:'#f59e0b' },
+  { key:'l1_interview',label:'L1 Interview',color:'#f59e0b' },
   { key:'offer',       label:'Offer',       color:'#10b981' },
   { key:'placed',      label:'Placed',      color:'#059669' },
 ];
@@ -50,7 +51,8 @@ export default function DashboardPage() {
   const [_userRole, set_UserRole] = useState('admin');
   const isAdminOrLead = ['admin','super_admin','lead_recruiter','kae','kae_manager'].includes(_userRole);
   useEffect(() => { const t = getTokenPayload(); if(t?.full_name) set_UserName(t.full_name.split(' ')[0]); if(t?.role) set_UserRole(t.role); }, []);
-  const [checkedItems, setCheckedItems] = useState<number[]>([]);
+  const [reportsVisited, setReportsVisited] = useState(false);
+  useEffect(() => { setReportsVisited(localStorage.getItem('aviin_visited_reports') === '1'); }, []);
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [tab, setTab] = useState('overview');
   const { data: stats } = useFetch<any>('/reports/dashboard-summary');
@@ -61,11 +63,31 @@ export default function DashboardPage() {
   const { data: recruiterStats } = useFetch<any>(_userRole === 'recruiter' ? '/recruiter/my-stats' : null);
   const { data: pipelineMetrics } = useFetch<any>('/pipeline/metrics');
   const { data: recruiterCapacity } = useFetch<any[]>('/analytics/recruiter-capacity');
+  const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
+  const { data: redeployments } = useFetch<any[]>('/analytics/redeployment-queue');
+  const { data: clients } = useFetch<any[]>('/clients');
+  const { data: emailSettings } = useFetch<any>('/settings/email');
+
+  const PIPELINE_STAGE_CONFIG = (stageConfig && stageConfig.length > 0)
+    ? [...stageConfig].filter((s: any) => s.is_visible).sort((a: any, b: any) => a.display_order - b.display_order)
+        .slice(0, 8).map((s: any) => ({ key: s.stage_key, label: s.label, color: s.color }))
+    : DEFAULT_PIPELINE_STAGE_CONFIG;
 
   const pipeline = stats?.pipeline || {};
   const openJobs = (reqs||[]).filter((r:any)=>r.status==='open').length;
   const totalCands = cands?.total || 0;
-  const pct = Math.round(checkedItems.length / CHECKLIST.length * 100);
+
+  // Real signals instead of ephemeral click-state that reset on reload
+  const hasAiMatch = (cands?.items || []).some((c: any) => c.jd_match_score != null || c.ai_match_score != null);
+  const doneItems = new Set<number>([
+    ...(totalCands > 0 ? [1] : []),
+    ...((clients?.length || 0) > 0 ? [2] : []),
+    ...((reqs?.length || 0) > 0 ? [3] : []),
+    ...(emailSettings?.configured ? [4] : []),
+    ...(hasAiMatch ? [5] : []),
+    ...(reportsVisited ? [6] : []),
+  ]);
+  const pct = Math.round(doneItems.size / CHECKLIST.length * 100);
 
   return (
     <div className="space-y-6">
@@ -96,7 +118,7 @@ export default function DashboardPage() {
         <StatCard icon="👤" label="Active Candidates"       value={totalCands}  color="#059669" bg="#d1fae5" trend={8}   href="/candidates" />
         <StatCard icon="📋" label="In Pipeline"      value={pipeline.total_candidates||0} color="#7c3aed" bg="#ede9fe" trend={5} href="/pipeline" />
         {isAdminOrLead && <StatCard icon="⚠️" label="SLA Breaches"    value={sla?.breached||0}            color="#dc2626" bg="#fee2e2" trend={-3} href="/sla" />}
-        {isAdminOrLead && <StatCard icon="⚙️" label="Cron Jobs"       value={schedStat?.jobs?.length||6}  color="#0f766e" bg="#ccfbf1" href="/scheduler/status" />}
+        {isAdminOrLead && <StatCard icon="⚙️" label="Cron Jobs"       value={schedStat?.jobs?.length||6}  color="#0f766e" bg="#ccfbf1" />}
         {isAdminOrLead && <StatCard icon="🤖" label="AI Features"     value={19}          color="#7c3aed" bg="#ede9fe" href="/ai-tools" />}
       </div>
       {/* Recruiter Performance (shown to recruiter role only) */}
@@ -232,9 +254,10 @@ export default function DashboardPage() {
           </div>
           <div className="divide-y" style={{ borderColor:'var(--gray-100)' }}>
             {CHECKLIST.map(item => {
-              const done = checkedItems.includes(item.id);
+              const done = doneItems.has(item.id);
               return (
-                <div key={item.id} onClick={() => setCheckedItems(prev => prev.includes(item.id)?prev.filter(i=>i!==item.id):[...prev,item.id])}
+                <Link key={item.id} href={item.href}
+                  onClick={() => { if (item.id === 6) { localStorage.setItem('aviin_visited_reports', '1'); setReportsVisited(true); } }}
                   className="flex items-start gap-3 px-5 py-3 cursor-pointer hover:bg-gray-50 transition-colors">
                   <div className="mt-0.5 flex-shrink-0">
                     {done
@@ -248,7 +271,8 @@ export default function DashboardPage() {
                     </div>
                     <div className="text-xs mt-0.5" style={{ color:'var(--gray-400)' }}>{item.desc}</div>
                   </div>
-                </div>
+                  <ChevronRight size={14} style={{ color:'var(--gray-300)', marginLeft:'auto', flexShrink:0, marginTop:'2px' }} />
+                </Link>
               );
             })}
           </div>
@@ -290,9 +314,35 @@ export default function DashboardPage() {
         </div>
       </div>
       <div style={{marginTop:"24px"}}>
-        <h3 style={{fontSize:"15px",fontWeight:"700",color:"#0f172a",marginBottom:"12px"}}>Redeployment Queue</h3>
-        <div style={{background:"white",borderRadius:"12px",border:"1px solid #e2e8f0",padding:"20px",textAlign:"center"}}>
-          <p style={{color:"#94a3b8",fontSize:"13px"}}>No upcoming redeployments</p>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"12px"}}>
+          <h3 style={{fontSize:"15px",fontWeight:"700",color:"#0f172a"}}>Redeployment Queue</h3>
+          <span style={{fontSize:"11px",color:"#94a3b8"}}>Contractors ending within 21 days</span>
+        </div>
+        <div style={{background:"white",borderRadius:"12px",border:"1px solid #e2e8f0",overflow:"hidden"}}>
+          {(redeployments && redeployments.length > 0) ? (
+            <table style={{width:'100%',borderCollapse:'collapse'}}>
+              <thead><tr style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0'}}>
+                {['Candidate','Client','Role','Ends','Days Left'].map(h=>(
+                  <th key={h} style={{padding:'8px 16px',textAlign:'left',fontSize:'11px',fontWeight:700,color:'#64748b',letterSpacing:'0.05em'}}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {redeployments.slice(0,8).map((r:any)=>(
+                  <tr key={r.placement_id} style={{borderBottom:'1px solid #f1f5f9'}}>
+                    <td style={{padding:'10px 16px',fontSize:'13px',fontWeight:600,color:'#0f172a'}}>{r.candidate_name}</td>
+                    <td style={{padding:'10px 16px',fontSize:'12px',color:'#475569'}}>{r.client_name||'—'}</td>
+                    <td style={{padding:'10px 16px',fontSize:'12px',color:'#475569'}}>{r.requisition_title||'—'}</td>
+                    <td style={{padding:'10px 16px',fontSize:'12px',color:'#475569'}}>{r.end_date?new Date(r.end_date).toLocaleDateString('en-IN',{day:'2-digit',month:'short'}):'—'}</td>
+                    <td style={{padding:'10px 16px'}}>
+                      <span style={{fontSize:'11px',fontWeight:700,padding:'2px 9px',borderRadius:999,background:r.days_remaining<=7?'#fef2f2':'#fffbeb',color:r.days_remaining<=7?'#dc2626':'#ca8a04'}}>{r.days_remaining}d</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p style={{color:"#94a3b8",fontSize:"13px",padding:"20px",textAlign:"center"}}>No upcoming redeployments</p>
+          )}
         </div>
       </div>
 
