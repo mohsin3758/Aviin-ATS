@@ -204,20 +204,8 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
 
       {/* Mini Pipeline Bar — inbox matches + pipeline stages */}
       {counts && (counts.inbox_count > 0 || counts.total > 0) && (() => {
-        const stages = [
-          {key:'contacted',  label:'Contacted',  color:'#06b6d4'},
-          {key:'interested', label:'Interested', color:'#3b82f6'},
-          {key:'nda',        label:'NDA',         color:'#f59e0b'},
-          {key:'sourced',    label:'Sourced',     color:'#6366f1'},
-          {key:'screened',   label:'Screened',    color:'#0891b2'},
-          {key:'submitted',  label:'Submitted',   color:'#64748b'},
-          {key:'interview',  label:'Interview',   color:'#7c3aed'},
-          {key:'on_hold',    label:'Hold',        color:'#94a3b8'},
-          {key:'offer',      label:'Offer',       color:'#ca8a04'},
-          {key:'placed',     label:'Placed',      color:'#16a34a'},
-        ];
-        const active = stages.filter(s => counts[s.key] > 0);
-        const maxCount = Math.max(...stages.map(s => counts[s.key]||0), counts.inbox_count||0, 1);
+        const stages: {key:string;label:string;color:string;count:number}[] = counts.stages || [];
+        const active = stages.filter((s:any) => s.count > 0);
         return (
           <div style={{ borderTop:'1px solid #f1f5f9', paddingTop:10, marginTop:4 }}>
             {/* Row 1: inbox vs pipeline counts */}
@@ -239,7 +227,7 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
               {/* Stage pills */}
               {active.map(s => (
                 <div key={s.key} style={{ display:'flex', alignItems:'center', gap:2, padding:'2px 7px', borderRadius:10, background:s.color+'14', border:`1px solid ${s.color}30` }}>
-                  <span style={{ fontSize:11, fontWeight:800, color:s.color }}>{counts[s.key]}</span>
+                  <span style={{ fontSize:11, fontWeight:800, color:s.color }}>{s.count}</span>
                   <span style={{ fontSize:9, fontWeight:500, color:s.color }}>{s.label}</span>
                 </div>
               ))}
@@ -254,16 +242,16 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
                   Pipeline Funnel — {counts.total} candidate{counts.total!==1?'s':''}
                 </div>
                 <div style={{ display:'flex', borderRadius:6, overflow:'hidden', height:14, gap:'1px', background:'#e2e8f0' }}>
-                  {stages.map(s => counts[s.key] > 0 ? (
-                    <div key={s.key} title={`${s.label}: ${counts[s.key]}`}
-                      style={{ background:s.color, flex:counts[s.key], minWidth:6 }} />
+                  {stages.map(s => s.count > 0 ? (
+                    <div key={s.key} title={`${s.label}: ${s.count}`}
+                      style={{ background:s.color, flex:s.count, minWidth:6 }} />
                   ) : null)}
                 </div>
                 <div style={{ display:'flex', gap:'6px 12px', marginTop:6, flexWrap:'wrap' }}>
                   {active.map(s => (
                     <div key={s.key} style={{ display:'flex', alignItems:'center', gap:3 }}>
                       <div style={{ width:8, height:8, borderRadius:2, background:s.color, flexShrink:0 }} />
-                      <span style={{ fontSize:10, fontWeight:700, color:s.color }}>{counts[s.key]}</span>
+                      <span style={{ fontSize:10, fontWeight:700, color:s.color }}>{s.count}</span>
                       <span style={{ fontSize:10, color:'#64748b' }}>{s.label}</span>
                     </div>
                   ))}

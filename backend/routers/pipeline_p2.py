@@ -821,54 +821,56 @@ async def get_active_requisitions(actor: Actor = Depends(get_actor)):
 # ── Per-requisition stage counts (bulk, for job cards) ────────────────────────
 @metrics_router.get("/req-stage-counts")
 async def req_stage_counts(actor: Actor = Depends(get_actor)):
-    """Return stage breakdown for every open requisition in one query."""
+    """Return stage breakdown for every open requisition in one query.
+
+    Previously used a hardcoded FILTER-per-stage list (13 fixed keys, plus
+    an ad-hoc 'interview' bucket combining l1/l2), so any custom stage a
+    tenant added (e.g. an 'L3 Interview' stage) - and its candidates -
+    silently vanished from the Requisitions page's mini pipeline bar.
+    Now driven by the tenant's live pipeline_stage_config, same as
+    /pipeline/stage-analytics.
+    """
     async with db.tenant_conn(actor.tenant_id) as conn:
+        stage_cfg_rows = await conn.fetch(
+            "SELECT stage_key, label, color FROM pipeline_stage_config "
+            "WHERE tenant_id=$1 AND is_visible=TRUE ORDER BY display_order", actor.tenant_id)
+        stage_cfg = [(r["stage_key"], r["label"], r["color"]) for r in stage_cfg_rows]
+        if not stage_cfg:
+            stage_cfg = [(st, st.replace("_", " ").title(), "#64748b") for st in STAGES]
+
         rows = await conn.fetch("""
-            SELECT
-                r.id::text AS req_id,
-                COUNT(a.id)                                                         AS total,
-                COUNT(a.id) FILTER (WHERE a.stage = 'sourced')              AS sourced,
-                COUNT(a.id) FILTER (WHERE a.stage = 'contacted')            AS contacted,
-                COUNT(a.id) FILTER (WHERE a.stage = 'interested')           AS interested,
-                COUNT(a.id) FILTER (WHERE a.stage = 'nda')                  AS nda,
-                COUNT(a.id) FILTER (WHERE a.stage = 'screened')             AS screened,
-                COUNT(a.id) FILTER (WHERE a.stage = 'submitted')            AS submitted,
-                COUNT(a.id) FILTER (WHERE a.stage IN ('l1_interview','l2_interview')) AS interview,
-                COUNT(a.id) FILTER (WHERE a.stage = 'contacted')            AS contacted,
-                COUNT(a.id) FILTER (WHERE a.stage = 'interested')           AS interested,
-                COUNT(a.id) FILTER (WHERE a.stage = 'nda')                  AS nda,
-                COUNT(a.id) FILTER (WHERE a.stage = 'submitted')            AS submitted,
-                COUNT(a.id) FILTER (WHERE a.stage = 'hold')                 AS on_hold,
-                COUNT(a.id) FILTER (WHERE a.stage IN ('offer','offer_accepted'))      AS offer,
-                COUNT(a.id) FILTER (WHERE a.stage = 'placed')               AS placed,
-                COUNT(a.id) FILTER (WHERE a.stage = 'rejected')             AS rejected,
-                (SELECT COUNT(*) FROM candidates c
-                 WHERE c.matched_requisition_id = r.id
-                   AND c.tenant_id = r.tenant_id)                          AS inbox_count
+            SELECT r.id::text AS req_id, a.stage AS stage, COUNT(*) AS cnt
             FROM requisitions r
-            LEFT JOIN applications a ON a.requisition_id = r.id
+            JOIN applications a ON a.requisition_id = r.id
+            WHERE r.tenant_id = $1 AND r.status = 'open'
+            GROUP BY r.id, a.stage
+        """, actor.tenant_id)
+        inbox_rows = await conn.fetch("""
+            SELECT r.id::text AS req_id, COUNT(c.id) AS inbox_count
+            FROM requisitions r
+            LEFT JOIN candidates c ON c.matched_requisition_id = r.id AND c.tenant_id = r.tenant_id
             WHERE r.tenant_id = $1 AND r.status = 'open'
             GROUP BY r.id
         """, actor.tenant_id)
-        return {
-            r["req_id"]: {
-                "total":     int(r["total"]),
-                "sourced":   int(r["sourced"]),
-                "contacted": int(r["contacted"]),
-                "interested":int(r["interested"]),
-                "nda":       int(r["nda"]),
-                "screened":  int(r["screened"]),
-                "submitted": int(r["submitted"]),
-                "contacted": int(r["contacted"]),
-                "interested":int(r["interested"]),
-                "nda":       int(r["nda"]),
-                "submitted": int(r["submitted"]),
-                "on_hold":   int(r["on_hold"]),
-                "interview": int(r["interview"]),
-                "offer":     int(r["offer"]),
-                "placed":    int(r["placed"]),
-                "rejected":  int(r["rejected"]),
-                "inbox_count": int(r["inbox_count"]),
+
+        result: dict = {}
+        for r in inbox_rows:
+            result[r["req_id"]] = {
+                "total": 0, "rejected": 0, "inbox_count": int(r["inbox_count"]),
+                "stages": [{"key": k, "label": l, "color": c, "count": 0} for k, l, c in stage_cfg],
             }
-            for r in rows
-        }
+        for r in rows:
+            rid = r["req_id"]
+            if rid not in result:
+                result[rid] = {"total": 0, "rejected": 0, "inbox_count": 0,
+                                "stages": [{"key": k, "label": l, "color": c, "count": 0} for k, l, c in stage_cfg]}
+            cnt = int(r["cnt"])
+            result[rid]["total"] += cnt
+            if r["stage"] == "rejected":
+                result[rid]["rejected"] += cnt
+            else:
+                for s in result[rid]["stages"]:
+                    if s["key"] == r["stage"]:
+                        s["count"] += cnt
+                        break
+        return result
