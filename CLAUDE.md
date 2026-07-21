@@ -394,10 +394,18 @@ NEVER call external LLM APIs.
 - NEXT_PUBLIC_API_URL set to https://yourdomain.com/api
 
 ## P23-P35 Features (added 2026-06-21)
+NOTE (2026-07-21): "DONE" below tracks backend-route existence, not
+frontend UI — audit on this date found Candidate Tags (P33), Duplicate
+Candidate Detection (P35), and Bulk CV Upload (P23) all had working
+routers with ZERO frontend usage (plus a real bug: the email/phone
+duplicate scanner's own DB default overflowed its column type on every
+insert, silently, since creation). All three now have real UI wired up
+as of today. Don't trust DONE alone for "does a user-facing page exist"
+without spot-checking — re-audit the rest of this table opportunistically.
 | Feature | Phase | Status |
 |---------|-------|--------|
 | Skills Taxonomy (71 skills + aliases) | P23 | DONE |
-| Bulk CV Upload + AI Parse + Dup Detection | P23 | DONE |
+| Bulk CV Upload + AI Parse + Dup Detection | P23 | DONE (UI added 2026-07-21) |
 | Email Template Engine (6 templates) | P24 | DONE |
 | Interview Scheduler | P24 | DONE |
 | Candidate Activity Timeline | P24 | DONE |
@@ -411,9 +419,9 @@ NEVER call external LLM APIs.
 | Salary Benchmarking (26 benchmarks) | P31 | DONE |
 | Market Demand Intelligence | P31 | DONE |
 | In-app Notification Center | P32 | DONE |
-| Candidate Tags (12 default tags) | P33 | DONE |
+| Candidate Tags (12 default tags) | P33 | DONE (UI added 2026-07-21) |
 | Interview Question Bank (26 questions) | P34 | DONE |
-| Duplicate Candidate Detection | P35 | DONE |
+| Duplicate Candidate Detection | P35 | DONE (UI added 2026-07-21; fixed a silent DB-overflow bug that made it record zero duplicates ever) |
 | User Management (27 staffing roles) | NEW | DONE |
 
 ## New Routes (P23-P35)
@@ -421,3 +429,16 @@ NEVER call external LLM APIs.
 /sla, /audit, /jd-templates, /export/*, /jobs, /salary-benchmark,
 /notifications, /automations, /candidate-tags, /question-bank, /duplicates
 /users, /roles
+
+## Additional UI wired up 2026-07-21 (pre-existing backends, no UI until now)
+- Recruiter Reassignment (HARD RULE #10 HITL flow, `/assignments`) — now
+  on the Requisitions detail page ("Assigned Recruiter" card, admin/
+  manager-gated reassign)
+- Pipeline Automation Rules (`/pipeline-rules`, Tier-0 nightly stage
+  auto-move) — now on Settings > Pipeline Stages page. Was silently
+  never executing: `scheduler.py`'s `run_pipeline_auto_move()` called an
+  undefined `_eval()` helper every night since it was scheduled — fixed.
+- CSV/Excel candidate import (`/import`) — Candidates page's "Import CSV"
+  button previously ran a fragile hand-rolled client-side CSV parser
+  that never called this endpoint; now uses the real backend endpoint
+  (adds Excel support + downloadable template as a side effect)

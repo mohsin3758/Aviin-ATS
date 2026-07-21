@@ -322,6 +322,133 @@ function DuplicatesModal({onClose,onRefetch}:{onClose:()=>void;onRefetch:()=>voi
   );
 }
 
+// ── Bulk CV Upload Modal (P23: AI-parsed multi-resume upload) ─────────────────
+function BulkCVModal({onClose,onDone}:{onClose:()=>void;onDone:()=>void}) {
+  const [files,setFiles] = useState<File[]>([]);
+  const [parsing,setParsing] = useState(false);
+  const [results,setResults] = useState<any[]|null>(null);
+  const [selected,setSelected] = useState<Set<number>>(new Set());
+  const [creating,setCreating] = useState(false);
+  const [createSummary,setCreateSummary] = useState<{created:number;errors:number}|null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const pickFiles = (e:React.ChangeEvent<HTMLInputElement>) => {
+    const f = Array.from(e.target.files||[]);
+    setFiles(f); setResults(null); setCreateSummary(null);
+  };
+
+  const parse = async () => {
+    if (files.length===0) return;
+    setParsing(true);
+    try {
+      const fd = new FormData();
+      files.forEach(f=>fd.append('files', f));
+      const res = await fetch(`${API}/bulk-cv/parse`, {method:'POST', headers:authHeaders(), body:fd});
+      const data = await res.json().catch(()=>({}));
+      if (!res.ok) throw new Error(data?.detail || 'Parse failed');
+      const rows: any[] = data.results||[];
+      setResults(rows);
+      setSelected(new Set(rows.map((r:any,i:number)=>i).filter(i=>rows[i].status==='parsed')));
+    } catch(e:any) { alert(e?.message||'Failed to parse resumes'); }
+    finally { setParsing(false); }
+  };
+
+  const toggle = (i:number) => setSelected(prev => { const n=new Set(prev); n.has(i)?n.delete(i):n.add(i); return n; });
+
+  const createSelected = async () => {
+    if (!results || selected.size===0) return;
+    setCreating(true);
+    let created=0, errors=0;
+    for (const i of Array.from(selected)) {
+      const r = results[i];
+      try {
+        await apiFetch('/candidates', {method:'POST', body:JSON.stringify({
+          full_name: r.name || r.file, email: r.email||'', phone: r.phone||'',
+          skills: r.skills||[], total_exp_mo: Math.round((r.exp_years||0)*12),
+          source: 'bulk_cv_upload',
+        })});
+        created++;
+      } catch { errors++; }
+    }
+    setCreateSummary({created,errors});
+    setCreating(false);
+  };
+
+  const STATUS_CFG: Record<string,{label:string;bg:string;color:string}> = {
+    parsed:    {label:'Parsed',    bg:'#f0fdf4', color:'#166534'},
+    duplicate: {label:'Duplicate', bg:'#fffbeb', color:'#92400e'},
+    failed:    {label:'Failed',    bg:'#fef2f2', color:'#991b1b'},
+  };
+
+  const OV:any={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'};
+  return (
+    <div style={OV} onClick={onClose}>
+      <div style={{background:'white',borderRadius:'16px',width:'720px',maxWidth:'100%',maxHeight:'85vh',overflow:'auto',boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}} onClick={e=>e.stopPropagation()}>
+        <div style={{padding:'20px 28px',borderBottom:'1px solid #e2e8f0',display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'white',zIndex:1}}>
+          <div>
+            <h2 style={{fontSize:'16px',fontWeight:'700',color:'#0f172a',margin:0}}>Bulk CV Upload</h2>
+            <p style={{fontSize:'11px',color:'#94a3b8',margin:'2px 0 0'}}>Upload multiple resumes — parsed with zero-token regex NER, duplicate-checked by email</p>
+          </div>
+          <button onClick={onClose} style={{border:'none',background:'none',cursor:'pointer',color:'#94a3b8'}}><X size={18}/></button>
+        </div>
+        <div style={{padding:'20px 28px'}}>
+          {!results && (
+            <>
+              <input ref={fileRef} type="file" multiple accept=".txt,.pdf,.doc,.docx" style={{display:'none'}} onChange={pickFiles}/>
+              <button onClick={()=>fileRef.current?.click()} style={{width:'100%',padding:'28px',border:'2px dashed #cbd5e1',borderRadius:'10px',background:'#f8fafc',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#64748b'}}>
+                {files.length>0 ? `${files.length} file${files.length>1?'s':''} selected` : 'Click to select resume files'}
+              </button>
+              {files.length>0 && (
+                <button onClick={parse} disabled={parsing} style={{marginTop:'14px',width:'100%',padding:'10px',borderRadius:'8px',border:'none',background:parsing?'#94a3b8':'#7c3aed',color:'white',cursor:parsing?'not-allowed':'pointer',fontSize:'13px',fontWeight:'700'}}>
+                  {parsing?'Parsing…':`Parse ${files.length} Resume${files.length>1?'s':''}`}
+                </button>
+              )}
+            </>
+          )}
+          {results && !createSummary && (
+            <>
+              <div style={{display:'flex',gap:'8px',marginBottom:'14px',fontSize:'12px'}}>
+                <span style={{color:'#166534'}}>{results.filter(r=>r.status==='parsed').length} parsed</span>
+                <span style={{color:'#92400e'}}>· {results.filter(r=>r.status==='duplicate').length} duplicates</span>
+                <span style={{color:'#991b1b'}}>· {results.filter(r=>r.status==='failed').length} failed</span>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:'8px',maxHeight:'400px',overflowY:'auto'}}>
+                {results.map((r:any,i:number)=>{
+                  const cfg = STATUS_CFG[r.status]||STATUS_CFG.failed;
+                  const canSelect = r.status==='parsed';
+                  return (
+                    <div key={i} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',border:'1px solid #f1f5f9',borderRadius:'8px',opacity:canSelect?1:0.7}}>
+                      <input type="checkbox" checked={selected.has(i)} disabled={!canSelect} onChange={()=>toggle(i)} style={{accentColor:'#7c3aed'}}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:'12px',fontWeight:'700',color:'#0f172a'}}>{r.name||r.file}</div>
+                        <div style={{fontSize:'11px',color:'#64748b'}}>{r.email||'no email'} · {r.exp_years||0}y exp · {(r.skills||[]).slice(0,4).join(', ')||'no skills detected'}</div>
+                      </div>
+                      <span style={{fontSize:'10px',fontWeight:'700',padding:'3px 8px',borderRadius:'6px',background:cfg.bg,color:cfg.color,flexShrink:0}}>{cfg.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{display:'flex',justifyContent:'flex-end',gap:'10px',marginTop:'16px'}}>
+                <button onClick={onClose} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Cancel</button>
+                <button onClick={createSelected} disabled={selected.size===0||creating} style={{padding:'9px 18px',borderRadius:'8px',border:'none',background:selected.size===0||creating?'#94a3b8':'#1e40af',color:'white',cursor:selected.size===0||creating?'not-allowed':'pointer',fontSize:'13px',fontWeight:'700'}}>
+                  {creating?'Adding…':`Add ${selected.size} Candidate${selected.size!==1?'s':''}`}
+                </button>
+              </div>
+            </>
+          )}
+          {createSummary && (
+            <div style={{textAlign:'center',padding:'20px 0'}}>
+              <div style={{fontSize:'32px',marginBottom:'8px'}}>✅</div>
+              <p style={{fontSize:'14px',fontWeight:'600',color:'#16a34a',marginBottom:'16px'}}>{createSummary.created} candidate{createSummary.created!==1?'s':''} added{createSummary.errors>0?`, ${createSummary.errors} failed`:''}</p>
+              <button onClick={onDone} style={{padding:'9px 20px',borderRadius:'8px',border:'none',background:'#1e40af',color:'white',cursor:'pointer',fontSize:'13px',fontWeight:'700'}}>Done</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Sort Header Cell ─────────────────────────────────────────────────────────
 function SortTh({label,col,sort,onSort,style:s}:{label:string;col:string;sort:{by:string;dir:string};onSort:(c:string)=>void;style?:any}) {
   const active = sort.by===col;
@@ -367,6 +494,7 @@ export default function CandidatesPage() {
   const [selected,setSelected] = useState<Set<string>>(new Set());
   const [bulkAssignOpen,setBulkAssignOpen] = useState(false);
   const [showDups,setShowDups] = useState(false);
+  const [showBulkCV,setShowBulkCV] = useState(false);
 
   // quick-view drawer
   const [drawer,setDrawer] = useState<any>(null);
@@ -500,50 +628,29 @@ export default function CandidatesPage() {
     setImporting(true);setImportResult(null);
     const target = e.target;
     try {
-      const text=await file.text();
-      const lines=text.split(/\r?\n/).filter(l=>l.trim());
-      if(lines.length<2){setImporting(false);return;}
-      const headerMap:Record<string,number>={};
-      const rawHeaders=lines[0].split(',').map(h=>h.replace(/^"|"$/g,'').trim().toLowerCase());
-      rawHeaders.forEach((h,i)=>{
-        const key = h==='name'||h==='full_name'?'full_name'
-          :h==='email'?'email'
-          :h==='phone'||h==='mobile'?'phone'
-          :h==='location'||h==='city'?'location'
-          :h==='employer'||h==='company'||h==='current_employer'?'current_employer'
-          :h==='designation'||h==='current_designation'?'current_designation'
-          :h==='exp'||h==='experience'||h==='total_exp_mo'?'total_exp_mo'
-          :h==='expected_ctc'||h==='ctc'?'expected_ctc'
-          :h==='current_ctc'?'current_ctc'
-          :h==='notice'||h==='notice_period_days'?'notice_period_days'
-          :h==='linkedin'||h==='linkedin_url'?'linkedin_url'
-          :h==='source'?'source'
-          :h==='skills'?'skills'
-          :null;
-        if(key) headerMap[key]=i;
+      const isExcel = /\.xlsx?$/i.test(file.name);
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`${API}${isExcel?'/import/candidates/excel':'/import/candidates'}`, {
+        method:'POST', headers: authHeaders(), body: fd,
       });
-      let created=0,errors=0;
-      for(let i=1;i<lines.length;i++){
-        const vals=lines[i].split(',').map(v=>v.replace(/^"|"$/g,'').trim());
-        const get=(k:string)=>headerMap[k]!=null?vals[headerMap[k]]||'':'';
-        const payload:any={
-          full_name:get('full_name'),email:get('email'),phone:get('phone'),
-          location:get('location'),current_employer:get('current_employer'),
-          current_designation:get('current_designation'),
-          total_exp_mo:parseInt(get('total_exp_mo'))||0,
-          expected_ctc:get('expected_ctc')?parseFloat(get('expected_ctc')):null,
-          current_ctc:get('current_ctc')?parseFloat(get('current_ctc')):null,
-          notice_period_days:get('notice_period_days')?parseInt(get('notice_period_days')):null,
-          linkedin_url:get('linkedin_url'),source:get('source')||'direct',
-          skills:get('skills')?get('skills').split(';').map((s:string)=>s.trim()).filter(Boolean):[]
-        };
-        if(!payload.full_name)continue;
-        try{await apiFetch('/candidates',{method:'POST',body:JSON.stringify(payload)});created++;}
-        catch{errors++;}
-      }
-      setImportResult({created,errors});refetch();
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data?.detail || 'Import failed');
+      setImportResult({created:(data.created||0)+(data.updated||0), errors:data.errors||0});
+      refetch();
     } catch(e:any){showStatus('Import error: '+(e?.message||'unknown'));}
     finally{setImporting(false);if(target)target.value='';}
+  };
+
+  const downloadImportTemplate = async(kind:'csv'|'excel')=>{
+    const res = await fetch(`${API}/import/template/${kind==='excel'?'excel':'candidates'}`, {headers:authHeaders()});
+    if(!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = kind==='excel'?'candidates_template.xlsx':'template.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
   };
 
   const runJDRank = async()=>{
@@ -566,9 +673,11 @@ export default function CandidatesPage() {
           <h1 style={{fontSize:'22px',fontWeight:'800',color:'#0f172a',margin:0}}>Candidates</h1>
           <p style={{fontSize:'13px',color:'#64748b',margin:'4px 0 0'}}>{total.toLocaleString()} candidates · Page {page+1}/{totalPages}</p>
         </div>
-        <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
-          <input ref={importRef} type="file" accept=".csv" style={{display:'none'}} onChange={handleImportFile}/>
-          <button onClick={()=>importRef.current?.click()} disabled={importing} style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600',color:'#374151'}}><Upload size={13}/>{importing?'Importing...':'Import CSV'}</button>
+        <div style={{display:'flex',gap:'8px',flexWrap:'wrap',alignItems:'center'}}>
+          <input ref={importRef} type="file" accept=".csv,.xlsx,.xls" style={{display:'none'}} onChange={handleImportFile}/>
+          <button onClick={()=>importRef.current?.click()} disabled={importing} style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600',color:'#374151'}}><Upload size={13}/>{importing?'Importing...':'Import CSV/Excel'}</button>
+          <button onClick={()=>downloadImportTemplate('csv')} title="Download CSV template" style={{padding:'8px 9px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'11px',fontWeight:'600',color:'#94a3b8'}}>Template</button>
+          <button onClick={()=>setShowBulkCV(true)} style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',border:'1px solid #ddd6fe',background:'#faf5ff',cursor:'pointer',fontSize:'12px',fontWeight:'600',color:'#7c3aed'}}><FileText size={13}/>Bulk CV Upload</button>
           <button onClick={handleExport} disabled={exporting} style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600',color:'#374151'}}><Download size={13}/>{exporting?'Exporting...':'Export CSV'}</button>
           <button onClick={()=>setShowDups(true)} style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',border:'1px solid #f59e0b',background:'#fffbeb',cursor:'pointer',fontSize:'12px',fontWeight:'600',color:'#92400e'}}><GitMerge size={13}/>Duplicates</button>
           <button onClick={()=>setShowJD(true)} style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 16px',borderRadius:'8px',border:'none',background:'linear-gradient(135deg,#7c3aed,#2563eb)',color:'white',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}><Brain size={13}/>JD Match</button>
@@ -791,6 +900,7 @@ export default function CandidatesPage() {
 
       {/* ── Duplicates modal ─────────────────────────────────────────────── */}
       {showDups && <DuplicatesModal onClose={()=>setShowDups(false)} onRefetch={refetch}/>}
+      {showBulkCV && <BulkCVModal onClose={()=>setShowBulkCV(false)} onDone={()=>{setShowBulkCV(false);refetch();}}/>}
 
       {/* ── Bulk Assign modal ─────────────────────────────────────────────── */}
       {bulkAssignOpen && <BulkAssignModal candidateIds={Array.from(selected)} onClose={()=>setBulkAssignOpen(false)} onDone={()=>setSelected(new Set())}/>}

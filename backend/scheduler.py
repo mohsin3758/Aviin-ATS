@@ -103,6 +103,23 @@ async def send_monthly_incentive_summary():
 
 
 
+def _eval(actual, op, expected):
+    """Evaluate one stage_rules condition. actual is the application/candidate
+    field value, op/expected come from the rule's stored conditions JSON."""
+    if actual is None:
+        return False
+    try:
+        if op == ">":  return actual > expected
+        if op == "<":  return actual < expected
+        if op == ">=": return actual >= expected
+        if op == "<=": return actual <= expected
+        if op in ("==", "="): return actual == expected
+        if op in ("!=", "<>"): return actual != expected
+        return False
+    except TypeError:
+        return False
+
+
 async def run_pipeline_auto_move():
     """Daily: evaluate all tenant stage rules and auto-move candidates."""
     logger.info("Running scheduled pipeline auto-move")
@@ -120,7 +137,7 @@ async def run_pipeline_auto_move():
                     for rule in rules:
                         conds = rule["conditions"] if isinstance(rule["conditions"], list) else _json.loads(rule["conditions"] or "[]")
                         apps = await conn.fetch(
-                            "SELECT a.id, a.stage, a.candidate_id, c.total_exp_mo, c.ai_match_score, c.expected_ctc, c.notice_period_days, c.full_name FROM applications a JOIN candidates c ON c.id=a.candidate_id WHERE a.stage=$1 AND a.tenant_id=$2",
+                            "SELECT a.id, a.stage, a.candidate_id, a.fit_score, c.total_exp_mo, c.ai_match_score, c.expected_ctc, c.notice_period_days, c.full_name FROM applications a JOIN candidates c ON c.id=a.candidate_id WHERE a.stage=$1 AND a.tenant_id=$2",
                             rule["stage_from"], t["tenant_id"]
                         )
                         moved = 0

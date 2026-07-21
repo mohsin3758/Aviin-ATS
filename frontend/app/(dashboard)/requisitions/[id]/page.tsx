@@ -2,11 +2,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { getTokenPayload } from '@/lib/auth';
 import {
   ArrowLeft, MapPin, Users, Clock, Briefcase, Edit, BarChart2,
   Plus, X, ChevronDown, Mail, Phone, Download, ExternalLink,
   Star, MessageSquare, FileText, Activity, Search, SlidersHorizontal,
-  RotateCcw, CheckCircle, AlertTriangle, Send
+  RotateCcw, CheckCircle, AlertTriangle, Send, UserCog, Repeat
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -770,10 +771,93 @@ function ActivityTab({ candidateId }: any) {
 }
 
 // ── Summary Tab ───────────────────────────────────────────────────────────────
+// ── Assigned Recruiter card (HARD RULE #10: reassignment is HITL-gated) ───────
+function AssignedRecruiterCard({ reqId }: { reqId: string }) {
+  const { data: assignments, refetch } = useFetch<any[]>(`/assignments?requisition_id=${reqId}`);
+  const { data: users } = useFetch<any[]>(`/users?is_active=true`);
+  const [showForm, setShowForm] = useState(false);
+  const [newRecruiterId, setNewRecruiterId] = useState('');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const role = getTokenPayload()?.role || '';
+  const canReassign = ['admin', 'super_admin', 'manager'].includes(role);
+  const userMap = Object.fromEntries((users || []).map((u: any) => [u.id, u]));
+  const active = (assignments || []).find((a: any) => a.status === 'active');
+  const recruiter = active ? userMap[active.recruiter_id] : null;
+
+  async function submit() {
+    if (!newRecruiterId) { setErr('Select a recruiter'); return; }
+    setSaving(true); setErr('');
+    try {
+      if (active) {
+        await apiFetch(`/assignments/${active.id}/reassign`, { method: 'POST', body: JSON.stringify({ new_recruiter_id: newRecruiterId, reason }) });
+      } else {
+        await apiFetch('/assignments', { method: 'POST', body: JSON.stringify({ requisition_id: reqId, recruiter_id: newRecruiterId }) });
+      }
+      setShowForm(false); setNewRecruiterId(''); setReason(''); refetch();
+    } catch (e: any) { setErr(e?.message || 'Failed'); } finally { setSaving(false); }
+  }
+
+  return (
+    <Card title="Assigned Recruiter">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        {recruiter ? (
+          <>
+            <div style={{ width: 36, height: 36, borderRadius: '50%', background: avatarColor(recruiter.full_name), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
+              {initials(recruiter.full_name)}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#1E293B' }}>{recruiter.full_name}</div>
+              <div style={{ fontSize: 11, color: '#64748B' }}>{recruiter.role_name || recruiter.role} · assigned {ago(active.assigned_at)}</div>
+            </div>
+          </>
+        ) : (
+          <div style={{ flex: 1, fontSize: 12, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <UserCog size={14} /> No recruiter assigned yet
+          </div>
+        )}
+        {canReassign && !showForm && (
+          <button onClick={() => { setShowForm(true); setNewRecruiterId(''); setErr(''); }}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', fontSize: 11, fontWeight: 700, color: '#374151', cursor: 'pointer', flexShrink: 0 }}>
+            <Repeat size={12} /> {recruiter ? 'Reassign' : 'Assign'}
+          </button>
+        )}
+      </div>
+      {showForm && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9' }}>
+          <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>NEW RECRUITER</label>
+          <select value={newRecruiterId} onChange={e => setNewRecruiterId(e.target.value)}
+            style={{ width: '100%', padding: '8px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, marginBottom: 8 }}>
+            <option value="">-- Select --</option>
+            {(users || []).filter((u: any) => u.id !== active?.recruiter_id).map((u: any) => (
+              <option key={u.id} value={u.id}>{u.full_name} ({u.role_name || u.role})</option>
+            ))}
+          </select>
+          {active && (
+            <>
+              <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>REASON</label>
+              <input value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Recruiter went on leave"
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, marginBottom: 8 }} />
+            </>
+          )}
+          {err && <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 8 }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={submit} disabled={saving} style={{ padding: '7px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{saving ? 'Saving…' : 'Confirm'}</button>
+            <button onClick={() => setShowForm(false)} style={{ padding: '7px 12px', background: '#F1F5F9', color: '#64748B', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function SummaryTab({ req, stats, board, stages }: any) {
   const stageBreakdown = stages.map((s: any) => ({ ...s, count: (board[s.key] || []).length })).filter((s: any) => s.count > 0);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <AssignedRecruiterCard reqId={req.id} />
       <Card title="Job Details">
         {req.description && <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{req.description}</div>}
       </Card>

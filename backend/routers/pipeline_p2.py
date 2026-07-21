@@ -364,7 +364,9 @@ async def list_rules(actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT * FROM stage_rules ORDER BY created_at DESC")
         return [{"id":str(r["id"]),"name":r["name"],"stage_from":r["stage_from"],
-                 "stage_to":r["stage_to"],"conditions":r["conditions"],
+                 "stage_to":r["stage_to"],
+                 "conditions": r["conditions"] if isinstance(r["conditions"], list)
+                               else json.loads(r["conditions"] or "[]"),
                  "action":r["action"],"enabled":r["enabled"]} for r in rows]
 
 @rules_router.post("")

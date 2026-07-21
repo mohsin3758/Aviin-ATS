@@ -1,7 +1,7 @@
 """P38: Bulk CSV Import - minimal safe version."""
 import csv, io
 from typing import Optional
-from fastapi import APIRouter, Depends, UploadFile, File, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
 import db
 from deps import Actor, get_actor
 

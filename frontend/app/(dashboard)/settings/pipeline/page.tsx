@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2 } from 'lucide-react';
+import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2, Zap, ToggleLeft, ToggleRight } from 'lucide-react';
 
 interface StageRow {
   stage_key: string;
@@ -192,6 +192,131 @@ export default function PipelineStagesSettings() {
           <RotateCcw size={14} /> {resetting ? 'Resetting…' : 'Restore Defaults'}
         </button>
       </div>
+
+      <AutomationRulesSection stages={rows} />
+    </div>
+  );
+}
+
+// ── Pipeline Automation Rules (Tier-0, evaluated nightly by the scheduler) ────
+const COND_FIELDS = [
+  { key: 'total_exp_mo',       label: 'Experience (months)' },
+  { key: 'ai_match_score',     label: 'AI Match Score (0-100)' },
+  { key: 'fit_score',          label: 'JD Fit Score (0-100)' },
+  { key: 'expected_ctc',       label: 'Expected CTC' },
+  { key: 'notice_period_days', label: 'Notice Period (days)' },
+];
+const COND_OPS = [
+  { key: '>=', label: '≥' }, { key: '<=', label: '≤' },
+  { key: '>', label: '>' }, { key: '<', label: '<' },
+  { key: '==', label: '=' }, { key: '!=', label: '≠' },
+];
+const EMPTY_RULE = { name: '', stage_from: '', stage_to: '', conditions: [{ field: 'total_exp_mo', op: '>=', value: 0 }], enabled: true };
+
+function AutomationRulesSection({ stages }: { stages: StageRow[] }) {
+  const { data: rules, refetch } = useFetch<any[]>('/pipeline-rules');
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState<any>({ ...EMPTY_RULE });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const stageLabel = (key: string) => stages.find(s => s.stage_key === key)?.label || key;
+
+  async function createRule() {
+    if (!form.name.trim() || !form.stage_from || !form.stage_to) { setErr('Name, from-stage and to-stage are required'); return; }
+    setSaving(true); setErr('');
+    try {
+      await apiFetch('/pipeline-rules', { method: 'POST', body: JSON.stringify(form) });
+      setAdding(false); setForm({ ...EMPTY_RULE }); refetch();
+    } catch (e: any) { setErr(e?.message || 'Failed to create rule'); } finally { setSaving(false); }
+  }
+
+  async function toggleEnabled(rule: any) {
+    setBusyId(rule.id);
+    try { await apiFetch(`/pipeline-rules/${rule.id}`, { method: 'PUT', body: JSON.stringify({ enabled: !rule.enabled }) }); refetch(); }
+    finally { setBusyId(null); }
+  }
+
+  async function deleteRule(id: string) {
+    if (!confirm('Delete this automation rule?')) return;
+    setBusyId(id);
+    try { await apiFetch(`/pipeline-rules/${id}`, { method: 'DELETE' }); refetch(); }
+    finally { setBusyId(null); }
+  }
+
+  return (
+    <div style={{ marginTop: 32 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+        <Zap size={16} style={{ color: '#7c3aed' }} />
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', margin: 0 }}>Pipeline Automation Rules</h2>
+      </div>
+      <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 12px' }}>
+        Auto-move candidates between stages when conditions match — evaluated nightly (zero-token, no AI involved). E.g. "Sourced → Screened when AI Match Score ≥ 70".
+      </p>
+
+      <div style={{ background: 'white', borderRadius: 12, border: '1px solid #e2e8f0', overflow: 'hidden', marginBottom: 12 }}>
+        {(rules || []).length === 0 && !adding && (
+          <div style={{ padding: 24, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>No automation rules yet</div>
+        )}
+        {(rules || []).map((r: any, i: number) => (
+          <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: i < rules!.length - 1 ? '1px solid #f1f5f9' : 'none', opacity: r.enabled ? 1 : 0.55 }}>
+            <button onClick={() => toggleEnabled(r)} disabled={busyId === r.id} style={{ background: 'none', border: 'none', cursor: 'pointer', color: r.enabled ? '#16a34a' : '#cbd5e1', flexShrink: 0, display: 'flex' }} title={r.enabled ? 'Enabled — click to pause' : 'Paused — click to enable'}>
+              {r.enabled ? <ToggleRight size={22} /> : <ToggleLeft size={22} />}
+            </button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#1e293b' }}>{r.name}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                {stageLabel(r.stage_from)} → {stageLabel(r.stage_to)}
+                {(r.conditions || []).length > 0 && (
+                  <> · when {r.conditions.map((c: any, ci: number) => `${COND_FIELDS.find(f => f.key === c.field)?.label || c.field} ${COND_OPS.find(o => o.key === c.op)?.label || c.op} ${c.value}`).join(' AND ')}</>
+                )}
+              </div>
+            </div>
+            <button onClick={() => deleteRule(r.id)} disabled={busyId === r.id} style={{ width: 28, height: 28, borderRadius: 6, border: '1px solid #fee2e2', background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+              <Trash2 size={12} style={{ color: '#dc2626' }} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {!adding ? (
+        <button onClick={() => { setAdding(true); setErr(''); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', background: '#faf5ff', color: '#7c3aed', border: '1px solid #ddd6fe', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+          <Plus size={13} /> New Automation Rule
+        </button>
+      ) : (
+        <div style={{ background: 'white', border: '1px dashed #cbd5e1', borderRadius: 12, padding: 16 }}>
+          <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Rule name, e.g. Auto-screen strong matches"
+            style={{ width: '100%', border: '1px solid #e2e8f0', borderRadius: 6, padding: '8px 10px', fontSize: 13, marginBottom: 8, outline: 'none' }} />
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <select value={form.stage_from} onChange={e => setForm({ ...form, stage_from: e.target.value })} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
+              <option value="">From stage…</option>
+              {stages.map(s => <option key={s.stage_key} value={s.stage_key}>{s.label}</option>)}
+            </select>
+            <span style={{ alignSelf: 'center', color: '#94a3b8' }}>→</span>
+            <select value={form.stage_to} onChange={e => setForm({ ...form, stage_to: e.target.value })} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
+              <option value="">To stage…</option>
+              {stages.map(s => <option key={s.stage_key} value={s.stage_key}>{s.label}</option>)}
+            </select>
+          </div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 6 }}>CONDITION (all must match)</div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <select value={form.conditions[0].field} onChange={e => setForm({ ...form, conditions: [{ ...form.conditions[0], field: e.target.value }] })} style={{ flex: 2, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
+              {COND_FIELDS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+            </select>
+            <select value={form.conditions[0].op} onChange={e => setForm({ ...form, conditions: [{ ...form.conditions[0], op: e.target.value }] })} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
+              {COND_OPS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+            <input type="number" value={form.conditions[0].value} onChange={e => setForm({ ...form, conditions: [{ ...form.conditions[0], value: Number(e.target.value) }] })}
+              style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }} />
+          </div>
+          {err && <div style={{ fontSize: 11, color: '#dc2626', marginBottom: 8 }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={createRule} disabled={saving} style={{ padding: '8px 16px', background: '#7c3aed', color: 'white', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{saving ? 'Saving…' : 'Create Rule'}</button>
+            <button onClick={() => setAdding(false)} style={{ padding: '8px 14px', background: '#f1f5f9', color: '#64748b', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
