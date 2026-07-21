@@ -210,6 +210,10 @@ from routers import email_settings
 app.include_router(email_settings.router)
 from routers import resume_intake
 app.include_router(resume_intake.router)
+from routers import nda
+app.include_router(nda.router)
+app.include_router(nda.nda_router)
+app.include_router(nda.nda_sign_public)
 app.include_router(users.roles_router)
 app.include_router(p23_p27.skills_router)
 app.include_router(p23_p27.bulk_router)

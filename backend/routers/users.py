@@ -53,15 +53,16 @@ async def list_users(
 ):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
-            SELECT id, email, full_name, role, role_name, role_level,
-                   department, designation, phone, employee_id,
-                   is_active, location, joining_date, last_login_at,
-                   capacity_weekly, reporting_to_name
-            FROM v_users_with_roles
-            WHERE tenant_id = $1
-              AND ($2::text IS NULL OR department = $2)
-              AND ($3::text IS NULL OR role = $3)
-              AND ($4::bool IS NULL OR is_active = $4)
+            SELECT v.id, v.email, v.full_name, v.role, v.role_name, v.role_level,
+                   v.department, v.designation, v.phone, v.employee_id,
+                   v.is_active, v.location, v.joining_date, v.last_login_at,
+                   v.capacity_weekly, v.reporting_to_name, u.reporting_to
+            FROM v_users_with_roles v
+            JOIN users u ON u.id = v.id
+            WHERE v.tenant_id = $1
+              AND ($2::text IS NULL OR v.department = $2)
+              AND ($3::text IS NULL OR v.role = $3)
+              AND ($4::bool IS NULL OR v.is_active = $4)
         """, actor.tenant_id, department, role, is_active)
     return [dict(r) for r in rows]
 
@@ -182,7 +183,9 @@ async def create_user(body: UserCreate, actor: Actor = Depends(get_actor)):
 async def get_user(user_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
-            SELECT * FROM v_users_with_roles WHERE tenant_id=$1 AND id=$2
+            SELECT v.*, u.reporting_to FROM v_users_with_roles v
+            JOIN users u ON u.id = v.id
+            WHERE v.tenant_id=$1 AND v.id=$2
         """, actor.tenant_id, user_id)
         if not row:
             raise HTTPException(404, "User not found")

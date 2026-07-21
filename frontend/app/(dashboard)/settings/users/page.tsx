@@ -9,7 +9,7 @@ const ROLES_LIST = [
   'kae','kam','account_director','sales_executive','sales_manager','finance_manager','hr_manager','compliance_officer','ceo','cto',
 ];
 const DEPT_LIST = ['Delivery','Account Management','Sales','Finance','HR','Technology','Leadership','Operations','IT'];
-const EMPTY_USER = { email:'', full_name:'', role:'recruiter', department:'Delivery', designation:'', phone:'', employee_id:'', location:'', capacity_weekly:40, password:'Welcome@2026' };
+const EMPTY_USER = { email:'', full_name:'', role:'recruiter', department:'Delivery', designation:'', phone:'', employee_id:'', location:'', capacity_weekly:40, password:'Welcome@2026', reporting_to:'' };
 
 const ROLE_COLOR:Record<string,string> = {
   admin:'badge-red', ceo:'badge-purple', recruitment_manager:'badge-blue',
@@ -39,7 +39,7 @@ export default function UsersPage() {
   const openEdit = (u:any) => {
     setForm({ email:u.email||'', full_name:u.full_name||'', role:u.role||'recruiter', department:u.department||'Delivery',
       designation:u.designation||'', phone:u.phone||'', employee_id:u.employee_id||'',
-      location:u.location||'', capacity_weekly:u.capacity_weekly||40, password:'' });
+      location:u.location||'', capacity_weekly:u.capacity_weekly||40, password:'', reporting_to:u.reporting_to||'' });
     setEditId(u.id); setError(''); setShowModal(true);
   };
 
@@ -47,7 +47,8 @@ export default function UsersPage() {
     if (!form.email || !form.full_name) { setError('Email and name are required'); return; }
     setSaving(true); setError('');
     try {
-      const payload = {...form}; if (!payload.password) delete (payload as any).password;
+      const payload:any = {...form}; if (!payload.password) delete payload.password;
+      payload.reporting_to = payload.reporting_to || null;
       if (editId) await apiFetch(`/users/${editId}`, { method:'PUT', body:JSON.stringify(payload) });
       else await apiFetch('/users', { method:'POST', body:JSON.stringify(payload) });
       setShowModal(false); refetch();
@@ -169,6 +170,14 @@ export default function UsersPage() {
         </FormRow>
         <FormRow>
           <FormField label="Weekly Capacity (hrs)" hint="Default: 40 hours/week"><input type="number" style={inputStyle} min={0} max={60} value={form.capacity_weekly} onChange={e=>setForm(f=>({...f,capacity_weekly:+e.target.value}))} /></FormField>
+          <FormField label="Reports To" hint="Notified when this user's candidates clear NDA e-sign">
+            <select style={{ ...inputStyle }} value={form.reporting_to} onChange={e=>setForm(f=>({...f,reporting_to:e.target.value}))}>
+              <option value="">— None —</option>
+              {(users||[]).filter((u:any)=>u.id!==editId).map((u:any)=><option key={u.id} value={u.id}>{u.full_name} ({u.role_name||u.role})</option>)}
+            </select>
+          </FormField>
+        </FormRow>
+        <FormRow>
           <FormField label={editId?'New Password (leave blank to keep)':'Password'} hint="Min 8 chars, include uppercase + number"><input type="password" style={inputStyle} placeholder={editId?'Leave blank to keep current':'Welcome@2026'} value={form.password} onChange={e=>setForm(f=>({...f,password:e.target.value}))} /></FormField>
         </FormRow>
         <FormActions onClose={()=>setShowModal(false)} onSubmit={handleSave} loading={saving} submitLabel={editId?'Update User':'Send Invitation'} />

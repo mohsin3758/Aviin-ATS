@@ -2,11 +2,13 @@
 import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { authHeaders, API } from '@/lib/auth';
 import {
   Search, Plus, X, RotateCcw, ChevronDown, MapPin, Users, Briefcase,
   Clock, CheckCircle, AlertTriangle, Send, Star, MessageSquare,
   Activity, Download, ExternalLink, ArrowRight, Inbox, LayoutGrid,
   KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
+  FileSignature, Upload, ShieldCheck, Copy,
 } from 'lucide-react';
 
 // ── Stage config ──────────────────────────────────────────────────────────────
@@ -505,6 +507,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
           <div style={{ display: 'flex', gap: 0, marginBottom: -1 }}>
             {[
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
+              { key: 'nda', icon: <FileSignature size={12} />, label: 'NDA' },
               { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes', count: Array.isArray(app.app_notes) ? app.app_notes.length : 0 },
               { key: 'scorecards', icon: <Star size={12} />, label: 'Scorecards' },
               { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
@@ -523,6 +526,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
         {/* Body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '14px 18px' }}>
           {drawerTab === 'profile' && <ProfileTab app={app} apiUrl={API_URL} />}
+          {drawerTab === 'nda' && <NdaTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'notes' && <NotesTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'scorecards' && <ScorecardsTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'activity' && <ActivityTab candidateId={app.candidate_id} />}
@@ -576,6 +580,171 @@ function ProfileTab({ app, apiUrl }: any) {
       <a href={`/candidates/${app.candidate_id}`} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 14px', background: '#1E40AF', color: '#fff', borderRadius: 8, textDecoration: 'none', fontSize: 12, fontWeight: 700, width: 'fit-content' }}>
         <ExternalLink size={12} /> Full ATS Profile
       </a>
+    </div>
+  );
+}
+
+// ── NDA Tab ───────────────────────────────────────────────────────────────────
+const NDA_STATUS_CFG: Record<string, { label: string; color: string; bg: string }> = {
+  draft:            { label: 'Draft — not sent',       color: '#64748B', bg: '#F8FAFC' },
+  sent:             { label: 'Awaiting signature',     color: '#CA8A04', bg: '#FFFBEB' },
+  e_signed:         { label: 'E-Signed',                color: '#16A34A', bg: '#F0FDF4' },
+  manually_signed:  { label: 'Manually Signed',          color: '#16A34A', bg: '#F0FDF4' },
+  expired:          { label: 'Expired',                  color: '#DC2626', bg: '#FEF2F2' },
+};
+
+async function downloadNdaFile(appId: string, kind: 'pdf' | 'docx') {
+  const res = await fetch(`${API}/applications/${appId}/nda/${kind}`, { headers: authHeaders() });
+  if (!res.ok) return;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `nda_${appId.slice(0, 8)}.${kind}`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function NdaTab({ appId, showToast }: any) {
+  const { data: nda, refetch } = useFetch<any>(`/applications/${appId}/nda`);
+  const [draftText, setDraftText] = useState('');
+  const [initialized, setInitialized] = useState(false);
+  const [signMethod, setSignMethod] = useState<'type_name' | 'otp'>('type_name');
+  const [saving, setSaving] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [signUrl, setSignUrl] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (nda && !initialized) { setDraftText(nda.draft_text || ''); setInitialized(true); }
+  }, [nda, initialized]);
+
+  if (!nda) return <div style={{ color: '#94A3B8', fontSize: 12, textAlign: 'center', padding: 20 }}>Loading…</div>;
+
+  const cfg = NDA_STATUS_CFG[nda.status] || NDA_STATUS_CFG.draft;
+  const editable = nda.status === 'draft';
+
+  async function saveDraft() {
+    setSaving(true);
+    try {
+      await apiFetch(`/applications/${appId}/nda`, { method: 'PUT', body: JSON.stringify({ draft_text: draftText }) });
+      showToast('NDA draft saved'); refetch();
+    } catch (e: any) { showToast(String(e?.message || 'Save failed'), false); } finally { setSaving(false); }
+  }
+
+  async function sendForSignature() {
+    setSending(true);
+    try {
+      const res = await apiFetch(`/applications/${appId}/nda/send`, { method: 'POST', body: JSON.stringify({ sign_method: signMethod }) });
+      setSignUrl(res.sign_url || '');
+      showToast(`NDA emailed to ${res.recipient}`); refetch();
+    } catch (e: any) { showToast(String(e?.message || 'Send failed'), false); } finally { setSending(false); }
+  }
+
+  async function uploadManualSign(file: File) {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`${API}/applications/${appId}/nda/manual-sign?signatory_name=${encodeURIComponent('Signed copy uploaded by recruiter')}`, {
+        method: 'POST', headers: authHeaders(), body: fd,
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || 'Upload failed'); }
+      showToast('Signed copy uploaded — moved to Screened'); refetch();
+    } catch (e: any) { showToast(String(e?.message || 'Upload failed'), false); } finally { setUploading(false); }
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700, padding: '4px 10px', borderRadius: 999, background: cfg.bg, color: cfg.color }}>
+          <ShieldCheck size={11} /> {cfg.label}
+        </span>
+        {(nda.status === 'e_signed' || nda.status === 'manually_signed') && (
+          <span style={{ fontSize: 10, color: '#94A3B8' }}>
+            {nda.signatory_name} · {ago(nda.signed_at)}
+          </span>
+        )}
+      </div>
+
+      {editable ? (
+        <textarea value={draftText} onChange={e => setDraftText(e.target.value)}
+          style={{ width: '100%', minHeight: 220, padding: '10px 12px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, lineHeight: 1.6, resize: 'vertical', outline: 'none', fontFamily: 'Georgia,serif', color: '#374151', marginBottom: 10 }} />
+      ) : (
+        <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '12px 14px', fontSize: 12, lineHeight: 1.6, color: '#374151', fontFamily: 'Georgia,serif', whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto', marginBottom: 10 }}>
+          {nda.final_text || nda.draft_text}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+        {editable && (
+          <button onClick={saveDraft} disabled={saving}
+            style={{ padding: '7px 14px', background: '#F1F5F9', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+            {saving ? 'Saving…' : 'Save Draft'}
+          </button>
+        )}
+        <button onClick={() => downloadNdaFile(appId, 'pdf')}
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: '#F1F5F9', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+          <Download size={12} /> PDF
+        </button>
+        <button onClick={() => downloadNdaFile(appId, 'docx')}
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: '#F1F5F9', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+          <Download size={12} /> Word
+        </button>
+      </div>
+
+      {editable && (
+        <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 10, padding: 14, marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#1E40AF', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Send for Signature</div>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 10 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#374151', cursor: 'pointer' }}>
+              <input type="radio" checked={signMethod === 'type_name'} onChange={() => setSignMethod('type_name')} /> Type-name signature
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#374151', cursor: 'pointer' }}>
+              <input type="radio" checked={signMethod === 'otp'} onChange={() => setSignMethod('otp')} /> Type-name + Email OTP
+            </label>
+          </div>
+          <button onClick={sendForSignature} disabled={sending}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+            <Send size={12} /> {sending ? 'Sending…' : 'Send for Signature'}
+          </button>
+        </div>
+      )}
+
+      {signUrl && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, padding: '8px 12px', marginBottom: 14, fontSize: 11, color: '#15803D' }}>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{signUrl}</span>
+          <button onClick={() => { navigator.clipboard.writeText(signUrl); showToast('Signing link copied'); }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#15803D', display: 'flex' }}>
+            <Copy size={13} />
+          </button>
+        </div>
+      )}
+
+      {nda.status !== 'e_signed' && nda.status !== 'manually_signed' && (
+        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Or mark as manually signed</div>
+          <input ref={fileInputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" style={{ display: 'none' }}
+            onChange={e => { const f = e.target.files?.[0]; if (f) uploadManualSign(f); }} />
+          <button onClick={() => fileInputRef.current?.click()} disabled={uploading}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: '#fff', color: '#374151', border: '1px dashed #CBD5E1', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+            <Upload size={12} /> {uploading ? 'Uploading…' : 'Upload Signed Copy'}
+          </button>
+        </div>
+      )}
+
+      {(nda.status === 'manually_signed' && nda.manual_file_path) && (
+        <button onClick={async () => {
+          const res = await fetch(`${API}/nda/${nda.id}/manual-file`, { headers: authHeaders() });
+          if (!res.ok) return;
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          window.open(url, '_blank');
+        }}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, padding: '10px 14px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 10, color: '#15803D', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+          <Download size={13} /> View Uploaded Signed Copy
+        </button>
+      )}
     </div>
   );
 }
