@@ -188,6 +188,13 @@ NON_RESUME_FILENAME_SIGNALS = [
     r'certificate', r'degree', r'marksheet', r'transcript',
     r'relieving', r'experience.?letter', r'noc\b',
     r'relieving.?letter', r'resignation', r'termination',
+    # Job Description files - an extremely common attachment in a staffing
+    # inbox (clients sending open-role JDs), and one that keyword-scoring
+    # alone can misclassify as a resume: JDs legitimately use words like
+    # "experience", "skills", "responsibility", "qualification" too. Catch
+    # the near-universal "JD-" / "JD_" / "job description" naming up front.
+    r'^jd[_\-]', r'[_\-]jd[_\-\.]', r'[_\-]jd$', r'job.?description',
+    r'job.?spec\b', r'position.?description', r'\brole.?jd\b',
 ]
 
 
@@ -274,7 +281,17 @@ def classify_document(
         r_score += 5.0
     elif filename_hint == 'NON_RESUME_HINT':
         non_resume_raw += 5.0
-        r_score -= 2.0
+        # A document like "JD-<role>.docx" has no dedicated non-resume
+        # category to score high on below (there's no DOC_JD class), so it
+        # can only be caught here. A -2 penalty is too weak to overcome a
+        # JD's legitimate overlap with weak/medium RESUME_SIGNALS words
+        # ("experience", "skills", "responsibility", "qualification",
+        # "consultant" all appear in real JDs too) - this let a literal
+        # "JD-SAP MDG_ERP_ONE COE.docx" get auto-processed as a resume and
+        # create a fake candidate from the client contact's name. Matches
+        # the +5 given to a confirmed RESUME_HINT, so a confirmed filename
+        # signal can reliably decide a borderline case either way.
+        r_score -= 5.0
 
     # ── Step 5: Determine winner ───────────────────────────────────────────
     all_scores = {
@@ -314,6 +331,20 @@ def classify_document(
         else:
             decision = 'REJECT'
     else:
+        decision = 'REJECT'
+
+    # A confirmed non-resume filename pattern (invoice/JD/certificate/...)
+    # has no dedicated scoring category for some cases (JD in particular -
+    # there's no DOC_JD class), so keyword overlap alone can still win the
+    # scoring contest even after the Step 4 penalty above - a real JD file
+    # ("JD-SAP MDG_ERP_ONE COE.docx") scored as a high-confidence resume
+    # this way and created a candidate record from the client contact's
+    # name for a human to notice and clean up later. Treat a filename this
+    # unambiguous the same as any other confidently-non-resume document:
+    # REJECT outright, matching how invoices/certificates/etc. never even
+    # reach candidate creation.
+    if filename_hint == 'NON_RESUME_HINT':
+        is_resume = False
         decision = 'REJECT'
 
     # Collect matched signals for transparency
