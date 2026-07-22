@@ -735,13 +735,24 @@ async def process_email_for_resume(
         # ─────────────────────────────────────────────────────────────
 
         # Phase B: Use improved parser (v2) with keyword skills + smarter name/exp
-        parsed = parse_resume_v2(full_text, from_name, from_email, fn)
+        # If the sender is internal staff (same mailbox domain as the account
+        # we're reading from) forwarding/sharing a candidate's resume from
+        # their own inbox, trusting from_name/from_email as the candidate's
+        # identity would record the forwarder as the candidate instead of
+        # whoever the resume is actually about - so treat those fields as
+        # unavailable and let name/email come from the resume text itself.
+        sender_domain = (from_email or '').split('@')[-1].lower().strip()
+        own_domain = (imap_user or '').split('@')[-1].lower().strip()
+        is_internal_sender = bool(sender_domain) and sender_domain == own_domain
+        name_hint = '' if is_internal_sender else from_name
+        email_hint = '' if is_internal_sender else from_email
+        parsed = parse_resume_v2(full_text, name_hint, email_hint, fn)
         # Ollama enhancement if available
         if ollama_url and ollama_model:
             llm = await parse_with_ollama(full_text, ollama_url, ollama_model)
             if llm:
                 parsed = merge_parsed(parsed, llm)
-        if not parsed.get('email') and '@' in (from_email or ''):
+        if not parsed.get('email') and not is_internal_sender and '@' in (from_email or ''):
             parsed['email'] = from_email
         break
 

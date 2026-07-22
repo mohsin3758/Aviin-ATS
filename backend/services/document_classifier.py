@@ -21,6 +21,7 @@ DOC_OFFER_LETTER   = 'OFFER_LETTER'
 DOC_CONTRACT       = 'CONTRACT'
 DOC_ID_DOCUMENT    = 'ID_DOCUMENT'
 DOC_CERTIFICATE    = 'CERTIFICATE'
+DOC_JD             = 'JOB_DESCRIPTION'
 DOC_UNKNOWN        = 'UNKNOWN'
 
 # Confidence thresholds
@@ -168,11 +169,46 @@ CERTIFICATE_SIGNALS = [
     ('roll number', 2), ('examination', 2), ('university', 2),
 ]
 
+# A Job Description previously had no content-based category of its own -
+# only the filename heuristic could catch one, so a JD with a generic
+# filename (no "JD"/"requirement" marker) sailed through on keyword overlap
+# alone, since JDs legitimately use "experience"/"skills"/"responsibility"/
+# "qualification" too. These phrases are how a client/recruiter BROADCASTS
+# an opening to be filled - language a candidate's own resume never uses
+# about itself - so they're a genuinely distinguishing signal, not just
+# more of the same overlap.
+JD_SIGNALS = [
+    ('job description', 5), ('please share', 5), ('kindly share', 5),
+    ('share suitable profiles', 5), ('share resumes', 5), ('share cvs', 5),
+    ('share profiles', 5), ('share your profile', 5),
+    ('urgent requirement', 5), ('urgent opening', 5), ('immediate requirement', 5),
+    ('req id', 5), ('requisition id', 5), ('position id', 4), ('job id', 4),
+    ('no of positions', 4), ('number of positions', 4),
+    ('no of openings', 4), ('number of openings', 4), ('no. of openings', 4),
+    ('end client', 3), ('client name', 3), ('client :', 3),
+    ('work location', 3), ('job type', 3), ('employment type', 3),
+    ('eligible candidates', 3), ('interested candidates', 3),
+    ('candidates may apply', 3), ('looking for candidates', 3),
+    ('hiring for', 3), ('opening for', 3), ('we have an opening', 3),
+    ('mandatory skills', 3), ('must have skills', 3), ('good to have', 3),
+    ('bill rate', 3), ('pay rate', 3), ('rate card', 3),
+    ('contract duration', 3), ('contract length', 2), ('budget', 2),
+]
+
 # ─── Filename Heuristics ──────────────────────────────────────────────────────
+# Explicit, hard-to-fake resume markers - checked first, and win outright.
+# A JD filename would never be named "resume"/"cv"/"curriculum_vitae", and
+# naukri_ is a job-portal-only naming convention.
+STRONG_RESUME_FILENAME_SIGNALS = [
+    r'cv[_\-\s]', r'resume[_\-\s]?', r'curriculum[_\-]?vitae', r'naukri_',
+]
+
+# Weaker resume markers - role-suffix words like "_analyst"/"_developer" also
+# appear in JD filenames (a JD is about a role, so it names the role too), so
+# these must be checked AFTER NON_RESUME_FILENAME_SIGNALS, not before.
 RESUME_FILENAME_SIGNALS = [
-    r'cv[_\-\s]', r'resume[_\-\s]?', r'curriculum[_\-]?vitae',
     r'\d+[ym][\d_]', r'_\d+y_\d+m', r'\[\d+y_\d+m\]',  # e.g. 5y_3m, [10y_0m]
-    r'profile[_\-]', r'naukri_', r'_consultant', r'_engineer',
+    r'profile[_\-]', r'_consultant', r'_engineer',
     r'_developer', r'_analyst', r'_manager', r'_specialist',
     r'_associate', r'_executive', r'job_application',
 ]
@@ -195,6 +231,7 @@ NON_RESUME_FILENAME_SIGNALS = [
     # the near-universal "JD-" / "JD_" / "job description" naming up front.
     r'^jd[_\-]', r'[_\-]jd[_\-\.]', r'[_\-]jd$', r'job.?description',
     r'job.?spec\b', r'position.?description', r'\brole.?jd\b',
+    r'requirement', r'\bopening', r'\bvacancy', r'\breq[_\-]?id\b',
 ]
 
 
@@ -212,12 +249,15 @@ def score_signals(text_lower: str, signals: list) -> tuple[float, list]:
 def classify_from_filename(filename: str) -> str:
     """Quick pre-filter from filename before text extraction."""
     fn = filename.lower().replace(' ', '_').replace('-', '_')
-    for pattern in RESUME_FILENAME_SIGNALS:
+    for pattern in STRONG_RESUME_FILENAME_SIGNALS:
         if re.search(pattern, fn):
             return 'RESUME_HINT'
     for pattern in NON_RESUME_FILENAME_SIGNALS:
         if re.search(pattern, fn):
             return 'NON_RESUME_HINT'
+    for pattern in RESUME_FILENAME_SIGNALS:
+        if re.search(pattern, fn):
+            return 'RESUME_HINT'
     return 'UNKNOWN'
 
 
@@ -264,10 +304,11 @@ def classify_document(
     con_score, con_match = score_signals(text_lower, CONTRACT_SIGNALS)
     idd_score, idd_match = score_signals(text_lower, ID_DOC_SIGNALS)
     cer_score, cer_match = score_signals(text_lower, CERTIFICATE_SIGNALS)
+    jd_score,  jd_match  = score_signals(text_lower, JD_SIGNALS)
 
     # Non-resume total
     non_resume_raw = max(inv_score, frm_score, bnk_score, pay_score,
-                         off_score, con_score, idd_score, cer_score)
+                         off_score, con_score, idd_score, cer_score, jd_score)
 
     # ── Step 3: Word count boost for resumes ───────────────────────────────
     # Real resumes are typically 500-3000 words
@@ -281,16 +322,8 @@ def classify_document(
         r_score += 5.0
     elif filename_hint == 'NON_RESUME_HINT':
         non_resume_raw += 5.0
-        # A document like "JD-<role>.docx" has no dedicated non-resume
-        # category to score high on below (there's no DOC_JD class), so it
-        # can only be caught here. A -2 penalty is too weak to overcome a
-        # JD's legitimate overlap with weak/medium RESUME_SIGNALS words
-        # ("experience", "skills", "responsibility", "qualification",
-        # "consultant" all appear in real JDs too) - this let a literal
-        # "JD-SAP MDG_ERP_ONE COE.docx" get auto-processed as a resume and
-        # create a fake candidate from the client contact's name. Matches
-        # the +5 given to a confirmed RESUME_HINT, so a confirmed filename
-        # signal can reliably decide a borderline case either way.
+        # Matches the +5 given to a confirmed RESUME_HINT, so a confirmed
+        # filename signal can reliably decide a borderline case either way.
         r_score -= 5.0
 
     # ── Step 5: Determine winner ───────────────────────────────────────────
@@ -304,6 +337,7 @@ def classify_document(
         DOC_CONTRACT:       con_score,
         DOC_ID_DOCUMENT:    idd_score,
         DOC_CERTIFICATE:    cer_score,
+        DOC_JD:             jd_score,
     }
 
     winner = max(all_scores, key=all_scores.get)
@@ -314,7 +348,7 @@ def classify_document(
     if winner == DOC_RESUME:
         # Resume confidence: how much better is resume score vs best non-resume
         non_resume_max = max(inv_score, frm_score, bnk_score, pay_score,
-                             off_score, con_score, idd_score, cer_score)
+                             off_score, con_score, idd_score, cer_score, jd_score)
         margin = r_score - non_resume_max
         raw_confidence = min(1.0, (r_score / max(total, 1)) + (margin / 20.0))
         confidence = max(0.0, min(1.0, raw_confidence))
@@ -333,16 +367,11 @@ def classify_document(
     else:
         decision = 'REJECT'
 
-    # A confirmed non-resume filename pattern (invoice/JD/certificate/...)
-    # has no dedicated scoring category for some cases (JD in particular -
-    # there's no DOC_JD class), so keyword overlap alone can still win the
-    # scoring contest even after the Step 4 penalty above - a real JD file
-    # ("JD-SAP MDG_ERP_ONE COE.docx") scored as a high-confidence resume
-    # this way and created a candidate record from the client contact's
-    # name for a human to notice and clean up later. Treat a filename this
-    # unambiguous the same as any other confidently-non-resume document:
-    # REJECT outright, matching how invoices/certificates/etc. never even
-    # reach candidate creation.
+    # Belt-and-suspenders: an unambiguous filename marker (invoice/JD/
+    # certificate/...) overrides keyword scoring outright even though
+    # DOC_JD now has its own content-based signals above - a badly-OCR'd or
+    # unusually-worded JD could still under-score on JD_SIGNALS, and a
+    # filename this explicit is not worth second-guessing.
     if filename_hint == 'NON_RESUME_HINT':
         is_resume = False
         decision = 'REJECT'
@@ -350,7 +379,7 @@ def classify_document(
     # Collect matched signals for transparency
     signals_found = r_matched[:10] if is_resume else (
         inv_match + frm_match + bnk_match + pay_match +
-        off_match + con_match + idd_match + cer_match
+        off_match + con_match + idd_match + cer_match + jd_match
     )[:10]
 
     return ClassificationResult(
