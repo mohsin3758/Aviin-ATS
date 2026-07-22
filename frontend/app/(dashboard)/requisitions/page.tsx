@@ -411,11 +411,20 @@ function RequisitionsPageInner() {
 
       if (editId) {
         await apiFetch(`/requisitions/${editId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+        setShowModal(false);
+        refetch();
       } else {
-        await apiFetch('/requisitions', { method: 'POST', body: JSON.stringify(payload) });
+        const created = await apiFetch('/requisitions', { method: 'POST', body: JSON.stringify(payload) });
+        setShowModal(false);
+        // New requisitions are open by default - prompt to distribute it to
+        // the 70+ free job portal directory right away instead of leaving
+        // that as a separate step the recruiter has to remember to do.
+        if (created?.status === 'open' && created?.id) {
+          router.push(`/job-sharing?req=${created.id}`);
+        } else {
+          refetch();
+        }
       }
-      setShowModal(false);
-      refetch();
     } catch (e: any) {
       setError(e.message || 'Failed to save');
     } finally {

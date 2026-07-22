@@ -57,6 +57,24 @@ SOURCE_MAP = {
     'naukrigulf':   {'label': 'NaukriGulf',    'domains': ['naukrigulf.com']},
     'headhonchos':  {'label': 'HeadHonchos',   'domains': ['headhonchos.com']},
     'zoho_recruit': {'label': 'Zoho Recruit',  'domains': ['zoho.com','zohorecruit.com']},
+    # Added alongside the 70+ free-portal sharing directory (job_portals.py)
+    # so applications that arrive by email from these portals get correctly
+    # source-tagged instead of falling into the generic 'Direct Email' bucket.
+    'wellfound':    {'label': 'Wellfound',     'domains': ['wellfound.com','angel.co']},
+    'dice':         {'label': 'Dice',          'domains': ['dice.com']},
+    'toptal':       {'label': 'Toptal',        'domains': ['toptal.com']},
+    'upwork':       {'label': 'Upwork',        'domains': ['upwork.com']},
+    'freelancer':   {'label': 'Freelancer.com','domains': ['freelancer.com']},
+    'fiverr':       {'label': 'Fiverr',        'domains': ['fiverr.com']},
+    'remoteok':     {'label': 'RemoteOK',      'domains': ['remoteok.com']},
+    'weworkremotely':{'label': 'We Work Remotely','domains': ['weworkremotely.com']},
+    'bayt':         {'label': 'Bayt.com',      'domains': ['bayt.com']},
+    'gulftalent':   {'label': 'GulfTalent',    'domains': ['gulftalent.com']},
+    'ziprecruiter': {'label': 'ZipRecruiter',  'domains': ['ziprecruiter.com']},
+    'careerbuilder':{'label': 'CareerBuilder', 'domains': ['careerbuilder.com']},
+    'snagajob':     {'label': 'Snagajob',      'domains': ['snagajob.com']},
+    'ncs_gov':      {'label': 'NCS (Govt)',    'domains': ['ncs.gov.in']},
+    'ambitionbox':  {'label': 'AmbitionBox',   'domains': ['ambitionbox.com']},
 }
 
 RESUME_EXTS = {'.pdf', '.doc', '.docx', '.rtf'}
