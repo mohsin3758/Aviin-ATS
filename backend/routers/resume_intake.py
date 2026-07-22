@@ -119,11 +119,9 @@ async def intake_queue(
 @router.post('/process-pending')
 async def process_pending(actor: Actor = Depends(get_actor)):
     from services.resume_intake_service import process_pending_batch
-
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        return await process_pending_batch(
-            conn, actor.tenant_id, limit=50,
-            ollama_url=OLLAMA_URL, ollama_model=OLLAMA_MODEL)
+    return await process_pending_batch(
+        actor.tenant_id, limit=50,
+        ollama_url=OLLAMA_URL, ollama_model=OLLAMA_MODEL)
 
 
 # ─── Single record detail ─────────────────────────────────────────────────────

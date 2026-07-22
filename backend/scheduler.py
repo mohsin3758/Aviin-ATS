@@ -124,7 +124,7 @@ async def run_pipeline_auto_move():
     """Daily: evaluate all tenant stage rules and auto-move candidates."""
     logger.info("Running scheduled pipeline auto-move")
     try:
-        async with db.pool.acquire() as conn:
+        async with db.system_conn() as conn:
             tenants = await conn.fetch("SELECT DISTINCT tenant_id FROM stage_rules WHERE enabled=TRUE")
             for t in tenants:
                 tid = str(t["tenant_id"])
@@ -157,7 +157,7 @@ async def run_pipeline_auto_move():
         logger.error(f"Scheduled auto-move error: {e}")
 
 async def process_resume_backlog():
-    """Every 10 min: clear pending resume-intake emails in small batches.
+    """Every 1 min: clear pending resume-intake emails in small batches.
 
     Used to be entirely manual (the "Process Pending" button) - which is
     also how a large backlog built up in the first place, since nothing
@@ -170,7 +170,7 @@ async def process_resume_backlog():
         from services.resume_intake_service import process_pending_batch
         ollama_url = os.environ.get('OLLAMA_URL', 'http://ollama:11434')
         ollama_model = os.environ.get('OLLAMA_MODEL', 'qwen2.5:1.5b-instruct-q4_K_M')
-        async with db.pool.acquire() as conn:
+        async with db.system_conn() as conn:
             tenants = await conn.fetch("""
                 SELECT DISTINCT im.tenant_id
                 FROM imap_messages im
@@ -179,16 +179,26 @@ async def process_resume_backlog():
                   AND (im.auto_processed IS NOT TRUE)
                   AND im.attachments IS NOT NULL AND im.attachments!='[]'
             """)
-            for t in tenants:
-                tid = str(t["tenant_id"])
-                try:
-                    result = await process_pending_batch(
-                        conn, t["tenant_id"], limit=50,
-                        ollama_url=ollama_url, ollama_model=ollama_model)
-                    if result.get('processed') or result.get('errors'):
-                        logger.info(f"Resume backlog tenant {tid}: {result}")
-                except Exception as e:
-                    logger.error(f"Resume backlog processing failed for tenant {tid}: {e}")
+        # system_conn() sets app.tenant_id='' - fine for the cross-tenant
+        # discovery read above, but process_pending_batch() manages its own
+        # per-tenant tenant_conn() calls internally now (see that
+        # function's docstring - it used to share one connection for a
+        # whole 50-item batch, which meant nothing committed until the
+        # entire batch finished, sometimes 12+ minutes with OCR-heavy
+        # PDFs mixed in).
+        for t in tenants:
+            # asyncpg decodes a uuid column into a Python uuid.UUID object,
+            # not str - tenant_conn()'s set_config() call needs an actual
+            # string, so pass tid (already stringified), not the raw UUID.
+            tid = str(t["tenant_id"])
+            try:
+                result = await process_pending_batch(
+                    tid, limit=50,
+                    ollama_url=ollama_url, ollama_model=ollama_model)
+                if result.get('processed') or result.get('errors'):
+                    logger.info(f"Resume backlog tenant {tid}: {result}")
+            except Exception as e:
+                logger.error(f"Resume backlog processing failed for tenant {tid}: {e}")
     except Exception as e:
         logger.error(f"Scheduled resume backlog error: {e}")
 
@@ -305,8 +315,14 @@ def start_scheduler():
     # Daily at 08:00 — interview reminder emails
     scheduler.add_job(send_interview_reminders, "cron", hour=8, minute=0,
                       id="interview_reminders", replace_existing=True)
-    # Every 10 min — clear resume-intake backlog in small batches
-    scheduler.add_job(process_resume_backlog, "interval", minutes=10,
+    # Every 1 min — clear resume-intake backlog in small batches. Safe to
+    # fire this often: process_pending_batch() takes a per-tenant Postgres
+    # advisory lock, so if the previous run is still going (a batch full of
+    # real OCR/Ollama parsing can take several minutes) this just no-ops
+    # instead of overlapping. Was every 10 min, but many batches finish in
+    # under 20s when dominated by duplicates/deleted messages, leaving most
+    # of each 10-minute window idle instead of grabbing the next batch.
+    scheduler.add_job(process_resume_backlog, "interval", minutes=1,
                       id="resume_backlog", replace_existing=True)
     scheduler.add_job(process_nurture_sequences, "interval", hours=4, id="nurture_sequences", replace_existing=True)
     scheduler.start()

@@ -10,6 +10,7 @@ import re, json, base64, imaplib, email as email_lib, asyncio, os, uuid, httpx, 
 from email.header import decode_header, make_header
 from datetime import datetime, timezone
 from pathlib import Path
+import db
 from services.document_classifier import classify_document, is_resume_document, DOC_RESUME
 try:
     from services.dedup_service import check_duplicate, compute_file_hash, EXACT_MATCH, HIGH_CONFIDENCE
@@ -790,6 +791,15 @@ async def process_email_for_resume(
     if requisition_id:
         await create_application(conn, tenant_id, candidate_id, requisition_id)
 
+    # NOTE: if this INSERT hits uq_resume_files_msg_fname (a leftover row
+    # from an earlier attempt whose imap_messages.auto_processed update
+    # never landed), do NOT try to recover here - the SQL exception has
+    # already put this transaction/savepoint into an aborted state, and any
+    # further query on this same connection (even a plain SELECT) fails
+    # with "current transaction is aborted" until an actual ROLLBACK runs.
+    # Let it propagate; process_pending_batch's outer conn.transaction()
+    # context manager rolls back the savepoint on the way out, and recovers
+    # this specific case on a now-clean connection afterward.
     resume_file_id = await conn.fetchval("""
         INSERT INTO resume_files
           (tenant_id,candidate_id,imap_msg_id,job_board,job_board_label,
@@ -863,7 +873,7 @@ async def process_email_for_resume(
 RESUME_BACKLOG_LOCK_NS = 778899  # arbitrary fixed namespace for this advisory lock
 
 
-async def process_pending_batch(conn, tenant_id: str, limit: int = 50, ollama_url: str = '', ollama_model: str = '') -> dict:
+async def process_pending_batch(tenant_id: str, limit: int = 50, ollama_url: str = '', ollama_model: str = '') -> dict:
     """Process up to `limit` pending resume emails for one tenant. Shared by
     both POST /resume-intake/process-pending (manual trigger) and the
     scheduled backlog-clearing job in scheduler.py, so both go through the
@@ -871,37 +881,54 @@ async def process_pending_batch(conn, tenant_id: str, limit: int = 50, ollama_ur
     logic rather than drifting into two copies of this bug-prone flow.
 
     Takes a Postgres advisory lock per tenant so a manual click and the
-    every-10-min scheduled run can never overlap for the same tenant - not
-    because overlap would corrupt anything (each item is its own
-    transaction), just to avoid doubling up IMAP connections against a
-    mail host that's already proven touchy about concurrent logins today."""
-    got_lock = await conn.fetchval(
-        "SELECT pg_try_advisory_lock($1, hashtext($2))", RESUME_BACKLOG_LOCK_NS, str(tenant_id))
-    if not got_lock:
-        return {'processed': 0, 'skipped_no_resume': 0, 'candidates_created_or_updated': 0,
-                'errors': 0, 'status': 'already_running'}
-    try:
-        return await _process_pending_batch_locked(conn, tenant_id, limit, ollama_url, ollama_model)
-    finally:
-        await conn.execute(
-            "SELECT pg_advisory_unlock($1, hashtext($2))", RESUME_BACKLOG_LOCK_NS, str(tenant_id))
+    every-1-min scheduled run can never overlap for the same tenant - not
+    because overlap would corrupt anything, just to avoid doubling up IMAP
+    connections against a mail host that's already proven touchy about
+    concurrent logins today.
+
+    Opens its OWN db.tenant_conn() per item rather than sharing one
+    connection for the whole batch - the earlier version ran all 50 items
+    in a single transaction, so NONE of a batch's progress became visible
+    or durable to any other connection until the entire batch committed.
+    With OCR-heavy PDFs mixed in, a single batch was observed taking 12+
+    minutes, making the whole pipeline look completely frozen from outside
+    (this pending count, /resume-intake/stats, etc.) even though it was
+    actively working - and a crash or restart mid-batch would have lost
+    everything done so far, not just the one item that failed. The lock
+    itself is held on a separate, dedicated connection for the whole
+    batch's duration (cheap - it does no writes) so overlap protection
+    doesn't depend on the same connection doing all the slow work too."""
+    async with db.tenant_conn(tenant_id) as lock_conn:
+        got_lock = await lock_conn.fetchval(
+            "SELECT pg_try_advisory_lock($1, hashtext($2))", RESUME_BACKLOG_LOCK_NS, str(tenant_id))
+        if not got_lock:
+            return {'processed': 0, 'skipped_no_resume': 0, 'candidates_created_or_updated': 0,
+                    'errors': 0, 'status': 'already_running'}
+        try:
+            return await _process_pending_batch_locked(tenant_id, limit, ollama_url, ollama_model)
+        finally:
+            await lock_conn.execute(
+                "SELECT pg_advisory_unlock($1, hashtext($2))", RESUME_BACKLOG_LOCK_NS, str(tenant_id))
 
 
-async def _process_pending_batch_locked(conn, tenant_id: str, limit: int, ollama_url: str, ollama_model: str) -> dict:
-    rows = await conn.fetch("""
-        SELECT im.id, im.imap_uid, im.folder, im.from_email, im.from_name,
-               im.subject, im.attachments, im.tenant_id,
-               ua.imap_host, ua.imap_port, ua.imap_user, ua.imap_password,
-               ua.email as smtp_email, ua.display_name,
-               ua.smtp_host, ua.smtp_port, ua.smtp_user, ua.smtp_password, ua.smtp_tls
-        FROM imap_messages im
-        JOIN user_email_accounts ua ON ua.id=im.account_id
-        WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE
-          AND im.folder='INBOX' AND ua.is_active=TRUE
-          AND (im.auto_processed IS NOT TRUE)
-          AND im.attachments IS NOT NULL AND im.attachments!='[]'
-        ORDER BY im.received_at DESC LIMIT $2""",
-        tenant_id, limit)
+async def _process_pending_batch_locked(tenant_id: str, limit: int, ollama_url: str, ollama_model: str) -> dict:
+    async with db.tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT im.id, im.imap_uid, im.folder, im.from_email, im.from_name,
+                   im.subject, im.attachments, im.tenant_id,
+                   ua.imap_host, ua.imap_port, ua.imap_user, ua.imap_password,
+                   ua.email as smtp_email, ua.display_name,
+                   ua.smtp_host, ua.smtp_port, ua.smtp_user, ua.smtp_password, ua.smtp_tls
+            FROM imap_messages im
+            JOIN user_email_accounts ua ON ua.id=im.account_id
+            WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE
+              AND im.folder='INBOX' AND ua.is_active=TRUE
+              AND (im.auto_processed IS NOT TRUE)
+              AND im.attachments IS NOT NULL AND im.attachments!='[]'
+            ORDER BY im.received_at DESC LIMIT $2""",
+            tenant_id, limit)
+    # rows fetched, connection above released - everything below opens its
+    # own fresh per-item connection so each item commits independently.
 
     imap_conns = {}
 
@@ -937,9 +964,10 @@ async def _process_pending_batch_locked(conn, tenant_id: str, limit: int, ollama
             is_resume_attachment(a.get('filename', ''), a.get('mime_type', ''))
             for a in (attachments or []))
         if not has_resume:
-            await conn.execute(
-                "UPDATE imap_messages SET auto_processed=TRUE,process_status='no_resume' WHERE id=$1",
-                row['id'])
+            async with db.tenant_conn(tenant_id) as conn:
+                await conn.execute(
+                    "UPDATE imap_messages SET auto_processed=TRUE,process_status='no_resume' WHERE id=$1",
+                    row['id'])
             skipped += 1
             continue
 
@@ -972,7 +1000,7 @@ async def _process_pending_batch_locked(conn, tenant_id: str, limit: int, ollama
             continue
 
         try:
-            async with conn.transaction():
+            async with db.tenant_conn(tenant_id) as conn:
                 result = await process_email_for_resume(
                     conn=conn,
                     msg_id=str(row['id']),
@@ -993,6 +1021,11 @@ async def _process_pending_batch_locked(conn, tenant_id: str, limit: int, ollama
                     smtp_acc=smtp_acc,
                     imap_conn=M,
                 )
+            # This item's own db.tenant_conn() has now committed (or rolled
+            # back) independently - a slow/failed item can no longer hold
+            # up or wipe out every other item in the batch, and progress on
+            # already-finished items is durable even if a later item or the
+            # whole process dies.
             processed += 1
             if result.get('status') == 'error':
                 key = (row['imap_host'], row['imap_port'] or 993, row['imap_user'], imap_pw)
@@ -1004,6 +1037,30 @@ async def _process_pending_batch_locked(conn, tenant_id: str, limit: int, ollama
             if result.get('status') == 'done' and result.get('candidate_id'):
                 created += 1
         except Exception as ex:
+            if 'uq_resume_files_msg_fname' in str(ex):
+                # A resume_files row for this exact (msg_id, file_name)
+                # already exists from an earlier attempt that inserted it
+                # successfully but never got back to marking
+                # imap_messages.auto_processed=TRUE (several since-fixed
+                # bugs today could cause that). Without this, this one
+                # message retries every batch forever, permanently
+                # blocking whatever's queued behind it. Needs a fresh
+                # connection - the one that raised this is already rolled
+                # back and released.
+                try:
+                    async with db.tenant_conn(tenant_id) as rconn:
+                        existing = await rconn.fetchrow(
+                            "SELECT id, candidate_id FROM resume_files WHERE imap_msg_id=$1 LIMIT 1",
+                            str(row['id']))
+                        await rconn.execute(
+                            "UPDATE imap_messages SET auto_processed=TRUE,process_status='done' WHERE id=$1", row['id'])
+                    processed += 1
+                    if existing and existing['candidate_id']:
+                        created += 1
+                except Exception as ex2:
+                    errors += 1
+                    print(f'[ResumeIntake] Recovery for {row["id"]} also failed: {ex2}')
+                continue
             errors += 1
             print(f'[ResumeIntake] Error processing {row["id"]}: {ex}')
 
