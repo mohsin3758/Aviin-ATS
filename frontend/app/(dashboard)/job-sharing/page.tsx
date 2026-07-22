@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -22,7 +22,61 @@ const CATEGORY_LABELS: Record<string, string> = {
   startup_niche: 'Startup / Niche',
 };
 
+const ISSUE_TYPES = [
+  { value: 'broken_link', label: 'Broken link' },
+  { value: 'wrong_info', label: 'Wrong info' },
+  { value: 'posting_failed', label: 'Posting failed' },
+  { value: 'other', label: 'Other' },
+];
+
 interface Portal { key: string; name: string; category: string; share_intent: boolean; link: string; }
+
+function ReportIssueModal({ portal, reqId, onClose, onReported }: {
+  portal: Portal; reqId: string; onClose: () => void; onReported: () => void;
+}) {
+  const [issueType, setIssueType] = useState('broken_link');
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    setSaving(true);
+    try {
+      await apiFetch('/job-sharing/issues', {
+        method: 'POST',
+        body: JSON.stringify({ req_id: reqId || null, portal_key: portal.key, portal_name: portal.name, issue_type: issueType, note: note || null }),
+      });
+      onReported();
+      onClose();
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+      <div style={{ background: 'white', borderRadius: 14, width: '100%', maxWidth: 380, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-sm">Report issue — {portal.name}</h3>
+          <button onClick={onClose}><XCircle className="h-4 w-4 text-gray-400" /></button>
+        </div>
+        <label className="text-xs font-medium text-gray-600 block mb-1">Issue type</label>
+        <select value={issueType} onChange={e => setIssueType(e.target.value)}
+          className="w-full border rounded-lg px-2 py-1.5 text-sm mb-3">
+          {ISSUE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+        </select>
+        <label className="text-xs font-medium text-gray-600 block mb-1">Note (optional)</label>
+        <textarea value={note} onChange={e => setNote(e.target.value)} rows={3}
+          placeholder="e.g. link 404s, redirected to wrong page..."
+          className="w-full border rounded-lg px-2 py-1.5 text-sm mb-4 resize-none" />
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="text-xs px-3 py-1.5 rounded-lg border text-gray-600">Cancel</button>
+          <button onClick={submit} disabled={saving}
+            className="text-xs px-3 py-1.5 rounded-lg bg-red-600 text-white disabled:opacity-50">
+            {saving ? 'Reporting...' : 'Report Issue'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function JobSharingPageInner() {
   const searchParams = useSearchParams();
@@ -34,10 +88,21 @@ function JobSharingPageInner() {
   }, [searchParams]);
   const { data: links, loading } = useFetch<any>(selId ? `/job-sharing/requisition/${selId}` : null);
   const { data: statsData } = useFetch<any[]>('/job-sharing/stats');
+  const { data: sharedData, refetch: refetchShared } = useFetch<any>(selId ? `/job-sharing/shared/${selId}` : null);
+  const { data: issuesData, refetch: refetchIssues } = useFetch<any[]>('/job-sharing/issues?status=open');
   const [posted, setPosted] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState('');
   const [copied, setCopied] = useState(false);
+  const [issuePortal, setIssuePortal] = useState<Portal | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  useEffect(() => {
+    // Restore real server-recorded share state on load/select (was
+    // previously lost on every page refresh - see /job-sharing/log fix).
+    const platforms: string[] = sharedData?.platforms || [];
+    setPosted(Object.fromEntries(platforms.map(p => [p, true])));
+  }, [sharedData]);
 
   const portals: Portal[] = links?.portals || [];
   const autoPortals = portals.filter(p => AUTO_CHANNELS.includes(p.key));
@@ -57,7 +122,7 @@ function JobSharingPageInner() {
 
   function logShare(platform: string) {
     setPosted(p => ({ ...p, [platform]: true }));
-    apiFetch('/job-sharing/log', { method: 'POST', body: JSON.stringify({ req_id: selId, platform }) });
+    apiFetch('/job-sharing/log', { method: 'POST', body: JSON.stringify({ req_id: selId, platform }) }).catch(() => {});
   }
 
   function openPortal(p: Portal) {
@@ -75,8 +140,24 @@ function JobSharingPageInner() {
     });
   }
 
+  async function clearShared() {
+    if (!selId || !confirm('Clear all "posted" checkmarks for this requisition? This only resets tracking — it does not remove your listing from any portal.')) return;
+    setClearing(true);
+    try {
+      await apiFetch(`/job-sharing/clear/${selId}`, { method: 'POST' });
+      setPosted({});
+      refetchShared();
+    } finally { setClearing(false); }
+  }
+
+  async function resolveIssue(id: string) {
+    await apiFetch(`/job-sharing/issues/${id}/resolve`, { method: 'PATCH' });
+    refetchIssues();
+  }
+
   const sharedCount = Object.keys(posted).length;
   const totalPortals = portals.length;
+  const openIssues = issuesData || [];
 
   return (
     <div className="space-y-6" data-testid="job-sharing-page">
@@ -102,19 +183,32 @@ function JobSharingPageInner() {
         <Card>
           <CardHeader className="flex items-center justify-between">
             <h2 className="font-semibold">2. Auto-Share (zero typing — opens pre-filled)</h2>
-            <button onClick={shareToAllAuto}
-              className="flex items-center gap-1.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg px-3 py-1.5">
-              <Share2 className="h-3.5 w-3.5" /> Share to All 6
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={clearShared} disabled={clearing || sharedCount === 0}
+                title="Clear posted checkmarks for this requisition"
+                className="flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-800 border rounded-lg px-2.5 py-1.5 disabled:opacity-40">
+                <RotateCcw className="h-3.5 w-3.5" /> Clear
+              </button>
+              <button onClick={shareToAllAuto}
+                className="flex items-center gap-1.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg px-3 py-1.5">
+                <Share2 className="h-3.5 w-3.5" /> Share to All 6
+              </button>
+            </div>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
               {autoPortals.map(p => (
-                <button key={p.key} onClick={() => openPortal(p)}
-                  className="flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium text-white bg-gray-800 hover:opacity-90 relative">
-                  {posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> : <ExternalLink className="h-3.5 w-3.5" />}
-                  {p.name}
-                </button>
+                <div key={p.key} className="relative group">
+                  <button onClick={() => openPortal(p)}
+                    className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium text-white bg-gray-800 hover:opacity-90">
+                    {posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> : <ExternalLink className="h-3.5 w-3.5" />}
+                    {p.name}
+                  </button>
+                  <button onClick={() => setIssuePortal(p)} title="Report issue"
+                    className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Flag className="h-3 w-3 text-red-500" />
+                  </button>
+                </div>
               ))}
             </div>
           </CardContent>
@@ -143,7 +237,8 @@ function JobSharingPageInner() {
           <CardContent>
             <p className="text-xs text-gray-400 mb-3">
               These portals don't offer a public posting API (true of nearly every free job board — they require your own logged-in
-              employer account). Each button copies the job description and opens the portal so you can paste + submit.
+              employer account). Each button copies the job description and opens the portal so you can paste + submit. Hover a
+              portal and click the flag to report a broken link.
             </p>
             <div className="space-y-4">
               {Object.entries(grouped).map(([cat, list]) => (
@@ -151,12 +246,18 @@ function JobSharingPageInner() {
                   <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2">{CATEGORY_LABELS[cat] || cat} ({list.length})</div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
                     {list.map(p => (
-                      <button key={p.key} onClick={() => openPortal(p)}
-                        className={`flex items-center justify-between gap-1.5 py-2 px-3 rounded-lg text-xs font-medium border transition-colors
-                          ${posted[p.key] ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-700 hover:border-purple-300 hover:bg-purple-50'}`}>
-                        <span className="truncate">{p.name}</span>
-                        {posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <ExternalLink className="h-3 w-3 shrink-0 text-gray-400" />}
-                      </button>
+                      <div key={p.key} className="relative group">
+                        <button onClick={() => openPortal(p)}
+                          className={`w-full flex items-center justify-between gap-1.5 py-2 px-3 rounded-lg text-xs font-medium border transition-colors
+                            ${posted[p.key] ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-700 hover:border-purple-300 hover:bg-purple-50'}`}>
+                          <span className="truncate">{p.name}</span>
+                          {posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <ExternalLink className="h-3 w-3 shrink-0 text-gray-400" />}
+                        </button>
+                        <button onClick={() => setIssuePortal(p)} title="Report issue"
+                          className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <Flag className="h-3 w-3 text-red-500" />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -177,10 +278,35 @@ function JobSharingPageInner() {
         </Card>
 
         <div className="text-xs text-gray-400">
-          {sharedCount} of {totalPortals} portals opened this session · Resumes from applicants who apply via email (most free portals notify by email)
+          {sharedCount} of {totalPortals} portals posted for this requisition · Resumes from applicants who apply via email (most free portals notify by email)
           land automatically in Resume Inbox, source-tagged by portal.
         </div>
       </>))}
+
+      {openIssues.length > 0 && (
+        <Card>
+          <CardHeader><h2 className="font-semibold text-red-600">Reported Issues ({openIssues.length})</h2></CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {openIssues.map((i: any) => (
+                <div key={i.id} className="flex items-center justify-between gap-3 border rounded-lg px-3 py-2 text-sm">
+                  <div className="min-w-0">
+                    <span className="font-medium">{i.portal_name}</span>
+                    <span className="text-gray-400 mx-1.5">·</span>
+                    <span className="text-xs text-gray-500">{ISSUE_TYPES.find(t => t.value === i.issue_type)?.label || i.issue_type}</span>
+                    {i.requisition_title && <span className="text-xs text-gray-400"> · {i.requisition_title}</span>}
+                    {i.note && <div className="text-xs text-gray-500 truncate">{i.note}</div>}
+                  </div>
+                  <button onClick={() => resolveIssue(i.id)}
+                    className="shrink-0 text-xs px-2.5 py-1 rounded-lg border text-green-700 border-green-200 bg-green-50 hover:bg-green-100">
+                    Resolve
+                  </button>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {statsData && statsData.length > 0 && (
         <Card>
@@ -196,6 +322,12 @@ function JobSharingPageInner() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {issuePortal && (
+        <ReportIssueModal portal={issuePortal} reqId={selId}
+          onClose={() => setIssuePortal(null)}
+          onReported={refetchIssues} />
       )}
     </div>
   );
