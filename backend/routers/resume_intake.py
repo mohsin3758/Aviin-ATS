@@ -1,5 +1,5 @@
 """Resume Intake Router — Phases 1-6 API endpoints"""
-import json, os, base64
+import json, os
 from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -10,15 +10,6 @@ router = APIRouter(prefix='/resume-intake', tags=['resume-intake'])
 
 OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://ollama:11434')
 OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'qwen2.5:1.5b-instruct-q4_K_M')
-
-
-def _parse_atts(atts):
-    if isinstance(atts, str):
-        try:
-            return json.loads(atts or '[]')
-        except Exception:
-            return []
-    return atts or []
 
 
 # ─── Stats endpoint (Phase 6) ─────────────────────────────────────────────────
@@ -46,7 +37,7 @@ async def intake_stats(actor: Actor = Depends(get_actor)):
         pending = await conn.fetchval("""
             SELECT COUNT(*) FROM imap_messages im
             JOIN user_email_accounts ua ON ua.id=im.account_id
-            WHERE im.tenant_id=$1 AND ua.user_id=$2
+            WHERE im.tenant_id=$1 AND ua.user_id=$2 AND ua.is_active=TRUE
               AND im.is_deleted IS NOT TRUE AND im.folder='INBOX'
               AND (im.auto_processed IS NOT TRUE)
               AND im.attachments IS NOT NULL AND im.attachments!='[]'""",
@@ -127,87 +118,12 @@ async def intake_queue(
 # ─── Process pending emails (Phase 1-5 trigger) ───────────────────────────────
 @router.post('/process-pending')
 async def process_pending(actor: Actor = Depends(get_actor)):
-    from services.resume_intake_service import process_email_for_resume, is_resume_attachment
-    import asyncpg
+    from services.resume_intake_service import process_pending_batch
 
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
-            SELECT im.id, im.imap_uid, im.folder, im.from_email, im.from_name,
-                   im.subject, im.attachments, im.tenant_id,
-                   ua.imap_host, ua.imap_port, ua.imap_user, ua.imap_password,
-                   ua.email as smtp_email, ua.display_name,
-                   ua.smtp_host, ua.smtp_port, ua.smtp_user, ua.smtp_password, ua.smtp_tls
-            FROM imap_messages im
-            JOIN user_email_accounts ua ON ua.id=im.account_id
-            WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE
-              AND im.folder='INBOX'
-              AND (im.auto_processed IS NOT TRUE)
-              AND im.attachments IS NOT NULL AND im.attachments!='[]'
-            ORDER BY im.received_at DESC LIMIT 100""",
-            actor.tenant_id)
-
-        processed = skipped = created = errors = 0
-        for row in rows:
-            attachments = _parse_atts(row['attachments'])
-            has_resume = any(
-                is_resume_attachment(a.get('filename', ''), a.get('mime_type', ''))
-                for a in attachments)
-            if not has_resume:
-                await conn.execute(
-                    "UPDATE imap_messages SET auto_processed=TRUE,process_status='no_resume' WHERE id=$1",
-                    row['id'])
-                skipped += 1
-                continue
-
-            try:
-                from services.resume_intake_service import _simple_decrypt as _dec
-            except ImportError:
-                _dec = lambda x: x
-
-            imap_pw = row['imap_password'] or ''
-            smtp_acc = {
-                'email': row['smtp_email'],
-                'display_name': row['display_name'] or 'AVIIN Jobs',
-                'smtp_host': row['smtp_host'] or '',
-                'smtp_port': row['smtp_port'] or 587,
-                'smtp_user': row['smtp_user'] or '',
-                'smtp_password': imap_pw,
-                'smtp_tls': row['smtp_tls'] if row['smtp_tls'] is not None else True,
-            } if row.get('smtp_host') else None
-
-            try:
-                result = await process_email_for_resume(
-                    conn=conn,
-                    msg_id=str(row['id']),
-                    tenant_id=str(row['tenant_id']),
-                    account_id=None,
-                    imap_uid=row['imap_uid'],
-                    folder=row['folder'],
-                    from_email=row['from_email'] or '',
-                    from_name=row['from_name'] or '',
-                    subject=row['subject'] or '',
-                    attachments_meta=attachments,
-                    imap_host=row['imap_host'],
-                    imap_port=row['imap_port'] or 993,
-                    imap_user=row['imap_user'],
-                    imap_password=imap_pw,
-                    ollama_url=OLLAMA_URL,
-                    ollama_model=OLLAMA_MODEL,
-                    smtp_acc=smtp_acc,
-                )
-                processed += 1
-                if result.get('status') == 'done' and result.get('candidate_id'):
-                    created += 1
-            except Exception as ex:
-                errors += 1
-                print(f'[ResumeIntake] Error processing {row["id"]}: {ex}')
-
-    return {
-        'processed': processed,
-        'skipped_no_resume': skipped,
-        'candidates_created_or_updated': created,
-        'errors': errors,
-    }
+        return await process_pending_batch(
+            conn, actor.tenant_id, limit=50,
+            ollama_url=OLLAMA_URL, ollama_model=OLLAMA_MODEL)
 
 
 # ─── Single record detail ─────────────────────────────────────────────────────

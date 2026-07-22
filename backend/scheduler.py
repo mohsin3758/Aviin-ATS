@@ -156,6 +156,43 @@ async def run_pipeline_auto_move():
     except Exception as e:
         logger.error(f"Scheduled auto-move error: {e}")
 
+async def process_resume_backlog():
+    """Every 10 min: clear pending resume-intake emails in small batches.
+
+    Used to be entirely manual (the "Process Pending" button) - which is
+    also how a large backlog built up in the first place, since nothing
+    was ever pulling it down automatically. Runs the same batch logic as
+    that button, just on a schedule instead of a click, so it keeps making
+    steady progress unattended."""
+    import os
+    logger.info("scheduler: processing resume-intake backlog batch")
+    try:
+        from services.resume_intake_service import process_pending_batch
+        ollama_url = os.environ.get('OLLAMA_URL', 'http://ollama:11434')
+        ollama_model = os.environ.get('OLLAMA_MODEL', 'qwen2.5:1.5b-instruct-q4_K_M')
+        async with db.pool.acquire() as conn:
+            tenants = await conn.fetch("""
+                SELECT DISTINCT im.tenant_id
+                FROM imap_messages im
+                JOIN user_email_accounts ua ON ua.id=im.account_id
+                WHERE im.is_deleted IS NOT TRUE AND im.folder='INBOX' AND ua.is_active=TRUE
+                  AND (im.auto_processed IS NOT TRUE)
+                  AND im.attachments IS NOT NULL AND im.attachments!='[]'
+            """)
+            for t in tenants:
+                tid = str(t["tenant_id"])
+                try:
+                    result = await process_pending_batch(
+                        conn, t["tenant_id"], limit=50,
+                        ollama_url=ollama_url, ollama_model=ollama_model)
+                    if result.get('processed') or result.get('errors'):
+                        logger.info(f"Resume backlog tenant {tid}: {result}")
+                except Exception as e:
+                    logger.error(f"Resume backlog processing failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"Scheduled resume backlog error: {e}")
+
+
 async def send_interview_reminders():
     """Daily 8am: email candidates with interviews in the next 24 hours."""
     logger.info("scheduler: sending interview reminders")
@@ -268,6 +305,9 @@ def start_scheduler():
     # Daily at 08:00 — interview reminder emails
     scheduler.add_job(send_interview_reminders, "cron", hour=8, minute=0,
                       id="interview_reminders", replace_existing=True)
+    # Every 10 min — clear resume-intake backlog in small batches
+    scheduler.add_job(process_resume_backlog, "interval", minutes=10,
+                      id="resume_backlog", replace_existing=True)
     scheduler.add_job(process_nurture_sequences, "interval", hours=4, id="nurture_sequences", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")

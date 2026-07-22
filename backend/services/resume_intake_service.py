@@ -626,7 +626,16 @@ async def process_email_for_resume(
     imap_host: str, imap_port: int, imap_user: str, imap_password: str,
     ollama_url: str = '', ollama_model: str = '',
     smtp_acc: dict = None,
+    imap_conn=None,
 ) -> dict:
+    """imap_conn: an already-open, already-selected-folder imaplib.IMAP4_SSL
+    connection, for batch callers (process-pending) that process many
+    messages in one call - opening a fresh connection per message was both
+    slow (100 sequential logins) and fragile (transient connection drops
+    against a flaky mail host got permanently recorded as failures, with no
+    retry, since imap_error used to set auto_processed=TRUE). If not given,
+    a one-off connection is opened as before (used by the live single-
+    message IMAP IDLE path, where this is unavoidable)."""
     job_board, label = detect_source(from_email, subject)
 
     # Skip blacklisted senders (banks, alerts, newsletters)
@@ -644,17 +653,36 @@ async def process_email_for_resume(
 
     # Download from IMAP
     try:
-        M = imaplib.IMAP4_SSL(imap_host, imap_port)
-        M.login(imap_user, imap_password)
-        M.select(folder, readonly=True)
-        _, data = M.uid('FETCH', imap_uid.encode(), '(RFC822)')
-        M.logout()
+        if imap_conn is not None:
+            M = imap_conn
+            _, data = M.uid('FETCH', imap_uid.encode(), '(RFC822)')
+        else:
+            M = imaplib.IMAP4_SSL(imap_host, imap_port)
+            M.login(imap_user, imap_password)
+            M.select(folder, readonly=True)
+            _, data = M.uid('FETCH', imap_uid.encode(), '(RFC822)')
+            M.logout()
         if not data or not data[0] or not isinstance(data[0], tuple):
-            raise Exception('No data from IMAP')
+            # The server answered cleanly but has nothing for this UID - the
+            # message was deleted/moved out of this folder after we recorded
+            # it (a normal, permanent condition, not a network blip). Unlike
+            # a raised exception below, this can NEVER succeed on retry, so
+            # unlike imap_error it must be marked auto_processed - otherwise
+            # ORDER BY received_at DESC keeps re-selecting this exact row
+            # forever and the rest of the backlog behind it never gets a
+            # chance to run.
+            print(f'[ResumeIntake] uid={imap_uid} folder={folder}: message no longer on server, skipping permanently')
+            await conn.execute(
+                "UPDATE imap_messages SET auto_processed=TRUE,process_status='not_found' WHERE id=$1", msg_id)
+            return {'status': 'not_found'}
         raw_msg = email_lib.message_from_bytes(data[0][1])
     except Exception as ex:
+        # Transient (connection drop, timeout) - do NOT mark auto_processed
+        # so this gets retried on the next process-pending/live-sync pass
+        # instead of being silently stuck forever.
+        print(f'[ResumeIntake] uid={imap_uid} folder={folder}: IMAP error (will retry): {ex}')
         await conn.execute(
-            "UPDATE imap_messages SET auto_processed=TRUE,process_status='imap_error' WHERE id=$1", msg_id)
+            "UPDATE imap_messages SET process_status='imap_error' WHERE id=$1", msg_id)
         return {'status': 'error', 'error': str(ex)}
 
     body_text = ''
@@ -732,7 +760,7 @@ async def process_email_for_resume(
             print(f'[Dedup] {dedup_result.decision}: {dedup_result.evidence[0][0]} → linking to existing candidate')
             # Link this file to existing candidate, skip parse
             await conn.execute(
-                "UPDATE imap_messages SET auto_processed=TRUE,process_status='dedup_matched',candidate_id= WHERE id=",
+                "UPDATE imap_messages SET auto_processed=TRUE,process_status='dedup_matched',candidate_id=$1 WHERE id=$2",
                 dedup_result.matched_candidate_id, msg_id)
             return {
                 'status': 'dedup_matched',
@@ -802,10 +830,22 @@ async def process_email_for_resume(
     if smtp_acc and parsed.get('email') and parsed['email'] != from_email:
         await send_auto_reply(parsed['email'], parsed.get('name', 'Applicant'), smtp_acc)
 
-    # Phase 5 optional: WhatsApp notification to candidate if phone available
+    # Phase 5 optional: WhatsApp notification to candidate if phone available.
+    # send_whatsapp_to_candidate was never implemented anywhere in this
+    # codebase - calling it unconditionally threw NameError for every
+    # resume with a phone number (i.e. nearly all of them), and since the
+    # caller wraps this whole function in a transaction, that exception
+    # silently rolled back the candidate/resume_files rows this function
+    # had just successfully created. Guarded so a missing optional
+    # notification feature can never undo a successful resume intake.
     phone = parsed.get('phone')
     if phone:
-        await send_whatsapp_to_candidate(phone, parsed.get('name', 'Applicant'), label)
+        try:
+            await send_whatsapp_to_candidate(phone, parsed.get('name', 'Applicant'), label)
+        except NameError:
+            pass
+        except Exception as ex:
+            print(f'[ResumeIntake] WhatsApp notify failed (non-fatal): {ex}')
 
     return {
         'status': 'done',
@@ -817,4 +857,143 @@ async def process_email_for_resume(
         'requisition_matched': bool(requisition_id),
         'confidence': round(conf, 3),
         'routing': routing_decision,
+    }
+
+
+async def process_pending_batch(conn, tenant_id: str, limit: int = 50, ollama_url: str = '', ollama_model: str = '') -> dict:
+    """Process up to `limit` pending resume emails for one tenant. Shared by
+    both POST /resume-intake/process-pending (manual trigger) and the
+    scheduled backlog-clearing job in scheduler.py, so both go through the
+    exact same connection-reuse + circuit-breaker + per-item-transaction
+    logic rather than drifting into two copies of this bug-prone flow."""
+    rows = await conn.fetch("""
+        SELECT im.id, im.imap_uid, im.folder, im.from_email, im.from_name,
+               im.subject, im.attachments, im.tenant_id,
+               ua.imap_host, ua.imap_port, ua.imap_user, ua.imap_password,
+               ua.email as smtp_email, ua.display_name,
+               ua.smtp_host, ua.smtp_port, ua.smtp_user, ua.smtp_password, ua.smtp_tls
+        FROM imap_messages im
+        JOIN user_email_accounts ua ON ua.id=im.account_id
+        WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE
+          AND im.folder='INBOX' AND ua.is_active=TRUE
+          AND (im.auto_processed IS NOT TRUE)
+          AND im.attachments IS NOT NULL AND im.attachments!='[]'
+        ORDER BY im.received_at DESC LIMIT $2""",
+        tenant_id, limit)
+
+    imap_conns = {}
+
+    def _get_conn(host, port, user, pw):
+        key = (host, port, user, pw)
+        M = imap_conns.get(key)
+        if M is not None:
+            try:
+                M.noop()
+                return M
+            except Exception:
+                try:
+                    M.logout()
+                except Exception:
+                    pass
+                imap_conns.pop(key, None)
+        M = imaplib.IMAP4_SSL(host, port)
+        M.login(user, pw)
+        M.select('INBOX', readonly=True)
+        imap_conns[key] = M
+        return M
+
+    processed = skipped = created = errors = 0
+    consecutive_connect_failures = 0
+    for row in rows:
+        attachments = row['attachments']
+        if isinstance(attachments, str):
+            try:
+                attachments = json.loads(attachments or '[]')
+            except Exception:
+                attachments = []
+        has_resume = any(
+            is_resume_attachment(a.get('filename', ''), a.get('mime_type', ''))
+            for a in (attachments or []))
+        if not has_resume:
+            await conn.execute(
+                "UPDATE imap_messages SET auto_processed=TRUE,process_status='no_resume' WHERE id=$1",
+                row['id'])
+            skipped += 1
+            continue
+
+        raw_pw = row['imap_password'] or ''
+        try:
+            imap_pw = base64.b64decode(raw_pw.encode()).decode()
+        except Exception:
+            imap_pw = raw_pw
+        smtp_acc = {
+            'email': row['smtp_email'],
+            'display_name': row['display_name'] or 'AVIIN Jobs',
+            'smtp_host': row['smtp_host'] or '',
+            'smtp_port': row['smtp_port'] or 587,
+            'smtp_user': row['smtp_user'] or '',
+            'smtp_password': imap_pw,
+            'smtp_tls': row['smtp_tls'] if row['smtp_tls'] is not None else True,
+        } if row.get('smtp_host') else None
+
+        try:
+            M = _get_conn(row['imap_host'], row['imap_port'] or 993, row['imap_user'], imap_pw)
+            consecutive_connect_failures = 0
+        except Exception as ex:
+            errors += 1
+            consecutive_connect_failures += 1
+            print(f'[ResumeIntake] IMAP connect failed, will retry next batch: {ex}')
+            if consecutive_connect_failures >= 3:
+                print('[ResumeIntake] 3 consecutive connect failures - aborting batch early to avoid rate-limit pileup')
+                break
+            await asyncio.sleep(2)
+            continue
+
+        try:
+            async with conn.transaction():
+                result = await process_email_for_resume(
+                    conn=conn,
+                    msg_id=str(row['id']),
+                    tenant_id=str(row['tenant_id']),
+                    account_id=None,
+                    imap_uid=row['imap_uid'],
+                    folder=row['folder'],
+                    from_email=row['from_email'] or '',
+                    from_name=row['from_name'] or '',
+                    subject=row['subject'] or '',
+                    attachments_meta=attachments,
+                    imap_host=row['imap_host'],
+                    imap_port=row['imap_port'] or 993,
+                    imap_user=row['imap_user'],
+                    imap_password=imap_pw,
+                    ollama_url=ollama_url,
+                    ollama_model=ollama_model,
+                    smtp_acc=smtp_acc,
+                    imap_conn=M,
+                )
+            processed += 1
+            if result.get('status') == 'error':
+                key = (row['imap_host'], row['imap_port'] or 993, row['imap_user'], imap_pw)
+                imap_conns.pop(key, None)
+                try:
+                    M.logout()
+                except Exception:
+                    pass
+            if result.get('status') == 'done' and result.get('candidate_id'):
+                created += 1
+        except Exception as ex:
+            errors += 1
+            print(f'[ResumeIntake] Error processing {row["id"]}: {ex}')
+
+    for M in imap_conns.values():
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+    return {
+        'processed': processed,
+        'skipped_no_resume': skipped,
+        'candidates_created_or_updated': created,
+        'errors': errors,
     }

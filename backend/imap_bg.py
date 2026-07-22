@@ -61,16 +61,27 @@ def _extract_att_meta(msg):
     return attachments
 
 
-async def _store_email(conn, acc_id, tenant_id, uid_s, folder, msg):
-    """Parse a full RFC822 message and store to DB with attachment metadata."""
+async def _store_email(conn, acc_id, tenant_id, uid_s, folder, msg, internal_dt=None):
+    """Parse a full RFC822 message and store to DB with attachment metadata.
+
+    Some real-world emails (forwarded chains, malformed clients) have no
+    Date header at all - parsedate_to_datetime('') raises, and the old
+    fallback here was datetime.now(), which stamped genuinely old backfilled
+    mail with the sync time. Falls back to the IMAP server's own
+    INTERNALDATE (actual mailbox delivery time) when the caller has it,
+    which is far more accurate than "now".
+    """
     subj = _dec(msg.get('Subject', ''))
     fr = _dec(msg.get('From', ''))
     fn = fr.split('<')[0].strip().strip('"') if '<' in fr else fr.split('@')[0].strip()
     fe = fr.split('<')[1].rstrip('>').strip() if '<' in fr else fr.strip()
+    ra = None
     try:
         ra = parsedate_to_datetime(msg.get('Date', ''))
     except Exception:
-        ra = datetime.now(timezone.utc)
+        ra = None
+    if ra is None:
+        ra = internal_dt or datetime.now(timezone.utc)
     att_meta = _extract_att_meta(msg)
     await conn.execute(
         'INSERT INTO imap_messages'
@@ -92,6 +103,7 @@ async def _do_sync_folder_full(acc, folder):
     """Sync new emails in a folder — fetch full RFC822 to capture attachments."""
     conn = None
     total = 0
+    resume_tasks = []
     try:
         conn = await asyncpg.connect(DB_URL)
         max_uid = int(await conn.fetchval(
@@ -114,25 +126,43 @@ async def _do_sync_folder_full(acc, folder):
         for uid in new_uids:
             try:
                 try:
-                    _, data = M.uid('FETCH', uid, '(RFC822)')
+                    _, data = M.uid('FETCH', uid, '(INTERNALDATE RFC822)')
                 except Exception:
-                    _, data = M.fetch(uid, '(RFC822)')
+                    _, data = M.fetch(uid, '(INTERNALDATE RFC822)')
                 if not data or not data[0] or not isinstance(data[0], tuple):
                     continue
                 msg = email_lib.message_from_bytes(data[0][1])
+                internal_dt = None
+                try:
+                    it = imaplib.Internaldate2tuple(data[0][0])
+                    if it:
+                        internal_dt = datetime.fromtimestamp(time.mktime(it), tz=timezone.utc)
+                except Exception:
+                    internal_dt = None
                 uid_s = uid.decode()
-                att_meta = await _store_email(conn, acc['id'], acc['tenant_id'], uid_s, folder, msg)
+                att_meta = await _store_email(conn, acc['id'], acc['tenant_id'], uid_s, folder, msg, internal_dt)
                 total += 1
                 if att_meta:
                     print(f'[IMAP] New email uid={uid_s} folder={folder} has {len(att_meta)} attachment(s): {[a["filename"] for a in att_meta]}')
-                    # Auto-process resume if INBOX email has resume attachment
+                    # Auto-process resume if INBOX email has resume attachment.
+                    # This USED TO fire via asyncio.ensure_future() (schedule and
+                    # forget) - but _run_sync_folder below creates a fresh event
+                    # loop for this whole function and closes it the moment this
+                    # function returns, so every scheduled-but-not-yet-run task
+                    # was silently abandoned. The entire auto-capture pipeline
+                    # never actually executed via live sync; resumes only ever
+                    # got processed when someone manually clicked "Process
+                    # Pending". Collecting tasks and awaiting them via gather()
+                    # below actually runs them before the loop closes.
                     if folder == 'INBOX':
-                        asyncio.ensure_future(_auto_process_resume(conn, acc, uid_s, folder, msg, att_meta))
+                        resume_tasks.append(_auto_process_resume(conn, acc, uid_s, folder, msg, att_meta))
             except Exception as ex:
                 print(f'[IMAP] Sync err uid={uid}: {ex}')
         M.logout()
         if total:
             print(f'[IMAP] Synced {total} new email(s) in {folder}')
+        if resume_tasks:
+            await asyncio.gather(*resume_tasks, return_exceptions=True)
         return total
     except Exception as ex:
         print(f'[IMAP] Folder sync err {folder}: {ex}')
