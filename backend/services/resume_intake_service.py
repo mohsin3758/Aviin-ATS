@@ -860,12 +860,34 @@ async def process_email_for_resume(
     }
 
 
+RESUME_BACKLOG_LOCK_NS = 778899  # arbitrary fixed namespace for this advisory lock
+
+
 async def process_pending_batch(conn, tenant_id: str, limit: int = 50, ollama_url: str = '', ollama_model: str = '') -> dict:
     """Process up to `limit` pending resume emails for one tenant. Shared by
     both POST /resume-intake/process-pending (manual trigger) and the
     scheduled backlog-clearing job in scheduler.py, so both go through the
     exact same connection-reuse + circuit-breaker + per-item-transaction
-    logic rather than drifting into two copies of this bug-prone flow."""
+    logic rather than drifting into two copies of this bug-prone flow.
+
+    Takes a Postgres advisory lock per tenant so a manual click and the
+    every-10-min scheduled run can never overlap for the same tenant - not
+    because overlap would corrupt anything (each item is its own
+    transaction), just to avoid doubling up IMAP connections against a
+    mail host that's already proven touchy about concurrent logins today."""
+    got_lock = await conn.fetchval(
+        "SELECT pg_try_advisory_lock($1, hashtext($2))", RESUME_BACKLOG_LOCK_NS, str(tenant_id))
+    if not got_lock:
+        return {'processed': 0, 'skipped_no_resume': 0, 'candidates_created_or_updated': 0,
+                'errors': 0, 'status': 'already_running'}
+    try:
+        return await _process_pending_batch_locked(conn, tenant_id, limit, ollama_url, ollama_model)
+    finally:
+        await conn.execute(
+            "SELECT pg_advisory_unlock($1, hashtext($2))", RESUME_BACKLOG_LOCK_NS, str(tenant_id))
+
+
+async def _process_pending_batch_locked(conn, tenant_id: str, limit: int, ollama_url: str, ollama_model: str) -> dict:
     rows = await conn.fetch("""
         SELECT im.id, im.imap_uid, im.folder, im.from_email, im.from_name,
                im.subject, im.attachments, im.tenant_id,
