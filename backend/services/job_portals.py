@@ -58,6 +58,7 @@ _PORTALS = [
     ('turing',        'Turing',                'tech', 'https://www.turing.com', False),
     ('toptal',        'Toptal',                'tech', 'https://www.toptal.com', False),
     ('dice',          'Dice',                  'tech', 'https://www.dice.com', False),
+    ('techfetch',     'TechFetch (SAP/Enterprise IT)','tech','https://www.techfetch.com', False),
     ('builtin',       'BuiltIn',               'tech', 'https://builtin.com', False),
     ('dribbble',      'Dribbble Jobs',         'tech', 'https://dribbble.com/jobs', False),
     ('behance',       'Behance Jobs',          'tech', 'https://www.behance.net/joblist', False),

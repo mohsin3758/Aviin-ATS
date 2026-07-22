@@ -1,6 +1,6 @@
 """P28-P32: Audit Log, Reports, Job Board, n8n Workflows,
 Salary Benchmarking, Notification Center."""
-import csv, io
+import csv, io, os
 from typing import Optional
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
@@ -322,6 +322,56 @@ async def public_list_jobs(
             ORDER BY r.created_at DESC LIMIT 50
         """, tenant_id, search, location)
     return [dict(r) for r in rows]
+
+@public_jobs_router.get("/jobs/feed.xml")
+async def public_jobs_feed(tenant_id: str):
+    """Free, automatic job distribution: standard XML job-feed format
+    (Indeed's documented free organic-feed schema, also accepted by Jooble
+    and most other aggregators that support publisher feeds). Register
+    this URL once with each aggregator's free publisher program and every
+    future open requisition gets picked up automatically on their next
+    crawl - no manual posting, no per-job action, no paid API/account.
+    This is the actual mechanism "free multi-board auto-posting" runs on
+    everywhere it's genuinely free; there is no zero-click free posting
+    path that skips it."""
+    import xml.sax.saxutils as sx
+    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+    async with _db_public.tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT r.id, r.title, r.location, r.employment_type, r.description,
+                   r.skills_required, r.created_at, t.name AS company_name
+            FROM requisitions r
+            JOIN tenants t ON t.id = r.tenant_id
+            WHERE r.tenant_id=$1::uuid AND r.status='open'
+            ORDER BY r.created_at DESC LIMIT 500
+        """, tenant_id)
+
+    def esc(s): return sx.escape(str(s or ''))
+    jobs_xml = []
+    for r in rows:
+        desc = r["description"] or f"{r['title']} opportunity"
+        skills = ', '.join(r["skills_required"] or [])
+        jobs_xml.append(f"""  <job>
+    <title><![CDATA[{r['title']}]]></title>
+    <date>{r['created_at'].strftime('%a, %d %b %Y %H:%M:%S GMT')}</date>
+    <referencenumber>{r['id']}</referencenumber>
+    <url><![CDATA[{base}/careers?job={r['id']}]]></url>
+    <company><![CDATA[{r['company_name'] or 'AVIIN Jobs Services'}]]></company>
+    <city><![CDATA[{r['location'] or ''}]]></city>
+    <country>IN</country>
+    <description><![CDATA[{desc}\n\nSkills: {skills}]]></description>
+    <jobtype><![CDATA[{r['employment_type'] or 'Full-time'}]]></jobtype>
+  </job>""")
+
+    xml_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<source>
+  <publisher>AVIIN Jobs Services</publisher>
+  <publisherurl><![CDATA[{base}/careers]]></publisherurl>
+  <lastBuildDate>{__import__('datetime').datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}</lastBuildDate>
+{chr(10).join(jobs_xml)}
+</source>"""
+    return Response(content=xml_body, media_type="application/xml")
+
 
 @public_jobs_router.post("/jobs/apply")
 async def public_apply(body: dict):

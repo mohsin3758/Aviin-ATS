@@ -144,8 +144,32 @@ export default function PublicJobsPage() {
   const filtered = (jobs || []).slice(page * 10, page * 10 + 10);
   const totalPages = Math.ceil((jobs?.length || 0) / 10);
 
+  // schema.org JobPosting structured data - this (not any manual posting
+  // step) is what makes Google for Jobs index these listings automatically
+  // and for free. Covers the current page's jobs; the XML feed
+  // (/api/public/jobs/feed.xml) is the complete, pagination-independent
+  // source used by Indeed/Jooble/aggregator publisher programs.
+  const jsonLd = filtered.map(job => ({
+    '@context': 'https://schema.org/',
+    '@type': 'JobPosting',
+    title: job.title,
+    description: job.description || `${job.title} opportunity at AVIIN Jobs Services`,
+    identifier: { '@type': 'PropertyValue', name: 'AVIIN Jobs Services', value: job.id },
+    datePosted: job.created_at,
+    employmentType: (job.employment_type || 'FULL_TIME').toUpperCase().replace(/[\s-]/g, '_'),
+    hiringOrganization: { '@type': 'Organization', name: 'AVIIN Jobs Services' },
+    jobLocation: {
+      '@type': 'Place',
+      address: { '@type': 'PostalAddress', addressLocality: job.location || 'Remote', addressCountry: 'IN' },
+    },
+    directApply: true,
+  }));
+
   return (
     <div style={{minHeight:'100vh',background:'#f8fafc',fontFamily:'system-ui,-apple-system,sans-serif'}}>
+      {jsonLd.map((ld, i) => (
+        <script key={i} type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(ld) }} />
+      ))}
       {/* Header */}
       <div style={{background:'linear-gradient(135deg,#1e40af,#7c3aed)',padding:'48px 24px 32px',textAlign:'center'}}>
         <div style={{maxWidth:'600px',margin:'0 auto'}}>

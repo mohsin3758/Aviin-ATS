@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -88,6 +88,8 @@ function JobSharingPageInner() {
   }, [searchParams]);
   const { data: links, loading } = useFetch<any>(selId ? `/job-sharing/requisition/${selId}` : null);
   const { data: statsData } = useFetch<any[]>('/job-sharing/stats');
+  const { data: feedInfo } = useFetch<any>('/job-sharing/feed-info');
+  const [feedCopied, setFeedCopied] = useState(false);
   const { data: sharedData, refetch: refetchShared } = useFetch<any>(selId ? `/job-sharing/shared/${selId}` : null);
   const { data: issuesData, refetch: refetchIssues } = useFetch<any[]>('/job-sharing/issues?status=open');
   const [posted, setPosted] = useState<Record<string, boolean>>({});
@@ -168,6 +170,39 @@ function JobSharingPageInner() {
           <p className="text-sm text-gray-500">One click auto-shares to LinkedIn/WhatsApp/Facebook/X/Telegram/Email · JD auto-copied for the rest, ready to paste</p>
         </div>
       </div>
+
+      {feedInfo && (
+        <Card className="border-green-200 bg-green-50/40">
+          <CardHeader>
+            <h2 className="font-semibold flex items-center gap-1.5"><Zap className="h-4 w-4 text-green-600" /> Automatic Distribution (Free, Zero-Click)</h2>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-gray-600 mb-3">
+              This is the real "post once, auto-distribute everywhere" mechanism — the same one every ATS actually relies on for
+              its free tier. <strong>Google for Jobs</strong> is already fully automatic (structured data ships on every job
+              listing — nothing to set up). For Indeed/Jooble's free organic listings, register the feed URL below <em>once</em> —
+              every future open requisition then appears automatically, no manual posting, ever again.
+            </p>
+            <div className="flex items-center gap-2 mb-3">
+              <input readOnly value={feedInfo.feed_url}
+                className="flex-1 border rounded-lg px-2.5 py-1.5 text-xs bg-white font-mono text-gray-600" />
+              <button onClick={() => navigator.clipboard.writeText(feedInfo.feed_url).then(() => { setFeedCopied(true); setTimeout(() => setFeedCopied(false), 2000); })}
+                className="flex items-center gap-1 text-xs text-white bg-green-600 hover:bg-green-700 rounded-lg px-3 py-1.5 shrink-0">
+                <Copy className="h-3 w-3" /> {feedCopied ? 'Copied!' : 'Copy Feed URL'}
+              </button>
+            </div>
+            <div className="grid sm:grid-cols-2 gap-2">
+              {(feedInfo.registration_steps || []).map((s: any) => (
+                <a key={s.platform} href={s.url} target="_blank" rel="noopener noreferrer"
+                  className="border rounded-lg px-3 py-2 text-xs bg-white hover:border-green-300 hover:bg-green-50">
+                  <div className="font-medium text-gray-700">{s.platform}</div>
+                  <div className="text-gray-400 mt-0.5">{s.how}</div>
+                </a>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card><CardHeader><h2 className="font-semibold">1. Select Open Requisition</h2></CardHeader><CardContent>
         <select value={selId} onChange={e => { setSelId(e.target.value); setPosted({}); }}

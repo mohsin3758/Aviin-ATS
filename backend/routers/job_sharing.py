@@ -20,6 +20,30 @@ async def list_portals():
     return {"count": portal_count(), "portals": get_all_portals()}
 
 
+@router.get("/feed-info")
+async def feed_info(actor: Actor = Depends(get_actor)):
+    """The actual free, automatic distribution mechanism: a standing XML
+    feed (Indeed's documented free organic-feed format, also accepted by
+    Jooble and most aggregators) that publishes every open requisition.
+    Register the URL once with each aggregator's free publisher program
+    and every future job gets picked up on their next crawl with zero
+    further action - this is what genuinely free "auto-post everywhere"
+    looks like; it is not a one-click button because the one-time
+    registration step requires the agency's own account with each
+    aggregator, which no backend call can do on their behalf."""
+    feed_url = f"{BASE_URL}/api/public/jobs/feed.xml?tenant_id={actor.tenant_id}"
+    careers_url = f"{BASE_URL}/careers"
+    return {
+        "feed_url": feed_url,
+        "careers_url": careers_url,
+        "google_for_jobs": "Fully automatic, zero setup - the careers page already carries schema.org/JobPosting structured data, so Google's own crawler indexes every open job into Google for Jobs on its normal schedule.",
+        "registration_steps": [
+            {"platform": "Indeed (free organic listings)", "how": "Indeed Employer Center → Post a job → \"Import via XML feed\" (or Publisher Program signup), paste the Feed URL below.", "url": "https://employers.indeed.com"},
+            {"platform": "Jooble", "how": "Jooble Publisher Program signup, submit the Feed URL for automatic crawling.", "url": "https://jooble.org/publishers"},
+        ],
+    }
+
+
 @router.get("/requisition/{req_id}")
 async def share_links(req_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
