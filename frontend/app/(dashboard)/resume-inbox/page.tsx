@@ -453,6 +453,7 @@ function ResumeInboxPageInner() {
   const [limit, setLimit] = useState(100);
   const [dedupTarget, setDedupTarget] = useState<string|null>(null);
   const [sortByMatch, setSortByMatch] = useState(false);
+  const [sortNewest, setSortNewest] = useState(false);
 
   const { data: stats, refetch: reloadStats } = useFetch<any>('/resume-intake/stats');
   const { data: reqs } = useFetch<any>('/requisitions?limit=200&status=open');
@@ -513,13 +514,23 @@ function ResumeInboxPageInner() {
   });
 
   const items = useMemo(() => {
-    if (!sortByMatch) return baseItems;
-    return [...baseItems].sort((a, b) => {
-      const sa = a.jd_match_score ?? a.parsed_data?.jd_match_score ?? -1;
-      const sb = b.jd_match_score ?? b.parsed_data?.jd_match_score ?? -1;
-      return sb - sa;
-    });
-  }, [baseItems, sortByMatch]);
+    if (sortByMatch) {
+      return [...baseItems].sort((a, b) => {
+        const sa = a.jd_match_score ?? a.parsed_data?.jd_match_score ?? -1;
+        const sb = b.jd_match_score ?? b.parsed_data?.jd_match_score ?? -1;
+        return sb - sa;
+      });
+    }
+    // "Added" (created_at) — when OUR system actually processed this email,
+    // not the email's own original date (that's the separate "Received"
+    // column). The API already defaults to this order, but making it an
+    // explicit, clickable sort makes recently-cleared backlog activity
+    // visible and lets you get back to it after using Match % sort.
+    if (sortNewest) {
+      return [...baseItems].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    }
+    return baseItems;
+  }, [baseItems, sortByMatch, sortNewest]);
 
   const selectAll = () => { const all = items.map(r => r.id); setSelectedIds(prev => prev.size === all.length ? new Set() : new Set(all)); };
 
@@ -607,8 +618,12 @@ function ResumeInboxPageInner() {
             <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 10 }}>
               <input type="checkbox" checked={selectedIds.size === items.length && items.length > 0} onChange={selectAll} style={{ cursor: 'pointer' }} />
               <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>{items.length} resumes</span>
+              {/* Sort by newest-added toggle — shows live backlog-clearing activity */}
+              <button onClick={() => { setSortNewest(s => !s); setSortByMatch(false); }} style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: sortNewest ? '#eff6ff' : '#f8fafc', color: sortNewest ? '#1e40af' : '#64748b', border: `1px solid ${sortNewest ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                <ArrowUpDown size={11} /> {sortNewest ? 'Sorted: Newest Added' : 'Sort by Newest Added'}
+              </button>
               {/* Sort by match toggle */}
-              <button onClick={() => setSortByMatch(s => !s)} style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: sortByMatch ? '#eff6ff' : '#f8fafc', color: sortByMatch ? '#1e40af' : '#64748b', border: `1px solid ${sortByMatch ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+              <button onClick={() => { setSortByMatch(s => !s); setSortNewest(false); }} style={{ marginLeft: 4, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: sortByMatch ? '#eff6ff' : '#f8fafc', color: sortByMatch ? '#1e40af' : '#64748b', border: `1px solid ${sortByMatch ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
                 <ArrowUpDown size={11} /> {sortByMatch ? 'Sorted: Match %' : 'Sort by Match %'}
               </button>
               {withNearDup > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '3px 8px', borderRadius: 6, fontWeight: 600 }}><AlertTriangle size={10} style={{ display: 'inline', marginRight: 3 }} />{withNearDup} near-dup{withNearDup !== 1 ? 's' : ''}</span>}
@@ -617,10 +632,13 @@ function ResumeInboxPageInner() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead><tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
                 <th style={{ width: 32, padding: '10px 8px' }}></th>
-                {['Candidate', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Job Match', 'Match %', 'Status', ''].map(h => (
-                  <th key={h} style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: h === 'Match %' ? 'pointer' : 'default' }}
-                    onClick={h === 'Match %' ? () => setSortByMatch(s => !s) : undefined}>
-                    {h === 'Match %' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Target size={11} />{h}{sortByMatch ? ' ↓' : ''}</span> : h}
+                {['Candidate', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', 'Status', ''].map(h => (
+                  <th key={h} title={h === 'Received' ? "The email's own date" : h === 'Added' ? 'When our system processed this email' : undefined}
+                    style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : h === 'Added' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: (h === 'Match %' || h === 'Added') ? 'pointer' : 'default' }}
+                    onClick={h === 'Match %' ? () => { setSortByMatch(s => !s); setSortNewest(false); } : h === 'Added' ? () => { setSortNewest(s => !s); setSortByMatch(false); } : undefined}>
+                    {h === 'Match %' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Target size={11} />{h}{sortByMatch ? ' ↓' : ''}</span>
+                      : h === 'Added' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><ArrowUpDown size={11} />{h}{sortNewest ? ' ↓' : ''}</span>
+                      : h}
                   </th>
                 ))}
               </tr></thead>
@@ -653,6 +671,7 @@ function ResumeInboxPageInner() {
                       </td>
                       <td style={{ padding: '10px 12px', fontSize: 12, color: '#374151', fontWeight: 600, whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{gx(r.total_exp_mo || 0)}</td>
                       <td style={{ padding: '10px 12px', fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.email_received_at || r.created_at)}</td>
+                      <td style={{ padding: '10px 12px', fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.created_at)}</td>
                       {/* Job Match column — entire cell is clickable when JD is known */}
                       <td
                         style={{ padding: '10px 12px', cursor: (r.requisition_title || r.matched_jd_title) ? 'pointer' : 'default' }}
