@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -160,6 +160,10 @@ function JobSharingPageInner() {
   const sharedCount = Object.keys(posted).length;
   const totalPortals = portals.length;
   const openIssues = issuesData || [];
+  // A portal already flagged broken should say so right in the grid, not
+  // only in the panel further down the page - otherwise the next person
+  // clicks it not knowing it's a known dead link.
+  const flaggedKeys = useMemo(() => new Set(openIssues.map((i: any) => i.portal_key)), [openIssues]);
 
   return (
     <div className="space-y-6" data-testid="job-sharing-page">
@@ -234,9 +238,11 @@ function JobSharingPageInner() {
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
               {autoPortals.map(p => (
                 <div key={p.key} className="relative group">
-                  <button onClick={() => openPortal(p)}
-                    className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium text-white bg-gray-800 hover:opacity-90">
-                    {posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> : <ExternalLink className="h-3.5 w-3.5" />}
+                  <button onClick={() => openPortal(p)} title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : undefined}
+                    className={`w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium hover:opacity-90
+                      ${flaggedKeys.has(p.key) ? 'bg-amber-500 text-white' : 'bg-gray-800 text-white'}`}>
+                    {flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5" /> :
+                     posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> : <ExternalLink className="h-3.5 w-3.5" />}
                     {p.name}
                   </button>
                   <button onClick={() => setIssuePortal(p)} title="Report issue"
@@ -273,7 +279,7 @@ function JobSharingPageInner() {
             <p className="text-xs text-gray-400 mb-3">
               These portals don't offer a public posting API (true of nearly every free job board — they require your own logged-in
               employer account). Each button copies the job description and opens the portal so you can paste + submit. Hover a
-              portal and click the flag to report a broken link.
+              portal and click the flag to report a broken link — amber ⚠ means someone already has.
             </p>
             <div className="space-y-4">
               {Object.entries(grouped).map(([cat, list]) => (
@@ -282,11 +288,13 @@ function JobSharingPageInner() {
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
                     {list.map(p => (
                       <div key={p.key} className="relative group">
-                        <button onClick={() => openPortal(p)}
+                        <button onClick={() => openPortal(p)} title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : undefined}
                           className={`w-full flex items-center justify-between gap-1.5 py-2 px-3 rounded-lg text-xs font-medium border transition-colors
-                            ${posted[p.key] ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-700 hover:border-purple-300 hover:bg-purple-50'}`}>
+                            ${flaggedKeys.has(p.key) ? 'bg-amber-50 border-amber-300 text-amber-800' :
+                              posted[p.key] ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-700 hover:border-purple-300 hover:bg-purple-50'}`}>
                           <span className="truncate">{p.name}</span>
-                          {posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <ExternalLink className="h-3 w-3 shrink-0 text-gray-400" />}
+                          {flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> :
+                           posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <ExternalLink className="h-3 w-3 shrink-0 text-gray-400" />}
                         </button>
                         <button onClick={() => setIssuePortal(p)} title="Report issue"
                           className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
