@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, LayoutGrid, BarChart3 } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -78,8 +78,149 @@ function ReportIssueModal({ portal, reqId, onClose, onReported }: {
   );
 }
 
+const INTEGRATION_STYLES: Record<string, { border: string; dot: string }> = {
+  auto_share:   { border: 'border-l-blue-500',  dot: 'bg-blue-500' },
+  auto_feed:    { border: 'border-l-emerald-500', dot: 'bg-emerald-500' },
+  auto_indexed: { border: 'border-l-violet-500', dot: 'bg-violet-500' },
+  manual:       { border: 'border-l-gray-300',  dot: 'bg-gray-400' },
+};
+
+const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
+  posted:      { label: 'Posted',       cls: 'bg-green-50 text-green-700 border-green-200' },
+  flagged:     { label: 'Flagged',      cls: 'bg-amber-50 text-amber-800 border-amber-300' },
+  not_posted:  { label: 'Never posted', cls: 'bg-gray-50 text-gray-500 border-gray-200' },
+};
+
+function StatTile({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
+  return (
+    <div className="border rounded-xl px-4 py-3 bg-white">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className="text-2xl font-bold text-gray-900 mt-0.5">{value}</div>
+      {sub && <div className="text-[11px] text-gray-400 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+function DashboardView() {
+  const { data } = useFetch<any>('/job-sharing/dashboard');
+  const [dCat, setDCat] = useState('');
+  const [dStatus, setDStatus] = useState('');
+
+  if (!data) return <div className="flex justify-center py-10"><Spinner size="lg" /></div>;
+
+  const { summary, integration_breakdown, portals } = data;
+  const topPosted = portals.filter((p: any) => p.times_posted > 0).slice(0, 10);
+  const maxPosted = Math.max(1, ...topPosted.map((p: any) => p.times_posted));
+  const categories = Array.from(new Set(portals.map((p: any) => p.category))) as string[];
+  const filtered = portals.filter((p: any) =>
+    (!dCat || p.category === dCat) && (!dStatus || p.status === dStatus));
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatTile label="Total Portals" value={summary.total_portals} />
+        <StatTile label="Total Posts (all-time)" value={summary.total_shares} />
+        <StatTile label="Open Issues" value={summary.open_issues} sub={summary.open_issues > 0 ? 'needs attention' : 'all clear'} />
+        <StatTile label="Never Posted" value={summary.portals_never_posted} sub={`of ${summary.total_portals} portals`} />
+      </div>
+
+      <Card>
+        <CardHeader><h2 className="font-semibold">Integration Type</h2></CardHeader>
+        <CardContent>
+          <p className="text-xs text-gray-400 mb-3">What "posted" actually means differs by portal — these aren't the same guarantee.</p>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {integration_breakdown.map((b: any) => (
+              <div key={b.type} className={`border-l-4 ${INTEGRATION_STYLES[b.type]?.border || 'border-l-gray-300'} border-y border-r rounded-lg px-3 py-2.5`}>
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${INTEGRATION_STYLES[b.type]?.dot || 'bg-gray-400'}`} />
+                  <span className="text-xs font-medium text-gray-700">{b.label}</span>
+                </div>
+                <div className="text-xl font-bold text-gray-900 mt-1">{b.count}</div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {topPosted.length > 0 && (
+        <Card>
+          <CardHeader><h2 className="font-semibold">Most-Posted Portals</h2></CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {topPosted.map((p: any) => (
+                <div key={p.key} className="flex items-center gap-3">
+                  <div className="w-32 shrink-0 text-xs text-gray-600 truncate">{p.name}</div>
+                  <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
+                    <div className="bg-blue-500 h-full rounded-full" style={{ width: `${(p.times_posted / maxPosted) * 100}%` }} />
+                  </div>
+                  <div className="w-6 shrink-0 text-xs font-semibold text-gray-700 text-right">{p.times_posted}</div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="font-semibold">All {portals.length} Portals — Status</h2>
+          <div className="flex items-center gap-2">
+            <select value={dCat} onChange={e => setDCat(e.target.value)} className="border rounded-lg px-2 py-1.5 text-xs">
+              <option value="">All categories</option>
+              {categories.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
+            </select>
+            <select value={dStatus} onChange={e => setDStatus(e.target.value)} className="border rounded-lg px-2 py-1.5 text-xs">
+              <option value="">All statuses</option>
+              <option value="posted">Posted</option>
+              <option value="flagged">Flagged</option>
+              <option value="not_posted">Never posted</option>
+            </select>
+          </div>
+        </CardHeader>
+        <CardContent className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-400 border-b">
+                <th className="py-2 pr-3 font-medium">Portal</th>
+                <th className="py-2 pr-3 font-medium">Integration</th>
+                <th className="py-2 pr-3 font-medium">Times Posted</th>
+                <th className="py-2 pr-3 font-medium">Jobs</th>
+                <th className="py-2 pr-3 font-medium">Last Posted</th>
+                <th className="py-2 pr-3 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((p: any) => (
+                <tr key={p.key} className="border-b border-gray-50 hover:bg-gray-50">
+                  <td className="py-2 pr-3 font-medium text-gray-800">{p.name}</td>
+                  <td className="py-2 pr-3 text-gray-500">
+                    <span className="inline-flex items-center gap-1">
+                      <span className={`w-1.5 h-1.5 rounded-full ${INTEGRATION_STYLES[p.integration_type]?.dot || 'bg-gray-400'}`} />
+                      {p.integration_label}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-gray-700">{p.times_posted}</td>
+                  <td className="py-2 pr-3 text-gray-500">{p.jobs_posted_to}</td>
+                  <td className="py-2 pr-3 text-gray-400">{p.last_posted_at ? new Date(p.last_posted_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}</td>
+                  <td className="py-2 pr-3">
+                    <span className={`inline-flex items-center gap-1 border rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_BADGE[p.status].cls}`}>
+                      {p.status === 'flagged' && <AlertTriangle className="h-3 w-3" />}
+                      {STATUS_BADGE[p.status].label}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function JobSharingPageInner() {
   const searchParams = useSearchParams();
+  const [tab, setTab] = useState<'share' | 'dashboard'>('share');
   const { data: reqs } = useFetch<any[]>('/requisitions');
   const [selId, setSelId] = useState('');
   useEffect(() => {
@@ -87,7 +228,6 @@ function JobSharingPageInner() {
     if (reqParam) setSelId(reqParam);
   }, [searchParams]);
   const { data: links, loading } = useFetch<any>(selId ? `/job-sharing/requisition/${selId}` : null);
-  const { data: statsData } = useFetch<any[]>('/job-sharing/stats');
   const { data: feedInfo } = useFetch<any>('/job-sharing/feed-info');
   const [feedCopied, setFeedCopied] = useState(false);
   const { data: sharedData, refetch: refetchShared } = useFetch<any>(selId ? `/job-sharing/shared/${selId}` : null);
@@ -167,13 +307,27 @@ function JobSharingPageInner() {
 
   return (
     <div className="space-y-6" data-testid="job-sharing-page">
-      <div className="flex items-center gap-3">
-        <div className="p-2 rounded-lg bg-purple-50"><Share2 className="h-5 w-5 text-purple-600" /></div>
-        <div>
-          <h1 className="text-2xl font-bold">Job Sharing — {totalPortals || '70+'} Free Portals</h1>
-          <p className="text-sm text-gray-500">One click auto-shares to LinkedIn/WhatsApp/Facebook/X/Telegram/Email · JD auto-copied for the rest, ready to paste</p>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-lg bg-purple-50"><Share2 className="h-5 w-5 text-purple-600" /></div>
+          <div>
+            <h1 className="text-2xl font-bold">Job Sharing — {totalPortals || '70+'} Free Portals</h1>
+            <p className="text-sm text-gray-500">One click auto-shares to LinkedIn/WhatsApp/Facebook/X/Telegram/Email · JD auto-copied for the rest, ready to paste</p>
+          </div>
+        </div>
+        <div className="flex items-center border rounded-lg overflow-hidden">
+          <button onClick={() => setTab('share')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium ${tab === 'share' ? 'bg-purple-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>
+            <LayoutGrid className="h-3.5 w-3.5" /> Share
+          </button>
+          <button onClick={() => setTab('dashboard')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-l ${tab === 'dashboard' ? 'bg-purple-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>
+            <BarChart3 className="h-3.5 w-3.5" /> Dashboard
+          </button>
         </div>
       </div>
+
+      {tab === 'dashboard' ? <DashboardView /> : (<>
 
       {feedInfo && (
         <Card className="border-green-200 bg-green-50/40">
@@ -350,22 +504,7 @@ function JobSharingPageInner() {
           </CardContent>
         </Card>
       )}
-
-      {statsData && statsData.length > 0 && (
-        <Card>
-          <CardHeader><h2 className="font-semibold">All-Time Share Stats</h2></CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {statsData.map((s: any) => (
-                <div key={s.platform} className="border rounded-lg p-3">
-                  <div className="text-xs text-gray-500">{s.platform}</div>
-                  <div className="text-lg font-bold">{s.shares}</div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      </>)}
 
       {issuePortal && (
         <ReportIssueModal portal={issuePortal} reqId={selId}

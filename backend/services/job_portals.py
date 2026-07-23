@@ -124,6 +124,38 @@ _PORTALS = [
 ]
 
 
+# Integration type, for the status dashboard - what "posted here" actually
+# means differs by portal, and conflating them would misrepresent delivery:
+#   auto_share    - a real pre-filled share/compose URL opens with zero typing
+#   auto_feed     - registered once (see /job-sharing/feed-info), then every
+#                   future job is picked up automatically on the portal's own
+#                   crawl schedule - no per-job action at all
+#   auto_indexed  - Google for Jobs: crawls the public careers page's
+#                   schema.org/JobPosting data on its own; nothing to trigger
+#   manual        - no API/feed exists; a human has to click through, paste,
+#                   and submit on the portal's own site
+_FEED_ELIGIBLE = {'indeed', 'jooble'}
+_INDEXED = {'google_jobs'}
+
+
+def integration_type(key: str, share_intent: bool) -> str:
+    if share_intent:
+        return 'auto_share'
+    if key in _INDEXED:
+        return 'auto_indexed'
+    if key in _FEED_ELIGIBLE:
+        return 'auto_feed'
+    return 'manual'
+
+
+INTEGRATION_LABELS = {
+    'auto_share': 'Auto-Share (zero click)',
+    'auto_feed': 'Auto-Feed (registered once)',
+    'auto_indexed': 'Auto-Indexed (Google for Jobs)',
+    'manual': 'Manual (click-through)',
+}
+
+
 def build_share_links(job_url: str, title: str, desc: str, loc: str,
                        skills: list[str], wa_msg: str) -> dict:
     """URL-encoded share links for the six genuinely pre-fillable channels."""
@@ -150,6 +182,7 @@ def get_all_portals(job_url: str = '', title: str = '', desc: str = '',
             'name': name,
             'category': category,
             'share_intent': share_intent,
+            'integration_type': integration_type(key, share_intent),
             'link': share_links.get(key, homepage) if share_intent else homepage,
         })
     return out

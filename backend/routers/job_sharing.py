@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
-from services.job_portals import get_all_portals, build_share_links, portal_count
+from services.job_portals import get_all_portals, build_share_links, portal_count, INTEGRATION_LABELS
 
 router = APIRouter(prefix="/job-sharing", tags=["job-sharing"])
 # Matches the convention already used in routers/offers.py and routers/nda.py.
@@ -165,6 +165,64 @@ async def list_issues(status: str = 'open', actor: Actor = Depends(get_actor)):
             ORDER BY i.created_at DESC
         """, actor.tenant_id, status)
     return [dict(r) for r in rows]
+
+
+@router.get("/dashboard")
+async def dashboard(actor: Actor = Depends(get_actor)):
+    """Consolidated status view: for every portal in the directory, how it's
+    integrated (auto-share / auto-feed / auto-indexed / manual - these mean
+    different things and shouldn't be conflated as one "posted" checkbox),
+    how many times it's actually been posted to across all requisitions, and
+    whether it currently has an open reported issue."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        share_rows = await conn.fetch("""
+            SELECT platform, COUNT(*) AS times_posted,
+                   COUNT(DISTINCT requisition_id) AS jobs_posted_to,
+                   MAX(posted_at) AS last_posted_at
+            FROM job_shares WHERE tenant_id=$1 GROUP BY platform
+        """, actor.tenant_id)
+        issue_rows = await conn.fetch("""
+            SELECT portal_key, COUNT(*) AS open_issues
+            FROM job_portal_issues WHERE tenant_id=$1 AND status='open'
+            GROUP BY portal_key
+        """, actor.tenant_id)
+
+    share_by_platform = {r["platform"]: r for r in share_rows}
+    issues_by_portal = {r["portal_key"]: r["open_issues"] for r in issue_rows}
+
+    portals = get_all_portals()
+    portal_status = []
+    integration_counts: dict[str, int] = {}
+    total_shares = 0
+    for p in portals:
+        integration_counts[p["integration_type"]] = integration_counts.get(p["integration_type"], 0) + 1
+        s = share_by_platform.get(p["key"])
+        times_posted = int(s["times_posted"]) if s else 0
+        total_shares += times_posted
+        portal_status.append({
+            "key": p["key"], "name": p["name"], "category": p["category"],
+            "integration_type": p["integration_type"],
+            "integration_label": INTEGRATION_LABELS[p["integration_type"]],
+            "times_posted": times_posted,
+            "jobs_posted_to": int(s["jobs_posted_to"]) if s else 0,
+            "last_posted_at": s["last_posted_at"].isoformat() if s and s["last_posted_at"] else None,
+            "open_issues": issues_by_portal.get(p["key"], 0),
+            "status": "flagged" if issues_by_portal.get(p["key"], 0) > 0 else ("posted" if times_posted > 0 else "not_posted"),
+        })
+
+    return {
+        "summary": {
+            "total_portals": len(portals),
+            "total_shares": total_shares,
+            "open_issues": sum(issues_by_portal.values()),
+            "portals_never_posted": sum(1 for p in portal_status if p["times_posted"] == 0),
+        },
+        "integration_breakdown": [
+            {"type": t, "label": INTEGRATION_LABELS[t], "count": c}
+            for t, c in integration_counts.items()
+        ],
+        "portals": sorted(portal_status, key=lambda p: (-p["times_posted"], p["name"])),
+    }
 
 
 @router.patch("/issues/{issue_id}/resolve")
