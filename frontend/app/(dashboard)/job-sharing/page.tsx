@@ -108,7 +108,7 @@ function DashboardView() {
 
   if (!data) return <div className="flex justify-center py-10"><Spinner size="lg" /></div>;
 
-  const { summary, integration_breakdown, portals } = data;
+  const { summary, integration_breakdown, portals, recent_posts } = data;
   const topPosted = portals.filter((p: any) => p.times_posted > 0).slice(0, 10);
   const maxPosted = Math.max(1, ...topPosted.map((p: any) => p.times_posted));
   const categories = Array.from(new Set(portals.map((p: any) => p.category))) as string[];
@@ -156,6 +156,44 @@ function DashboardView() {
                   <div className="w-6 shrink-0 text-xs font-semibold text-gray-700 text-right">{p.times_posted}</div>
                 </div>
               ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {recent_posts && recent_posts.length > 0 && (
+        <Card>
+          <CardHeader><h2 className="font-semibold">Recent Posts — Direct Links</h2></CardHeader>
+          <CardContent>
+            <p className="text-xs text-gray-400 mb-3">Every individual post logged, most recent first — click "View Post" to open the exact link that was shared.</p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-gray-400 border-b">
+                    <th className="py-2 pr-3 font-medium">Portal</th>
+                    <th className="py-2 pr-3 font-medium">Job</th>
+                    <th className="py-2 pr-3 font-medium">Posted By</th>
+                    <th className="py-2 pr-3 font-medium">When</th>
+                    <th className="py-2 pr-3 font-medium">Link</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recent_posts.map((post: any) => (
+                    <tr key={post.id} className="border-b border-gray-50 hover:bg-gray-50">
+                      <td className="py-2 pr-3 font-medium text-gray-800">{post.portal_name}</td>
+                      <td className="py-2 pr-3 text-gray-600 truncate max-w-[180px]">{post.requisition_title}</td>
+                      <td className="py-2 pr-3 text-gray-500">{post.posted_by_name || '—'}</td>
+                      <td className="py-2 pr-3 text-gray-400">{post.posted_at ? new Date(post.posted_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</td>
+                      <td className="py-2 pr-3">
+                        <a href={post.link} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 font-medium">
+                          <ExternalLink className="h-3 w-3" /> View Post
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </CardContent>
         </Card>
@@ -262,9 +300,9 @@ function JobSharingPageInner() {
     return g;
   }, [filteredManual]);
 
-  function logShare(platform: string) {
+  function logShare(platform: string, shareUrl: string) {
     setPosted(p => ({ ...p, [platform]: true }));
-    apiFetch('/job-sharing/log', { method: 'POST', body: JSON.stringify({ req_id: selId, platform }) }).catch(() => {});
+    apiFetch('/job-sharing/log', { method: 'POST', body: JSON.stringify({ req_id: selId, platform, share_url: shareUrl }) }).catch(() => {});
   }
 
   function openPortal(p: Portal) {
@@ -272,13 +310,13 @@ function JobSharingPageInner() {
       navigator.clipboard.writeText(links.job_description_text).catch(() => {});
     }
     window.open(p.link, '_blank', 'noopener,noreferrer');
-    logShare(p.key);
+    logShare(p.key, p.link);
   }
 
   function shareToAllAuto() {
     if (links?.job_description_text) navigator.clipboard.writeText(links.job_description_text).catch(() => {});
     autoPortals.forEach((p, i) => {
-      setTimeout(() => { window.open(p.link, '_blank', 'noopener,noreferrer'); logShare(p.key); }, i * 250);
+      setTimeout(() => { window.open(p.link, '_blank', 'noopener,noreferrer'); logShare(p.key, p.link); }, i * 250);
     });
   }
 

@@ -81,6 +81,7 @@ async def share_links(req_id: str, actor: Actor = Depends(get_actor)):
 class LogShareBody(BaseModel):
     req_id: str
     platform: str
+    share_url: str | None = None
 
 
 @router.post("/log")
@@ -90,11 +91,15 @@ async def log_share(body: LogShareBody, actor: Actor = Depends(get_actor)):
     # frontend has always sent these as a JSON body, so every call 422'd
     # silently (fire-and-forget, error never surfaced) - job_shares has
     # essentially never recorded anything and /stats has always been empty.
+    # share_url was also never captured even after that fix, even though
+    # the column has existed all along - the frontend has the exact link it
+    # just opened at the moment it calls this, so there's no reason not to
+    # keep it for "what did I actually post" lookups later.
     async with db.tenant_conn(actor.tenant_id) as conn:
         await conn.execute("""
-            INSERT INTO job_shares (tenant_id,requisition_id,platform,posted_by)
-            VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING
-        """, actor.tenant_id, body.req_id, body.platform, actor.user_id)
+            INSERT INTO job_shares (tenant_id,requisition_id,platform,posted_by,share_url)
+            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING
+        """, actor.tenant_id, body.req_id, body.platform, actor.user_id, body.share_url)
     return {"logged": True, "platform": body.platform}
 
 
@@ -186,6 +191,17 @@ async def dashboard(actor: Actor = Depends(get_actor)):
             FROM job_portal_issues WHERE tenant_id=$1 AND status='open'
             GROUP BY portal_key
         """, actor.tenant_id)
+        recent_rows = await conn.fetch("""
+            SELECT js.id, js.platform, js.share_url, js.posted_at,
+                   r.id AS requisition_id, r.title, r.location, r.description,
+                   r.skills_required, r.employment_type,
+                   u.full_name AS posted_by_name
+            FROM job_shares js
+            JOIN requisitions r ON r.id = js.requisition_id
+            LEFT JOIN users u ON u.id = js.posted_by
+            WHERE js.tenant_id=$1
+            ORDER BY js.posted_at DESC LIMIT 50
+        """, actor.tenant_id)
 
     share_by_platform = {r["platform"]: r for r in share_rows}
     issues_by_portal = {r["portal_key"]: r["open_issues"] for r in issue_rows}
@@ -210,6 +226,32 @@ async def dashboard(actor: Actor = Depends(get_actor)):
             "status": "flagged" if issues_by_portal.get(p["key"], 0) > 0 else ("posted" if times_posted > 0 else "not_posted"),
         })
 
+    portal_by_key = {p["key"]: p for p in portals}
+    recent_posts = []
+    for r in recent_rows:
+        link = r["share_url"]
+        if not link:
+            # Rows logged before share_url was captured (or a manual portal
+            # whose homepage link doesn't carry a per-job URL) - regenerate
+            # the same link deterministically from the requisition data so
+            # "View Post" still works instead of showing a dead entry.
+            job_url = f"{BASE_URL}/careers?job={r['requisition_id']}"
+            title = r["title"]; loc = r["location"] or "Bengaluru"
+            skills = list(r["skills_required"] or [])
+            desc = (r["description"] or f"{title} opportunity")[:300]
+            wa_msg = f"*{title}*\n📍 {loc} | {r['employment_type']}\nApply: {job_url}"
+            share = build_share_links(job_url, title, desc, loc, skills, wa_msg)
+            p = portal_by_key.get(r["platform"])
+            link = share.get(r["platform"]) or (p["link"] if p else job_url)
+        recent_posts.append({
+            "id": str(r["id"]), "platform": r["platform"],
+            "portal_name": portal_by_key.get(r["platform"], {}).get("name", r["platform"]),
+            "requisition_id": str(r["requisition_id"]), "requisition_title": r["title"],
+            "posted_at": r["posted_at"].isoformat() if r["posted_at"] else None,
+            "posted_by_name": r["posted_by_name"],
+            "link": link,
+        })
+
     return {
         "summary": {
             "total_portals": len(portals),
@@ -222,6 +264,7 @@ async def dashboard(actor: Actor = Depends(get_actor)):
             for t, c in integration_counts.items()
         ],
         "portals": sorted(portal_status, key=lambda p: (-p["times_posted"], p["name"])),
+        "recent_posts": recent_posts,
     }
 
 
