@@ -14,7 +14,7 @@ import {
   Mail, MessageCircle, MessageSquare, Zap, Webhook,
   Truck, UserCog, Lock, BookMarked, Palette,
   ChevronDown, ChevronLeft, ChevronRight,
-  FileSignature, Send, GitMerge,
+  FileSignature, Send, GitMerge, ExternalLink,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -42,6 +42,7 @@ const NAV_GROUPS = [
     { icon:BookOpen,        href:'/question-bank',label:'Question Bank' },
     { icon:Globe,           href:'/jobs',         label:'Job Board' },
     { icon:Share2,          href:'/job-sharing',  label:'Job Sharing' },
+    { icon:ExternalLink,    href:'/careers',      label:'Career Page', external:true },
     { icon:ClipboardList,   href:'/onboarding',   label:'Onboarding' },
   ]},
   { id:'analytics', label:'ANALYTICS', defaultOpen:false, items:[
@@ -257,7 +258,9 @@ export function Sidebar() {
                       <Link
                         key={item.href}
                         href={item.href}
-                        title={collapsed ? item.label : undefined}
+                        target={(item as any).external ? '_blank' : undefined}
+                        rel={(item as any).external ? 'noopener noreferrer' : undefined}
+                        title={collapsed ? item.label : (item as any).external ? `${item.label} (opens in new tab)` : undefined}
                         style={{
                           display: 'flex', alignItems: 'center',
                           gap: collapsed ? '0' : '9px',
