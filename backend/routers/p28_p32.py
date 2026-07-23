@@ -355,7 +355,7 @@ async def public_jobs_feed(tenant_id: str):
     <title><![CDATA[{r['title']}]]></title>
     <date>{r['created_at'].strftime('%a, %d %b %Y %H:%M:%S GMT')}</date>
     <referencenumber>{r['id']}</referencenumber>
-    <url><![CDATA[{base}/careers?job={r['id']}]]></url>
+    <url><![CDATA[{base}/careers/{r['id']}]]></url>
     <company><![CDATA[{r['company_name'] or 'AVIIN Jobs Services'}]]></company>
     <city><![CDATA[{r['location'] or ''}]]></city>
     <country>IN</country>
@@ -371,6 +371,25 @@ async def public_jobs_feed(tenant_id: str):
 {chr(10).join(jobs_xml)}
 </source>"""
     return Response(content=xml_body, media_type="application/xml")
+
+
+@public_jobs_router.get("/jobs/{job_id}")
+async def public_get_job(job_id: str, tenant_id: str):
+    """Single-job fetch for the per-job careers page
+    (careers/[jobId]/page.tsx) - used both by generateMetadata (so
+    Facebook/LinkedIn/Twitter's crawlers, which don't execute JS, see a
+    real title/description in the page's initial HTML) and by the
+    client-rendered apply UI on the same page."""
+    async with _db_public.tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow("""
+            SELECT r.id, r.title, r.location, r.employment_type, r.description,
+                   r.skills_required, r.positions_count, r.created_at
+            FROM requisitions r
+            WHERE r.id=$1::uuid AND r.tenant_id=$2::uuid AND r.status='open'
+        """, job_id, tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found or closed")
+    return dict(row)
 
 
 @public_jobs_router.post("/jobs/apply")

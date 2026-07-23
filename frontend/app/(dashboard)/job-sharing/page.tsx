@@ -306,7 +306,13 @@ function JobSharingPageInner() {
   }
 
   function openPortal(p: Portal) {
-    if (!p.share_intent && links?.job_description_text) {
+    // Facebook and LinkedIn both stopped letting any tool pre-fill the
+    // actual post text years ago (anti-spam policy - not fixable, applies
+    // to every product, not just this one) - their dialogs open with a
+    // blank text box no matter what URL params are sent. Auto-copy the
+    // message so it's one paste (Ctrl+V) instead of typing from scratch.
+    const needsClipboardCopy = !p.share_intent || p.key === 'facebook' || p.key === 'linkedin';
+    if (needsClipboardCopy && links?.job_description_text) {
       navigator.clipboard.writeText(links.job_description_text).catch(() => {});
     }
     window.open(p.link, '_blank', 'noopener,noreferrer');
@@ -413,7 +419,7 @@ function JobSharingPageInner() {
       {selId && (loading ? <div className="flex justify-center py-10"><Spinner size="lg" /></div> : links && (<>
         <Card>
           <CardHeader className="flex items-center justify-between">
-            <h2 className="font-semibold">2. Auto-Share (zero typing — opens pre-filled)</h2>
+            <h2 className="font-semibold">2. Auto-Share</h2>
             <div className="flex items-center gap-2">
               <button onClick={clearShared} disabled={clearing || sharedCount === 0}
                 title="Clear posted checkmarks for this requisition"
@@ -427,6 +433,11 @@ function JobSharingPageInner() {
             </div>
           </CardHeader>
           <CardContent>
+            <p className="text-xs text-gray-400 mb-3">
+              WhatsApp, Telegram, X and Email open with the message already typed in. Facebook and LinkedIn open with an
+              empty box — both platforms block any tool from pre-filling someone's own post text (their anti-spam policy,
+              not something specific to this) — the message is copied to your clipboard automatically, so it's one paste (Ctrl/Cmd+V).
+            </p>
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
               {autoPortals.map(p => (
                 <div key={p.key} className="relative group">

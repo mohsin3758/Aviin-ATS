@@ -54,12 +54,24 @@ async def share_links(req_id: str, actor: Actor = Depends(get_actor)):
     # frontend/app/(public)/careers/page.tsx) - /jobs/{id} is the internal
     # admin view under (dashboard) and requires login, so a candidate
     # clicking a shared link there would just hit the login wall.
-    job_url = f"{BASE_URL}/careers?job={req_id}"
+    # /careers/{id} (a path, not ?job=) is a real server-rendered route
+    # with per-job Open Graph metadata - see careers/[jobId]/page.tsx -
+    # so link-preview cards on Facebook/LinkedIn/WhatsApp show the actual
+    # job title/description instead of a blank/generic card (those
+    # crawlers don't execute JS, so a query param on the client-rendered
+    # list page was invisible to them).
+    job_url = f"{BASE_URL}/careers/{req_id}"
     title   = req["title"]
     loc     = req["location"] or "Bengaluru"
     skills  = list(req["skills_required"] or [])
     desc    = (req["description"] or f"{title} opportunity")[:300]
-    wa_msg  = f"*{title}*\n📍 {loc} | {req['employment_type']}\n🎯 Skills: {', '.join(skills[:4])}\nApply: {job_url}\n\n_AVIIN Jobs — AI Staffing_"
+    # No emoji here - WhatsApp's own wa.me -> api.whatsapp.com redirect has
+    # been observed mangling supplementary-plane emoji (📍, 🎯) into the
+    # Unicode replacement character on some paths, confirmed NOT a bug in
+    # this backend (verified correct UTF-8 bytes at every stage up to the
+    # HTTP response) - it happens on WhatsApp's own infrastructure during
+    # the redirect, outside anything fixable here. Plain text is reliable.
+    wa_msg  = f"*{title}*\nLocation: {loc} | {req['employment_type']}\nSkills: {', '.join(skills[:4])}\nApply: {job_url}\n\n_AVIIN Jobs - AI Staffing_"
     share = build_share_links(job_url, title, desc, loc, skills, wa_msg)
     return {
         "job_url": job_url,
@@ -235,11 +247,11 @@ async def dashboard(actor: Actor = Depends(get_actor)):
             # whose homepage link doesn't carry a per-job URL) - regenerate
             # the same link deterministically from the requisition data so
             # "View Post" still works instead of showing a dead entry.
-            job_url = f"{BASE_URL}/careers?job={r['requisition_id']}"
+            job_url = f"{BASE_URL}/careers/{r['requisition_id']}"
             title = r["title"]; loc = r["location"] or "Bengaluru"
             skills = list(r["skills_required"] or [])
             desc = (r["description"] or f"{title} opportunity")[:300]
-            wa_msg = f"*{title}*\n📍 {loc} | {r['employment_type']}\nApply: {job_url}"
+            wa_msg = f"*{title}*\nLocation: {loc} | {r['employment_type']}\nApply: {job_url}"
             share = build_share_links(job_url, title, desc, loc, skills, wa_msg)
             p = portal_by_key.get(r["platform"])
             link = share.get(r["platform"]) or (p["link"] if p else job_url)
