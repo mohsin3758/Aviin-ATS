@@ -152,6 +152,7 @@ INTEGRATION_LABELS = {
     'auto_share': 'Auto-Share (zero click)',
     'auto_feed': 'Auto-Feed (registered once)',
     'auto_indexed': 'Auto-Indexed (Google for Jobs)',
+    'auto_api': 'Auto-Post (connected API)',
     'manual': 'Manual (click-through)',
 }
 

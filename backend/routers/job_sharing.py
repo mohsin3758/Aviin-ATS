@@ -2,6 +2,7 @@
 70+ portal directory (services/job_portals.py) for one-click sharing."""
 import os
 from urllib.parse import urlencode, quote
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import db
@@ -12,12 +13,132 @@ router = APIRouter(prefix="/job-sharing", tags=["job-sharing"])
 # Matches the convention already used in routers/offers.py and routers/nda.py.
 BASE_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
 
+# Real Facebook Graph API posting (not the sharer.php dialog trick, which
+# never lets a URL pre-fill post text - Meta anti-spam policy, unrelated
+# to this key). Same pgcrypto pattern HARD RULE #11 already requires for
+# Aadhaar/PAN/bank fields (see erp.py) - a Page Access Token is a real
+# secret credential.
+FB_ENCRYPT_KEY = os.getenv("FB_ENCRYPT_KEY", os.getenv("ERP_ENCRYPT_KEY", "erp_demo_key_change_in_prod"))
+FB_GRAPH_VERSION = "v23.0"
+
+
+async def _set_encrypt_key(conn) -> None:
+    await conn.execute("SELECT set_config('app.encrypt_key', $1, true)", FB_ENCRYPT_KEY)
+
 
 @router.get("/portals")
 async def list_portals():
     """Full 70+ portal catalog, no requisition context - used for the
     directory/category browser before a job is selected."""
     return {"count": portal_count(), "portals": get_all_portals()}
+
+
+# ─── Facebook Page: real automatic posting ────────────────────────────────────
+class FacebookConnectBody(BaseModel):
+    page_id: str
+    page_access_token: str
+
+
+@router.post("/facebook/connect")
+async def facebook_connect(body: FacebookConnectBody, actor: Actor = Depends(get_actor)):
+    """Validates the token against the Page it claims (a bad/expired token
+    or wrong Page ID fails here, not silently at post-time) and stores it
+    encrypted. One connection per tenant - reconnecting overwrites it."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"https://graph.facebook.com/{FB_GRAPH_VERSION}/{body.page_id}",
+            params={"fields": "name", "access_token": body.page_access_token})
+    if r.status_code != 200:
+        detail = r.json().get("error", {}).get("message", "Facebook rejected this Page ID/token")
+        raise HTTPException(400, f"Could not verify this Page: {detail}")
+    page_name = r.json().get("name", body.page_id)
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await _set_encrypt_key(conn)
+        await conn.execute("""
+            INSERT INTO facebook_page_connections
+              (tenant_id, page_id, page_name, page_access_token_enc, connected_by, is_active)
+            VALUES ($1, $2, $3, pgp_sym_encrypt($4, current_setting('app.encrypt_key', true)), $5, TRUE)
+            ON CONFLICT (tenant_id) DO UPDATE SET
+              page_id=EXCLUDED.page_id, page_name=EXCLUDED.page_name,
+              page_access_token_enc=EXCLUDED.page_access_token_enc,
+              connected_by=EXCLUDED.connected_by, is_active=TRUE, updated_at=now()
+        """, actor.tenant_id, body.page_id, page_name, body.page_access_token, actor.user_id)
+    return {"connected": True, "page_id": body.page_id, "page_name": page_name}
+
+
+@router.get("/facebook/status")
+async def facebook_status(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            SELECT page_id, page_name, is_active, updated_at
+            FROM facebook_page_connections WHERE tenant_id=$1
+        """, actor.tenant_id)
+    if not row or not row["is_active"]:
+        return {"connected": False}
+    return {"connected": True, "page_id": row["page_id"], "page_name": row["page_name"],
+            "connected_at": row["updated_at"].isoformat()}
+
+
+@router.delete("/facebook/disconnect")
+async def facebook_disconnect(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute(
+            "UPDATE facebook_page_connections SET is_active=FALSE, updated_at=now() WHERE tenant_id=$1",
+            actor.tenant_id)
+    return {"disconnected": True}
+
+
+class FacebookPostBody(BaseModel):
+    req_id: str
+
+
+@router.post("/facebook/post")
+async def facebook_post(body: FacebookPostBody, actor: Actor = Depends(get_actor)):
+    """The real thing: POST /{page-id}/feed with a fully custom message,
+    genuinely automatic, no dialog, no paste. Requires facebook/connect
+    to have been called first (own-Page Standard Access token - see
+    sql/19_facebook_page_connection.sql for why no App Review is needed
+    for this specific case)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await _set_encrypt_key(conn)
+        conn_row = await conn.fetchrow("""
+            SELECT page_id, pgp_sym_decrypt(page_access_token_enc, current_setting('app.encrypt_key', true)) AS token
+            FROM facebook_page_connections WHERE tenant_id=$1 AND is_active=TRUE
+        """, actor.tenant_id)
+        if not conn_row:
+            raise HTTPException(400, "No Facebook Page connected - go to Settings to connect one first")
+
+        req = await conn.fetchrow(
+            "SELECT * FROM requisitions WHERE id=$1 AND tenant_id=$2", body.req_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+
+    title = req["title"]
+    loc = req["location"] or "Bengaluru"
+    skills = list(req["skills_required"] or [])
+    desc = (req["description"] or f"{title} opportunity")[:400]
+    job_url = f"{BASE_URL}/careers/{body.req_id}"
+    message = f"We're hiring: {title}\n\nLocation: {loc} | {req['employment_type'] or 'Full-time'}\n{desc}\n\nSkills: {', '.join(skills[:8])}\n\nApply now: {job_url}"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"https://graph.facebook.com/{FB_GRAPH_VERSION}/{conn_row['page_id']}/feed",
+            data={"message": message, "link": job_url, "access_token": conn_row["token"]})
+    if r.status_code != 200:
+        detail = r.json().get("error", {}).get("message", "Facebook post failed")
+        raise HTTPException(502, f"Facebook rejected the post: {detail}")
+
+    post_id = r.json().get("id", "")  # format: {page_id}_{post_id}
+    post_url = f"https://www.facebook.com/{post_id}" if post_id else f"https://www.facebook.com/{conn_row['page_id']}"
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute("""
+            INSERT INTO job_shares (tenant_id,requisition_id,platform,posted_by,share_url)
+            VALUES ($1,$2,'facebook',$3,$4) ON CONFLICT DO NOTHING
+        """, actor.tenant_id, body.req_id, actor.user_id, post_url)
+
+    return {"posted": True, "post_url": post_url}
 
 
 @router.get("/feed-info")
@@ -214,11 +335,22 @@ async def dashboard(actor: Actor = Depends(get_actor)):
             WHERE js.tenant_id=$1
             ORDER BY js.posted_at DESC LIMIT 50
         """, actor.tenant_id)
+        fb_connected = await conn.fetchval(
+            "SELECT is_active FROM facebook_page_connections WHERE tenant_id=$1", actor.tenant_id)
 
     share_by_platform = {r["platform"]: r for r in share_rows}
     issues_by_portal = {r["portal_key"]: r["open_issues"] for r in issue_rows}
 
     portals = get_all_portals()
+    if fb_connected:
+        # Facebook is auto_share (share-dialog link) by default in the
+        # static catalog, but this tenant has a real Page connected -
+        # /facebook/post genuinely posts with zero user interaction, a
+        # different (better) guarantee than "opens a dialog to click
+        # through", so the dashboard should say so.
+        for p in portals:
+            if p["key"] == "facebook":
+                p["integration_type"] = "auto_api"
     portal_status = []
     integration_counts: dict[str, int] = {}
     total_shares = 0

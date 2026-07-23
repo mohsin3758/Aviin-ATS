@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, LayoutGrid, BarChart3 } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, LayoutGrid, BarChart3, Facebook, Link2, Unlink } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -256,6 +256,86 @@ function DashboardView() {
   );
 }
 
+function FacebookConnectionCard({ onStatusChange }: { onStatusChange: (connected: boolean) => void }) {
+  const { data: status, refetch } = useFetch<any>('/job-sharing/facebook/status');
+  const [showForm, setShowForm] = useState(false);
+  const [pageId, setPageId] = useState('');
+  const [token, setToken] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => { if (status) onStatusChange(!!status.connected); }, [status]);
+
+  async function connect() {
+    if (!pageId || !token) { setErr('Page ID and Access Token are both required'); return; }
+    setSaving(true); setErr('');
+    try {
+      await apiFetch('/job-sharing/facebook/connect', { method: 'POST', body: JSON.stringify({ page_id: pageId, page_access_token: token }) });
+      setShowForm(false); setPageId(''); setToken('');
+      refetch();
+    } catch (e: any) { setErr(e.message || 'Connection failed'); }
+    finally { setSaving(false); }
+  }
+
+  async function disconnect() {
+    if (!confirm('Disconnect this Facebook Page? "Facebook" will go back to opening the share dialog instead of posting automatically.')) return;
+    await apiFetch('/job-sharing/facebook/disconnect', { method: 'DELETE' });
+    refetch();
+  }
+
+  return (
+    <Card className="border-blue-200 bg-blue-50/40">
+      <CardHeader>
+        <h2 className="font-semibold flex items-center gap-1.5"><Facebook className="h-4 w-4 text-blue-600" /> Facebook Page — Real Automatic Posting</h2>
+      </CardHeader>
+      <CardContent>
+        {status?.connected ? (
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-sm">
+              <CheckCircle2 className="h-4 w-4 text-green-600" />
+              <span>Connected to <strong>{status.page_name}</strong> — Facebook posts go out automatically now, no dialog, no paste.</span>
+            </div>
+            <button onClick={disconnect} className="flex items-center gap-1 text-xs text-red-600 hover:text-red-800 border border-red-200 rounded-lg px-2.5 py-1.5">
+              <Unlink className="h-3 w-3" /> Disconnect
+            </button>
+          </div>
+        ) : showForm ? (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-500 mb-2">
+              One-time setup: create a Facebook App at developers.facebook.com, add your own account as an Admin/Tester on it,
+              request the <code className="bg-white px-1 rounded border">pages_manage_posts</code> permission (Standard Access —
+              no App Review needed for posting to your own Page), then generate a Page Access Token for your Page and paste both below.
+            </p>
+            {err && <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">{err}</div>}
+            <input value={pageId} onChange={e => setPageId(e.target.value)} placeholder="Facebook Page ID"
+              className="w-full border rounded-lg px-2.5 py-1.5 text-sm" />
+            <input value={token} onChange={e => setToken(e.target.value)} placeholder="Page Access Token" type="password"
+              className="w-full border rounded-lg px-2.5 py-1.5 text-sm" />
+            <div className="flex items-center gap-2">
+              <button onClick={connect} disabled={saving}
+                className="flex items-center gap-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1.5 disabled:opacity-50">
+                <Link2 className="h-3.5 w-3.5" /> {saving ? 'Verifying...' : 'Connect'}
+              </button>
+              <button onClick={() => { setShowForm(false); setErr(''); }} className="text-xs text-gray-500 px-2 py-1.5">Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <p className="text-xs text-gray-600">
+              Not connected — Facebook currently opens a share dialog you have to paste into (Facebook blocks pre-filled post text
+              for any tool). Connect your Page's API token for genuinely automatic posting instead.
+            </p>
+            <button onClick={() => setShowForm(true)}
+              className="flex items-center gap-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1.5 shrink-0">
+              <Link2 className="h-3.5 w-3.5" /> Connect Facebook Page
+            </button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function JobSharingPageInner() {
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<'share' | 'dashboard'>('share');
@@ -276,6 +356,8 @@ function JobSharingPageInner() {
   const [copied, setCopied] = useState(false);
   const [issuePortal, setIssuePortal] = useState<Portal | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [fbConnected, setFbConnected] = useState(false);
+  const [fbPosting, setFbPosting] = useState(false);
 
   useEffect(() => {
     // Restore real server-recorded share state on load/select (was
@@ -305,7 +387,23 @@ function JobSharingPageInner() {
     apiFetch('/job-sharing/log', { method: 'POST', body: JSON.stringify({ req_id: selId, platform, share_url: shareUrl }) }).catch(() => {});
   }
 
+  async function postToFacebookApi() {
+    setFbPosting(true);
+    try {
+      const res = await apiFetch('/job-sharing/facebook/post', { method: 'POST', body: JSON.stringify({ req_id: selId }) });
+      setPosted(p => ({ ...p, facebook: true }));
+      refetchShared();
+      window.open(res.post_url, '_blank', 'noopener,noreferrer');
+    } catch (e: any) {
+      alert(`Facebook post failed: ${e.message || 'unknown error'}`);
+    } finally { setFbPosting(false); }
+  }
+
   function openPortal(p: Portal) {
+    // A connected Facebook Page posts for real, no dialog at all - see
+    // postToFacebookApi. Everything else still uses the share-dialog/
+    // homepage link.
+    if (p.key === 'facebook' && fbConnected) { postToFacebookApi(); return; }
     // Facebook and LinkedIn both stopped letting any tool pre-fill the
     // actual post text years ago (anti-spam policy - not fixable, applies
     // to every product, not just this one) - their dialogs open with a
@@ -322,7 +420,11 @@ function JobSharingPageInner() {
   function shareToAllAuto() {
     if (links?.job_description_text) navigator.clipboard.writeText(links.job_description_text).catch(() => {});
     autoPortals.forEach((p, i) => {
-      setTimeout(() => { window.open(p.link, '_blank', 'noopener,noreferrer'); logShare(p.key, p.link); }, i * 250);
+      setTimeout(() => {
+        if (p.key === 'facebook' && fbConnected) { postToFacebookApi(); return; }
+        window.open(p.link, '_blank', 'noopener,noreferrer');
+        logShare(p.key, p.link);
+      }, i * 250);
     });
   }
 
@@ -406,6 +508,8 @@ function JobSharingPageInner() {
         </Card>
       )}
 
+      <FacebookConnectionCard onStatusChange={setFbConnected} />
+
       <Card><CardHeader><h2 className="font-semibold">1. Select Open Requisition</h2></CardHeader><CardContent>
         <select value={selId} onChange={e => { setSelId(e.target.value); setPosted({}); }}
           className="w-full border rounded-lg px-3 py-2 text-sm">
@@ -439,21 +543,28 @@ function JobSharingPageInner() {
               not something specific to this) — the message is copied to your clipboard automatically, so it's one paste (Ctrl/Cmd+V).
             </p>
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-              {autoPortals.map(p => (
-                <div key={p.key} className="relative group">
-                  <button onClick={() => openPortal(p)} title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : undefined}
-                    className={`w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium hover:opacity-90
-                      ${flaggedKeys.has(p.key) ? 'bg-amber-500 text-white' : 'bg-gray-800 text-white'}`}>
-                    {flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5" /> :
-                     posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> : <ExternalLink className="h-3.5 w-3.5" />}
-                    {p.name}
-                  </button>
-                  <button onClick={() => setIssuePortal(p)} title="Report issue"
-                    className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Flag className="h-3 w-3 text-red-500" />
-                  </button>
-                </div>
-              ))}
+              {autoPortals.map(p => {
+                const isFbAuto = p.key === 'facebook' && fbConnected;
+                const busy = isFbAuto && fbPosting;
+                return (
+                  <div key={p.key} className="relative group">
+                    <button onClick={() => openPortal(p)} disabled={busy}
+                      title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : isFbAuto ? 'Posts automatically via connected Page API' : undefined}
+                      className={`w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-60
+                        ${flaggedKeys.has(p.key) ? 'bg-amber-500 text-white' : isFbAuto ? 'bg-blue-600 text-white' : 'bg-gray-800 text-white'}`}>
+                      {busy ? <Spinner size="sm" /> :
+                       flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5" /> :
+                       posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> :
+                       isFbAuto ? <Zap className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
+                      {p.name}
+                    </button>
+                    <button onClick={() => setIssuePortal(p)} title="Report issue"
+                      className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <Flag className="h-3 w-3 text-red-500" />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </CardContent>
         </Card>
