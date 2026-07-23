@@ -79,18 +79,6 @@ async def create_application(body: ApplicationCreate, actor: Actor = Depends(get
             f"application.created:{row['id']}",
         )
 
-    # Send notification using candidate info fetched inside conn block
-    try:
-        if _notif_cand and _notif_cand["email"] and body.send_email:
-            import asyncio
-            asyncio.create_task(_notify_stage_change_bg(
-                _notif_cand["cid"], body.stage,
-                _notif_cand["email"], _notif_cand["full_name"],
-                actor.tenant_id,
-                custom_msg=body.custom_message
-            ))
-    except Exception as _ex:
-        print(f"Stage notification error: {_ex}")
     return dict(row)
 
 
@@ -100,21 +88,7 @@ async def get_application(application_id: str, actor: Actor = Depends(get_actor)
         row = await conn.fetchrow(f"SELECT {FIELDS} FROM applications WHERE id = $1", application_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Application not found")
-    # Send notification using candidate info fetched inside conn block
-    try:
-        if _notif_cand and _notif_cand["email"] and body.send_email:
-            import asyncio
-            asyncio.create_task(_notify_stage_change_bg(
-                _notif_cand["cid"], body.stage,
-                _notif_cand["email"], _notif_cand["full_name"],
-                actor.tenant_id,
-                custom_msg=body.custom_message
-            ))
-    except Exception as _ex:
-        print(f"Stage notification error: {_ex}")
     return dict(row)
-
-
 
 
 async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, custom_msg=None):

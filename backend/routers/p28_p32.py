@@ -2,7 +2,7 @@
 Salary Benchmarking, Notification Center."""
 import csv, io, os
 from typing import Optional
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, HTTPException
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
@@ -162,7 +162,7 @@ async def get_job(job_id: str, actor: Actor=Depends(get_actor)):
                    r.skills_required, r.positions_count, r.created_at
             FROM requisitions r WHERE r.id=$1 AND r.tenant_id=$2 AND r.status='open'
         """, job_id, actor.tenant_id)
-    if not row: raise __import__('fastapi').HTTPException(404,"Job not found")
+    if not row: raise HTTPException(404,"Job not found")
     return dict(row)
 
 @jobs_router.post("/{job_id}/apply")

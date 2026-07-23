@@ -1,7 +1,7 @@
 """P30-P35: n8n Automations, Candidate Tags, Question Bank, Duplicates."""
 import json
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Body
 from pydantic import BaseModel
 import httpx
 import db
@@ -92,8 +92,13 @@ async def create_tag(body: dict, actor: Actor=Depends(get_actor)):
     return dict(row)
 
 @tags_router.post("/assign")
-async def assign_tags(candidate_id: str, tag_ids: List[str],
+async def assign_tags(candidate_id: str, tag_ids: List[str] = Body(...),
                        actor: Actor=Depends(get_actor)):
+    # candidate_id stays a query param (frontend sends it that way); tag_ids
+    # needs Body() explicitly - a bare List[str] param with no Body() marker
+    # binds to repeated query params (?tag_ids=a&tag_ids=b), but the
+    # frontend has always sent it as a JSON array body, so every "add tag"
+    # call 422'd silently (empty catch{}) since this endpoint was built.
     async with db.tenant_conn(actor.tenant_id) as conn:
         for tag_id in tag_ids:
             await conn.execute("""

@@ -409,17 +409,19 @@ async def send_offer_letter(offer_id: str, actor: Actor = Depends(get_actor)):
     sent = False
     channel = 'none'
     try:
-        raw_conn = await _asyncpg.connect(
-            dsn=None,
-            host=os.environ.get('DB_HOST', 'db'),
-            port=int(os.environ.get('DB_PORT', '5432')),
-            user=os.environ.get('DB_USER', 'app_user'),
-            password=os.environ.get('DB_PASS', ''),
-            database=os.environ.get('DB_NAME', 'ats'),
-        )
+        # Was connecting with host/port/user/password built from DB_HOST/
+        # DB_PORT/DB_USER/DB_PASS/DB_NAME env vars - none of which are set
+        # anywhere in docker-compose.yml (only DATABASE_URL is), so
+        # DB_PASS defaulted to an empty string and every connection attempt
+        # failed auth before ever reaching the query below. Also queried
+        # smtp_pass/from_email, columns that don't exist (the real columns
+        # are smtp_password/smtp_from - see email_settings.py and the
+        # working pattern already in nda.py's _send_via_smtp).
+        db_url = os.environ.get('DATABASE_URL', 'postgresql://app_user:apppw@db:5432/ats')
+        raw_conn = await _asyncpg.connect(db_url)
         try:
             smtp_row = await raw_conn.fetchrow(
-                "SELECT smtp_host,smtp_port,smtp_user,smtp_pass,from_email FROM email_settings WHERE tenant_id=$1",
+                "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE",
                 actor.tenant_id)
         finally:
             await raw_conn.close()
@@ -427,7 +429,7 @@ async def send_offer_letter(offer_id: str, actor: Actor = Depends(get_actor)):
         if smtp_row and smtp_row['smtp_host']:
             msg = MIMEMultipart()
             msg['Subject'] = f"Offer Letter  -  {company_name}"
-            msg['From'] = smtp_row['from_email'] or smtp_row['smtp_user']
+            msg['From'] = smtp_row['smtp_from'] or smtp_row['smtp_user']
             msg['To'] = candidate['email']
             msg.attach(MIMEText(
                 'Dear ' + candidate['full_name'] + ',' + chr(10)*2 +
@@ -441,12 +443,13 @@ async def send_offer_letter(offer_id: str, actor: Actor = Depends(get_actor)):
             msg.attach(part)
             ctx = _ssl.create_default_context()
             with smtplib.SMTP_SSL(smtp_row['smtp_host'], smtp_row['smtp_port'] or 465, context=ctx) as srv:
-                srv.login(smtp_row['smtp_user'], smtp_row['smtp_pass'])
+                srv.login(smtp_row['smtp_user'], smtp_row['smtp_password'])
                 srv.send_message(msg)
             sent = True
             channel = 'email'
     except Exception as exc:
         # SMTP not configured or failed  -  still mark letter as sent
+        print(f'[Offers] send_offer_letter SMTP error: {exc}')
         channel = 'none'
 
     # Update DB: mark offer as issued, stamp sent_at on offer_letters

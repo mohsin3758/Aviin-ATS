@@ -816,9 +816,18 @@ async def process_email_for_resume(
         candidate_id = None
         print(f'[Routing] LOW_CONFIDENCE (conf={conf:.2f}): file stored, no candidate created')
 
-    requisition_id = await match_requisition(conn, tenant_id, subject, parsed.get('skills', []), job_board)
-    if requisition_id:
-        await create_application(conn, tenant_id, candidate_id, requisition_id)
+    # A low_confidence resume deliberately gets no candidate (candidate_id is
+    # None) - create_application's INSERT requires a non-null candidate_id,
+    # so calling it unconditionally violated that constraint on every
+    # low-confidence item. The caught exception didn't propagate, but it
+    # left the connection's transaction in Postgres's "aborted" state for
+    # the rest of this item's processing, since catching a Python exception
+    # doesn't clear that - every later query on this same conn then failed
+    # too with "current transaction is aborted".
+    if candidate_id:
+        requisition_id = await match_requisition(conn, tenant_id, subject, parsed.get('skills', []), job_board)
+        if requisition_id:
+            await create_application(conn, tenant_id, candidate_id, requisition_id)
 
     # NOTE: if this INSERT hits uq_resume_files_msg_fname (a leftover row
     # from an earlier attempt whose imap_messages.auto_processed update
