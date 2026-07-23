@@ -14,7 +14,7 @@ import {
   Mail, MessageCircle, MessageSquare, Zap, Webhook,
   Truck, UserCog, Lock, BookMarked, Palette,
   ChevronDown, ChevronLeft, ChevronRight,
-  FileSignature, Send, GitMerge, ExternalLink,
+  FileSignature, Send, GitMerge, ExternalLink, Activity, Workflow,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -53,6 +53,7 @@ const NAV_GROUPS = [
     { icon:Heart,           href:'/client-health',     label:'Client Health' },
     { icon:Building2,       href:'/clients',           label:'Clients & Packs' },
     { icon:Target,          href:'/headcount',         label:'Headcount Plan' },
+    { icon:Activity,        href:'/command-center',    label:'War Room' },
   ]},
   { id:'finance', label:'FINANCE', defaultOpen:false, items:[
     { icon:DollarSign,      href:'/finance',          label:'ERP / Finance' },
@@ -78,6 +79,7 @@ const NAV_GROUPS = [
     { icon:Globe,            href:'/whatsapp-setup', label:'WhatsApp Setup' },
     { icon:MessageSquare,   href:'/sms',           label:'SMS Notifications' },
     { icon:Zap,             href:'/automations',   label:'Automations' },
+    { icon:Workflow,        href:'/nurture',       label:'Nurture Sequences' },
     { icon:Webhook,         href:'/integrations',  label:'Integrations' },
   ]},
   { id:'vendors', label:'VENDORS', defaultOpen:false, items:[
