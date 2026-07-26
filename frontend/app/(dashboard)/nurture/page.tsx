@@ -1,7 +1,6 @@
 'use client';
 import { useState } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { MessageSquare, Mail, Clock, Zap, ChevronUp, ChevronDown } from 'lucide-react';
 
 const TRIGGERS = [
   { value: 'offer_made', label: 'Offer Made' },
@@ -113,6 +112,7 @@ export default function NurturePage() {
   const [running, setRunning] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, any>>({});
   const [seeding, setSeeding] = useState(false);
+  const [toggling, setToggling] = useState<string | null>(null);
 
   const rows: any[] = Array.isArray(seqs) ? seqs : [];
 
@@ -124,6 +124,16 @@ export default function NurturePage() {
     } catch (e: any) {
       alert(e.message || 'Failed to run sequence');
     } finally { setRunning(null); }
+  }
+
+  async function toggleActive(seq: any) {
+    setToggling(seq.id);
+    try {
+      await apiFetch('/nurture/' + seq.id + '/toggle', { method: 'PATCH' });
+      refetch();
+    } catch (e: any) {
+      alert(e.message || 'Failed to toggle sequence');
+    } finally { setToggling(null); }
   }
 
   async function seedDefaults() {
@@ -199,10 +209,16 @@ export default function NurturePage() {
                       </div>
                     )}
                   </div>
-                  <button onClick={() => runNow(seq)} disabled={running === seq.id}
-                    style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '9px 16px', background: running === seq.id ? '#94a3b8' : '#7c3aed', color: 'white', border: 'none', borderRadius: '8px', cursor: running === seq.id ? 'not-allowed' : 'pointer', fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                    {running === seq.id ? 'Running...' : 'Run Now'}
-                  </button>
+                  <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+                    <button onClick={() => toggleActive(seq)} disabled={toggling === seq.id}
+                      style={{ padding: '9px 14px', background: seq.is_active ? '#fee2e2' : '#d1fae5', color: seq.is_active ? '#dc2626' : '#059669', border: 'none', borderRadius: '8px', cursor: toggling === seq.id ? 'not-allowed' : 'pointer', fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap', opacity: toggling === seq.id ? 0.6 : 1 }}>
+                      {toggling === seq.id ? '...' : seq.is_active ? 'Pause' : 'Activate'}
+                    </button>
+                    <button onClick={() => runNow(seq)} disabled={running === seq.id}
+                      style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '9px 16px', background: running === seq.id ? '#94a3b8' : '#7c3aed', color: 'white', border: 'none', borderRadius: '8px', cursor: running === seq.id ? 'not-allowed' : 'pointer', fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap' }}>
+                      {running === seq.id ? 'Running...' : 'Run Now'}
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -214,102 +230,4 @@ export default function NurturePage() {
     </div>
   );
 }
-
-type NurtureStep = { day: number; type: 'whatsapp' | 'sms' | 'email'; template: string };
-type NurtureSeq = {
-  id: string; name: string; trigger_event: string;
-  steps: NurtureStep[] | string; is_active: boolean;
-};
-
-const TRIGGER_LABELS: Record<string, string> = {
-  offer_made: '🎁 Offer Made', offer_accepted: '✅ Offer Accepted',
-  interview_scheduled: '📅 Interview Scheduled', candidate_placed: '🎉 Placed',
-  candidate_rejected: '❌ Rejected', application_received: '📩 Application Received',
-  daily_cron: '⏰ Daily Cron', stage_change: '🔄 Stage Change',
-};
-
-const CHANNEL_ICON: Record<string, JSX.Element> = {
-  whatsapp: <MessageSquare size={12} style={{ color: '#25d366' }} />,
-  sms: <MessageSquare size={12} style={{ color: '#3b82f6' }} />,
-  email: <Mail size={12} style={{ color: '#6366f1' }} />,
-};
-
-function parseSteps(steps: NurtureStep[] | string): NurtureStep[] {
-  if (Array.isArray(steps)) return steps;
-  try { return JSON.parse(steps as string); } catch { return []; }
-}
-
-function StepCard({ step, idx }: { step: NurtureStep; idx: number }) {
-  const bg = step.type === 'whatsapp' ? '#f0fdf4' : step.type === 'email' ? '#eff6ff' : '#f0f9ff';
-  const border = step.type === 'whatsapp' ? '#bbf7d0' : step.type === 'email' ? '#bfdbfe' : '#bae6fd';
-  return (
-    <div style={{ padding: '10px 14px', borderRadius: '10px', background: bg, border: `1px solid ${border}`, marginBottom: '8px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-        <div style={{ width: '22px', height: '22px', borderRadius: '50%', background: '#1e40af', color: 'white',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: '700', flexShrink: 0 }}>
-          {idx + 1}
-        </div>
-        {CHANNEL_ICON[step.type]}
-        <span style={{ fontSize: '11px', fontWeight: '700', color: '#374151', textTransform: 'capitalize' }}>{step.type}</span>
-        <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '3px' }}>
-          <Clock size={9} /> Day {step.day}
-        </span>
-      </div>
-      <p style={{ fontSize: '12px', color: '#374151', margin: 0, lineHeight: '1.5', fontStyle: 'italic' }}>
-        "{step.template?.slice(0, 120)}{step.template?.length > 120 ? '…' : ''}"
-      </p>
-    </div>
-  );
-}
-
-function CampaignCard({ seq, onToggle }: { seq: NurtureSeq; onToggle: () => void }) {
-  const [open, setOpen] = useState(false);
-  const steps = parseSteps(seq.steps);
-  const trig = TRIGGER_LABELS[seq.trigger_event] || seq.trigger_event;
-
-  return (
-    <div style={{ border: '1px solid #e2e8f0', borderRadius: '14px', overflow: 'hidden', background: 'white', marginBottom: '12px' }}>
-      <div style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-        <div style={{ width: '44px', height: '44px', borderRadius: '10px',
-          background: seq.is_active ? 'linear-gradient(135deg,#1e40af,#6366f1)' : '#f1f5f9',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-          <Zap size={20} style={{ color: seq.is_active ? 'white' : '#94a3b8' }} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: '700', fontSize: '15px', color: '#0f172a' }}>{seq.name}</div>
-          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
-            Trigger: {trig} · {steps.length} step{steps.length !== 1 ? 's' : ''}
-          </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{ padding: '4px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: '700',
-            background: seq.is_active ? '#d1fae5' : '#f1f5f9',
-            color: seq.is_active ? '#065f46' : '#64748b' }}>
-            {seq.is_active ? '● Active' : '○ Paused'}
-          </span>
-          <button onClick={onToggle}
-            style={{ padding: '6px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: '600', border: 'none',
-              background: seq.is_active ? '#fee2e2' : '#d1fae5',
-              color: seq.is_active ? '#dc2626' : '#059669', cursor: 'pointer' }}>
-            {seq.is_active ? 'Pause' : 'Activate'}
-          </button>
-          <button onClick={() => setOpen(!open)}
-            style={{ padding: '6px', borderRadius: '8px', border: '1px solid #e2e8f0', background: 'white', cursor: 'pointer' }}>
-            {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-          </button>
-        </div>
-      </div>
-      {open && steps.length > 0 && (
-        <div style={{ padding: '0 20px 16px', borderTop: '1px solid #f1f5f9' }}>
-          <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '10px', marginTop: '12px' }}>
-            Sequence Steps ({steps.length})
-          </div>
-          {steps.map((s, i) => <StepCard key={i} step={s} idx={i} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-type FormStep = { day: string; type: string; template: string };
 

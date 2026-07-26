@@ -390,6 +390,13 @@ async def process_nurture_sequences():
             seqs = await conn.fetch(
                 "SELECT id, tenant_id, name, trigger_event, steps FROM nurture_sequences WHERE is_active=true")
         for seq in seqs:
+            # 'manual' is intentionally excluded from the scheduler - it's a
+            # trigger a human fires deliberately via "Run Now" (see the
+            # matching fix in final_features.py's run-now for that path);
+            # auto-firing it here every 4h would silently message every
+            # passive candidate once a day forever, defeating the entire
+            # point of choosing "Manual Trigger" over one of the automatic
+            # ones.
             stage = stage_map.get(seq['trigger_event'])
             if not stage:
                 continue

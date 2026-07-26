@@ -511,13 +511,30 @@ async def create_sequence(body: dict, actor: Actor = Depends(get_actor)):
              json.dumps(body.get('steps',[])))
     return dict(row)
 
+@nurture_router.patch("/{seq_id}/toggle")
+async def toggle_sequence(seq_id: str, actor: Actor = Depends(get_actor)):
+    """Pause/activate a sequence - the frontend has shown an ACTIVE/PAUSED
+    badge since this page was built, but there was never a control to
+    actually change it (a Pause/Activate button existed in an abandoned,
+    never-rendered component) nor an endpoint to back one."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            UPDATE nurture_sequences SET is_active = NOT is_active
+            WHERE id=$1::uuid AND tenant_id=$2
+            RETURNING id, is_active
+        """, seq_id, actor.tenant_id)
+    if not row:
+        raise HTTPException(404, "Sequence not found")
+    return dict(row)
+
+
 @nurture_router.post("/seed-defaults")
 async def seed_default_sequences(actor: Actor = Depends(get_actor)):
     """Seed 3 default nurture sequences for common staffing scenarios."""
     defaults = [
         {
             "name": "Post-Interview Follow-up",
-            "trigger_event": "interview_completed",
+            "trigger_event": "interview_scheduled",
             "steps": [
                 {"day": 1, "type": "whatsapp", "template": "Thank you for the interview for {role}. We will update you within 2 business days. - AVIIN Jobs"},
                 {"day": 3, "type": "whatsapp", "template": "Hi {name}, any update on your interview feedback? The client is keen. - AVIIN Jobs"},
@@ -673,13 +690,31 @@ async def run_sequence_now(seq_id: str, actor: Actor = Depends(get_actor)):
             'stage_change': None,
         }
         stage = stage_map.get(seq['trigger_event'])
-        if not stage:
+        if seq['trigger_event'] == 'manual':
+            # A manual trigger has no pipeline stage to match by design - it's
+            # meant for outreach to candidates who AREN'T in an active
+            # pipeline (e.g. "Passive Candidate Warm-up"), not a stage-based
+            # audience. Was previously falling through to "no matching stage"
+            # every time, so this trigger type could never actually run.
+            rows = await conn.fetch('''
+                SELECT c.id AS candidate_id, c.full_name, c.email
+                FROM candidates c
+                WHERE c.tenant_id=$1 AND c.email IS NOT NULL AND c.is_active=TRUE
+                  AND NOT EXISTS (
+                    SELECT 1 FROM applications a
+                    WHERE a.candidate_id=c.id AND a.tenant_id=$1
+                      AND a.stage NOT IN ('placed','rejected','hold')
+                  )
+                LIMIT 50
+            ''', actor.tenant_id)
+        elif not stage:
             return {'triggered': 0, 'message': 'No matching stage for trigger'}
-        rows = await conn.fetch('''
-            SELECT a.candidate_id, c.full_name, c.email
-            FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            WHERE a.tenant_id=$1 AND a.stage=$2 AND c.email IS NOT NULL LIMIT 50
-        ''', actor.tenant_id, stage)
+        else:
+            rows = await conn.fetch('''
+                SELECT a.candidate_id, c.full_name, c.email
+                FROM applications a JOIN candidates c ON c.id=a.candidate_id
+                WHERE a.tenant_id=$1 AND a.stage=$2 AND c.email IS NOT NULL LIMIT 50
+            ''', actor.tenant_id, stage)
         triggered = 0
         for r in rows:
             try:
@@ -692,5 +727,6 @@ async def run_sequence_now(seq_id: str, actor: Actor = Depends(get_actor)):
                 triggered += 1
             except Exception:
                 pass
+        audience = 'passive candidates (not in an active pipeline)' if seq['trigger_event'] == 'manual' else f'stage: {stage}'
         return {'triggered': triggered, 'sequence': seq['name'],
-                'message': f'Sequence queued for {triggered} candidates in stage: {stage}'}
+                'message': f'Sequence queued for {triggered} candidates in {audience}'}
