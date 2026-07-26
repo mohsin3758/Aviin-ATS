@@ -28,8 +28,14 @@ export default function WarRoomPage() {
 
   const totalCapacity = capacity?.reduce((s, r) => s + r.capacity_weekly, 0) ?? 0;
   const totalAssigned = capacity?.reduce((s, r) => s + r.active_assignments, 0) ?? 0;
+  // Aggregate ratio (assigned/capacity across the whole team), not the mean
+  // of each recruiter's own percentage - averaging already-computed percentages
+  // overweights low-capacity recruiters (one person at 1/1 capacity = 100%
+  // pulls the "average" way up even though they're 1 of 552 total slots), so
+  // it doesn't reconcile with the Total Capacity/Assigned numbers shown right
+  // below it. This is the same aggregate math as those two figures.
   const avgUtilization = capacity
-    ? Math.round(capacity.reduce((s, r) => s + r.utilization_pct, 0) / Math.max(capacity.length, 1))
+    ? Math.round(100 * totalAssigned / Math.max(totalCapacity, 1))
     : null;
 
   const openReqs = reqs?.filter(r => r.status === 'open').length ?? null;
@@ -44,6 +50,11 @@ export default function WarRoomPage() {
   // Rule-based: Retention risk (redeployment queue severity)
   const retentionCritical = redeployQueue?.filter(r => r.days_remaining <= 7) ?? [];
   const retentionWarning = redeployQueue?.filter(r => r.days_remaining > 7 && r.days_remaining <= 14) ?? [];
+  // The table itself renders a 3rd "Watch" badge for 15-21 days (see the row
+  // logic below), but the header summary only tallied the first two tiers -
+  // a contractor in that window would show up in the table with no matching
+  // count above it.
+  const retentionWatch = redeployQueue?.filter(r => r.days_remaining > 14) ?? [];
 
   // Top clients by placements
   const topClients = funnel
@@ -140,7 +151,7 @@ export default function WarRoomPage() {
                 Retention Risk Model
               </h2>
               <p className="text-xs text-gray-400 mt-0.5">
-                {retentionCritical.length} critical (≤7d) · {retentionWarning.length} warning (8–14d)
+                {retentionCritical.length} critical (≤7d) · {retentionWarning.length} warning (8–14d) · {retentionWatch.length} watch (15–21d)
               </p>
             </CardHeader>
             <CardContent className="p-0">
