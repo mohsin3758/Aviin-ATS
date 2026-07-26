@@ -325,6 +325,7 @@ def start_scheduler():
     scheduler.add_job(process_resume_backlog, "interval", minutes=1,
                       id="resume_backlog", replace_existing=True)
     scheduler.add_job(process_nurture_sequences, "interval", hours=4, id="nurture_sequences", replace_existing=True)
+    scheduler.add_job(process_nurture_dispatch, "interval", minutes=15, id="nurture_dispatch", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 
@@ -415,10 +416,14 @@ async def process_nurture_sequences():
                         seq['tenant_id'], stage, str(seq['id']))
                     for cand in cands:
                         try:
+                            # step_idx=0/sent_at=NULL = "step 0 still due" -
+                            # process_nurture_dispatch is what actually sends
+                            # it. DO NOTHING on conflict: a candidate already
+                            # mid-sequence keeps their real progress.
                             await conn.execute(
                                 "INSERT INTO nurture_executions"
-                                "  (tenant_id, sequence_id, candidate_id, step_idx, channel, sent_at)"
-                                " VALUES ($1, $2::uuid, $3, 0, $4, now())"
+                                "  (tenant_id, sequence_id, candidate_id, step_idx, channel, enrolled_at, sent_at)"
+                                " VALUES ($1, $2::uuid, $3, 0, $4, now(), NULL)"
                                 " ON CONFLICT (sequence_id, candidate_id) DO NOTHING",
                                 seq['tenant_id'], str(seq['id']), cand['candidate_id'],
                                 steps[0].get('type', 'email') if steps else 'email')
@@ -428,3 +433,123 @@ async def process_nurture_sequences():
                 logger.warning(f"nurture seq {seq['id']}: {e}")
     except Exception as e:
         logger.error(f"process_nurture_sequences error: {e}")
+
+
+def _render_nurture_template(template: str, ctx: dict) -> str:
+    """Fill in {name}/{role}/{company}/... placeholders; strip anything
+    left unresolved rather than send a literal "{ctc}" to a candidate."""
+    import re as _re
+    def _sub(m):
+        return str(ctx.get(m.group(1), '')) if m.group(1) in ctx else ''
+    return _re.sub(r'\{(\w+)\}', _sub, template)
+
+
+async def process_nurture_dispatch():
+    """Every 15 min: the actual send step. process_nurture_sequences (and
+    run-now) only ever enrolled candidates (step_idx=0, sent_at=NULL) - no
+    code anywhere read that enrollment and called a real send function, so
+    no candidate has ever received an actual nurture email/WhatsApp/SMS.
+    This walks every in-progress enrollment, sends whichever step is due
+    (day offset measured from enrolled_at), and advances step_idx on
+    success so the next step becomes due later."""
+    import json as _json
+    from routers.nda import _send_email_with_pdf
+    from routers.whatsapp_bot import send_wa
+    from services.sms_service import send_sms
+
+    logger.info("scheduler: dispatching due nurture steps")
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT DISTINCT tenant_id FROM nurture_executions")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    rows = await conn.fetch("""
+                        SELECT ne.id, ne.sequence_id, ne.candidate_id, ne.step_idx, ne.enrolled_at,
+                               ns.name AS seq_name, ns.steps,
+                               c.full_name, c.email, c.phone,
+                               tt.name AS company_name
+                        FROM nurture_executions ne
+                        JOIN nurture_sequences ns ON ns.id = ne.sequence_id
+                        JOIN candidates c ON c.id = ne.candidate_id
+                        JOIN tenants tt ON tt.id = ne.tenant_id
+                        WHERE ne.tenant_id=$1 AND ns.is_active=TRUE
+                        LIMIT 100
+                    """, tid)
+                    for r in rows:
+                        steps = r["steps"] if isinstance(r["steps"], list) else _json.loads(r["steps"] or "[]")
+                        if r["step_idx"] >= len(steps):
+                            continue
+                        step = steps[r["step_idx"]]
+                        due_at = r["enrolled_at"] + __import__("datetime").timedelta(days=int(step.get("day", 0)))
+                        if __import__("datetime").datetime.now(__import__("datetime").timezone.utc) < due_at:
+                            continue
+
+                        role_row = await conn.fetchrow("""
+                            SELECT req.title FROM applications a
+                            JOIN requisitions req ON req.id = a.requisition_id
+                            WHERE a.candidate_id=$1 AND a.tenant_id=$2
+                            ORDER BY a.updated_at DESC LIMIT 1
+                        """, r["candidate_id"], tid)
+                        ctx = {
+                            "name": r["full_name"] or "there",
+                            "role": (role_row["title"] if role_row else "") or "",
+                            "company": r["company_name"] or "AVIIN Jobs",
+                        }
+                        message = _render_nurture_template(step.get("template", ""), ctx)
+                        channel = step.get("type", "email")
+
+                        sent_ok = False
+                        error = None
+                        try:
+                            if channel == "email" and r["email"]:
+                                sent_ok = await _send_email_with_pdf(
+                                    tid, r["email"], r["full_name"],
+                                    f"Update from {ctx['company']}", message)
+                                if not sent_ok:
+                                    error = "SMTP send returned false (no active email_settings?)"
+                            elif channel == "whatsapp" and r["phone"]:
+                                # HARD RULE #7: WhatsApp always requires consent
+                                # first - unlike email/SMS, this is the one
+                                # channel with an explicit project-wide rule,
+                                # so it's the one gated here even though the
+                                # consent-collection UI itself doesn't exist
+                                # yet (P26 audit finding) - the correct,
+                                # conservative behavior until it does is to
+                                # not send, not to send anyway.
+                                consented = await conn.fetchval("""
+                                    SELECT 1 FROM consent_records
+                                    WHERE candidate_id=$1 AND tenant_id=$2
+                                      AND (channel='whatsapp' OR data_category ILIKE '%whatsapp%')
+                                      AND consent_given=TRUE LIMIT 1
+                                """, r["candidate_id"], tid)
+                                if consented:
+                                    sent_ok = await send_wa(r["phone"], message)
+                                    if not sent_ok:
+                                        error = "WAHA send failed"
+                                else:
+                                    error = "Skipped: no WhatsApp consent record (HARD RULE #7)"
+                            elif channel == "sms" and r["phone"]:
+                                result = await send_sms(r["phone"], message)
+                                sent_ok = result.get("status") == "sent"
+                                error = None if sent_ok else f"SMS {result.get('status')}: {result.get('error', '')}"
+                            else:
+                                error = f"No {channel} contact info for candidate"
+                        except Exception as send_exc:
+                            error = str(send_exc)
+
+                        if sent_ok:
+                            await conn.execute("""
+                                UPDATE nurture_executions
+                                SET step_idx=step_idx+1, sent_at=now(), channel=$1, last_error=NULL
+                                WHERE id=$2
+                            """, channel, r["id"])
+                        else:
+                            await conn.execute(
+                                "UPDATE nurture_executions SET last_error=$1 WHERE id=$2",
+                                (error or "unknown error")[:500], r["id"])
+            except Exception as e:
+                logger.error(f"Nurture dispatch failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_nurture_dispatch error: {e}")

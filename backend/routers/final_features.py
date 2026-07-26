@@ -718,10 +718,13 @@ async def run_sequence_now(seq_id: str, actor: Actor = Depends(get_actor)):
         triggered = 0
         for r in rows:
             try:
+                # step_idx=0/sent_at=NULL means "step 0 still due" - the
+                # actual dispatch worker (scheduler.py::process_nurture_dispatch)
+                # is what sends it and advances step_idx from here.
                 await conn.execute('''
-                    INSERT INTO nurture_executions (tenant_id, sequence_id, candidate_id, step_idx, channel, sent_at)
-                    VALUES ($1, $2::uuid, $3, 0, $4, now())
-                    ON CONFLICT (sequence_id, candidate_id) DO UPDATE SET sent_at=now(), step_idx=0
+                    INSERT INTO nurture_executions (tenant_id, sequence_id, candidate_id, step_idx, channel, enrolled_at, sent_at)
+                    VALUES ($1, $2::uuid, $3, 0, $4, now(), NULL)
+                    ON CONFLICT (sequence_id, candidate_id) DO UPDATE SET enrolled_at=now(), step_idx=0, sent_at=NULL
                 ''', actor.tenant_id, seq_id, r['candidate_id'],
                      steps[0].get('type', 'email') if steps else 'email')
                 triggered += 1
