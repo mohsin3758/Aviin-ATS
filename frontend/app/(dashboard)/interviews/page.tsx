@@ -80,8 +80,18 @@ export default function InterviewsPage() {
   const [showModal, setShowModal] = useState(false);
   const [reminding, setReminding] = useState<string|null>(null);
   const [toast, setToast] = useState('');
+  const [icsBusy, setIcsBusy] = useState<string|null>(null);
 
   const showT = (m:string) => { setToast(m); setTimeout(()=>setToast(''),3000); };
+
+  const downloadIcs = async (id:string) => {
+    setIcsBusy(id);
+    try {
+      const r = await apiFetch(`/calendar/from-interview/${id}`, { method:'POST' });
+      if (r?.download_url) window.open((process.env.NEXT_PUBLIC_API_URL ?? '/api') + r.download_url, '_blank');
+    } catch { showT('Failed to generate .ics'); }
+    finally { setIcsBusy(null); }
+  };
 
   const sendReminder = async (id:string) => {
     setReminding(id);
@@ -189,7 +199,7 @@ export default function InterviewsPage() {
                         const loc=iv.meeting_link?encodeURIComponent(iv.meeting_link):'';
                         window.open('https://outlook.office.com/calendar/action/compose?rru=addevent&startdt='+fmt2(dt)+'&enddt='+fmt2(end)+'&subject='+title2+'&location='+loc,'_blank');
                       }} title="Add to Outlook Calendar" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'9px',fontWeight:'800',color:'#0078d4'}}>OL</button>}
-                        {iv.calendar_id&&<a href={"/api/calendar/"+(iv.calendar_id||"")+"/download"} target="_blank" title="Download .ics" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',textDecoration:'none',fontSize:'10px',fontWeight:'800',color:'#64748b'}}>📅</a>}
+                        {iv.scheduled_at&&<button onClick={()=>downloadIcs(iv.id)} disabled={icsBusy===iv.id} title="Download .ics (Outlook/Apple Calendar)" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'800',color:'#64748b',opacity:icsBusy===iv.id?0.5:1}}>📅</button>}
                     {iv.meeting_link&&<button onClick={()=>window.open(iv.meeting_link,'_blank')} title="Join meeting" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}><Video size={12} color="#8b5cf6"/></button>}
                       </div>
                     </td>

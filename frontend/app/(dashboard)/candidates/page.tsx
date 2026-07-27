@@ -6,7 +6,8 @@ import { API, authHeaders } from '@/lib/auth';
 import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
-  FileText, Users, GitMerge, Eye, Clock, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Layers
+  FileText, Users, GitMerge, Eye, Clock, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Layers,
+  Bookmark,
 } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -485,6 +486,8 @@ export default function CandidatesPage() {
   const [tagFilter,setTagFilter] = useState('');
   const [showFilters,setShowFilters] = useState(false);
   const [appliedFilters,setAppliedFilters] = useState<Record<string,string>>({});
+  const {data:savedFilters,refetch:refetchSavedFilters} = useFetch<any[]>('/saved-filters');
+  const [selectedSavedFilter,setSelectedSavedFilter] = useState('');
 
   // sort + pagination
   const [sort,setSort] = useState({by:'created_at',dir:'desc'});
@@ -662,7 +665,25 @@ export default function CandidatesPage() {
   };
 
   const applyFilters=()=>{setAppliedFilters({search,skill:skillFilter,location:locationFilter,employer:employerFilter,minExp:minExpYr,maxExp:maxExpYr});};
-  const clearFilters=()=>{setSearch('');setSkillFilter('');setLocationFilter('');setEmployerFilter('');setMinExpYr('');setMaxExpYr('');setSrcFilter('');setTagFilter('');setAppliedFilters({});};
+  const clearFilters=()=>{setSearch('');setSkillFilter('');setLocationFilter('');setEmployerFilter('');setMinExpYr('');setMaxExpYr('');setSrcFilter('');setTagFilter('');setAppliedFilters({});setSelectedSavedFilter('');};
+  const saveCurrentFilter=async()=>{
+    const name=prompt('Name this filter:');
+    if(!name)return;
+    const filters={search,skill:skillFilter,location:locationFilter,employer:employerFilter,minExp:minExpYr,maxExp:maxExpYr,source:srcFilter,tag:tagFilter};
+    await apiFetch('/saved-filters',{method:'POST',body:JSON.stringify({name,filters})});
+    refetchSavedFilters();
+  };
+  const loadSavedFilter=(id:string)=>{
+    setSelectedSavedFilter(id);
+    const f=(savedFilters||[]).find((sf:any)=>sf.id===id);
+    if(!f)return;
+    const filters=f.filters||{};
+    setSearch(filters.search||'');setSkillFilter(filters.skill||'');setLocationFilter(filters.location||'');
+    setEmployerFilter(filters.employer||'');setMinExpYr(filters.minExp||'');setMaxExpYr(filters.maxExp||'');
+    setSrcFilter(filters.source||'');setTagFilter(filters.tag||'');
+    setAppliedFilters({search:filters.search||'',skill:filters.skill||'',location:filters.location||'',employer:filters.employer||'',minExp:filters.minExp||'',maxExp:filters.maxExp||''});
+  };
+  const deleteSavedFilter=async(id:string)=>{await apiFetch(`/saved-filters/${id}`,{method:'DELETE'});if(selectedSavedFilter===id)setSelectedSavedFilter('');refetchSavedFilters();};
   const hasActiveFilters = Boolean(Object.values(appliedFilters).some(Boolean)||srcFilter||tagFilter);
 
   return (
@@ -704,6 +725,17 @@ export default function CandidatesPage() {
           </button>
           <button onClick={applyFilters} style={{padding:'8px 16px',borderRadius:'8px',border:'none',background:'#1e40af',color:'white',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>Search</button>
           {hasActiveFilters&&<button onClick={clearFilters} style={{padding:'8px 12px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px',color:'#64748b'}}>Clear</button>}
+          {!!(savedFilters||[]).length && (
+            <select value={selectedSavedFilter} onChange={e=>e.target.value?loadSavedFilter(e.target.value):setSelectedSavedFilter('')}
+              style={{padding:'8px 10px',border:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'12px',color:'#374151',background:'white'}}>
+              <option value="">Saved filters…</option>
+              {(savedFilters||[]).map((f:any)=><option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+          )}
+          {selectedSavedFilter && (
+            <button onClick={()=>deleteSavedFilter(selectedSavedFilter)} title="Delete saved filter" style={{padding:'8px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',color:'#94a3b8'}}><Trash2 size={13}/></button>
+          )}
+          {hasActiveFilters&&<button onClick={saveCurrentFilter} title="Save current filters" style={{display:'flex',alignItems:'center',gap:'5px',padding:'8px 12px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px',color:'#64748b',fontWeight:'600'}}><Bookmark size={13}/> Save</button>}
         </div>
 
         {showFilters && (

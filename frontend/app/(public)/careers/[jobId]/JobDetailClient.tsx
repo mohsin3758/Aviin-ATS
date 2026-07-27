@@ -28,10 +28,11 @@ function ApplyModal({ job, onClose }: { job: Job; onClose: () => void }) {
     if (!form.full_name || !form.email) { setErr('Name and email are required'); return; }
     setSaving(true); setErr('');
     try {
+      const ref = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('ref') : null;
       const r = await fetch(`${API_BASE}/public/jobs/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, experience_months: Number(form.experience_months) || 0, job_id: job.id, tenant_id: TENANT_ID }),
+        body: JSON.stringify({ ...form, experience_months: Number(form.experience_months) || 0, job_id: job.id, tenant_id: TENANT_ID, ref }),
       });
       if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
       setDone(true);

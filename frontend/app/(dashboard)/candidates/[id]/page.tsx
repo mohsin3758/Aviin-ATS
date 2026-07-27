@@ -1487,7 +1487,7 @@ export default function CandidateProfilePage() {
       <div>
         <div style={{borderBottom:'1px solid #e2e8f0',display:'flex',gap:'4px'}}>
           {TABS.map(tab => (
-            <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+            <button key={tab.key} data-tab={tab.key} onClick={() => setActiveTab(tab.key)}
               style={{padding:'9px 18px',fontSize:'13px',fontWeight:'600',cursor:'pointer',border:'none',
                 borderBottom:activeTab===tab.key?'2px solid #1e40af':'2px solid transparent',
                 background:'transparent',color:activeTab===tab.key?'#1e40af':'#64748b'}}>
@@ -1498,7 +1498,7 @@ export default function CandidateProfilePage() {
 
         {/* Profile tab */}
         {activeTab==='profile' && (
-          <div style={{marginTop:'16px',display:'flex',flexDirection:'column',gap:'16px'}}>
+          <div data-testid="profile-panel" style={{marginTop:'16px',display:'flex',flexDirection:'column',gap:'16px'}}>
             <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
               <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>
                 Application History ({applications.length})
@@ -1535,7 +1535,7 @@ export default function CandidateProfilePage() {
 
         {/* Applications tab */}
         {activeTab==='applications' && (
-          <div style={{marginTop:'16px',background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
+          <div data-testid="applications-panel" style={{marginTop:'16px',background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
             <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>All Applications</h3>
             {applications.length === 0 ? (
               <p style={{color:'#94a3b8',fontSize:'13px'}}>No applications</p>

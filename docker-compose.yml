@@ -61,7 +61,6 @@ services:
       WAHA_URL: http://waha:3000
       WAHA_API_KEY: ${WAHA_API_KEY:-}
       ERP_ENCRYPT_KEY: ${ERP_ENCRYPT_KEY:-erp_demo_key_change_in_prod}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - resume_uploads:/app/uploads
     ports:

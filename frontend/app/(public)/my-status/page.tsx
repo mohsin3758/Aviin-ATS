@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { CheckCircle2, Clock, XCircle, Calendar, Video, Phone, MapPin, ChevronRight, RefreshCw } from 'lucide-react';
+import { CheckCircle2, Clock, XCircle, Calendar, Video, Phone, MapPin, ChevronRight, RefreshCw, Upload, FileText } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '/api';
 
@@ -311,12 +311,58 @@ function MyStatusPageInner() {
           </div>
         )}
 
+        {/* Document upload */}
+        {token && <UploadPanel token={token} />}
+
         {/* Footer */}
         <div style={{textAlign:'center',color:'rgba(255,255,255,0.5)',fontSize:'11px'}}>
           Powered by AVIIN ATS · This link expires in 30 days
         </div>
       </div>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
+
+function UploadPanel({ token }: { token: string }) {
+  const [uploads, setUploads] = useState<any[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const loadUploads = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/candidate-status/public/uploads?token=${encodeURIComponent(token)}`);
+      if (r.ok) setUploads(await r.json());
+    } catch {}
+  };
+  useEffect(() => { loadUploads(); }, [token]);
+
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true); setErr('');
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch(`${API_BASE}/candidate-status/public/upload?token=${encodeURIComponent(token)}&doc_type=general`, { method: 'POST', body: fd });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Upload failed'); }
+      loadUploads();
+    } catch (e: any) { setErr(e.message); }
+    finally { setUploading(false); e.target.value = ''; }
+  };
+
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.12)', backdropFilter: 'blur(10px)', borderRadius: 14, padding: '16px 20px', border: '1px solid rgba(255,255,255,0.2)' }}>
+      <div style={{ color: '#fff', fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Documents</div>
+      {uploads.map(u => (
+        <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'rgba(255,255,255,0.85)', fontSize: 12, padding: '4px 0' }}>
+          <FileText size={13} /> {u.file_name}
+        </div>
+      ))}
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 10, padding: '8px 16px', background: 'rgba(255,255,255,0.2)', borderRadius: 8, fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
+        <Upload size={13} /> {uploading ? 'Uploading…' : 'Upload Document'}
+        <input type="file" onChange={onFile} disabled={uploading} style={{ display: 'none' }} />
+      </label>
+      {err && <div style={{ color: '#fecaca', fontSize: 11, marginTop: 6 }}>{err}</div>}
     </div>
   );
 }

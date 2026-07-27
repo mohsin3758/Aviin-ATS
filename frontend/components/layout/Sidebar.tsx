@@ -15,6 +15,7 @@ import {
   Truck, UserCog, Lock, BookMarked, Palette,
   ChevronDown, ChevronLeft, ChevronRight,
   FileSignature, Send, GitMerge, ExternalLink, Activity, Workflow,
+  Users2, CalendarDays, Smile, Video, FileBarChart, UserPlus, Sliders,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -26,6 +27,7 @@ const NAV_GROUPS = [
     { icon:KanbanSquare,    href:'/pipeline',     label:'Pipeline (Kanban)' },
     { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity', roles:['admin','super_admin','lead_recruiter'] },
     { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates' },
+    { icon:Users2,          href:'/recruiter-ops', label:'Recruiter Ops' },
   ]},
   { id:'ai', label:'AI & INTELLIGENCE', defaultOpen:true, items:[
     { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },
@@ -36,14 +38,20 @@ const NAV_GROUPS = [
   { id:'recruitment', label:'RECRUITMENT', defaultOpen:true, items:[
     { icon:Inbox,           href:'/resume-inbox',  label:'Resume Inbox' },
     { icon:Calendar,        href:'/interviews',   label:'Interviews' },
+    { icon:CalendarDays,    href:'/calendar',      label:'Calendar' },
+    { icon:Video,           href:'/video-screening', label:'Video Screening' },
     { icon:FileText,       href:'/offers',       label:'Offer Engine' },
     { icon:FileSignature,   href:'/nda-documents', label:'NDA Documents' },
     { icon:FileText,        href:'/jd-templates', label:'JD Templates' },
     { icon:BookOpen,        href:'/question-bank',label:'Question Bank' },
+    { icon:FileCheck,       href:'/reference-checks', label:'Reference Checks' },
+    { icon:FileBarChart,    href:'/submittals',   label:'Submittals' },
     { icon:Globe,           href:'/jobs',         label:'Job Board' },
     { icon:Share2,          href:'/job-sharing',  label:'Job Sharing' },
     { icon:ExternalLink,    href:'/careers',      label:'Career Page', external:true },
     { icon:ClipboardList,   href:'/onboarding',   label:'Onboarding' },
+    { icon:Smile,           href:'/candidate-engagement', label:'Candidate Engagement' },
+    { icon:UserPlus,        href:'/captured-profiles', label:'Captured Profiles' },
   ]},
   { id:'analytics', label:'ANALYTICS', defaultOpen:false, items:[
     { icon:BarChart3,       href:'/analytics',        label:'Analytics' },
@@ -54,6 +62,7 @@ const NAV_GROUPS = [
     { icon:Building2,       href:'/clients',           label:'Clients & Packs' },
     { icon:Target,          href:'/headcount',         label:'Headcount Plan' },
     { icon:Activity,        href:'/command-center',    label:'War Room' },
+    { icon:FileBarChart,    href:'/report-builder',    label:'Report Builder' },
   ]},
   { id:'finance', label:'FINANCE', defaultOpen:false, items:[
     { icon:DollarSign,      href:'/finance',          label:'ERP / Finance' },
@@ -84,6 +93,7 @@ const NAV_GROUPS = [
   ]},
   { id:'vendors', label:'VENDORS', defaultOpen:false, items:[
     { icon:Truck,           href:'/vendor-analytics', label:'Vendor Analytics' },
+    { icon:UserPlus,        href:'/agency-portal',    label:'Agency Portal' },
   ]},
   { id:'settings', label:'SETTINGS', defaultOpen:false, items:[
     { icon:UserCog,         href:'/settings/users',       label:'Users & Roles' },
@@ -93,6 +103,7 @@ const NAV_GROUPS = [
     { icon:Lock,            href:'/security',             label:'Security / 2FA' },
     { icon:BookMarked,      href:'/settings/skills',      label:'Skills Taxonomy' },
     { icon:Palette,         href:'/themes',               label:'6 Themes' },
+    { icon:Sliders,         href:'/ops-settings',         label:'Ops Settings', roles:['admin','super_admin','manager'] },
   ]},
   { id:'my_account', label:'MY ACCOUNT', defaultOpen:true, items:[
     { icon:Mail,            href:'/settings/mail-accounts', label:'My Email Accounts' },

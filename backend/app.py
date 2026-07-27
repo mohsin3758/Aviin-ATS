@@ -20,7 +20,6 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import db
-from routers.sse_router import sse_router
 from routers import (
     phase3,
     pipeline_p2,
@@ -64,14 +63,17 @@ from routers import (
     recruiter_dashboard,
 )
 from routers import recruiter_tracking
+from routers import recruiter_ops
+from routers import ops_gaps
 
-# GAP features (1-10)
+# GAP features (1-10) — job-distribution and bgv-api were retired (see
+# gap_features.py module docstring): both duplicated real functionality
+# that already exists elsewhere (job-sharing, /bgv).
 from routers.gap_features import (
     nps_router, gdpr_new_router, talent_router,
     referral_router, referral_redirect_router,
     refcheck_router, ref_public_router,
-    video_router, jobdist_router,
-    bgv_api_router, reportbuilder_router,
+    video_router, reportbuilder_router,
     extension_router
 )
 
@@ -272,8 +274,6 @@ app.include_router(user_mail_router)
 app.include_router(sig_router)
 app.include_router(phase3.schedule_router)
 
-app.include_router(sse_router)
-
 # Register GAP feature routers (10 gaps)
 app.include_router(nps_router)
 app.include_router(gdpr_new_router)
@@ -283,10 +283,21 @@ app.include_router(referral_redirect_router)
 app.include_router(refcheck_router)
 app.include_router(ref_public_router)
 app.include_router(video_router)
-app.include_router(jobdist_router)
-app.include_router(bgv_api_router)
 app.include_router(reportbuilder_router)
 app.include_router(extension_router)
+app.include_router(recruiter_ops.targets_router)
+app.include_router(recruiter_ops.tasks_router)
+app.include_router(recruiter_ops.hotlist_router)
+app.include_router(recruiter_ops.leave_router)
+app.include_router(ops_gaps.alerts_router)
+app.include_router(ops_gaps.config_router)
+app.include_router(ops_gaps.submittals_router)
+app.include_router(ops_gaps.worksessions_router)
+app.include_router(ops_gaps.blocks_router)
+app.include_router(ops_gaps.filters_router)
+app.include_router(ops_gaps.candidate_uploads_router)
+app.include_router(ops_gaps.agency_router)
+app.include_router(ops_gaps.agency_public_router)
 
 
 @app.get("/health")

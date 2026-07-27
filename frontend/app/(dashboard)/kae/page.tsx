@@ -1,17 +1,17 @@
 'use client';
 import { useState } from 'react';
-import { Handshake, Users, Eye, Building2, TrendingUp, Award, CheckCircle, XCircle, Shield } from 'lucide-react';
+import { Handshake, Users, Eye, Building2, TrendingUp, Award, CheckCircle, XCircle, Shield, Trophy } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Table, Thead, Th, Tbody, Tr, Td } from '@/components/ui/Table';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 
-type KaeTab = 'owners' | 'scorecards' | 'visibility' | 'retention';
+type KaeTab = 'owners' | 'scorecards' | 'visibility' | 'retention' | 'leaderboard';
 const MONTH_NAMES = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const GRADE_COLOR: Record<string,string> = {'A+':'bg-emerald-100 text-emerald-700 font-bold','A':'bg-green-100 text-green-700 font-bold','B':'bg-blue-100 text-blue-700 font-bold','C':'bg-amber-100 text-amber-700 font-bold','D':'bg-red-100 text-red-700 font-bold'};
 const LEVEL_COLOR: Record<string,string> = {L5:'bg-purple-100 text-purple-700 font-bold',L4:'bg-blue-100 text-blue-700 font-bold',L3:'bg-green-100 text-green-700 font-bold',L2:'bg-amber-100 text-amber-700',L1:'bg-gray-100 text-gray-500'};
 const LEVEL_LABEL: Record<string,string> = {L5:'L5 Founder',L4:'L4 AccountMgr',L3:'L3 KAE',L2:'L2 Senior',L1:'L1 Recruiter'};
-const TABS = [{key:'owners' as KaeTab,label:'Account Ownership',icon:Handshake},{key:'scorecards' as KaeTab,label:'KAE Scorecards',icon:Award},{key:'visibility' as KaeTab,label:'L1-L5 Visibility',icon:Eye},{key:'retention' as KaeTab,label:'Retention Bonuses',icon:Shield}];
+const TABS = [{key:'owners' as KaeTab,label:'Account Ownership',icon:Handshake},{key:'scorecards' as KaeTab,label:'KAE Scorecards',icon:Award},{key:'visibility' as KaeTab,label:'L1-L5 Visibility',icon:Eye},{key:'retention' as KaeTab,label:'Retention Bonuses',icon:Shield},{key:'leaderboard' as KaeTab,label:'Leaderboard',icon:Trophy}];
 function fmt(n:number|null|undefined){if(n==null)return'—';return new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(n);}
 function pct(n:number|null|undefined){return n!=null?`${Number(n).toFixed(1)}%`:'—';}
 function KpiCard({icon:Icon,label,value,color,bg}:{icon:any;label:string;value:any;color:string;bg:string}){return(<Card><CardContent className="flex items-center gap-3 py-5"><div className={`p-2.5 rounded-xl ${bg} ${color} shrink-0`}><Icon className="h-5 w-5"/></div><div className="min-w-0"><p className="text-xl font-bold text-gray-900 truncate">{value===null?<Spinner size="sm"/>:value}</p><p className="text-xs text-gray-500 mt-0.5 truncate">{label}</p></div></CardContent></Card>);}
@@ -27,6 +27,7 @@ export default function KaePage() {
   const {data:scorecards,loading:scLoading,refetch:refetchSc}=useFetch<any[]>(tab==='scorecards'?`/kae/scorecard${qs}`:null);
   const {data:visibility,loading:visLoading}=useFetch<any[]>(tab==='visibility'?'/kae/visibility':null);
   const {data:retention,loading:retLoading}=useFetch<any[]>(tab==='retention'?'/kae/retention':null);
+  const {data:leaderboard,loading:lbLoading}=useFetch<any[]>(tab==='leaderboard'?'/kae/leaderboard':null);
 
   async function removeOwner(id:string){await apiFetch(`/kae/owners/${id}`,{method:'DELETE'});refetchOwners();}
   async function approveScore(id:string,status:string){await apiFetch(`/kae/scorecard/${id}/status`,{method:'PATCH',body:JSON.stringify({status})});refetchSc();}
@@ -152,6 +153,31 @@ export default function KaePage() {
                       {[r.retention_6m_paid,r.retention_12m_paid,r.retention_24m_paid].map((paid,i)=>(
                         <Td key={i}>{paid?<CheckCircle className="h-4 w-4 text-green-500"/>:<XCircle className="h-4 w-4 text-gray-300"/>}</Td>
                       ))}
+                    </Tr>
+                  ))}
+                </Tbody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab==='leaderboard'&&(
+        <Card data-testid="kae-leaderboard-panel">
+          <CardHeader><h2 className="font-semibold text-gray-800">KAE Leaderboard</h2><p className="text-xs text-gray-400 mt-0.5">Ranked by total revenue (v_kae_summary)</p></CardHeader>
+          <CardContent className="p-0">
+            {lbLoading?<div className="flex justify-center py-10"><Spinner size="lg"/></div>:(
+              <Table><Thead><tr><Th>KAE</Th><Th>Scorecards</Th><Th>Avg Score</Th><Th>Accounts</Th><Th>Revenue</Th><Th>Collected</Th><Th>Incentive</Th></tr></Thead>
+                <Tbody>
+                  {!leaderboard?.length?<Tr><Td colSpan={7} className="text-center text-gray-400 py-10 text-sm">No KAE scorecards submitted yet.</Td></Tr>:leaderboard.map(r=>(
+                    <Tr key={r.user_id}>
+                      <Td className="font-medium text-sm">{r.full_name}</Td>
+                      <Td>{r.scorecard_count}</Td>
+                      <Td className="font-semibold">{r.avg_score}</Td>
+                      <Td>{r.accounts_owned}</Td>
+                      <Td className="font-semibold text-green-700">{fmt(r.total_revenue)}</Td>
+                      <Td>{fmt(r.total_collected)}</Td>
+                      <Td>{fmt(r.total_incentive)}</Td>
                     </Tr>
                   ))}
                 </Tbody>

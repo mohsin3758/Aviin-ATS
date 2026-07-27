@@ -182,6 +182,35 @@ export default function ClientsPage() {
                   </div>
                 </div>
               </div>
+              <div style={{ marginBottom: '12px' }}>
+                <select
+                  value={c.priority_tier || 'standard'}
+                  onClick={e => e.stopPropagation()}
+                  onChange={async e => {
+                    e.stopPropagation();
+                    const token = localStorage.getItem('airecruit_token');
+                    await fetch(`/api/clients/${c.id}/tier`, {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify({ priority_tier: e.target.value }),
+                    });
+                    refetch();
+                  }}
+                  style={{
+                    fontSize: '11px', fontWeight: '700', padding: '4px 10px', borderRadius: '999px', border: '1px solid',
+                    cursor: 'pointer',
+                    ...(c.priority_tier === 'strategic'
+                      ? { background: '#FEF3C7', color: '#92400E', borderColor: '#FDE68A' }
+                      : c.priority_tier === 'low_touch'
+                      ? { background: '#F1F5F9', color: '#64748B', borderColor: '#E2E8F0' }
+                      : { background: '#EFF6FF', color: '#1E40AF', borderColor: '#BFDBFE' }),
+                  }}
+                >
+                  <option value="strategic">★ Strategic</option>
+                  <option value="standard">Standard</option>
+                  <option value="low_touch">Low touch</option>
+                </select>
+              </div>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button
                   onClick={() => setSelected(c)}

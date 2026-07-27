@@ -263,3 +263,13 @@ async def kae_summary(month: Optional[int]=None, year: Optional[int]=None,
             FROM client_owners WHERE is_active
         """)
     return {**dict(stats), **dict(own)}
+
+@router.get("/leaderboard")
+async def kae_leaderboard(actor: Actor=Depends(get_actor)):
+    """Per-KAE leaderboard (v_kae_summary) - was defined since P16 but had
+    no caller; /kae/summary above only returns tenant-wide totals."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM v_kae_summary WHERE tenant_id=$1 ORDER BY total_revenue DESC
+        """, actor.tenant_id)
+    return [dict(r) for r in rows]

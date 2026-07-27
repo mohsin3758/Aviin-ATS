@@ -101,8 +101,18 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
         for r in stage_rows:
             by_stage[r["stage"]] = int(r["cnt"])
 
+        # "interview" was split into l1_interview/l2_interview (see STAGES /
+        # applications.py's _DEFAULT_STAGE_KEYS), and tenants can add further
+        # custom rounds (this tenant has l3_interview too, via
+        # pipeline_stage_config) — a plain by_stage["interview"] lookup never
+        # matched any of them, so interview/interview_rate/offer_rate/
+        # upcoming_interviews were silently always undercounted (0 for
+        # upcoming_interviews specifically) on both the Dashboard and
+        # Pipeline Velocity pages until this was caught by the QA suite.
+        # Summed dynamically (not a hardcoded l1+l2) for the same reason
+        # by_stage's keys themselves come from live stage_keys above.
         screened  = by_stage.get("screened",0)
-        interview = by_stage.get("interview",0)
+        interview = sum(v for k, v in by_stage.items() if "interview" in k)
         offer     = by_stage.get("offer",0)
         placed    = by_stage.get("placed",0)
         rejected  = by_stage.get("rejected",0)
@@ -117,7 +127,7 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
             WHERE stage NOT IN ('placed','rejected')
             AND updated_at < NOW() - INTERVAL '7 days'""") or 0
 
-        upcoming = by_stage.get('interview', 0)  # matches Kanban interview column
+        upcoming = interview  # matches Kanban interview column(s): l1 + l2
 
         high_pri = await conn.fetchval("""
             SELECT COUNT(*) FROM applications

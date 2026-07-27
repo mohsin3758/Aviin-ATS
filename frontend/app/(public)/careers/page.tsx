@@ -4,6 +4,49 @@ import { useState } from 'react';
 const TENANT_ID = 'a92d7fd7-fb72-47d8-881e-2493c61717ce';
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '/api';
 
+function TalentCommunitySignup() {
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
+  const [done, setDone] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const subscribe = async () => {
+    if (!email) return;
+    setSaving(true); setErr('');
+    try {
+      const r = await fetch(`${API_BASE}/talent-pool/subscribe`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: TENANT_ID, email, name }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
+      setDone(true);
+    } catch (e: any) { setErr(e.message); }
+    finally { setSaving(false); }
+  };
+
+  if (done) return (
+    <div style={{textAlign:'center',marginTop:'40px',padding:'20px',background:'#EEF2FF',borderRadius:12,fontSize:13,color:'#4338CA'}}>
+      You're on the list — we'll email you when a matching role opens up.
+    </div>
+  );
+
+  return (
+    <div style={{textAlign:'center',marginTop:'40px',padding:'24px',background:'#f8fafc',borderRadius:12}}>
+      <div style={{fontSize:15,fontWeight:700,color:'#1e293b',marginBottom:4}}>Don't see the right role yet?</div>
+      <div style={{fontSize:12,color:'#64748b',marginBottom:12}}>Join our talent community and we'll notify you when something matches.</div>
+      <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name" style={{padding:'8px 12px',borderRadius:8,border:'1px solid #e2e8f0',fontSize:13}} />
+        <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" style={{padding:'8px 12px',borderRadius:8,border:'1px solid #e2e8f0',fontSize:13}} />
+        <button onClick={subscribe} disabled={saving} style={{padding:'8px 18px',background:'#1e40af',color:'#fff',border:'none',borderRadius:8,fontSize:13,fontWeight:700,cursor:'pointer'}}>
+          {saving?'Joining…':'Notify Me'}
+        </button>
+      </div>
+      {err && <div style={{color:'#DC2626',fontSize:12,marginTop:8}}>{err}</div>}
+    </div>
+  );
+}
+
 interface Job {
   id: string;
   title: string;
@@ -48,10 +91,11 @@ function ApplyModal({ job, onClose }: { job: Job; onClose: () => void }) {
     if (!form.full_name || !form.email) { setErr('Name and email are required'); return; }
     setSaving(true); setErr('');
     try {
+      const ref = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('ref') : null;
       const r = await fetch(`${API_BASE}/public/jobs/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, experience_months: Number(form.experience_months)||0, job_id: job.id, tenant_id: TENANT_ID }),
+        body: JSON.stringify({ ...form, experience_months: Number(form.experience_months)||0, job_id: job.id, tenant_id: TENANT_ID, ref }),
       });
       if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
       setDone(true);
@@ -292,6 +336,8 @@ export default function PublicJobsPage() {
             ))}
           </div>
         )}
+
+        <TalentCommunitySignup />
 
         <div style={{textAlign:'center',marginTop:'40px',paddingBottom:'40px',fontSize:'12px',color:'#94a3b8'}}>
           Powered by AVIIN ATS · <a href="/login" style={{color:'#94a3b8',textDecoration:'none'}}>Recruiter Login</a>

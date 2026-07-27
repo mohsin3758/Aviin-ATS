@@ -5,7 +5,7 @@ Jobs: retention bank release, loyalty milestones, KAE months, n8n triggers.
 """
 import httpx
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import db
 
@@ -118,6 +118,131 @@ def _eval(actual, op, expected):
         return False
     except TypeError:
         return False
+
+
+SLA_ESCALATION_GRACE_HOURS = 24  # tier 2 (auto-reassign) only fires if still
+# unresolved this long after tier 1 (alert + manager notify) first fired —
+# not immediately, per the user's explicit choice for approved item 05
+# (layered policy, not instant auto-reassign).
+
+
+async def process_sla_escalations():
+    """Approved items 04+05 (AI Auto-Assignment Engine audit): find_sla_
+    breaches()/find_stalled_assignments() were real since P1/P3 but only
+    ever produced a dashboard card a human had to click — the ten
+    automation_workflows rows for exactly this (SLA Breach Warning, Stale
+    Requisition Alert) had fire_count=0 forever. Layered response per
+    tenant: tier 1 fires the matching n8n webhook + notifies the
+    recruiter's manager (once per alert); tier 2 auto-reassigns via
+    do_reassign() only if the alert is still open SLA_ESCALATION_GRACE_HOURS
+    after tier 1 fired.
+    """
+    logger.info("scheduler: processing SLA escalations")
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id FROM tenants")
+    except Exception as e:
+        logger.error(f"SLA escalation: could not list tenants: {e}")
+        return
+
+    for t in tenants:
+        tid = str(t["id"])
+        try:
+            async with db.tenant_conn(tid) as conn:
+                await _process_tenant_sla_escalations(conn, tid)
+        except Exception as e:
+            logger.error(f"SLA escalation failed for tenant {tid}: {e}")
+
+
+async def _process_tenant_sla_escalations(conn, tenant_id: str):
+    stalled = await conn.fetch("SELECT * FROM find_stalled_assignments(48)")
+    breaches = await conn.fetch("SELECT * FROM find_sla_breaches()")
+    current_alert_ids = []
+
+    for r in stalled:
+        alert_id = f"stale_{r['assignment_id']}"
+        current_alert_ids.append(alert_id)
+        await _handle_escalation_alert(
+            conn, tenant_id, alert_id, "stalled_assignment",
+            requisition_id=r["requisition_id"], assignment_id=r["assignment_id"],
+            title=f"{r['requisition_title']} — no update in {round(r['hours_since_update'])}h",
+            recruiter_id=r["recruiter_id"],
+        )
+
+    for r in breaches:
+        alert_id = f"sla_{r['requisition_id']}"
+        current_alert_ids.append(alert_id)
+        assignment = await conn.fetchrow(
+            "SELECT id, recruiter_id FROM assignments WHERE requisition_id=$1 AND status='active'",
+            r["requisition_id"],
+        )
+        await _handle_escalation_alert(
+            conn, tenant_id, alert_id, "sla_breach",
+            requisition_id=r["requisition_id"],
+            assignment_id=assignment["id"] if assignment else None,
+            title=f"{r['title']} — SLA breached ({round(r['hours_open'])}h open, limit {r['sla_hours']}h)",
+            recruiter_id=assignment["recruiter_id"] if assignment else None,
+        )
+
+    await conn.execute(
+        """UPDATE sla_escalations SET resolved_at=now()
+           WHERE tenant_id=$1 AND resolved_at IS NULL AND NOT (alert_id = ANY($2::text[]))""",
+        tenant_id, current_alert_ids,
+    )
+
+
+async def _handle_escalation_alert(conn, tenant_id, alert_id, alert_type, requisition_id, assignment_id, title, recruiter_id):
+    row = await conn.fetchrow(
+        """INSERT INTO sla_escalations (tenant_id, alert_id, alert_type, requisition_id, assignment_id)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (tenant_id, alert_id) WHERE resolved_at IS NULL DO NOTHING
+           RETURNING *""",
+        tenant_id, alert_id, alert_type, requisition_id, assignment_id,
+    )
+    if row is None:
+        row = await conn.fetchrow(
+            "SELECT * FROM sla_escalations WHERE tenant_id=$1 AND alert_id=$2 AND resolved_at IS NULL",
+            tenant_id, alert_id,
+        )
+    if row is None:
+        return
+
+    if row["tier1_fired_at"] is None:
+        webhook_path = "sla-breach-warning" if alert_type == "sla_breach" else "stale-requisitions"
+        await _notify_n8n(webhook_path, {"alert_id": alert_id, "title": title, "tenant_id": tenant_id})
+        await conn.execute(
+            "UPDATE automation_workflows SET last_fired_at=now(), fire_count=fire_count+1 WHERE tenant_id=$1 AND webhook_path=$2",
+            tenant_id, webhook_path,
+        )
+        if recruiter_id:
+            manager = await conn.fetchrow("SELECT reporting_to FROM users WHERE id=$1", recruiter_id)
+            if manager and manager["reporting_to"]:
+                # notifications has both an older (recipient_user_id/body) and a
+                # newer (user_id/message) column generation from different
+                # features; notifications_check requires recipient_user_id (or
+                # recipient_role) to be set, and "message" isn't a real column
+                # at all — matches the working pattern in nda.py/resume_intake_service.py.
+                await conn.execute(
+                    """INSERT INTO notifications (tenant_id,user_id,recipient_user_id,title,body,type,resource,resource_id,channel)
+                       VALUES ($1,$2,$2,$3,$4,'warning',$5,$6,'inapp')""",
+                    tenant_id, manager["reporting_to"], "SLA escalation", title,
+                    "requisition" if requisition_id else None, str(requisition_id) if requisition_id else None,
+                )
+        await conn.execute("UPDATE sla_escalations SET tier1_fired_at=now() WHERE id=$1", row["id"])
+        logger.info(f"SLA escalation tier 1 fired: {alert_id}")
+
+    elif row["tier2_fired_at"] is None and assignment_id:
+        hours_since_first = (datetime.now(timezone.utc) - row["first_detected_at"]).total_seconds() / 3600
+        if hours_since_first >= SLA_ESCALATION_GRACE_HOURS:
+            try:
+                result = await conn.fetchrow(
+                    "SELECT * FROM do_reassign($1, $2, NULL)",
+                    assignment_id, f"Auto-escalation: unresolved {SLA_ESCALATION_GRACE_HOURS}h+ after SLA alert",
+                )
+                await conn.execute("UPDATE sla_escalations SET tier2_fired_at=now() WHERE id=$1", row["id"])
+                logger.info(f"SLA escalation tier 2 auto-reassigned {assignment_id} -> {result['new_recruiter_id']}")
+            except Exception as e:
+                logger.warning(f"SLA escalation tier 2 reassign failed for {assignment_id}: {e}")
 
 
 async def run_pipeline_auto_move():
@@ -326,6 +451,10 @@ def start_scheduler():
                       id="resume_backlog", replace_existing=True)
     scheduler.add_job(process_nurture_sequences, "interval", hours=4, id="nurture_sequences", replace_existing=True)
     scheduler.add_job(process_nurture_dispatch, "interval", minutes=15, id="nurture_dispatch", replace_existing=True)
+    # Every 30 min — approved items 04+05: fire SLA-breach/stale-requisition
+    # alerts automatically instead of waiting for a human to open the panel,
+    # and auto-reassign after a grace period if still unresolved.
+    scheduler.add_job(process_sla_escalations, "interval", minutes=30, id="sla_escalations", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

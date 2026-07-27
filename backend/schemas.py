@@ -150,7 +150,7 @@ class AssignmentCreate(BaseModel):
 
 
 class ReassignRequest(BaseModel):
-    new_recruiter_id: str
+    new_recruiter_id: Optional[str] = None
     reason: Optional[str] = None
 
 

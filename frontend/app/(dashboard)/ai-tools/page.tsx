@@ -15,11 +15,28 @@ export default function AiToolsPage() {
   const [ranking, setRanking] = useState<any>(null);
   const [candId, setCandId] = useState('');
   const { data: cands } = useFetch<any[]>('/candidates');
+  const [genForm, setGenForm] = useState({ title:'', skills:'', location:'', employment_type:'contract', experience_years:'', notes:'' });
+  const [genResult, setGenResult] = useState<any>(null);
+  const [genLoading, setGenLoading] = useState(false);
 
   async function optimizeJd() {
     if (!jdText) return; setLoading(true);
     try { const r = await apiFetch(`/ai-tools/jd-optimizer?jd_text=${encodeURIComponent(jdText)}`, {method:'POST'}); setJdResult(r); }
     finally { setLoading(false); }
+  }
+  async function generateJd() {
+    if (!genForm.title) return; setGenLoading(true);
+    try {
+      const r = await apiFetch('/jd/generate', { method:'POST', body: JSON.stringify({
+        title: genForm.title,
+        skills_required: genForm.skills.split(',').map(s=>s.trim()).filter(Boolean),
+        location: genForm.location || null,
+        employment_type: genForm.employment_type,
+        experience_years: genForm.experience_years ? Number(genForm.experience_years) : null,
+        notes: genForm.notes || null,
+      })});
+      setGenResult(r);
+    } finally { setGenLoading(false); }
   }
   async function genQuestions() {
     if (!selReq) return; setLoading(true);
@@ -43,10 +60,36 @@ export default function AiToolsPage() {
         </div>
       </div>
       <div className="tabs">
-        {[['jd-optimizer','📄 JD Optimizer'],['questions','❓ Interview Questions'],['ranking','⭐ Ranking Explanation']].map(([k,l])=>(
+        {[['jd-generator','🪄 JD Generator'],['jd-optimizer','📄 JD Optimizer'],['questions','❓ Interview Questions'],['ranking','⭐ Ranking Explanation']].map(([k,l])=>(
           <button key={k} className={`tab ${tab===k?'active':''}`} onClick={()=>setTab(k)}>{l}</button>
         ))}
       </div>
+      {tab==='jd-generator' && (
+        <div className="card">
+          <div className="card-header"><h3>JD Generator</h3><span className="badge badge-purple">Ollama Qwen2.5 · Cached</span></div>
+          <div className="card-body space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <input className="input" placeholder="Job title *" value={genForm.title} onChange={e=>setGenForm({...genForm,title:e.target.value})} />
+              <input className="input" placeholder="Location" value={genForm.location} onChange={e=>setGenForm({...genForm,location:e.target.value})} />
+              <input className="input" placeholder="Skills (comma-separated)" value={genForm.skills} onChange={e=>setGenForm({...genForm,skills:e.target.value})} />
+              <input className="input" type="number" placeholder="Experience (years)" value={genForm.experience_years} onChange={e=>setGenForm({...genForm,experience_years:e.target.value})} />
+              <select className="input" value={genForm.employment_type} onChange={e=>setGenForm({...genForm,employment_type:e.target.value})}>
+                {['contract','fulltime','c2h','fte','part_time'].map(t=><option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <textarea className="input" rows={3} placeholder="Additional notes (optional)" value={genForm.notes} onChange={e=>setGenForm({...genForm,notes:e.target.value})} />
+            <button onClick={generateJd} disabled={genLoading||!genForm.title} className="btn btn-primary">
+              {genLoading ? <Spinner size="sm" /> : <Sparkles size={14} />} Generate Draft JD
+            </button>
+            {genResult && (
+              <div className="p-4 rounded-xl space-y-2" style={{ background:'var(--gray-50)', border:'1px solid var(--gray-200)' }}>
+                {genResult.cached && <span className="badge badge-green">Served from semantic cache (&gt;0.95 similarity)</span>}
+                <div className="whitespace-pre-wrap text-sm">{genResult.jd_text}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {tab==='jd-optimizer' && (
         <div className="card">
           <div className="card-header"><h3>JD Quality Optimizer</h3><span className="badge badge-purple">Rules Engine · Zero LLM</span></div>

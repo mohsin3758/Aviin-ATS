@@ -15,7 +15,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 
 router = APIRouter(prefix="/features", tags=["features"])
 OLLAMA_URL = "http://ollama:11434/api/generate"
@@ -447,8 +447,11 @@ async def public_status(token: str):
 gdpr_router = APIRouter(prefix="/gdpr", tags=["gdpr"])
 
 @gdpr_router.post("/archive-inactive")
-async def archive_inactive(days_threshold: int = 90, actor: Actor = Depends(get_actor)):
-    """Anonymize candidates with no activity for N days (GDPR compliance)."""
+async def archive_inactive(days_threshold: int = 90, actor: Actor = Depends(require_role("admin", "super_admin"))):
+    """Anonymize candidates with no activity for N days (GDPR compliance).
+
+    Irreversible (overwrites email/phone/name/resume text+embedding in
+    place), so admin-only — was previously open to any authenticated actor."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         stale = await conn.fetch("""
             SELECT c.id, c.full_name FROM candidates c

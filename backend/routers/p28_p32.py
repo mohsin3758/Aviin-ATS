@@ -154,38 +154,15 @@ async def public_jobs(location: Optional[str]=None, type: Optional[str]=None,
         """, actor.tenant_id, location, type, search)
     return [dict(r) for r in rows]
 
-@jobs_router.get("/{job_id}")
-async def get_job(job_id: str, actor: Actor=Depends(get_actor)):
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        row = await conn.fetchrow("""
-            SELECT r.id, r.title, r.description, r.location, r.employment_type,
-                   r.skills_required, r.positions_count, r.created_at
-            FROM requisitions r WHERE r.id=$1 AND r.tenant_id=$2 AND r.status='open'
-        """, job_id, actor.tenant_id)
-    if not row: raise HTTPException(404,"Job not found")
-    return dict(row)
-
-@jobs_router.post("/{job_id}/apply")
-async def apply_for_job(job_id: str, body: dict, actor: Actor=Depends(get_actor)):
-    """Direct job application from job board."""
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        # Find or create candidate
-        cand = await conn.fetchrow(
-            "SELECT id FROM candidates WHERE email=$1 AND tenant_id=$2",
-            body.get('email'), actor.tenant_id)
-        if not cand:
-            cand = await conn.fetchrow("""
-                INSERT INTO candidates (tenant_id,full_name,email,phone,total_exp_mo,source)
-                VALUES ($1,$2,$3,$4,$5,'job_board') RETURNING id
-            """, actor.tenant_id, body.get('full_name'), body.get('email'),
-                 body.get('phone'), body.get('experience_months',0))
-        # Create application
-        app = await conn.fetchrow("""
-            INSERT INTO applications (tenant_id,candidate_id,requisition_id,stage)
-            VALUES ($1,$2,$3,'applied')
-            ON CONFLICT DO NOTHING RETURNING id
-        """, actor.tenant_id, cand['id'], job_id)
-    return {"applied": True, "candidate_id": str(cand['id'])}
+# GET /jobs/{job_id} and POST /jobs/{job_id}/apply were removed here —
+# both were unreachable (the internal Job Board page is read-only browse,
+# no apply button; the real apply flow only ever ran through
+# public_jobs_router's /public/jobs/{job_id} and /public/jobs/apply
+# below, which don't require login, unlike these did). Two parallel,
+# independently-coded "job board apply" implementations is exactly the
+# kind of duplication that silently drifts out of sync — e.g. referral
+# click-through tracking was added to /public/jobs/apply only, and
+# would have missed anyone still on this dead path.
 
 # ── P31: Salary Benchmarking ──────────────────────────────────
 salary_router = APIRouter(prefix="/salary-benchmark", tags=["salary-benchmark"])
@@ -289,12 +266,17 @@ async def mark_all_read(actor: Actor=Depends(get_actor)):
 
 @notif_router.post("")
 async def create_notification(body: dict, actor: Actor=Depends(get_actor)):
+    # "message" isn't a real column (notifications has body instead), and
+    # notifications_check requires recipient_user_id or recipient_role to be
+    # set — same bug class as scheduler.py's SLA-escalation insert, fixed the
+    # same way (matches the working nda.py/resume_intake_service.py pattern).
+    target_user = body.get('user_id')
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
-            INSERT INTO notifications (tenant_id,user_id,title,message,type,resource,resource_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
-        """, actor.tenant_id, body.get('user_id'), body['title'],
-             body.get('message'), body.get('type','info'),
+            INSERT INTO notifications (tenant_id,user_id,recipient_user_id,recipient_role,title,body,type,resource,resource_id,channel)
+            VALUES ($1,$2,$2,$3,$4,$5,$6,$7,$8,'inapp') RETURNING *
+        """, actor.tenant_id, target_user, body.get('recipient_role') if not target_user else None,
+             body['title'], body.get('message'), body.get('type', 'info'),
              body.get('resource'), body.get('resource_id'))
     return dict(row)
 
@@ -424,5 +406,11 @@ async def public_apply(body: dict):
             VALUES ($1::uuid, $2, $3::uuid, 'sourced')
             ON CONFLICT DO NOTHING
         """, tenant_id, cand['id'], job_id)
+        ref_code = body.get('ref')
+        if ref_code:
+            await conn.execute("""
+                UPDATE referral_links SET candidate_ids = array_append(candidate_ids, $1::uuid)
+                WHERE tenant_id=$2::uuid AND unique_code=$3 AND NOT ($1::uuid = ANY(candidate_ids))
+            """, cand['id'], tenant_id, ref_code)
     return {"applied": True, "candidate_id": str(cand['id'])}
 

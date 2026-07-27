@@ -17,6 +17,17 @@ _DEFAULT_STAGE_KEYS = frozenset({
     "l1_interview", "l2_interview", "offer", "offer_accepted", "placed", "rejected", "hold",
 })
 
+# Approved item 08: which stage transitions auto-create a typed task for the
+# assigned recruiter, and what that task is. Deliberately not every stage —
+# e.g. "sourced"/"hold" have no single obvious next action.
+_STAGE_AUTO_TASK = {
+    "screened":        {"type": "screening_call",       "title": "Screening call: {name}"},
+    "l1_interview":    {"type": "interview_coordination", "title": "Coordinate L1 interview: {name}"},
+    "l2_interview":    {"type": "interview_coordination", "title": "Coordinate L2 interview: {name}"},
+    "offer":           {"type": "offer_followup",        "title": "Offer follow-up: {name}"},
+    "offer_accepted":  {"type": "joining_coordination",   "title": "Coordinate joining: {name}"},
+}
+
 
 
 @router.get("")
@@ -274,6 +285,25 @@ async def update_stage(application_id: str, body: StageUpdate, actor: Actor = De
                 WHERE id = $2 RETURNING {FIELDS}""",
             body.stage, application_id,
         )
+
+        # Approved item 08 (AI Auto-Assignment Engine audit): recruiter_tasks
+        # was real (CRUD + UI) but 100% manual — no stage transition ever
+        # auto-created one. Only fires when the application already has an
+        # assigned recruiter (nothing to hand a task to otherwise), and only
+        # for stages where there's a genuinely distinct next action — not
+        # every stage (sourced/contacted/hold etc. would just be task-list
+        # noise with nothing concrete to do).
+        _auto_task = _STAGE_AUTO_TASK.get(body.stage)
+        if _auto_task and row["assigned_recruiter_id"]:
+            _cand = await conn.fetchrow("SELECT full_name FROM candidates WHERE id=$1", row["candidate_id"])
+            await conn.execute(
+                """INSERT INTO recruiter_tasks
+                     (tenant_id, requisition_id, application_id, candidate_name, recruiter_id, task_type, title, priority, status)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,'medium','pending')""",
+                actor.tenant_id, row["requisition_id"], application_id,
+                _cand["full_name"] if _cand else None, row["assigned_recruiter_id"],
+                _auto_task["type"], _auto_task["title"].format(name=_cand["full_name"] if _cand else "candidate"),
+            )
 
         await events.write_outbox(
             conn, actor.tenant_id, "application.stage_changed",

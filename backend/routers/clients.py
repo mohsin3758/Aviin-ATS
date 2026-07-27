@@ -34,8 +34,26 @@ class ClientIn(BaseModel):
 async def list_clients(actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT id, name, industry, created_at FROM clients ORDER BY name")
+            "SELECT id, name, industry, priority_tier, created_at FROM clients ORDER BY name")
         return [dict(r) for r in rows]
+
+
+class ClientTierIn(BaseModel):
+    priority_tier: str
+
+
+@router.patch("/clients/{client_id}/tier")
+async def update_client_tier(client_id: str, body: ClientTierIn, actor: Actor = Depends(get_actor)):
+    if body.priority_tier not in ("strategic", "standard", "low_touch"):
+        raise HTTPException(400, "priority_tier must be strategic, standard, or low_touch")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE clients SET priority_tier=$1 WHERE id=$2 RETURNING id, name, priority_tier",
+            body.priority_tier, client_id,
+        )
+        if not row:
+            raise HTTPException(404, "Client not found")
+    return dict(row)
 
 
 @router.post("/clients", status_code=201)

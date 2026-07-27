@@ -5,11 +5,19 @@ import { ThemeProvider } from '@/components/providers/ThemeProvider';
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getToken } from '@/lib/auth';
+import { apiFetch } from '@/lib/useFetch';
 import { GlobalSearch } from '@/components/GlobalSearch';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   useEffect(() => { if (!getToken()) router.replace('/login'); }, [router]);
+  useEffect(() => {
+    if (!getToken()) return;
+    const ping = () => { apiFetch('/recruiter-tracking/heartbeat', { method: 'POST' }).catch(() => {}); };
+    ping();
+    const id = setInterval(ping, 120000);
+    return () => clearInterval(id);
+  }, []);
   return (
     <ThemeProvider>
       <div suppressHydrationWarning style={{ display:'flex', height:'100vh', overflow:'hidden', background:'var(--gray-50,#f8fafc)' }}>

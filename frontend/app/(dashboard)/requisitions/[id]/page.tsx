@@ -7,7 +7,7 @@ import {
   ArrowLeft, MapPin, Users, Clock, Briefcase, Edit, BarChart2,
   Plus, X, ChevronDown, Mail, Phone, Download, ExternalLink,
   Star, MessageSquare, FileText, Activity, Search, SlidersHorizontal,
-  RotateCcw, CheckCircle, AlertTriangle, Send, UserCog, Repeat
+  RotateCcw, CheckCircle, AlertTriangle, Send, UserCog, Repeat, Sparkles
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -780,6 +780,9 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  const [autoAssigning, setAutoAssigning] = useState(false);
+  const [autoResult, setAutoResult] = useState<any>(null);
+  const [autoErr, setAutoErr] = useState('');
 
   const role = getTokenPayload()?.role || '';
   const canReassign = ['admin', 'super_admin', 'manager'].includes(role);
@@ -798,6 +801,25 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
       }
       setShowForm(false); setNewRecruiterId(''); setReason(''); refetch();
     } catch (e: any) { setErr(e?.message || 'Failed'); } finally { setSaving(false); }
+  }
+
+  async function autoAssign() {
+    setAutoAssigning(true); setAutoErr(''); setAutoResult(null);
+    try {
+      const result = await apiFetch(`/requisitions/${reqId}/assign`, { method: 'POST' });
+      setAutoResult(result);
+      refetch();
+    } catch (e: any) { setAutoErr(e?.message || 'Auto-assign failed'); } finally { setAutoAssigning(false); }
+  }
+
+  async function autoReassign() {
+    if (!active) return;
+    setAutoAssigning(true); setAutoErr(''); setAutoResult(null);
+    try {
+      const result = await apiFetch(`/assignments/${active.id}/reassign`, { method: 'POST', body: JSON.stringify({ reason: 'Auto-picked next-best match' }) });
+      setAutoResult({ recruiter_name: result.new_recruiter_name, match_score: result.match_score });
+      refetch();
+    } catch (e: any) { setAutoErr(e?.message || 'Auto-reassign failed'); } finally { setAutoAssigning(false); }
   }
 
   return (
@@ -819,12 +841,37 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
           </div>
         )}
         {canReassign && !showForm && (
-          <button onClick={() => { setShowForm(true); setNewRecruiterId(''); setErr(''); }}
-            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', fontSize: 11, fontWeight: 700, color: '#374151', cursor: 'pointer', flexShrink: 0 }}>
-            <Repeat size={12} /> {recruiter ? 'Reassign' : 'Assign'}
-          </button>
+          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+            {!recruiter && (
+              <button onClick={autoAssign} disabled={autoAssigning}
+                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
+                <Sparkles size={12} /> {autoAssigning ? 'Assigning…' : 'Auto-Assign (AI)'}
+              </button>
+            )}
+            {recruiter && (
+              <button onClick={autoReassign} disabled={autoAssigning} title="Auto-pick the next-best alternative recruiter"
+                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
+                <Sparkles size={12} /> {autoAssigning ? 'Reassigning…' : 'Auto-Reassign (AI)'}
+              </button>
+            )}
+            <button onClick={() => { setShowForm(true); setNewRecruiterId(''); setErr(''); }}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', fontSize: 11, fontWeight: 700, color: '#374151', cursor: 'pointer' }}>
+              <Repeat size={12} /> {recruiter ? 'Reassign' : 'Assign'}
+            </button>
+          </div>
         )}
       </div>
+      {autoErr && (
+        <div style={{ marginTop: 10, fontSize: 11, color: '#DC2626', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '8px 10px' }}>{autoErr}</div>
+      )}
+      {autoResult && (
+        <div style={{ marginTop: 10, fontSize: 11, color: '#4338CA', background: '#EEF2FF', border: '1px solid #C7D2FE', borderRadius: 8, padding: '8px 10px', lineHeight: 1.6 }}>
+          <strong>{autoResult.recruiter_name}</strong> auto-assigned (match score {Math.round((autoResult.match_score || 0) * 100) / 100}%).
+          {autoResult.explanation?.skill_match_count != null && (
+            <> {autoResult.explanation.skill_match_count} skill match(es), {autoResult.explanation.available_capacity} slot(s) free.</>
+          )}
+        </div>
+      )}
       {showForm && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9' }}>
           <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>NEW RECRUITER</label>

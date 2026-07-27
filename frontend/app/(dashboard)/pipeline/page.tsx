@@ -205,7 +205,7 @@ function PipelineInner() {
                       {jobSearch && <button onClick={() => setJobSearch('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 0 }}><X size={11} /></button>}
                     </div>
                   </div>
-                  <div style={{ maxHeight: 340, overflowY: 'auto' }}>
+                  <div style={{ maxHeight: 340, overflowY: 'auto' }} data-testid="requisition-list">
                     {reqList.length === 0 && (
                       <div style={{ padding: '20px', textAlign: 'center', color: '#94A3B8', fontSize: 12 }}>No open jobs found</div>
                     )}

@@ -18,11 +18,6 @@ try:
 except ImportError:
     DEDUP_AVAILABLE = False
 from services.improved_parser import parse_resume_v2, extract_skills_from_text, calc_confidence
-try:
-    from services.ai_resume_parser import parse_resume_with_ai, is_configured as _ai_configured
-except Exception:
-    parse_resume_with_ai = None
-    _ai_configured = lambda: False
 
 
 def _clean_text(text: str) -> str:
@@ -519,13 +514,39 @@ async def match_requisition(conn, tenant_id: str, subject: str, skills: list, jo
     return None
 
 
+async def _pick_round_robin_recruiter(conn, tenant_id: str):
+    """Approved item 03 (AI Auto-Assignment Engine audit): resume intake
+    never set applications.assigned_recruiter_id, so every inbound resume
+    landed fully unowned. Round-robin = least current open-application
+    load among active, not-on-leave recruiters — self-correcting, no
+    rotation-cursor table to drift out of sync. Returns None (leave
+    unassigned) if no eligible recruiter exists rather than guessing."""
+    row = await conn.fetchrow("""
+        SELECT u.id
+        FROM users u
+        LEFT JOIN applications a ON a.assigned_recruiter_id = u.id
+            AND a.tenant_id = u.tenant_id AND a.stage NOT IN ('rejected','placed')
+        WHERE u.tenant_id = $1 AND u.role = 'recruiter' AND u.is_active
+          AND NOT EXISTS (
+            SELECT 1 FROM recruiter_leave rl
+            WHERE rl.recruiter_id = u.id AND rl.tenant_id = u.tenant_id
+              AND CURRENT_DATE BETWEEN rl.start_date AND rl.end_date
+          )
+        GROUP BY u.id
+        ORDER BY COUNT(a.id) ASC, u.full_name ASC
+        LIMIT 1
+    """, tenant_id)
+    return row["id"] if row else None
+
+
 async def create_application(conn, tenant_id: str, candidate_id: str, requisition_id: str):
     try:
+        recruiter_id = await _pick_round_robin_recruiter(conn, tenant_id)
         await conn.execute("""
-            INSERT INTO applications(tenant_id,requisition_id,candidate_id,stage)
-            VALUES($1,$2,$3,'sourced')
+            INSERT INTO applications(tenant_id,requisition_id,candidate_id,stage,assigned_recruiter_id)
+            VALUES($1,$2,$3,'sourced',$4)
             ON CONFLICT(tenant_id,requisition_id,candidate_id) DO NOTHING""",
-            tenant_id, requisition_id, candidate_id)
+            tenant_id, requisition_id, candidate_id, recruiter_id)
     except Exception as e:
         print(f'[ResumeIntake] Application insert: {e}')
 
@@ -824,6 +845,7 @@ async def process_email_for_resume(
     # the rest of this item's processing, since catching a Python exception
     # doesn't clear that - every later query on this same conn then failed
     # too with "current transaction is aborted".
+    requisition_id = None
     if candidate_id:
         requisition_id = await match_requisition(conn, tenant_id, subject, parsed.get('skills', []), job_board)
         if requisition_id:

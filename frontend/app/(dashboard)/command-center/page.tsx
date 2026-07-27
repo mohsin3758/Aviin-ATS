@@ -1,10 +1,54 @@
 'use client';
 
-import { TrendingUp, Users, Target, AlertTriangle, Activity, Zap, Shield } from 'lucide-react';
+import { TrendingUp, Users, Target, AlertTriangle, Activity, Zap, Shield, Check, Bell } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Table, Thead, Th, Tbody, Tr, Td } from '@/components/ui/Table';
-import { useFetch } from '@/lib/useFetch';
+import { useFetch, apiFetch } from '@/lib/useFetch';
+
+interface AlertRow { alert_id: string; type: string; severity: 'warning' | 'critical'; title: string; detail: string; acknowledged: boolean; }
+
+function OperationalAlertsPanel() {
+  const { data, refetch } = useFetch<{ alerts: AlertRow[]; unacknowledged: number }>('/alerts');
+  const alerts = (data?.alerts || []).filter(a => !a.acknowledged);
+
+  const ack = async (alert_id: string) => {
+    await apiFetch('/alerts/acknowledge', { method: 'POST', body: JSON.stringify({ alert_id }) });
+    refetch();
+  };
+
+  if (!data) return null;
+  if (!alerts.length) return (
+    <Card>
+      <CardContent className="flex items-center gap-2 py-4 text-sm text-gray-500">
+        <Check className="h-4 w-4 text-green-600" /> No open alerts — no stalled assignments or SLA breaches right now.
+      </CardContent>
+    </Card>
+  );
+
+  return (
+    <Card data-testid="operational-alerts-panel">
+      <CardHeader>
+        <h2 className="font-semibold text-gray-800 flex items-center gap-2">
+          <Bell className="h-4 w-4" /> Operational Alerts ({alerts.length})
+        </h2>
+        <p className="text-xs text-gray-400 mt-0.5">Stalled assignments (no update in 48h+) and SLA breaches, from find_stalled_assignments() / find_sla_breaches()</p>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {alerts.map(a => (
+          <div key={a.alert_id} className="flex items-center gap-3 p-2 rounded-lg border border-gray-100">
+            <AlertTriangle className={`h-4 w-4 shrink-0 ${a.severity === 'critical' ? 'text-red-600' : 'text-amber-600'}`} />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-gray-800 truncate">{a.title}</p>
+              <p className="text-xs text-gray-500">{a.detail}</p>
+            </div>
+            <button onClick={() => ack(a.alert_id)} className="text-xs font-semibold text-blue-600 hover:underline shrink-0">Acknowledge</button>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
 
 interface FunnelRow { client_id: string; client_name: string; submittals_count: number; offers_count: number; placements_count: number; }
 interface CapacityRow { recruiter_id: string; full_name: string; capacity_weekly: number; active_assignments: number; utilization_pct: number; }
@@ -87,6 +131,8 @@ export default function WarRoomPage() {
         <HeroCard label="Avg Utilization" value={avgUtilization !== null ? `${avgUtilization}%` : null} icon={Activity} color="text-purple-600" bg="bg-purple-50" />
         <HeroCard label="Skill Gaps" value={skillGap ? skillGap.filter(s => s.gap > 0).length : null} icon={Zap} color="text-amber-600" bg="bg-amber-50" />
       </div>
+
+      <OperationalAlertsPanel />
 
       {!loaded && (
         <div className="flex justify-center py-10"><Spinner size="lg" /></div>
