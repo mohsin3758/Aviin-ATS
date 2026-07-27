@@ -5,6 +5,7 @@ export default defineConfig({
   testDir: '.',
   timeout: 60000,
   retries: 1,
+  globalSetup: require.resolve('./global-setup'),
   use: {
     headless: true,
     screenshot: 'only-on-failure',

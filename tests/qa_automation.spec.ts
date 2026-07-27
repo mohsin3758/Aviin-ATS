@@ -1,10 +1,30 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, APIRequestContext } from '@playwright/test';
+import { AUTH_FILE } from './global-setup';
 
 const BASE = 'http://localhost:3001';
 const API  = 'http://localhost:8080';
 const EMAIL = process.env.QA_EMAIL || 'admin@example.com';
 const PASS  = process.env.QA_PASSWORD || 'changeme';
 const TID   = process.env.TENANT_ID || 'a92d7fd7-fb72-47d8-881e-2493c61717ce';  // AVIIN Jobs Services tenant
+
+// Every `page`-based test in this file reuses the session global-setup
+// already established, instead of re-submitting the login form per
+// describe block (see global-setup.ts for why: the login endpoint is
+// rate-limited and this file used to log in fresh 18+ times per run).
+test.use({ storageState: AUTH_FILE });
+
+// The handful of tests below that need a raw bearer token (for direct
+// `request.post`/`get` calls outside the page session) share ONE cached
+// login instead of each doing their own — same reasoning.
+let _cachedToken: string | null = null;
+async function getApiToken(request: APIRequestContext): Promise<string> {
+  if (_cachedToken) return _cachedToken;
+  const r = await request.post(`${API}/auth/login`, {
+    data: { email: EMAIL, password: PASS, tenant_id: TID },
+  });
+  _cachedToken = (await r.json()).access_token;
+  return _cachedToken!;
+}
 
 // Suite 1: API Health
 test.describe('S1 API Health', () => {
@@ -50,8 +70,12 @@ test.describe('S2 Zero-Token AI', () => {
   });
   test('assign-with-explanation returns recruiter + explanation', async ({ request }) => {
     if (!TID) return test.skip();
+    // assign_with_explanation() 409s on a non-open requisition (by design —
+    // see requisitions.py) — reqs[0] isn't guaranteed to be 'open', so this
+    // must filter, not just grab the first one.
     const reqs = await request.get(`${API}/requisitions`, { headers: { 'x-tenant-id': TID } });
-    const reqId = (await reqs.json())[0]?.id;
+    const reqList = await reqs.json();
+    const reqId = (Array.isArray(reqList) ? reqList : reqList.items || []).find((r: { status: string }) => r.status === 'open')?.id;
     if (!reqId) return test.skip();
     const r = await request.post(`${API}/requisitions/${reqId}/assign`, { headers: { 'x-tenant-id': TID } });
     const body = await r.json();
@@ -80,13 +104,6 @@ test.describe('S2 Zero-Token AI', () => {
 
 // Suite 3: Frontend
 test.describe('S3 Frontend Pages', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
-  });
   const pages = [
     ['dashboard', 'T1 Command Center'],
     ['pipeline', 'T2 Kanban'],
@@ -118,14 +135,6 @@ test.describe('S3 Frontend Pages', () => {
 
 // Suite 5: Recruiter Command Center (P5)
 test.describe('S5 Recruiter Command Center', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
-  });
-
   test('stat cards visible with numeric values', async ({ page }) => {
     await page.goto(`${BASE}/dashboard`);
     await page.waitForSelector('[data-testid="stat-cards"]', { state: 'visible', timeout: 10000 });
@@ -166,18 +175,16 @@ test.describe('S5 Recruiter Command Center', () => {
 
 // Suite 6: Kanban Pipeline Board (P6)
 test.describe('S6 Kanban Pipeline Board', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
-  });
-
   test('pipeline list shows requisitions', async ({ page }) => {
     await page.goto(`${BASE}/pipeline`);
     await page.waitForSelector('[data-testid="requisition-list"]', { state: 'visible', timeout: 10000 });
-    const count = await page.locator('[data-testid="requisition-list"] a').count();
+    // Job entries are <button onClick={() => selectJob(r.id)}>, not <a> tags.
+    // The container renders before its async-fetched reqList populates, so
+    // a bare .count() right after can race and see zero buttons — expect()
+    // on a locator count auto-retries until the timeout, a plain .count()
+    // read does not.
+    await expect(page.locator('[data-testid="requisition-list"] button').first()).toBeVisible({ timeout: 10000 });
+    const count = await page.locator('[data-testid="requisition-list"] button').count();
     expect(count).toBeGreaterThan(0);
   });
 
@@ -225,14 +232,6 @@ test.describe('S6 Kanban Pipeline Board', () => {
 
 // Suite 7: Candidate 360 View (P7)
 test.describe('S7 Candidate 360 View', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
-  });
-
   test('candidate list shows candidates', async ({ page }) => {
     await page.goto(`${BASE}/candidates`);
     await page.waitForSelector('[data-testid="candidate-list"]', { state: 'visible', timeout: 10000 });
@@ -271,38 +270,30 @@ test.describe('S7 Candidate 360 View', () => {
     await page.waitForSelector('[data-testid="applications-panel"]', { state: 'visible', timeout: 10000 });
   });
 
-  test('assessment tab renders MCQ questions', async ({ page }) => {
-    if (!TID) return test.skip();
-    const resp = await page.request.get(`${API}/candidates`, {
-      headers: { 'x-tenant-id': TID },
-    });
-    const raw = await resp.json();
-    const candidates = Array.isArray(raw) ? raw : (raw.items || []);
-    const candId = candidates.find((c: { full_name: string; id: string }) => !c.full_name.startsWith('QA'))?.id;
-
-    await page.goto(`${BASE}/candidates/${candId}`);
-    await page.waitForLoadState('networkidle');
-    await page.waitForTimeout(1500);
-    await page.click('[data-tab="assessment"]');
-    await page.waitForSelector('[data-testid="assessment-panel"]', { state: 'visible', timeout: 10000 });
+  // There is no per-candidate "assessment" tab on the 360 view anymore —
+  // candidates/[id]/page.tsx's TABS only has profile/applications/interviews/
+  // offers/notes/parse-history, no assessment key at all. Technical
+  // assessments (P20) are their own dedicated module now, not embedded per
+  // candidate — checking the real thing instead of a tab that doesn't exist.
+  test('assessments page loads with real data', async ({ page }) => {
+    await page.goto(`${BASE}/assessments`);
+    await page.waitForSelector('[data-testid="assessments-page"]', { state: 'visible', timeout: 10000 });
+    await expect(page.locator('[data-testid="assessment-kpis"]')).toBeVisible();
   });
 });
 
 // Suite 8: Analytics BI Dashboard (P8)
 test.describe('S8 Analytics BI Dashboard', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
-  });
-
   test('analytics KPI cards visible', async ({ page }) => {
+    // [data-testid="analytics-kpi"] itself was always real and became visible
+    // fine — only the expected label text was stale. Current cards are Total
+    // Candidates / Open Jobs / Total Placements / Interviews Today / Avg Days
+    // to Hire / Placed (90d) / Offers Pending / Active Pipeline, not
+    // "Placement Rate"/"Skill Gaps"/"Utilization".
     await page.goto(`${BASE}/analytics`);
     await page.waitForSelector('[data-testid="analytics-kpi"]', { state: 'visible', timeout: 10000 });
     const text = await page.locator('[data-testid="analytics-kpi"]').textContent();
-    expect(text).toMatch(/Placement Rate|Skill Gaps|Utilization/);
+    expect(text).toMatch(/Total Candidates|Total Placements|Active Pipeline/);
   });
 
   test('funnel chart renders', async ({ page }) => {
@@ -323,14 +314,6 @@ test.describe('S8 Analytics BI Dashboard', () => {
 
 // Suite 9: CEO War Room (P9)
 test.describe('S9 CEO War Room', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
-  });
-
   test('war room KPI cards visible', async ({ page }) => {
     await page.goto(`${BASE}/command-center`);
     await page.waitForSelector('[data-testid="war-room-kpis"]', { state: 'visible', timeout: 10000 });
@@ -351,14 +334,6 @@ test.describe('S9 CEO War Room', () => {
 
 // Suite 10: Finance ERP Dashboard (P10)
 test.describe('S10 Finance ERP', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
-  });
-
   test('finance KPI cards visible', async ({ page }) => {
     await page.goto(`${BASE}/finance`);
     await page.waitForSelector('[data-testid="finance-kpis"]', { state: 'visible', timeout: 10000 });
@@ -409,10 +384,7 @@ test.describe('S11 WhatsApp Outreach', () => {
   });
 
   test('HARD RULE #7: send without consent returns 403', async ({ request }) => {
-    const loginR = await request.post(`${API}/auth/login`, {
-      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
-    });
-    const { access_token } = await loginR.json();
+    const access_token = await getApiToken(request);
     const candsR = await request.get(`${API}/candidates`, {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
@@ -425,14 +397,6 @@ test.describe('S11 WhatsApp Outreach', () => {
     expect(r.status()).toBe(403);
     const body = await r.json();
     expect(body.detail).toContain('HARD RULE #7/#12');
-  });
-
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
   });
 
   test('WhatsApp page session panel visible', async ({ page }) => {
@@ -460,10 +424,7 @@ test.describe('S11 WhatsApp Outreach', () => {
 // Suite 12: ERP Timesheet + Invoice + Payroll (P12)
 test.describe('S12 ERP Timesheet/Invoice/Payroll', () => {
   test('ERP timesheets endpoint returns array (RLS)', async ({ request }) => {
-    const loginR = await request.post(`${API}/auth/login`, {
-      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
-    });
-    const { access_token } = await loginR.json();
+    const access_token = await getApiToken(request);
     const r = await request.get(`${API}/erp/timesheets`, {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
@@ -472,10 +433,7 @@ test.describe('S12 ERP Timesheet/Invoice/Payroll', () => {
   });
 
   test('ERP invoices endpoint returns array', async ({ request }) => {
-    const loginR = await request.post(`${API}/auth/login`, {
-      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
-    });
-    const { access_token } = await loginR.json();
+    const access_token = await getApiToken(request);
     const r = await request.get(`${API}/erp/invoices`, {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
@@ -484,10 +442,7 @@ test.describe('S12 ERP Timesheet/Invoice/Payroll', () => {
   });
 
   test('HARD RULE #11: contractor PII encrypted — Aadhaar bytes not plaintext', async ({ request }) => {
-    const loginR = await request.post(`${API}/auth/login`, {
-      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
-    });
-    const { access_token } = await loginR.json();
+    const access_token = await getApiToken(request);
     const candsR = await request.get(`${API}/candidates`, {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
@@ -502,14 +457,6 @@ test.describe('S12 ERP Timesheet/Invoice/Payroll', () => {
     expect(body.note).toContain('HARD RULE #11');
     // Aadhaar must NOT be returned in plaintext
     expect(JSON.stringify(body)).not.toContain('9999-8888-7777');
-  });
-
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
   });
 
   test('Finance timesheets tab shows ERP table', async ({ page }) => {
@@ -537,10 +484,7 @@ test.describe('S12 ERP Timesheet/Invoice/Payroll', () => {
 // Suite 13: BGV + Trust Intelligence (P13)
 test.describe('S13 BGV Trust Intelligence', () => {
   test('BGV trust score endpoint returns score fields', async ({ request }) => {
-    const loginR = await request.post(`${API}/auth/login`, {
-      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
-    });
-    const { access_token } = await loginR.json();
+    const access_token = await getApiToken(request);
     const candsR = await request.get(`${API}/candidates`, {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
@@ -556,10 +500,7 @@ test.describe('S13 BGV Trust Intelligence', () => {
   });
 
   test('BGV check creation initiates in_progress check', async ({ request }) => {
-    const loginR = await request.post(`${API}/auth/login`, {
-      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
-    });
-    const { access_token } = await loginR.json();
+    const access_token = await getApiToken(request);
     const candsR = await request.get(`${API}/candidates`, {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
@@ -576,10 +517,7 @@ test.describe('S13 BGV Trust Intelligence', () => {
   });
 
   test('Aadhaar initiate returns transaction_id (demo mode)', async ({ request }) => {
-    const loginR = await request.post(`${API}/auth/login`, {
-      data: { email: 'admin@example.com', password: 'changeme', tenant_id: 'a92d7fd7-fb72-47d8-881e-2493c61717ce' }
-    });
-    const { access_token } = await loginR.json();
+    const access_token = await getApiToken(request);
     const candsR = await request.get(`${API}/candidates`, {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
@@ -593,14 +531,6 @@ test.describe('S13 BGV Trust Intelligence', () => {
     const data = await r.json();
     expect(data.transaction_id).toBeTruthy();
     expect(data.production_required).toBe(true);
-  });
-
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`);
   });
 
   test('BGV page trust overview visible', async ({ page }) => {
@@ -905,13 +835,6 @@ test.describe('S12 P22 Vendor Analytics', () => {
 
 // ─── S13: P15-P22 Frontend Pages ─────────────────────────
 test.describe('S13 P15-P22 Frontend Pages', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(`${BASE}/login`);
-    await page.fill('input[name="email"]', EMAIL);
-    await page.fill('input[name="password"]', PASS);
-    await page.click('button[type="submit"]');
-    await page.waitForURL(`${BASE}/dashboard`, { timeout: 15000 });
-  });
   const newPages = [
     ['incentives', 'incentives-page'],
     ['kae', 'kae-page'],

@@ -1,6 +1,14 @@
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
+import { AUTH_FILE } from './global-setup';
+
+const API = 'http://localhost:8080';
+const TID = process.env.TENANT_ID || 'a92d7fd7-fb72-47d8-881e-2493c61717ce';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
+// Only used by S1 (tests the login flow itself) and the one S6 test that
+// checks a freshly-issued token's expiry claim. Every other describe block
+// below reuses the session global-setup already established via
+// `test.use({ storageState: AUTH_FILE })`, instead of logging in again.
 async function login(page: Page) {
   await page.goto('http://localhost:3001/login');
   await page.fill('input[name="email"]', 'admin@example.com');
@@ -46,7 +54,8 @@ test.describe('S1: Login Page', () => {
 
 // ─── S2: Dashboard ───────────────────────────────────────────────────────────
 test.describe('S2: Dashboard', () => {
-  test.beforeEach(async ({ page }) => { await login(page); });
+  test.use({ storageState: AUTH_FILE });
+  test.beforeEach(async ({ page }) => { await page.goto('http://localhost:3001/dashboard'); });
 
   test('sidebar has candidates, pipeline, requisitions links', async ({ page }) => {
     await expect(page.locator('a[href="/candidates"]').first()).toBeVisible();
@@ -64,14 +73,19 @@ test.describe('S2: Dashboard', () => {
 
 // ─── S3: Candidates Page ─────────────────────────────────────────────────────
 test.describe('S3: Candidates Page', () => {
+  test.use({ storageState: AUTH_FILE });
   test.beforeEach(async ({ page }) => {
-    await login(page);
     await page.goto('http://localhost:3001/candidates');
     await page.waitForLoadState('networkidle');
   });
 
   test('page count text matches pattern', async ({ page }) => {
-    const countEl = page.locator('text=/\\d+ candidates in/i');
+    // Was "/\d+ candidates in/i" — the header text is now "{total} candidates
+    // · Page {n}/{total}" (candidates/page.tsx:695), no "in" substring. There's
+    // ALSO a separate "Showing X–Y of Z candidates" footer near pagination
+    // (line 900) that matches the same broad pattern — .first() avoids a
+    // strict-mode violation from matching both.
+    const countEl = page.locator('text=/[\\d,]+\\s+candidates/i').first();
     await expect(countEl).toBeVisible({ timeout: 10000 });
   });
 
@@ -86,12 +100,17 @@ test.describe('S3: Candidates Page', () => {
     await page.waitForTimeout(4000);
     const rowsBefore = await page.locator('tbody tr').count();
     expect(rowsBefore).toBeGreaterThan(5); // sanity: must have loaded candidates
-    // Use the specific candidates-page search (not the topbar search)
-    // The topbar has 'Search candidates, jobs...' — candidates page has 'Search name, email...'
-    const searchInput = page.locator('input[placeholder*="name, email"]').first();
+    // Use the specific candidates-page search (not the topbar search).
+    // Placeholder is now "Name, email, phone..." (capital N) — the old
+    // lowercase substring `*="name, email"` never matched (CSS attribute
+    // selectors are case-sensitive); added the `i` flag. Search also only
+    // applies on Enter/button-click, not live-as-you-type (see applyFilters
+    // in candidates/page.tsx), so `.fill()` alone never triggered it either.
+    const searchInput = page.locator('input[placeholder*="name, email" i]').first();
     await searchInput.waitFor({ state: 'visible', timeout: 10000 });
     await searchInput.click();
     await searchInput.fill('Priya');
+    await searchInput.press('Enter');
     await page.waitForTimeout(2000);
     const rowsAfter = await page.locator('tbody tr').count();
     expect(rowsAfter).toBeLessThan(rowsBefore);
@@ -105,11 +124,15 @@ test.describe('S3: Candidates Page', () => {
   });
 
   test('modal contains section headers', async ({ page }) => {
+    // COMPENSATION was merged into Professional Details at some point (CTC/
+    // notice-period fields now live under that SectionDivider, see
+    // candidates/page.tsx) — there's no separate section by that name
+    // anymore. "Resume / Notes" is the 4th real section today.
     await page.click('button:has-text("Add Candidate")');
     await expect(page.locator('text=PERSONAL INFORMATION').first()).toBeVisible();
     await expect(page.locator('text=PROFESSIONAL DETAILS').first()).toBeVisible();
-    await expect(page.locator('text=COMPENSATION').first()).toBeVisible();
     await expect(page.locator('text=SKILLS').first()).toBeVisible();
+    await expect(page.locator('text=RESUME / NOTES').first()).toBeVisible();
   });
 
   test('Save button visible after modal opens', async ({ page }) => {
@@ -119,16 +142,28 @@ test.describe('S3: Candidates Page', () => {
   });
 
   test('full add candidate flow', async ({ page }) => {
-    const rowsBefore = await page.locator('tbody tr').count();
+    // Email AND phone must be unique per run — a hardcoded phone number
+    // reused across many prior runs eventually collides with the app's own
+    // duplicate-candidate detection (working as intended: it shows an
+    // "Add Anyway" confirmation dialog this test never handled), which
+    // silently blocked every submission after the first successful one.
+    //
+    // Also: rowsAfter > rowsBefore stopped being a valid check once there
+    // were enough candidates to fill a full page (PAGE_SIZE=50) — the table
+    // always shows exactly 50 rows regardless of total, so adding one more
+    // candidate never changes the current page's row count. Checking that
+    // the new candidate's own name is now visible (default sort is
+    // created_at desc, so a new row lands on page 1) is what this test
+    // actually needs to verify.
+    const unique = Date.now();
+    const name = `QA PW Test ${unique}`;
     await page.click('button:has-text("Add Candidate")');
     await page.waitForSelector('h2:has-text("Add New Candidate")', { timeout: 5000 });
-    await page.fill('input[placeholder="e.g. Rahul Sharma"]', 'QA PW Test');
-    await page.fill('input[placeholder="rahul@example.com"]', 'qapwunique@aviin.io');
-    await page.fill('input[placeholder="+91 9876543210"]', '9900001234');
+    await page.fill('input[placeholder="e.g. Rahul Sharma"]', name);
+    await page.fill('input[placeholder="rahul@example.com"]', `qapwunique${unique}@aviin.io`);
+    await page.fill('input[placeholder="+91 9876543210"]', `9${String(unique).slice(-9)}`);
     await page.locator('button:has-text("Add Candidate")').last().click();
-    await page.waitForTimeout(2000);
-    const rowsAfter = await page.locator('tbody tr').count();
-    expect(rowsAfter).toBeGreaterThan(rowsBefore);
+    await expect(page.locator(`tbody tr:has-text("${name}")`)).toBeVisible({ timeout: 5000 });
   });
 
   test('Cancel closes modal without adding row', async ({ page }) => {
@@ -160,32 +195,49 @@ test.describe('S3: Candidates Page', () => {
 });
 
 // ─── S4: Pipeline Page ───────────────────────────────────────────────────────
+// The base /pipeline route is now a job-*picker* landing page (no Kanban
+// board, no stage columns) until a specific job is selected — it used to
+// show the board directly. Selection is a `?job=<id>` query param
+// (pipeline/page.tsx's selectJob()), not a path segment, so tests that need
+// the actual board navigate there directly instead of clicking through the
+// picker UI.
 test.describe('S4: Pipeline Page', () => {
-  test.beforeEach(async ({ page }) => {
-    await login(page);
-    await page.goto('http://localhost:3001/pipeline');
-    await page.waitForLoadState('networkidle');
-  });
+  test.use({ storageState: AUTH_FILE });
 
-  test('all 7 stage labels visible', async ({ page }) => {
-    await page.waitForTimeout(6000); // Wait for pipeline to fully load
-    // Stage column headers use partial text matching (they may have bullet dots or counts)
+  test('all 7 stage labels visible', async ({ page, request }) => {
+    const reqs = await (await request.get(`${API}/requisitions`, { headers: { 'x-tenant-id': TID } })).json();
+    const openReq = (Array.isArray(reqs) ? reqs : reqs.items || []).find((r: any) => r.status === 'open');
+    test.skip(!openReq, 'no open requisition available to test against');
+    await page.goto(`http://localhost:3001/pipeline?job=${openReq.id}`);
+    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(3000);
+    // Stage labels are Title Case today (e.g. "Sourced") — text= matches
+    // case-insensitively by default, so the all-caps search terms still work.
     for (const stage of ['SOURCED', 'SCREENED', 'SUBMITTED', 'OFFER', 'PLACED', 'REJECTED']) {
       await expect(page.locator('text=' + stage).first()).toBeVisible({ timeout: 12000 });
     }
     await expect(page.locator('text=INTERVIEW').first()).toBeVisible({ timeout: 12000 });
   });
 
-  test('first select has at least 1 option', async ({ page }) => {
-    const sel = page.locator('select').first();
-    await expect(sel).toBeVisible();
-    const opts = await sel.locator('option').count();
-    expect(opts).toBeGreaterThanOrEqual(1);
+  test('job picker has at least one selectable job', async ({ page }) => {
+    // There's no native <select> on this page anymore — job selection is a
+    // custom searchable dropdown (pipeline/page.tsx's job-picker, rendered
+    // open by default when no job is pre-selected), so this now checks the
+    // modern equivalent of the original intent: the picker offers >=1 option.
+    await page.goto('http://localhost:3001/pipeline');
+    await page.waitForSelector('[data-testid="requisition-list"]', { state: 'visible', timeout: 10000 });
+    // Container renders before its async-fetched reqList populates —
+    // expect().toBeVisible() auto-retries until the button actually exists,
+    // a bare .count() read right after waitForSelector can race and see 0.
+    await expect(page.locator('[data-testid="requisition-list"] button').first()).toBeVisible({ timeout: 10000 });
+    const count = await page.locator('[data-testid="requisition-list"] button').count();
+    expect(count).toBeGreaterThanOrEqual(1);
   });
 
   test('no hydration errors', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', e => errors.push(e.message));
+    await page.goto('http://localhost:3001/pipeline');
     await page.waitForTimeout(2000);
     const hydrationErrors = errors.filter(e => e.includes('Hydration'));
     expect(hydrationErrors).toHaveLength(0);
@@ -194,8 +246,8 @@ test.describe('S4: Pipeline Page', () => {
 
 // ─── S5: Requisitions Page ───────────────────────────────────────────────────
 test.describe('S5: Requisitions Page', () => {
+  test.use({ storageState: AUTH_FILE });
   test.beforeEach(async ({ page }) => {
-    await login(page);
     await page.goto('http://localhost:3001/requisitions');
     await page.waitForLoadState('networkidle');
   });
@@ -294,13 +346,23 @@ test.describe('S7: API Contract', () => {
     expect(body.location).toBe('QA PUT Test');
   });
 
-  test('GET /pipeline/metrics upcoming_interviews equals by_stage.interview', async ({ request }) => {
+  test('GET /pipeline/metrics upcoming_interviews equals sum of interview stages', async ({ request }) => {
+    // by_stage never had a literal "interview" key — it's split into
+    // l1_interview/l2_interview (and tenants can add further custom rounds,
+    // e.g. this tenant's l3_interview via pipeline_stage_config). The
+    // backend used to look up by_stage["interview"] directly, which never
+    // matched anything and silently left upcoming_interviews at 0 always
+    // (fixed in pipeline_p2.py to sum every by_stage key containing
+    // "interview" instead) — this assertion needs the same fix.
     const res = await request.get('http://localhost:8080/pipeline/metrics', {
       headers: { Authorization: `Bearer ${apiToken}` },
     });
     expect(res.status()).toBe(200);
     const m = await res.json();
-    expect(m.upcoming_interviews).toBe(m.by_stage?.interview);
+    const interviewSum = Object.entries(m.by_stage || {})
+      .filter(([k]) => k.includes('interview'))
+      .reduce((sum, [, v]) => sum + (v as number), 0);
+    expect(m.upcoming_interviews).toBe(interviewSum);
   });
 
   test('GET /pipeline/active-requisitions all items have app_count', async ({ request }) => {

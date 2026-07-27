@@ -25,4 +25,5 @@ waha.env
 *.bak
 *.bak2
 *.tsbuildinfo
+tests/.auth/
 
