@@ -232,9 +232,60 @@ async def list_interviews(candidate_id: Optional[str]=None,
         """, actor.tenant_id, candidate_id, status)
     return [dict(r) for r in rows]
 
+# Gap-audit item 10: interviewer load-balancing. No dedicated "interviewer"
+# role exists (only admin/manager/recruiter) - eligible pool is any active
+# staff member, ranked by how many OTHER interviews they already have near
+# the requested time, hard-excluding anyone with a real time conflict.
+INTERVIEWER_ELIGIBLE_ROLES = ("recruiter", "manager", "admin", "super_admin", "lead_recruiter")
+
+
+async def _suggest_interviewer(conn, tenant_id: str, scheduled_at, duration_mins: int) -> Optional[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT u.id, u.full_name,
+               count(i.id) FILTER (
+                 WHERE i.status NOT IN ('cancelled','completed')
+                   AND i.scheduled_at BETWEEN $2::timestamptz - interval '3 days' AND $2::timestamptz + interval '3 days'
+               ) AS nearby_load,
+               bool_or(
+                 i.status NOT IN ('cancelled','completed')
+                 AND tstzrange(i.scheduled_at, i.scheduled_at + make_interval(mins => i.duration_mins))
+                     && tstzrange($2::timestamptz, $2::timestamptz + make_interval(mins => $3::int))
+               ) AS has_conflict
+        FROM users u
+        LEFT JOIN interview_schedules i ON i.interviewer_id = u.id AND i.tenant_id = $1
+        WHERE u.tenant_id = $1 AND u.is_active AND u.role = ANY($4)
+        GROUP BY u.id, u.full_name
+        HAVING NOT COALESCE(bool_or(
+                 i.status NOT IN ('cancelled','completed')
+                 AND tstzrange(i.scheduled_at, i.scheduled_at + make_interval(mins => i.duration_mins))
+                     && tstzrange($2::timestamptz, $2::timestamptz + make_interval(mins => $3::int))
+               ), false)
+        ORDER BY nearby_load ASC, u.full_name ASC
+        LIMIT 1
+        """,
+        tenant_id, scheduled_at, duration_mins, list(INTERVIEWER_ELIGIBLE_ROLES),
+    )
+    return dict(rows[0]) if rows else None
+
+
+@interview_router.get("/suggest-interviewer")
+async def suggest_interviewer(scheduled_at: str, duration_mins: int = 45, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        suggestion = await _suggest_interviewer(conn, actor.tenant_id, _to_dt(scheduled_at), duration_mins)
+    if not suggestion:
+        raise HTTPException(status_code=404, detail="No eligible interviewer available at that time (all conflict or none active)")
+    return suggestion
+
+
 @interview_router.post("")
 async def schedule_interview(body: InterviewIn, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        interviewer_id = body.interviewer_id
+        if not interviewer_id:
+            auto = await _suggest_interviewer(conn, actor.tenant_id, _to_dt(body.scheduled_at), body.duration_mins)
+            if auto:
+                interviewer_id = auto["id"]
         row = await conn.fetchrow("""
             INSERT INTO interview_schedules
               (tenant_id,application_id,candidate_id,requisition_id,interviewer_id,
@@ -242,7 +293,7 @@ async def schedule_interview(body: InterviewIn, actor: Actor=Depends(get_actor))
             VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9,$10,$11,NULLIF($12,''))
             RETURNING *
         """, actor.tenant_id, body.application_id, body.candidate_id,
-             body.requisition_id, body.interviewer_id, body.interview_type,
+             body.requisition_id, interviewer_id, body.interview_type,
              _to_dt(body.scheduled_at), body.duration_mins, body.mode,
              body.meeting_link, body.location, body.notes)
         # Log activity

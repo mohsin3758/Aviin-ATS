@@ -947,3 +947,82 @@ skips brand-new untracked files — the first post-build run reported
 CONFIRMED CLEAN at 307 files, identical to the pre-build count, meaning
 none of this feature's new files were actually scanned. Staged them
 (`git add`, no commit yet) and re-ran: 313 files, genuinely clean.
+
+## Three remaining gaps closed: approval chain, load-balancing, predictive SLA, 2026-07-28
+Follow-up to the 10-item "did we already build this" check earlier the same
+day (7 verified, 3 gaps: predictive SLA, hierarchy/approval-chain routing,
+interviewer/task load-balancing). All 3 built, deployed, and verified with
+real API calls end-to-end - not code review.
+
+- **Hierarchy/approval-chain routing** (`sql/27_gap_features_2.sql`,
+  `requisitions.py`) — `requisitions.approval_status` existed since an
+  early migration (draft/pending_approval/approved) but zero application
+  code ever touched it. Now real: a recruiter-created requisition walks
+  their real `users.reporting_to` chain (up to 3 levels) into a genuine
+  multi-step `requisition_approval_steps` sequence — each step must
+  approve in order before the next unlocks, any rejection short-circuits
+  the rest to 'skipped', admin/manager-created requisitions are exempt
+  (they already have authority), and admin/super_admin can override any
+  step. Notifies each approver in turn via the `notifications` table
+  fixed earlier today. New "Approval Chain" card on the requisition
+  detail Summary tab (Approve/Reject, comment, only visible to the
+  current step's approver or an admin) + a "PENDING APPROVAL" badge on
+  the requisitions list.
+  Real bug caught immediately by testing, not visible from reading the
+  code: `approval_status`'s CHECK constraint only allowed
+  `draft`/`pending_approval`/`approved` - my first version wrote
+  `'pending'` (wrong string entirely) and `'rejected'` (not a valid value
+  at all), so requisition creation 500'd for every non-exempt creator.
+  Fixed the string and added `'rejected'` as a proper CHECK-constraint
+  value rather than overloading `'draft'`. Verified with a genuine
+  3-level chain (built via reporting_to on synthetic QA test accounts,
+  not real staff): sequential-order enforcement (an admin trying to skip
+  ahead gets a 400), correct-approver-only enforcement (creator trying to
+  approve their own request gets a 403), a real notification firing at
+  each hand-off, and both a full approve-to-completion run and a
+  reject-with-cascade-skip run, each confirmed against the DB.
+- **Interviewer + task load-balancing** (`p23_p27.py`, `phase3.py`,
+  `recruiter_ops.py`) — `GET /interviews/suggest-interviewer` ranks
+  active staff by how many other interviews they have booked within 3
+  days of the requested slot, hard-excluding anyone with a real time
+  conflict (range-overlap, not just exact-match). Wired into **both**
+  interview-creation paths found in the codebase - `p23_p27.py`'s
+  `POST /interviews` and, importantly, `phase3.py`'s
+  `POST /auto-interview/schedule`, which is what the actual Interview
+  Scheduler UI calls (its form had never had any interviewer field at
+  all, auto or manual, until now). `recruiter_tasks` creation gained the
+  same treatment - `recruiter_id` is now optional; omitting it auto-picks
+  the least-loaded active recruiter, same round-robin/least-loaded
+  pattern as resume auto-routing.
+  Real bug caught by testing on a genuinely open slot with zero existing
+  bookings: Postgres three-valued logic. `bool_or()` aggregated over a
+  LEFT JOIN with no matching rows returns NULL, not FALSE, so
+  `HAVING NOT bool_or(...)` silently excluded every candidate who had
+  never been interviewer on anything before - the suggestion endpoint
+  returned "no one available" for a slot where literally everyone was
+  free. Fixed by wrapping in `COALESCE(bool_or(...), false)`. Verified
+  load-balancing for real: scheduled a real interview for the suggested
+  person, re-queried the exact same slot (correctly excluded, hard
+  conflict), an overlapping-but-not-identical slot (correctly excluded,
+  range overlap not just exact match), and a same-day non-overlapping
+  slot (correctly deprioritized in favor of someone with zero nearby
+  load, even though no direct conflict existed - proving this is real
+  load-balancing, not just conflict-avoidance).
+- **Predictive time-to-fill** (`backend/routers/sla_predictions.py`) —
+  the existing SLA Dashboard/`v_sla_dashboard` is purely reactive
+  (current elapsed days vs a static target); this is genuinely
+  predictive: same lazy-cached-sklearn-per-tenant pattern as
+  `predictions.py` (P21), trained on this tenant's own historical
+  fill times to forecast expected time-to-fill and flag risk *before* a
+  requisition actually breaches, not just after. `placements` is too
+  sparse to train on directly (1 row tenant-wide) - uses first
+  placed/offer_accepted application per requisition as a "filled_at"
+  proxy instead. Honestly reports "insufficient training data" rather
+  than fabricating a number when there isn't enough signal yet (this
+  tenant currently has 2 usable historical examples, need >= 5) - falls
+  back to the tenant's own historical median in the meantime, which is
+  still genuinely data-driven, just not a fitted per-requisition model.
+  New "Predicted Time-to-Fill" section on the SLA Dashboard, openly
+  labeled with which method produced each number. Verified the honest
+  degraded-mode path for real (this tenant doesn't have enough data yet)
+  rather than only testing the happy path a real regression would take.

@@ -230,7 +230,7 @@ function TasksTab() {
   const userMap = Object.fromEntries((users || []).map((u: any) => [u.id, u.full_name]));
 
   const create = async () => {
-    if (!form.recruiter_id || !form.title) return;
+    if (!form.title) return;
     await apiFetch('/recruiter-tasks', { method: 'POST', body: JSON.stringify(form) });
     setShowForm(false); setForm({ recruiter_id: '', title: '', task_type: 'general', priority: 'medium', due_at: '' }); refetch();
   };
@@ -247,7 +247,7 @@ function TasksTab() {
         <div style={card}>
           <label style={label}>RECRUITER</label>
           <select value={form.recruiter_id} onChange={e => setForm({ ...form, recruiter_id: e.target.value })} style={input}>
-            <option value="">-- Select --</option>
+            <option value="">— Auto-assign (least loaded) —</option>
             {(users || []).map((u: any) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
           </select>
           <label style={label}>TITLE</label>

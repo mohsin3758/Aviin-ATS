@@ -30,6 +30,62 @@ type SlaSummary = {
   stale_no_submission: number;
 };
 
+// Gap-audit item 07: predictive time-to-fill. Everything above is reactive
+// (current elapsed time vs a static target) — this is the genuinely
+// predictive piece: a per-tenant regression (or historical-median fallback
+// when there isn't yet enough closed-requisition data to fit one) forecasting
+// expected fill time and flagging requisitions on track to breach before
+// they actually do, not just after.
+const RISK_STYLE: Record<string, { bg: string; color: string; label: string }> = {
+  overdue: { bg: '#fee2e2', color: '#dc2626', label: 'OVERDUE' },
+  at_risk: { bg: '#ffedd5', color: '#ea580c', label: 'AT RISK' },
+  watch: { bg: '#fef9c3', color: '#a16207', label: 'WATCH' },
+  on_track: { bg: '#d1fae5', color: '#059669', label: 'ON TRACK' },
+};
+
+function ForecastSection() {
+  const { data: forecast } = useFetch<any>('/sla-predictions/forecast');
+  const [expanded, setExpanded] = useState(false);
+  if (!forecast) return null;
+  const trained = forecast.model_status === 'trained';
+  const shown = expanded ? forecast.forecasts : forecast.forecasts.slice(0, 5);
+
+  return (
+    <div className="card" style={{ padding: '16px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>Predicted Time-to-Fill</div>
+        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: trained ? '#EEF2FF' : '#F1F5F9', color: trained ? '#4338CA' : '#64748B' }}>
+          {trained ? 'sklearn regression' : 'historical median (insufficient data to fit a model)'}
+        </span>
+      </div>
+      {!trained && (
+        <p style={{ fontSize: 12, color: '#94a3b8', marginBottom: 10 }}>
+          Only {forecast.training_rows} closed requisition(s) with a tracked fill date so far — using this tenant's own historical median as a rough estimate until at least 5 real examples exist for a proper per-requisition model.
+        </p>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {shown.map((f: any) => {
+          const risk = RISK_STYLE[f.risk_level] || RISK_STYLE.on_track;
+          return (
+            <div key={f.requisition_id} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, padding: '6px 0', borderBottom: '1px solid #f1f5f9' }}>
+              <span style={{ flex: 1, fontWeight: 600, color: '#1e293b' }}>{f.title}</span>
+              <span style={{ color: '#64748b' }}>elapsed {f.elapsed_days}d</span>
+              <span style={{ color: '#64748b' }}>predicted {f.predicted_fill_days ?? '—'}d</span>
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: risk.bg, color: risk.color }}>{risk.label}</span>
+            </div>
+          );
+        })}
+        {!forecast.forecasts.length && <div style={{ fontSize: 12, color: '#94a3b8' }}>No open requisitions to forecast.</div>}
+      </div>
+      {forecast.forecasts.length > 5 && (
+        <button onClick={() => setExpanded(v => !v)} style={{ marginTop: 8, background: 'none', border: 'none', color: '#2563eb', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}>
+          {expanded ? 'Show less' : `Show all ${forecast.forecasts.length}`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SlaProgressBar({ ageDays, targetDays }: { ageDays: number; targetDays: number }) {
   const pct = Math.min(100, Math.round((ageDays / targetDays) * 100));
   const color = pct >= 100 ? '#dc2626' : pct >= 80 ? '#f59e0b' : pct >= 50 ? '#3b82f6' : '#10b981';
@@ -210,6 +266,8 @@ export default function SlaPage() {
           </div>
         ))}
       </div>
+
+      <ForecastSection />
 
       {/* Filters + Search */}
       <div className="card" style={{ padding: '16px 20px' }}>

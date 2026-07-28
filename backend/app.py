@@ -66,6 +66,7 @@ from routers import recruiter_tracking
 from routers import recruiter_ops
 from routers import device_monitoring
 from routers import ops_gaps
+from routers import sla_predictions
 
 # GAP features (1-10) — job-distribution and bgv-api were retired (see
 # gap_features.py module docstring): both duplicated real functionality
@@ -300,6 +301,7 @@ app.include_router(ops_gaps.candidate_uploads_router)
 app.include_router(ops_gaps.agency_router)
 app.include_router(ops_gaps.agency_public_router)
 app.include_router(device_monitoring.router)
+app.include_router(sla_predictions.router)
 
 
 @app.get("/health")

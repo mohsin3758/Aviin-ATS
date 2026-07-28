@@ -1,7 +1,9 @@
 import json
+from typing import Optional
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 import db
 import events
@@ -19,7 +21,41 @@ FIELDS = """id, tenant_id, client_id, title, description, skills_required,
             budget_min, budget_max, bill_rate,
             work_mode, priority, deadline, expected_start_date,
             education_required, shift_type, notice_period_max,
-            industry, client_name"""
+            industry, client_name, approval_status"""
+
+# Gap-audit item 09: hierarchy/approval-chain routing. requisitions.approval_
+# status existed since an early migration but defaulted to 'approved' with
+# zero application code reading or writing it - a vestigial column, not a
+# workflow. This walks the creator's real users.reporting_to org chart
+# (populated earlier this session) to build a genuine multi-step chain.
+APPROVAL_EXEMPT_ROLES = ("admin", "super_admin", "manager")
+MAX_APPROVAL_CHAIN_LEVELS = 3
+
+
+async def _build_approval_chain(conn, creator_id: str, max_levels: int = MAX_APPROVAL_CHAIN_LEVELS) -> list[str]:
+    """Walk reporting_to upward from the creator, one step per manager level
+    found. Stops at max_levels, a missing reporting_to, or a cycle."""
+    chain: list[str] = []
+    seen = {creator_id}
+    current = creator_id
+    for _ in range(max_levels):
+        row = await conn.fetchrow("SELECT reporting_to FROM users WHERE id=$1", current)
+        nxt = row["reporting_to"] if row else None
+        if not nxt or str(nxt) in seen:
+            break
+        nxt = str(nxt)
+        chain.append(nxt)
+        seen.add(nxt)
+        current = nxt
+    return chain
+
+
+async def _notify_approver(conn, tenant_id: str, approver_id: str, requisition_id: str, title_text: str, req_title: str):
+    await conn.execute(
+        """INSERT INTO notifications (tenant_id,user_id,recipient_user_id,title,body,type,resource,resource_id,channel)
+           VALUES ($1,$2,$2,$3,$4,'info','requisition',$5,'inapp')""",
+        tenant_id, approver_id, title_text, f'"{req_title}" needs your approval', str(requisition_id),
+    )
 
 PIPELINE_STAGES = ["sourced", "contacted", "interested", "nda", "screened", "submitted", "l1_interview", "l2_interview", "offer", "offer_accepted", "placed", "rejected", "hold"]
 
@@ -91,13 +127,31 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(get
             body.industry, body.client_name,
         )
 
+        result = dict(row)
+        if actor.role not in APPROVAL_EXEMPT_ROLES:
+            approvers = await _build_approval_chain(conn, actor.user_id)
+            if approvers:
+                await conn.execute(
+                    "UPDATE requisitions SET approval_status='pending_approval' WHERE id=$1", row["id"],
+                )
+                result["approval_status"] = "pending_approval"
+                for i, approver_id in enumerate(approvers, start=1):
+                    await conn.execute(
+                        """INSERT INTO requisition_approval_steps
+                             (tenant_id, requisition_id, step_number, approver_id)
+                           VALUES ($1,$2,$3,$4)""",
+                        actor.tenant_id, row["id"], i, approver_id,
+                    )
+                await _notify_approver(conn, actor.tenant_id, approvers[0], row["id"],
+                                        "Requisition awaiting your approval", body.title)
+
         await events.write_outbox(
             conn, actor.tenant_id, "requisition.created",
             {"requisition_id": str(row["id"]), "title": body.title},
             f"requisition.created:{row['id']}",
         )
 
-    return dict(row)
+    return result
 
 
 @router.get("/{requisition_id}")
@@ -219,3 +273,89 @@ async def assign_requisition(requisition_id: str, actor: Actor = Depends(get_act
     result = dict(row)
     result["explanation"] = json.loads(result["explanation"])
     return result
+
+
+@router.get("/{requisition_id}/approval-chain")
+async def get_approval_chain(requisition_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            """SELECT s.*, u.full_name AS approver_name FROM requisition_approval_steps s
+               JOIN users u ON u.id = s.approver_id
+               WHERE s.tenant_id=$1 AND s.requisition_id=$2 ORDER BY s.step_number""",
+            actor.tenant_id, requisition_id,
+        )
+    return [dict(r) for r in rows]
+
+
+class ApprovalAction(BaseModel):
+    comment: Optional[str] = None
+
+
+async def _act_on_step(requisition_id: str, step_id: str, body: ApprovalAction, actor: Actor, approve: bool):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        step = await conn.fetchrow(
+            "SELECT * FROM requisition_approval_steps WHERE id=$1 AND tenant_id=$2 AND requisition_id=$3",
+            step_id, actor.tenant_id, requisition_id,
+        )
+        if not step:
+            raise HTTPException(status_code=404, detail="Approval step not found")
+        if str(step["approver_id"]) != actor.user_id and actor.role not in ("admin", "super_admin"):
+            raise HTTPException(status_code=403, detail="Not your approval step")
+        if step["status"] != "pending":
+            raise HTTPException(status_code=400, detail=f"Step already {step['status']}")
+        current = await conn.fetchval(
+            """SELECT min(step_number) FROM requisition_approval_steps
+               WHERE tenant_id=$1 AND requisition_id=$2 AND status='pending'""",
+            actor.tenant_id, requisition_id,
+        )
+        if step["step_number"] != current:
+            raise HTTPException(status_code=400, detail="An earlier approval step is still pending")
+
+        req = await conn.fetchrow("SELECT title FROM requisitions WHERE id=$1", requisition_id)
+
+        if approve:
+            await conn.execute(
+                "UPDATE requisition_approval_steps SET status='approved', comment=$1, acted_at=now() WHERE id=$2",
+                body.comment, step_id,
+            )
+            next_step = await conn.fetchrow(
+                """SELECT * FROM requisition_approval_steps
+                   WHERE tenant_id=$1 AND requisition_id=$2 AND status='pending'
+                   ORDER BY step_number LIMIT 1""",
+                actor.tenant_id, requisition_id,
+            )
+            if next_step:
+                await _notify_approver(conn, actor.tenant_id, str(next_step["approver_id"]), requisition_id,
+                                        "Requisition awaiting your approval", req["title"])
+            else:
+                await conn.execute("UPDATE requisitions SET approval_status='approved' WHERE id=$1", requisition_id)
+                await events.write_outbox(
+                    conn, actor.tenant_id, "requisition.approved",
+                    {"requisition_id": requisition_id}, f"requisition.approved:{requisition_id}",
+                )
+        else:
+            await conn.execute(
+                "UPDATE requisition_approval_steps SET status='rejected', comment=$1, acted_at=now() WHERE id=$2",
+                body.comment, step_id,
+            )
+            await conn.execute(
+                """UPDATE requisition_approval_steps SET status='skipped'
+                   WHERE tenant_id=$1 AND requisition_id=$2 AND status='pending'""",
+                actor.tenant_id, requisition_id,
+            )
+            await conn.execute("UPDATE requisitions SET approval_status='rejected' WHERE id=$1", requisition_id)
+            await events.write_outbox(
+                conn, actor.tenant_id, "requisition.rejected",
+                {"requisition_id": requisition_id, "reason": body.comment}, f"requisition.rejected:{requisition_id}",
+            )
+    return {"approved": approve}
+
+
+@router.post("/{requisition_id}/approval-steps/{step_id}/approve")
+async def approve_step(requisition_id: str, step_id: str, body: ApprovalAction, actor: Actor = Depends(get_actor)):
+    return await _act_on_step(requisition_id, step_id, body, actor, approve=True)
+
+
+@router.post("/{requisition_id}/approval-steps/{step_id}/reject")
+async def reject_step(requisition_id: str, step_id: str, body: ApprovalAction, actor: Actor = Depends(get_actor)):
+    return await _act_on_step(requisition_id, step_id, body, actor, approve=False)

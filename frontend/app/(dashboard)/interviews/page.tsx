@@ -8,13 +8,30 @@ const MODE_COLORS:Record<string,string> = { video:'#3b82f6', phone:'#22c55e', in
 
 function ScheduleModal({ onClose, onScheduled }:any) {
   const { data: appsData } = useFetch<any>('/applications?limit=100');
+  const { data: usersData } = useFetch<any[]>('/users?is_active=true');
   const [form, setForm] = useState({
     application_id:'', scheduled_at:'', duration_mins:60,
-    mode:'video', meeting_link:'', notes:'', send_whatsapp:true
+    mode:'video', meeting_link:'', notes:'', send_whatsapp:true, interviewer_id:''
   });
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<any>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestNote, setSuggestNote] = useState('');
   const apps:any[] = Array.isArray(appsData) ? appsData : (appsData?.items || []);
+  const users:any[] = usersData || [];
+
+  const suggestInterviewer = async () => {
+    if (!form.scheduled_at) { setSuggestNote('Pick a date/time first'); return; }
+    setSuggesting(true); setSuggestNote('');
+    try {
+      const iso = new Date(form.scheduled_at).toISOString();
+      const r = await apiFetch(`/interviews/suggest-interviewer?scheduled_at=${encodeURIComponent(iso)}&duration_mins=${form.duration_mins}`);
+      setForm(f => ({ ...f, interviewer_id: r.id }));
+      setSuggestNote(`Suggested: ${r.full_name} (${r.nearby_load} interview${r.nearby_load === 1 ? '' : 's'} nearby)`);
+    } catch (e: any) {
+      setSuggestNote(e?.message || 'No one available at that time');
+    } finally { setSuggesting(false); }
+  };
 
   const save = async () => {
     if (!form.application_id || !form.scheduled_at) return;
@@ -54,6 +71,17 @@ function ScheduleModal({ onClose, onScheduled }:any) {
           <>
             {inp('Candidate / Application', <select value={form.application_id} onChange={e=>setForm(f=>({...f,application_id:e.target.value}))} style={iStyle}><option value="">Select candidate...</option>{apps.filter((a:any)=>a.stage==='screened'||a.stage==='submitted').map((a:any)=>(<option key={a.id} value={a.id}>{a.candidate_name} — {a.stage}</option>))}</select>)}
             {inp('Date & Time', <input type="datetime-local" value={form.scheduled_at} onChange={e=>setForm(f=>({...f,scheduled_at:e.target.value}))} style={iStyle}/>)}
+            {inp('Interviewer (optional — auto-picked by load if left blank)', <div style={{display:'flex',gap:'6px'}}>
+              <select value={form.interviewer_id} onChange={e=>setForm(f=>({...f,interviewer_id:e.target.value}))} style={{...iStyle,flex:1}}>
+                <option value="">Auto-assign (least loaded)</option>
+                {users.map((u:any)=>(<option key={u.id} value={u.id}>{u.full_name}</option>))}
+              </select>
+              <button type="button" onClick={suggestInterviewer} disabled={suggesting}
+                style={{padding:'8px 12px',background:'#EEF2FF',color:'#4338CA',border:'1px solid #C7D2FE',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontWeight:700,whiteSpace:'nowrap'}}>
+                {suggesting?'...':'Suggest'}
+              </button>
+            </div>)}
+            {suggestNote && <div style={{fontSize:'11px',color:'#64748b',marginTop:'-8px',marginBottom:'12px'}}>{suggestNote}</div>}
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               {inp('Duration', <select value={form.duration_mins} onChange={e=>setForm(f=>({...f,duration_mins:Number(e.target.value)}))} style={iStyle}>{[30,45,60,90,120].map(d=><option key={d} value={d}>{d} mins</option>)}</select>)}
               {inp('Mode', <select value={form.mode} onChange={e=>setForm(f=>({...f,mode:e.target.value}))} style={iStyle}><option value="video">Video</option><option value="phone">Phone</option><option value="in_person">In Person</option></select>)}

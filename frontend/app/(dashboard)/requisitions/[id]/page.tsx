@@ -900,11 +900,76 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   );
 }
 
+// Gap-audit item 09: hierarchy/approval-chain routing. Only rendered when
+// steps actually exist (requisitions.approval_status stays 'approved' by
+// default for admin/manager-created reqs, per _build_approval_chain's
+// APPROVAL_EXEMPT_ROLES — no chain, no card, matches existing behavior).
+function ApprovalChainCard({ reqId, approvalStatus }: { reqId: string; approvalStatus: string }) {
+  const { data: steps, refetch } = useFetch<any[]>(`/requisitions/${reqId}/approval-chain`);
+  const [busy, setBusy] = useState(false);
+  const [comment, setComment] = useState('');
+  const myId = getTokenPayload()?.sub;
+  const role = getTokenPayload()?.role || '';
+  const isAdmin = ['admin', 'super_admin'].includes(role);
+
+  if (!steps || !steps.length) return null;
+
+  const currentStep = steps.find((s: any) => s.status === 'pending');
+  const canAct = currentStep && (currentStep.approver_id === myId || isAdmin);
+
+  const act = async (approve: boolean) => {
+    if (!currentStep) return;
+    setBusy(true);
+    try {
+      await apiFetch(`/requisitions/${reqId}/approval-steps/${currentStep.id}/${approve ? 'approve' : 'reject'}`,
+        { method: 'POST', body: JSON.stringify({ comment: comment || undefined }) });
+      setComment('');
+      refetch();
+    } finally { setBusy(false); }
+  };
+
+  const statusColor: Record<string, string> = { approved: '#16A34A', pending: '#CA8A04', rejected: '#DC2626', skipped: '#94A3B8' };
+
+  return (
+    <Card title="Approval Chain">
+      <div style={{ fontSize: 11, fontWeight: 700, color: statusColor[approvalStatus] || '#64748B', marginBottom: 10 }}>
+        {approvalStatus === 'pending_approval' ? 'AWAITING APPROVAL' : approvalStatus.toUpperCase()}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {steps.map((s: any) => (
+          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
+            <span style={{ width: 20, height: 20, borderRadius: '50%', background: statusColor[s.status], color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, flexShrink: 0 }}>{s.step_number}</span>
+            <span style={{ flex: 1 }}>{s.approver_name}</span>
+            <span style={{ fontSize: 10, fontWeight: 700, color: statusColor[s.status], textTransform: 'uppercase' }}>{s.status}</span>
+          </div>
+        ))}
+      </div>
+      {canAct && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9' }}>
+          <input value={comment} onChange={e => setComment(e.target.value)} placeholder="Optional comment"
+            style={{ width: '100%', padding: '7px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, marginBottom: 8 }} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => act(true)} disabled={busy}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', borderRadius: 8, border: 'none', background: '#16A34A', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+              <CheckCircle size={13} /> Approve
+            </button>
+            <button onClick={() => act(false)} disabled={busy}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', borderRadius: 8, border: '1px solid #FECACA', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+              <AlertTriangle size={13} /> Reject
+            </button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function SummaryTab({ req, stats, board, stages }: any) {
   const stageBreakdown = stages.map((s: any) => ({ ...s, count: (board[s.key] || []).length })).filter((s: any) => s.count > 0);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <AssignedRecruiterCard reqId={req.id} />
+      {req.approval_status !== 'approved' && <ApprovalChainCard reqId={req.id} approvalStatus={req.approval_status} />}
       <Card title="Job Details">
         {req.description && <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{req.description}</div>}
       </Card>

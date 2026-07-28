@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
+from routers.p23_p27 import _suggest_interviewer
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +130,16 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
 
         scheduled_dt = datetime.fromisoformat(body.scheduled_at.replace("Z","+00:00"))
 
+        # Gap-audit item 10: interviewer load-balancing. This is the real
+        # scheduling path the Interview Scheduler UI calls - auto-pick when
+        # no interviewer was explicitly chosen, same logic p23_p27.py's
+        # GET /interviews/suggest-interviewer exposes for a UI preview.
+        interviewer_id = body.interviewer_id
+        if not interviewer_id:
+            auto = await _suggest_interviewer(conn, actor.tenant_id, scheduled_dt, body.duration_mins)
+            if auto:
+                interviewer_id = auto["id"]
+
         # Generate ICS
         attendees = [app["email"]] if app["email"] else []
         ics = await generate_ics(
@@ -148,7 +159,7 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
              interview_type,scheduled_at,duration_mins,mode,meeting_link,location,status,notes)
             VALUES ($1,$2,$3,$4,$5,$6,'technical',$7,$8,$9,$10,$11,'scheduled',$12)
         """, sched_id, actor.tenant_id, body.application_id, app["candidate_id"],
-             app["requisition_id"], body.interviewer_id, scheduled_dt,
+             app["requisition_id"], interviewer_id, scheduled_dt,
              body.duration_mins, body.mode,
              body.meeting_link, body.location, body.notes)
 

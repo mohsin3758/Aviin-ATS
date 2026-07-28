@@ -93,7 +93,7 @@ async def update_target(target_id: str, body: TargetIn, actor: Actor = Depends(r
 
 # ── Tasks ────────────────────────────────────────────────────
 class TaskIn(BaseModel):
-    recruiter_id: str
+    recruiter_id: Optional[str] = None  # omit to auto-assign (load-balanced)
     task_type: str = "general"
     title: str
     description: Optional[str] = None
@@ -127,13 +127,32 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
 @tasks_router.post("")
 async def create_task(body: TaskIn, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        recruiter_id = body.recruiter_id
+        if not recruiter_id:
+            # Gap-audit item 10: task load-balancing. Least-loaded active
+            # recruiter by open (pending/in_progress) task count, tie-broken
+            # alphabetically - same pattern as the round-robin resume router.
+            picked = await conn.fetchval(
+                """SELECT u.id FROM users u
+                   LEFT JOIN recruiter_tasks t
+                     ON t.recruiter_id = u.id AND t.tenant_id = $1 AND t.status IN ('pending','in_progress')
+                   WHERE u.tenant_id = $1 AND u.is_active AND u.role = 'recruiter'
+                   GROUP BY u.id, u.full_name
+                   ORDER BY count(t.id) ASC, u.full_name ASC
+                   LIMIT 1""",
+                actor.tenant_id,
+            )
+            if not picked:
+                raise HTTPException(400, "No active recruiter available to auto-assign")
+            recruiter_id = str(picked)
+
         row = await conn.fetchrow(
             """INSERT INTO recruiter_tasks
                  (tenant_id, recruiter_id, requisition_id, application_id, task_type,
                   title, description, priority, due_at, status)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')
                RETURNING *""",
-            actor.tenant_id, body.recruiter_id, body.requisition_id, body.application_id,
+            actor.tenant_id, recruiter_id, body.requisition_id, body.application_id,
             body.task_type, body.title, body.description, body.priority, body.due_at,
         )
     return dict(row)

@@ -106,6 +106,11 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
             <span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '10px' }}>
               {req.status}
             </span>
+            {req.approval_status === 'pending_approval' && (
+              <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '6px', background: '#FFFBEB', color: '#CA8A04', border: '1px solid #FDE68A' }}>
+                PENDING APPROVAL
+              </span>
+            )}
           </div>
           {req.client_name && (
             <div style={{ fontSize: '12px', color: '#475569', fontWeight: '500', marginTop: '2px' }}>
