@@ -4,6 +4,14 @@ export const metadata: Metadata = {
   title: 'AVIIN ATS',
   description: 'AI-powered staffing & recruitment',
   manifest: '/manifest.json',
+  icons: {
+    icon: [
+      { url: '/favicon.ico', sizes: 'any' },
+      { url: '/icon-192.png', type: 'image/png', sizes: '192x192' },
+      { url: '/icon-512.png', type: 'image/png', sizes: '512x512' },
+    ],
+    apple: '/icon-192.png',
+  },
 };
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
