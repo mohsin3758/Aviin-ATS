@@ -622,7 +622,13 @@ test.describe('S4 Core Workflows', () => {
       headers: { 'x-tenant-id': TID, 'content-type': 'application/json' },
       data: { full_name: 'QA Candidate', email: `qa${Date.now()}@test.com`, skills: ['QA'], total_exp_mo: 36, location: 'Bengaluru' }
     });
-    expect((await r.json()).id).toBeTruthy();
+    const id = (await r.json()).id;
+    expect(id).toBeTruthy();
+    // Cleanup — this test had never deleted what it created, so every run
+    // left a permanent fake "QA Candidate" visible to real recruiters on
+    // the live Candidates page. Soft-delete (same as the app's own DELETE
+    // endpoint) so repeated runs stop piling up.
+    await request.delete(`${API}/candidates/${id}`, { headers: { 'x-tenant-id': TID } });
   });
   test('RLS cross-tenant isolation', async ({ request }) => {
     const r = await request.get(`${API}/candidates`, { headers: { 'x-tenant-id': '00000000-0000-0000-0000-000000000000' } });

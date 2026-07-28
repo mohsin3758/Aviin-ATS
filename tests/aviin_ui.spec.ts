@@ -157,13 +157,34 @@ test.describe('S3: Candidates Page', () => {
     // actually needs to verify.
     const unique = Date.now();
     const name = `QA PW Test ${unique}`;
+    const email = `qapwunique${unique}@aviin.io`;
     await page.click('button:has-text("Add Candidate")');
     await page.waitForSelector('h2:has-text("Add New Candidate")', { timeout: 5000 });
     await page.fill('input[placeholder="e.g. Rahul Sharma"]', name);
-    await page.fill('input[placeholder="rahul@example.com"]', `qapwunique${unique}@aviin.io`);
+    await page.fill('input[placeholder="rahul@example.com"]', email);
     await page.fill('input[placeholder="+91 9876543210"]', `9${String(unique).slice(-9)}`);
     await page.locator('button:has-text("Add Candidate")').last().click();
     await expect(page.locator(`tbody tr:has-text("${name}")`)).toBeVisible({ timeout: 5000 });
+
+    // Cleanup — this test intentionally exercises the real add-candidate UI
+    // end-to-end, which means it really does create a live candidate. This
+    // was the third of three tests found leaving permanent fake "QA ..."
+    // candidates in front of real recruiters on the live Candidates page
+    // (30+ accumulated before this was caught). No apiToken in scope here
+    // (that's only set up in the S7 describe block) — pull the same
+    // localStorage JWT the app itself uses instead.
+    const token = await page.evaluate(() => localStorage.getItem('airecruit_token'));
+    const listRes = await page.request.get(`http://localhost:8080/candidates?search=${encodeURIComponent(email)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const listBody = await listRes.json();
+    const items = Array.isArray(listBody) ? listBody : (listBody.items || []);
+    const created = items.find((c: any) => c.email === email);
+    if (created) {
+      await page.request.delete(`http://localhost:8080/candidates/${created.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
   });
 
   test('Cancel closes modal without adding row', async ({ page }) => {
@@ -390,6 +411,13 @@ test.describe('S7: API Contract', () => {
     expect(d.full_name).toBe('API QA Test');
     expect(d.expected_ctc).toBe(1500000);
     expect(d.notice_period_days).toBe(30);
+    // Cleanup — same missing-cleanup bug as qa_automation.spec.ts's
+    // "Create candidate returns id": this test never deleted what it
+    // created, leaving a permanent fake "API QA Test" candidate visible
+    // on the live Candidates page after every run.
+    await request.delete('http://localhost:8080/candidates/' + d.id, {
+      headers: { Authorization: 'Bearer ' + apiToken },
+    });
   });
 
   test('DELETE candidate with cascade cleanup returns 200', async ({ request }) => {

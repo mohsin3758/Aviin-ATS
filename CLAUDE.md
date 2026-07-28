@@ -1068,3 +1068,83 @@ to My Day, both rendering real content. Found and cleaned up one piece of
 leftover test data ("E2E test task") from earlier in the session that had
 never been deleted - a reminder that cleanup steps need to actually be
 checked off, not just intended.
+
+## Candidates page data quality: 3 distinct real bugs, 2026-07-28/29
+User pointed at the live Candidates page (756 candidates) and asked about
+duplicates. Investigated rather than assumed - found three genuinely
+different bugs mixed together in what looked like one mess, fixed the two
+that were safe to fix broadly, cleaned up 32 confirmed-garbage records,
+and deliberately left real candidates alone even though their name field
+looked wrong.
+
+**Bug 1 - QA test suite leaking into production data.** 3 of the ~18
+tests across `qa_automation.spec.ts`/`aviin_ui.spec.ts` that create a
+real candidate (`Create candidate returns id`, `POST candidate has all
+required fields`, `full add candidate flow`) never cleaned up after
+themselves - unlike the one deliberate `DELETE candidate with cascade
+cleanup` test, which correctly self-deletes and was confirmed NOT
+appearing on the live page. Every `npm run qa` run (dozens of times this
+session alone, for unrelated feature regression checks) left 3 more
+permanent fake "QA Candidate"/"API QA Test"/"QA PW Test ..." rows visible
+to real recruiters. Fixed by adding the same soft-delete cleanup the
+working test already used, including a version for the UI-driven test
+(no `apiToken` in scope there - pulls the same localStorage JWT the app
+itself uses). Verified the fix actually holds, not just that tests still
+pass: ran the full suite once after the fix and confirmed all 4 candidates
+it created were `is_active=false` immediately, not just deletable.
+
+**Bug 2 - Job Descriptions getting classified as candidate resumes.**
+`document_classifier.py`'s Phase A step (JD_SIGNALS keyword scoring, added
+2026-07-22 per an earlier fix) exists specifically to catch this and is
+correctly wired into `resume_intake_service.py` - but two real JD shapes
+sailed through as `AUTO_PROCESS` anyway, reproduced and confirmed
+directly against the actual stored text of both:
+- A terse field-label JD (Segula Technologies "Die Design" role,
+  `POS0094.pdf`): scored resume_score=13 vs jd_score=4 because its own
+  field labels ("Notice period", "Technical Skills") are legitimate
+  resume vocabulary too, and its JD-specific phrasing ("No. Of Open
+  Position", "Job Location", "Position Name") didn't match any existing
+  JD_SIGNALS phrase closely enough. Fixed by widening JD_SIGNALS with
+  those exact phrases - resume language a candidate's own resume
+  essentially never uses about itself.
+- A bulk multi-role listing (9 stacked ServiceNow roles in one
+  attachment, narrative style, no field labels): scored resume_score=11
+  vs jd_score=2, because nothing in the keyword lists was built for
+  *repetition* as a signal. Fixed with two new structural heuristics
+  (count-based, not simple presence, so they live outside the normal
+  JD_SIGNALS list): 4+ distinct "X-Y years" experience-range mentions,
+  and 2+ instances of a numbered role title immediately followed by
+  "Job Summary" - both near-zero false-positive risk since a single
+  person's resume doesn't restate its own experience as several
+  different ranges or number itself as a list of roles.
+Verified all three cases together after the fix (both real JDs now
+REJECT, a synthetic real resume still AUTO_PROCESSes at resume_score=27
+vs non_resume_score=2 - no regression on real resumes).
+
+**Bug 3 - name extraction sometimes grabs the wrong line (found, NOT
+fixed).** While checking candidates with implausible-looking names
+("Techstar Award", "Playing Cricket", "Visual Studio", "Aviin Tech
+Business Solutions"), found these are REAL candidates with real resume
+content - the parser just extracted an achievement, hobby, or employer
+line instead of the actual name from the top of the document ("Techstar
+Award" is really Muskan D; "Playing Cricket" is really Manjunath; "Visual
+Studio" is really Charan M N). Deliberately did not touch these records
+or guess-correct their names - overwriting a real candidate's identity
+field based on my own inference from resume text is a different, more
+invasive kind of fix than deleting confirmed garbage, and deserves an
+explicit decision rather than being bundled into a cleanup pass. Flagged
+to the user as a separate, still-open issue.
+
+**Cleanup executed** (soft-delete via the real `DELETE /candidates/{id}`
+API, not raw SQL - same 200 status the tests themselves rely on): 24 live
+QA-test candidates, plus 8 individually-verified-by-reading-their-actual-
+resume_text records - 2 confirmed JD-as-candidate (Segula, "Dtdc Invenio"),
+2 duplicate copies of the same misfiled ServiceNow JD ("Job Summary" x2,
+"Key Responsibilities"), one more JD sent from a `postmaster@` system
+address, and 2 with no usable content at all (raw OLE/binary bytes from a
+failed old-`.doc` text extraction, not garbled-but-real text). Left every
+plausible-real-name candidate alone, including the 6 confirmed-real
+wrong-name cases from Bug 3 and everyone else pattern-matched but not
+individually verified - soft-delete is reversible, but "looks like a
+weird name" was not treated as sufficient grounds to act on without
+reading the actual content first.

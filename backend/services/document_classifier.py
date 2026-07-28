@@ -193,6 +193,21 @@ JD_SIGNALS = [
     ('mandatory skills', 3), ('must have skills', 3), ('good to have', 3),
     ('bill rate', 3), ('pay rate', 3), ('rate card', 3),
     ('contract duration', 3), ('contract length', 2), ('budget', 2),
+    # Added after a real terse-JD-template miss (POS0094.pdf, a Segula
+    # Technologies "Die Design" opening): a sparse field-label-style JD
+    # ("Job ID: POS0094", "No. Of Open Position: 1", "Position Name: ...",
+    # "Job Location: ...") scored resume_score=13 / jd_score=4 and sailed
+    # through as AUTO_PROCESS - "job id" was the only phrase that matched,
+    # while "notice period"/"technical skills"/"experience" (all real field
+    # labels in the same template) scored for RESUME instead, since a real
+    # resume legitimately uses that vocabulary too. These four widen JD
+    # coverage for exactly that template shape without touching resume
+    # scoring - each is something a candidate's own resume essentially
+    # never says about itself (a resume doesn't describe how many openings
+    # or name its own position), so they're a real signal, not overlap:
+    ('job location', 3), ('position name', 3),
+    ('open position', 3), ('no. of open position', 4),
+    ('key responsibilities', 2),
 ]
 
 # ─── Filename Heuristics ──────────────────────────────────────────────────────
@@ -305,6 +320,33 @@ def classify_document(
     idd_score, idd_match = score_signals(text_lower, ID_DOC_SIGNALS)
     cer_score, cer_match = score_signals(text_lower, CERTIFICATE_SIGNALS)
     jd_score,  jd_match  = score_signals(text_lower, JD_SIGNALS)
+
+    # A real bulk-JD miss (9 stacked ServiceNow role listings in one
+    # attachment, each numbered "N. <title>" with its own "Job Summary"/
+    # "Key Responsibilities" - a narrative style with no field labels, so
+    # none of the keyword signals above fired strongly enough). What DOES
+    # distinguish it: nine separate "X-Y years" experience ranges, one per
+    # role - a resume states its own total experience once or twice, not
+    # several different ranges for several different roles. This is a
+    # repetition signal, not a presence signal, so it can't live in the
+    # substring-based JD_SIGNALS list above; counted separately and only
+    # kicks in at 4+ distinct ranges to stay clear of a resume that
+    # legitimately breaks down experience per skill ("5 years Java, 3
+    # years Python, 2 years AWS" is 3, still under the threshold).
+    exp_range_count = len(re.findall(r'\d+\s*[–\-]\s*\d+\+?\s*years?|\d+\+\s*years?\b', text_lower))
+    if exp_range_count >= 4:
+        jd_score += 4.0
+        jd_match.append(f'{exp_range_count}x experience-range pattern')
+
+    # Second, independent structural signal for the same bulk-listing shape:
+    # a numbered item ("1. <role title>") immediately followed by a "Job
+    # Summary" heading, repeated. Near-zero false-positive risk - nothing
+    # about a single person's resume numbers itself as a list of roles.
+    numbered_listing_count = len(re.findall(
+        r'^\s*\d+\.\s+\S.{3,80}\n\s*job summary', text_lower, re.MULTILINE))
+    if numbered_listing_count >= 2:
+        jd_score += 6.0
+        jd_match.append(f'{numbered_listing_count}x numbered-role-listing pattern')
 
     # Non-resume total
     non_resume_raw = max(inv_score, frm_score, bnk_score, pay_score,
