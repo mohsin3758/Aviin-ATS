@@ -5,7 +5,7 @@ Jobs: retention bank release, loyalty milestones, KAE months, n8n triggers.
 """
 import httpx
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import db
 
@@ -455,8 +455,44 @@ def start_scheduler():
     # alerts automatically instead of waiting for a human to open the panel,
     # and auto-reassign after a grace period if still unresolved.
     scheduler.add_job(process_sla_escalations, "interval", minutes=30, id="sla_escalations", replace_existing=True)
+    # Daily at 03:00 IST — data-minimization purge for device monitoring
+    # (active-window log + browsing history). Consent/device/enrollment
+    # rows are kept (they're the audit trail of who agreed to what), only
+    # the granular activity data ages out.
+    scheduler.add_job(purge_old_device_monitoring_data, "cron", hour=3, minute=0,
+                      id="device_monitoring_purge", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
+
+DEVICE_MONITORING_RETENTION_DAYS = 90
+
+
+async def purge_old_device_monitoring_data():
+    """Data minimization: delete device activity/browsing rows older than
+    DEVICE_MONITORING_RETENTION_DAYS. Consent and device-enrollment records
+    are NOT touched here — those are the compliance audit trail (who
+    consented, when, to what policy version) and should outlive the raw
+    activity data they authorized."""
+    logger.info("scheduler: device monitoring purge running")
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=DEVICE_MONITORING_RETENTION_DAYS)
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id FROM tenants")
+        for tenant in tenants:
+            tid = str(tenant["id"])
+            async with db.tenant_conn(tid) as conn:
+                a = await conn.execute(
+                    "DELETE FROM device_activity_log WHERE tenant_id=$1 AND started_at < $2",
+                    tid, cutoff,
+                )
+                b = await conn.execute(
+                    "DELETE FROM device_browsing_history WHERE tenant_id=$1 AND visited_at < $2",
+                    tid, cutoff,
+                )
+                logger.info(f"device monitoring purge tenant={tid}: activity={a} browsing={b}")
+    except Exception as e:
+        logger.error(f"purge_old_device_monitoring_data error: {e}")
+
 
 async def run_gdpr_archive():
     """Weekly GDPR: anonymize candidates inactive for 90+ days."""

@@ -851,3 +851,99 @@ code-review-only:**
   genuinely-still-open escalation's `tier1_fired_at` to force a re-fire,
   ran the actual scheduler function, and got a correctly-formed
   notification row for the manager (`notifications` count 4147→4148).
+
+## Device Monitoring (company devices), 2026-07-28
+User asked for full "micro management" employee tracking on the
+Recruiter Ops Presence tab — login/logout, product usage, laptop use,
+website use. Scoped down through explicit back-and-forth before any code:
+**company-issued devices only** (no personal/BYOD — consent to monitor a
+personal device as a condition of employment fails DPDP 2023's "free"
+consent standard), **transparent only** (written policy + visible tray
+icon; recruiter self-consents and self-generates the enrollment code —
+no admin-push path exists), **no screenshots, no keystroke logging**
+(both explicitly declined — keylogging captures passwords/personal
+messages indiscriminately and is refused regardless of employer intent
+or disclosure). What shipped: active-window/idle time + browser URL
+history (Chrome/Edge) only.
+
+- **`sql/26_device_monitoring.sql`** — `device_monitoring_consent`
+  (separate from `consent_records`, which is `candidate_id`-FK'd by
+  design and can't be reused for employee consent),
+  `device_enrollment_tokens` (15-min single-use codes), `monitored_devices`,
+  `device_activity_log`, `device_browsing_history`. All forced-RLS. Two
+  `SECURITY DEFINER` functions (`get_device_by_key_hash`,
+  `redeem_device_enrollment`) owned by `postgres` — the agent authenticates
+  with a device API key, not a user JWT, so it doesn't know its own
+  tenant_id ahead of time, same "cast '' to uuid" problem as every other
+  anonymous/token flow (`nda.py`, `offers.py`), same fix.
+- **`backend/routers/device_monitoring.py`** — consent give/revoke/status,
+  enrollment-token issuance (blocked without active consent — 403),
+  device enroll (single-use token redemption), heartbeat + browsing
+  ingest (device-key auth), and role-scoped dashboards: recruiters can
+  only ever see their own data (server-enforced — a `user_id` query param
+  from a non-manager role is silently ignored, not honored), admin/manager
+  see everyone's. Revoking consent deactivates all of that user's devices
+  immediately; a deactivated device's key is rejected on the next request.
+- **`agent/aviin_device_agent.py`** — Windows agent. Active window +
+  process name (`pywin32`), idle detection via `GetLastInputInfo`
+  (boolean idle/active only, never keystroke content), Chrome/Edge
+  browsing history (copies the locked SQLite `History` file before
+  reading, converts Chrome's webkit-epoch timestamps). Always shows a
+  system tray icon while running — this agent has no silent/hidden mode.
+  `enroll`/`run`/`install-autostart` CLI; `install-autostart` only
+  touches `HKEY_CURRENT_USER` (no admin rights, current user only).
+  `README.md` has PyInstaller packaging instructions for real deployment.
+- **`frontend/app/(dashboard)/device-monitoring/page.tsx`** — "My Device"
+  tab (everyone): policy text, consent toggle, enrollment code generator,
+  own devices list, own activity summary, own browsing history — a
+  recruiter can always see the exact same data a manager can see about
+  them. "Team Overview" tab (admin/manager only): all enrolled devices,
+  per-person active-time, browsing history by selected recruiter.
+- **`purge_old_device_monitoring_data()`** (`scheduler.py`, daily 03:00
+  IST) — data-minimization purge of activity/browsing rows older than 90
+  days. Consent and enrollment records are kept (compliance audit trail),
+  only the granular activity data ages out.
+
+**Verification** (real API calls + real browser interaction, not code
+review): full consent→enrollment-token→enroll→heartbeat→browsing→
+dashboard cycle proven via curl against production; single-use token
+reuse correctly rejected (400); role-scoping proven with a real
+`recruiter`-role login (QA Test Recruiter, password reset via the real
+admin API) that could not see the admin's device/history even when
+explicitly requesting it by `user_id`; consent revoke proven to
+deactivate the device and reject its key on the next request (401);
+frontend proven via a real headless-browser click-through (consent →
+enroll → revoke → Team Overview), not just a successful build; the
+**actual agent code** (`enroll()`, `post_batch()`) run for real against
+production from an isolated config directory (never touching this
+machine's real AppData or its real device identity); all three capture
+functions proven against real local data on this Windows machine
+(idle detection, active-window capture, and reading 2,203 real Chrome/Edge
+history entries with correct webkit-epoch timestamp conversion) —
+without ever printing actual URLs/titles to the session transcript, to
+avoid exposing personal browsing content. All test data cleaned up
+from production after each proof.
+
+**Two real bugs found via genuine testing, not code review**:
+- The SSR/hydration bug class — `getTokenPayload()` reads `localStorage`,
+  which doesn't exist during server-render, so calling it synchronously
+  during a component's render body makes the server's first paint differ
+  from the client's (React error #418). This same pattern already exists
+  in `recruiter-ops/page.tsx`'s `TargetsTab` — not fixed there (out of
+  scope for this feature), but now a known, reproducible finding rather
+  than a theoretical one. Fixed in the new page via the standard
+  `useState` + `useEffect` deferred-read pattern.
+- `purge_old_device_monitoring_data()`'s first version passed a plain
+  Python string (`"90 days"`) as an asyncpg query parameter cast to
+  `::interval` — asyncpg can't bind a bare string to an interval
+  parameter that way. Fixed by computing the cutoff as a real
+  `datetime` in Python and comparing directly, no interval casting
+  needed. Caught by actually running the job against real inserted rows
+  (one dated 2026-01-01, one dated "now") and confirming exactly the old
+  one was deleted — not by reading the code.
+
+Also caught: the zero-token audit's `git ls-files`-based scan silently
+skips brand-new untracked files — the first post-build run reported
+CONFIRMED CLEAN at 307 files, identical to the pre-build count, meaning
+none of this feature's new files were actually scanned. Staged them
+(`git add`, no commit yet) and re-ran: 313 files, genuinely clean.

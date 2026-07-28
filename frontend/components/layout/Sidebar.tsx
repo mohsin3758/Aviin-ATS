@@ -16,6 +16,7 @@ import {
   ChevronDown, ChevronLeft, ChevronRight,
   FileSignature, Send, GitMerge, ExternalLink, Activity, Workflow,
   Users2, CalendarDays, Smile, Video, FileBarChart, UserPlus, Sliders,
+  Laptop,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -28,6 +29,7 @@ const NAV_GROUPS = [
     { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity', roles:['admin','super_admin','lead_recruiter'] },
     { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates' },
     { icon:Users2,          href:'/recruiter-ops', label:'Recruiter Ops' },
+    { icon:Laptop,          href:'/device-monitoring', label:'Device Monitoring' },
   ]},
   { id:'ai', label:'AI & INTELLIGENCE', defaultOpen:true, items:[
     { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },
