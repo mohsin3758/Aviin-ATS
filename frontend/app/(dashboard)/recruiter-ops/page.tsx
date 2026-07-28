@@ -1,10 +1,11 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
-import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff } from 'lucide-react';
+import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff, Sun, AlertCircle, Video } from 'lucide-react';
 
 const TABS = [
+  { key: 'myday', label: 'My Day', icon: Sun },
   { key: 'autoassign', label: 'Auto-Assign', icon: Sparkles },
   { key: 'presence', label: 'Presence', icon: Circle },
   { key: 'sessions', label: 'Work Sessions', icon: Clock },
@@ -18,6 +19,94 @@ const card: React.CSSProperties = { background: '#fff', border: '1px solid #E2E8
 const label: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 };
 const input: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, marginBottom: 8 };
 const btn: React.CSSProperties = { padding: '7px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' };
+
+// Unified daily action queue, backed by GET /recruiter/my-day — the data
+// (tasks, interviews, stale candidates) already existed across 3-4 other
+// pages; this is the one glanceable "what do I need to do today" view
+// most competitor ATS platforms give a recruiter as their home screen.
+function timeOnly(iso: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function MyDayTab() {
+  const { data, loading } = useFetch<any>('/recruiter/my-day');
+  const tasks = data?.tasks_due || [];
+  const interviews = data?.interviews_today || [];
+  const stale = data?.candidates_needing_action || [];
+  const nothingToDo = !loading && !tasks.length && !interviews.length && !stale.length;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {nothingToDo && (
+        <div style={{ ...card, textAlign: 'center', padding: 32, color: '#16A34A', fontSize: 13, fontWeight: 700 }}>
+          ✓ Nothing needs your attention right now — no tasks due, no interviews today, no stale candidates.
+        </div>
+      )}
+
+      {(loading || tasks.length > 0) && (
+        <div style={card}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <ListChecks size={15} color="#2563EB" />
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Tasks due or overdue ({tasks.length})</div>
+          </div>
+          {tasks.map((t: any) => {
+            const overdue = t.due_at && new Date(t.due_at) < new Date();
+            return (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
+                <span style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 600 }}>{t.title}</span>
+                  {t.candidate_name && <span style={{ color: '#64748B' }}> — {t.candidate_name}</span>}
+                  {t.req_title && <span style={{ color: '#94A3B8' }}> ({t.req_title})</span>}
+                </span>
+                {t.due_at && (
+                  <span style={{ fontSize: 10, fontWeight: 700, color: overdue ? '#DC2626' : '#64748B' }}>
+                    {overdue ? 'OVERDUE' : 'DUE'} {new Date(t.due_at).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {(loading || interviews.length > 0) && (
+        <div style={card}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <Video size={15} color="#2563EB" />
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Interviews today ({interviews.length})</div>
+          </div>
+          {interviews.map((i: any) => (
+            <div key={i.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
+              <span style={{ fontWeight: 700, color: '#2563EB', width: 60 }}>{timeOnly(i.scheduled_at)}</span>
+              <span style={{ flex: 1 }}>{i.candidate_name}{i.req_title && <span style={{ color: '#94A3B8' }}> — {i.req_title}</span>}</span>
+              <span style={{ fontSize: 10, color: '#64748B' }}>{i.duration_mins}min · {i.mode}</span>
+              {i.im_interviewer && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: '#EEF2FF', color: '#4338CA' }}>YOU INTERVIEW</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(loading || stale.length > 0) && (
+        <div style={card}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <AlertCircle size={15} color="#EA580C" />
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Candidates needing action ({stale.length})</div>
+          </div>
+          {stale.map((s: any) => (
+            <div key={s.application_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
+              <span style={{ flex: 1 }}>
+                <span style={{ fontWeight: 600 }}>{s.candidate_name}</span>
+                {s.req_title && <span style={{ color: '#94A3B8' }}> — {s.req_title}</span>}
+              </span>
+              <span style={{ fontSize: 10, color: '#64748B', textTransform: 'uppercase' }}>{s.stage}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: '#EA580C' }}>{s.days_stale}d stale</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function AutoAssignTab() {
   const { data: reqs, loading: reqsLoading } = useFetch<any[]>('/requisitions?status=open');
@@ -391,7 +480,15 @@ function HotlistTab() {
 }
 
 export default function RecruiterOpsPage() {
+  // 'autoassign' is the true initial value on both server and client (safe
+  // for hydration - see the same fix on device-monitoring/page.tsx). Only
+  // AFTER mount, once localStorage is actually reachable, do plain
+  // recruiters get switched to My Day instead of landing on a tool built
+  // for managing other people's assignments, not their own work.
   const [tab, setTab] = useState('autoassign');
+  useEffect(() => {
+    if ((getTokenPayload()?.role || '') === 'recruiter') setTab('myday');
+  }, []);
   return (
     <div className="anim-fade-up" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div>
@@ -406,6 +503,7 @@ export default function RecruiterOpsPage() {
           </button>
         ))}
       </div>
+      {tab === 'myday' && <MyDayTab />}
       {tab === 'autoassign' && <AutoAssignTab />}
       {tab === 'presence' && <PresenceTab />}
       {tab === 'sessions' && <WorkSessionsTab />}

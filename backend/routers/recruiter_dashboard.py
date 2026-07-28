@@ -120,3 +120,67 @@ async def my_stats(actor: Actor = Depends(get_actor)):
         "my_pipeline": my_pipeline,
         "my_candidates_added_today": int(cands_today or 0),
     }
+
+
+@router.get("/my-day")
+async def my_day(actor: Actor = Depends(get_actor)):
+    """Unified daily action queue for the logged-in recruiter. The data all
+    already existed (recruiter_tasks, interview_schedules, applications) but
+    was scattered across four separate pages - this assembles the three
+    things a recruiter actually needs at a glance into one response, same
+    as a typical ATS "today" home screen (Bullhorn/CEIPAL/JobDiva)."""
+    uid = actor.user_id
+    if uid is None:
+        return {"tasks_due": [], "interviews_today": [], "candidates_needing_action": []}
+
+    today_start = _start_of_day_utc()
+    today_end = today_start + timedelta(days=1)
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        tasks_due = await conn.fetch(
+            """SELECT id, task_type, title, priority, due_at, candidate_name, req_title, requisition_id, application_id
+               FROM recruiter_tasks
+               WHERE recruiter_id = $1 AND status IN ('pending','in_progress')
+                 AND (due_at IS NULL OR due_at < $2)
+               ORDER BY (due_at IS NULL), due_at ASC, priority = 'high' DESC
+               LIMIT 20""",
+            uid, today_end,
+        )
+
+        interviews_today = await conn.fetch(
+            """SELECT i.id, i.scheduled_at, i.duration_mins, i.mode, i.status, i.interview_type,
+                      c.full_name AS candidate_name, r.title AS req_title,
+                      (i.interviewer_id = $1) AS im_interviewer
+               FROM interview_schedules i
+               JOIN candidates c ON c.id = i.candidate_id
+               LEFT JOIN requisitions r ON r.id = i.requisition_id
+               LEFT JOIN applications a ON a.id = i.application_id
+               WHERE i.tenant_id = $2
+                 AND (i.interviewer_id = $1 OR a.assigned_recruiter_id = $1)
+                 AND i.scheduled_at >= $3 AND i.scheduled_at < $4
+                 AND i.status NOT IN ('cancelled', 'completed')
+               ORDER BY i.scheduled_at ASC""",
+            uid, actor.tenant_id, today_start, today_end,
+        )
+
+        # "Needs action" = assigned to me, not in a terminal stage, and
+        # nobody has touched it in 3+ days - the ones quietly going stale.
+        stale = await conn.fetch(
+            """SELECT a.id AS application_id, a.stage, a.updated_at, c.full_name AS candidate_name,
+                      r.title AS req_title, EXTRACT(day FROM now() - a.updated_at)::int AS days_stale
+               FROM applications a
+               JOIN candidates c ON c.id = a.candidate_id
+               LEFT JOIN requisitions r ON r.id = a.requisition_id
+               WHERE a.tenant_id = $1 AND a.assigned_recruiter_id = $2
+                 AND a.stage NOT IN ('placed', 'rejected', 'hold')
+                 AND a.updated_at < now() - interval '3 days'
+               ORDER BY a.updated_at ASC
+               LIMIT 15""",
+            actor.tenant_id, uid,
+        )
+
+    return {
+        "tasks_due": [dict(r) for r in tasks_due],
+        "interviews_today": [dict(r) for r in interviews_today],
+        "candidates_needing_action": [dict(r) for r in stale],
+    }

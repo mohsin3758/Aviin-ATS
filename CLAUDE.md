@@ -1026,3 +1026,44 @@ real API calls end-to-end - not code review.
   labeled with which method produced each number. Verified the honest
   degraded-mode path for real (this tenant doesn't have enough data yet)
   rather than only testing the happy path a real regression would take.
+
+## Recruiter Ops UX gap: wrong default tab + no unified "My Day", 2026-07-28
+User asked, from a screenshot of the Recruiter Ops page, whether anything
+was missing for the recruiter persona specifically (as opposed to admin/
+manager). Two real findings, both fixed:
+- Every recruiter landed on the "Auto-Assign" tab by default - a tool for
+  assigning recruiters to open reqs, more relevant to a manager's job than
+  their own. The page had exactly one role check anywhere (`canManage`,
+  gating just the Targets tab's "Set Target" button) - no tab-level role
+  awareness at all.
+- The three things a recruiter actually needs at a glance each day - tasks
+  due, interviews today, candidates going stale - already existed as real
+  data (`recruiter_tasks`, `interview_schedules`, `applications`) but were
+  scattered across four separate pages with no single "today" view, unlike
+  the home screen every competitor ATS (Bullhorn/CEIPAL/JobDiva) gives a
+  recruiter.
+
+Fixed both together: new `GET /recruiter/my-day` (`recruiter_dashboard.py`,
+alongside the existing `/recruiter/my-stats`) assembles tasks due-or-
+overdue, today's interviews (as interviewer or as the candidate's owning
+recruiter), and applications assigned to them with no stage movement in
+3+ days. New "My Day" tab on Recruiter Ops, first in the tab order,
+visible to everyone - but only recruiters get auto-switched to it on
+load (admin/manager keep the existing Auto-Assign default, via a
+post-mount `useEffect`, not the initial render, to avoid the exact
+localStorage/SSR hydration mismatch found and fixed earlier in the
+device-monitoring page - applying that lesson meant this one shipped
+with zero hydration errors on the first try, confirmed via the same
+browser-console-error check).
+
+Verified with real data end-to-end: created a real task due today, a real
+interview scheduled today, confirmed both appeared and a genuinely stale
+candidate (11 days untouched) also surfaced for a different account with
+no test setup at all - then confirmed a task due days in the future
+correctly did NOT appear (proving the query is actually date-selective,
+not just permissive). Real browser test confirmed the admin session
+still defaults to Auto-Assign while a real recruiter login auto-switches
+to My Day, both rendering real content. Found and cleaned up one piece of
+leftover test data ("E2E test task") from earlier in the session that had
+never been deleted - a reminder that cleanup steps need to actually be
+checked off, not just intended.
