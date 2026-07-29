@@ -1,12 +1,13 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2 } from 'lucide-react';
+import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Star, Pencil } from 'lucide-react';
 
 const TABS = [
   { key: 'scoring', label: 'Matching Weights', icon: Sliders },
   { key: 'sla', label: 'SLA Tiers', icon: AlertTriangle },
   { key: 'blocks', label: 'Recruiter-Client Blocks', icon: Ban },
+  { key: 'templates', label: 'Tracking Sheet Templates', icon: FileSpreadsheet },
   { key: 'gdpr', label: 'Data Retention (GDPR)', icon: ShieldOff },
 ];
 
@@ -154,6 +155,142 @@ function BlocksTab() {
   );
 }
 
+function TemplateForm({ initial, columnsReg, clients, onSave, onCancel }: any) {
+  const [name, setName] = useState(initial?.name || '');
+  const [clientId, setClientId] = useState(initial?.client_id || '');
+  const [isDefault, setIsDefault] = useState(initial?.is_default || false);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>(
+    initial?.columns ? initial.columns.map((c: any) => c.key) : (columnsReg || []).map((c: any) => c.key)
+  );
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const toggleKey = (key: string) => {
+    setSelectedKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+  };
+
+  const save = async () => {
+    if (!name.trim()) { setErr('Name is required'); return; }
+    if (selectedKeys.length === 0) { setErr('Select at least one column'); return; }
+    setSaving(true); setErr('');
+    try {
+      const columns = (columnsReg || [])
+        .filter((c: any) => selectedKeys.includes(c.key))
+        .map((c: any) => ({ key: c.key, label: c.label }));
+      await onSave({ name, client_id: clientId || null, columns, is_default: isDefault });
+    } catch (e: any) {
+      setErr(e.message || 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={card}>
+      <label style={label}>TEMPLATE NAME</label>
+      <input value={name} onChange={e => setName(e.target.value)} style={input} placeholder="e.g. Acme Corp Tracking Sheet" />
+
+      <label style={label}>CLIENT (LEAVE BLANK FOR A GLOBAL TEMPLATE)</label>
+      <select value={clientId} onChange={e => setClientId(e.target.value)} style={input}>
+        <option value="">-- Global (any client) --</option>
+        {(clients || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+      </select>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 10, cursor: 'pointer' }}>
+        <input type="checkbox" checked={isDefault} onChange={e => setIsDefault(e.target.checked)} />
+        Use as the default fallback template (when a client has no template of its own)
+      </label>
+
+      <label style={label}>COLUMNS ({selectedKeys.length} selected)</label>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 6, marginBottom: 12 }}>
+        {(columnsReg || []).map((c: any) => (
+          <label key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '5px 8px', borderRadius: 6, background: selectedKeys.includes(c.key) ? '#EFF6FF' : '#F8FAFC', border: `1px solid ${selectedKeys.includes(c.key) ? '#BFDBFE' : '#E2E8F0'}`, cursor: 'pointer' }}>
+            <input type="checkbox" checked={selectedKeys.includes(c.key)} onChange={() => toggleKey(c.key)} />
+            {c.label}
+            {!c.auto && <span style={{ fontSize: 9, color: '#94A3B8' }}>(manual)</span>}
+          </label>
+        ))}
+      </div>
+
+      {err && <div style={{ color: '#DC2626', fontSize: 12, marginBottom: 8 }}>{err}</div>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={save} disabled={saving} style={btn}>{saving ? 'Saving…' : 'Save Template'}</button>
+        <button onClick={onCancel} style={{ ...btn, background: '#F1F5F9', color: '#475569' }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function TemplatesTab() {
+  const { data: templates, refetch } = useFetch<any[]>('/submission-templates');
+  const { data: columnsReg } = useFetch<any[]>('/submission-templates/columns');
+  const { data: clientsRaw } = useFetch<any>('/clients');
+  const clients = clientsRaw?.items || clientsRaw || [];
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<any | null>(null);
+  const [err, setErr] = useState('');
+
+  const openNew = () => { setEditing(null); setShowForm(true); setErr(''); };
+  const openEdit = (t: any) => { setEditing(t); setShowForm(true); setErr(''); };
+
+  const save = async (body: any) => {
+    if (editing) {
+      await apiFetch(`/submission-templates/${editing.id}`, { method: 'PUT', body: JSON.stringify(body) });
+    } else {
+      await apiFetch('/submission-templates', { method: 'POST', body: JSON.stringify(body) });
+    }
+    setShowForm(false); setEditing(null); refetch();
+  };
+
+  const del = async (t: any) => {
+    if (!confirm(`Delete template "${t.name}"?`)) return;
+    setErr('');
+    try {
+      await apiFetch(`/submission-templates/${t.id}`, { method: 'DELETE' });
+      refetch();
+    } catch (e: any) {
+      setErr(e.message || 'Delete failed');
+    }
+  };
+
+  return (
+    <div data-testid="templates-panel" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ fontSize: 12, color: '#64748B' }}>
+        Column sets used when a recruiter submits a candidate profile + tracking sheet to a KAE. Leave a template's
+        client blank to make it the global default; pin one to a specific client for a fully separate sheet, or just
+        uncheck a few columns to reuse the default with fewer fields — same mechanism either way.
+      </p>
+      <button onClick={openNew} style={{ ...btn, alignSelf: 'flex-start', display: 'flex', gap: 6, alignItems: 'center' }}><Plus size={14} /> New Template</button>
+
+      {err && <div style={{ color: '#DC2626', fontSize: 12 }}>{err}</div>}
+      {showForm && (
+        <TemplateForm initial={editing} columnsReg={columnsReg} clients={clients} onSave={save} onCancel={() => setShowForm(false)} />
+      )}
+
+      <div style={card}>
+        {(templates || []).map((t: any) => (
+          <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <strong>{t.name}</strong>
+                {t.is_default && (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 800, padding: '1px 7px', borderRadius: 999, background: '#FFFBEB', color: '#CA8A04', border: '1px solid #FDE68A' }}>
+                    <Star size={9} fill="#CA8A04" /> DEFAULT
+                  </span>
+                )}
+              </div>
+              <div style={{ color: '#64748B', fontSize: 11 }}>{t.client_name ? `Client: ${t.client_name}` : 'Global (any client)'} · {t.columns?.length || 0} columns</div>
+            </div>
+            <button onClick={() => openEdit(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}><Pencil size={14} /></button>
+            <button data-testid={`del-template-${t.id}`} onClick={() => del(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }}><Trash2 size={14} /></button>
+          </div>
+        ))}
+        {!templates?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No templates yet.</div>}
+      </div>
+    </div>
+  );
+}
+
 function GdprTab() {
   const { data: log, refetch } = useFetch<any[]>('/gdpr/log');
   const [days, setDays] = useState(90);
@@ -200,7 +337,7 @@ export default function OpsSettingsPage() {
     <div className="anim-fade-up" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div>
         <h1 style={{ fontSize: 20, fontWeight: 800, color: '#0F172A', marginBottom: 2 }}>Ops Settings</h1>
-        <p style={{ fontSize: 13, color: '#64748B' }}>AI matching weights, SLA thresholds, recruiter-client blocks, and data retention.</p>
+        <p style={{ fontSize: 13, color: '#64748B' }}>AI matching weights, SLA thresholds, recruiter-client blocks, KAE tracking-sheet templates, and data retention.</p>
       </div>
       <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #E2E8F0', flexWrap: 'wrap' }}>
         {TABS.map(t => (
@@ -213,6 +350,7 @@ export default function OpsSettingsPage() {
       {tab === 'scoring' && <ScoringTab />}
       {tab === 'sla' && <SlaTab />}
       {tab === 'blocks' && <BlocksTab />}
+      {tab === 'templates' && <TemplatesTab />}
       {tab === 'gdpr' && <GdprTab />}
     </div>
   );

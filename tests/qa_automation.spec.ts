@@ -862,3 +862,149 @@ test.describe('S13 P15-P22 Frontend Pages', () => {
     });
   }
 });
+
+// ─── S14: KAE Candidate Submission (tracking sheet + redacted resume) ─────
+// Recruiters had no way to hand a candidate to the client-owning KAE with a
+// resume that hides contact details plus an Excel tracking-sheet row, by
+// real email, logged in the ATS — this suite exercises that whole path.
+// Uses its own throwaway client/requisition/candidate (not a real client's
+// client_owners) so repeat runs never touch real KAE assignments or risk
+// the 3-KAE-per-client limit; test data is left in place afterward, same
+// convention as the rest of this file (unique per-run names/emails instead
+// of hard deletes — there's no delete endpoint for candidates by design).
+test.describe('S14 KAE Candidate Submission', () => {
+  const stamp = Date.now();
+  let clientId: string;
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+
+  test('setup: throwaway client + requisition + candidate + application', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA KAE Test Client ${stamp}`, industry: 'BFSI' } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+
+    const r = await request.post(`${API}/requisitions`, { headers: auth, data: { client_id: clientId, title: 'QA KAE Test Role', skills_required: ['SAP FICO'] } });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `QA KaeSubmission Test ${stamp}`,
+        email: `qa.kaesub.${stamp}@test.com`,
+        phone: `9${String(stamp).slice(-9)}`,
+        skills: ['SAP FICO', 'Risk & Compliance'],
+        total_exp_mo: 120,
+        location: 'Gurugram, Haryana',
+        current_employer: 'QA Test Bank Ltd',
+        current_designation: 'Business Analyst',
+        current_ctc: 1500000,
+        expected_ctc: 2200000,
+        notice_period_days: 30,
+        resume_text: `QA KaeSubmission Test ${stamp} — Business Analyst, 10y BFSI.\nContact: test / test\nSkills: SAP FICO, Risk & Compliance.`,
+      },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { requisition_id: reqId, candidate_id: candId } });
+    expect(app.ok()).toBeTruthy();
+    appId = (await app.json()).id;
+  });
+
+  test('preview 400s with no KAE assigned, then resolves after assignment', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const pre = await request.get(`${API}/applications/${appId}/submit-to-kae/preview`, { headers: auth });
+    expect(pre.ok()).toBeTruthy();
+    expect((await pre.json()).kae).toBeNull();
+
+    const submitNoKae = await request.post(`${API}/applications/${appId}/submit-to-kae`, { headers: auth, data: { resume_style: 'clean_generated' } });
+    expect(submitNoKae.status()).toBe(400);
+
+    const me = await request.get(`${API}/auth/me`, { headers: auth }).catch(() => null);
+    const adminId = me && me.ok() ? (await me.json()).id : null;
+    if (adminId) {
+      const assign = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: clientId, user_id: adminId, owner_type: 'kae' } });
+      expect(assign.ok()).toBeTruthy();
+    }
+
+    const post = await request.get(`${API}/applications/${appId}/submit-to-kae/preview`, { headers: auth });
+    const postBody = await post.json();
+    expect(postBody.kae).not.toBeNull();
+    expect(postBody.auto_values.sl_no).toBe('1');
+  });
+
+  test('submit-to-kae sends real email, logs submission, bumps stage', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const before = await request.get(`${API}/applications/${appId}`, { headers: auth });
+    expect((await before.json()).stage).toBe('sourced');
+
+    const sub1 = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
+      headers: auth,
+      data: { resume_style: 'clean_generated', field_values: { relevant_exp: '8y', skill_summary: 'BFSI reporting automation' } },
+    });
+    expect(sub1.ok()).toBeTruthy();
+    const body1 = await sub1.json();
+    expect(body1.status).toBe('sent');
+    expect(body1.stage_bumped_to_submitted).toBe(true);
+    expect(body1.field_values.sl_no).toBe('1');
+
+    const after = await request.get(`${API}/applications/${appId}`, { headers: auth });
+    expect((await after.json()).stage).toBe('submitted');
+
+    const sub2 = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
+      headers: auth, data: { resume_style: 'redacted_original', cc_self: false },
+    });
+    expect(sub2.ok()).toBeTruthy();
+    const body2 = await sub2.json();
+    expect(body2.field_values.sl_no).toBe('2');
+    expect(body2.stage_bumped_to_submitted).toBe(false); // already submitted — no regression/error
+
+    const hist = await request.get(`${API}/applications/${appId}/submissions`, { headers: auth });
+    const rows = await hist.json();
+    expect(rows.length).toBe(2);
+  });
+
+  test('drawer shows Submit to KAE tab and sends via the real UI', async ({ page }) => {
+    await page.goto(`${BASE}/pipeline?job=${reqId}`);
+    await page.waitForSelector('[data-testid="kanban-board"]', { state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.click(`text=QA KaeSubmission Test ${stamp}`, { timeout: 15000 });
+    await page.click('button:has-text("Submit to KAE")');
+    await page.waitForSelector('[data-testid="kae-submit-panel"]', { state: 'visible', timeout: 10000 });
+    // Third submission via the real browser UI, on top of the two API ones above.
+    await page.click('[data-testid="kae-submit-panel"] button:has-text("Submit to KAE")');
+    await page.waitForSelector('text=/Sent to|Logged, but email failed/', { timeout: 15000 });
+  });
+
+  test('Ops Settings > Templates: default template lists, create + delete a new one via the UI', async ({ page }) => {
+    await page.goto(`${BASE}/ops-settings`);
+    await page.click('button:has-text("Tracking Sheet Templates")');
+    await page.waitForSelector('[data-testid="templates-panel"]', { state: 'visible', timeout: 10000 });
+    await expect(page.locator('text=Default Tracking Sheet')).toBeVisible();
+
+    const name = `QA Template ${stamp}`;
+    await page.click('button:has-text("New Template")');
+    await page.fill('input[placeholder="e.g. Acme Corp Tracking Sheet"]', name);
+    const [createResp] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/submission-templates') && r.request().method() === 'POST'),
+      page.click('button:has-text("Save Template")'),
+    ]);
+    const created = await createResp.json();
+    await page.waitForSelector(`text=${name}`, { timeout: 10000 });
+
+    // Clean up via the real delete button (keyed by id — a stray non-default
+    // template left behind on every run would clutter the recruiter-facing
+    // "click a template" picker over time, unlike leftover QA candidates).
+    page.once('dialog', d => d.accept());
+    await page.click(`[data-testid="del-template-${created.id}"]`);
+    await expect(page.locator(`text=${name}`)).toHaveCount(0, { timeout: 10000 });
+  });
+});

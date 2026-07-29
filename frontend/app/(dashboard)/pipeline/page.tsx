@@ -380,6 +380,22 @@ function PipelineInner() {
       {selected && (
         <CandidateDrawer app={selected} onClose={() => setSelected(null)}
           onMoveStage={(toStage: string) => moveStage(selected.id, selected.stage, toStage)}
+          onSubmittedToKae={(bumped: boolean) => {
+            if (bumped) {
+              setBoard(prev => {
+                const fromStage = selected.stage;
+                const a = prev[fromStage]?.find((x: any) => x.id === selected.id);
+                if (!a || fromStage === 'submitted') return prev;
+                return {
+                  ...prev,
+                  [fromStage]: (prev[fromStage] || []).filter((x: any) => x.id !== selected.id),
+                  submitted: [{ ...a, stage: 'submitted' }, ...(prev['submitted'] || [])],
+                };
+              });
+              setSelected((s: any) => s ? { ...s, stage: 'submitted' } : s);
+            }
+            refreshStats();
+          }}
           drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES} />
       )}
 
@@ -467,7 +483,7 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart }: any
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -521,6 +537,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
             {[
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
               { key: 'nda', icon: <FileSignature size={12} />, label: 'NDA' },
+              { key: 'kae', icon: <Send size={12} />, label: 'Submit to KAE' },
               { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes', count: Array.isArray(app.app_notes) ? app.app_notes.length : 0 },
               { key: 'scorecards', icon: <Star size={12} />, label: 'Scorecards' },
               { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
@@ -540,6 +557,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
         <div style={{ flex: 1, overflowY: 'auto', padding: '14px 18px' }}>
           {drawerTab === 'profile' && <ProfileTab app={app} apiUrl={API_URL} />}
           {drawerTab === 'nda' && <NdaTab appId={app.id} showToast={showToast} />}
+          {drawerTab === 'kae' && <SubmitKaeTab appId={app.id} showToast={showToast} onSubmitted={onSubmittedToKae} />}
           {drawerTab === 'notes' && <NotesTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'scorecards' && <ScorecardsTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'activity' && <ActivityTab candidateId={app.candidate_id} />}
@@ -771,6 +789,144 @@ function NdaTab({ appId, showToast }: any) {
           style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, padding: '10px 14px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 10, color: '#15803D', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
           <Download size={13} /> View Uploaded Signed Copy
         </button>
+      )}
+    </div>
+  );
+}
+
+// ── Submit to KAE Tab ────────────────────────────────────────────────────────
+function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
+  const { data: preview, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-kae/preview`);
+  const { data: templates } = useFetch<any[]>('/submission-templates');
+  const { data: history, refetch: refetchHistory } = useFetch<any[]>(`/applications/${appId}/submissions`);
+  const [templateId, setTemplateId] = useState('');
+  const [resumeStyle, setResumeStyle] = useState<'clean_generated' | 'redacted_original'>('clean_generated');
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const [ccSelf, setCcSelf] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+
+  useEffect(() => {
+    if (preview && !initialized) {
+      setTemplateId(preview.resolved_template_id || '');
+      setFields(preview.auto_values || {});
+      setInitialized(true);
+    }
+  }, [preview, initialized]);
+
+  const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em', marginBottom: 6, display: 'block' };
+
+  if (!preview) return <div style={{ color: '#94A3B8', fontSize: 12, textAlign: 'center', padding: 20 }}>Loading…</div>;
+
+  if (!preview.kae) {
+    return (
+      <div data-testid="kae-submit-panel" style={{ padding: 16, textAlign: 'center', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 10 }}>
+        <AlertTriangle size={20} color="#CA8A04" style={{ marginBottom: 6 }} />
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#92400E', marginBottom: 4 }}>No KAE assigned to this client</div>
+        <div style={{ fontSize: 11, color: '#92400E', marginBottom: 8 }}>Assign a Key Account Executive to this client before submitting a profile.</div>
+        <a href="/kae" style={{ fontSize: 11, fontWeight: 700, color: '#2563EB' }}>Go to KAE → Owners →</a>
+      </div>
+    );
+  }
+
+  const selectedTemplate = (templates || []).find((t: any) => t.id === templateId);
+
+  const send = async () => {
+    setSending(true);
+    try {
+      const r = await apiFetch(`/applications/${appId}/submit-to-kae`, {
+        method: 'POST',
+        body: JSON.stringify({ template_id: templateId, resume_style: resumeStyle, field_values: fields, cc_self: ccSelf }),
+      });
+      showToast(r.email_sent ? `Sent to ${r.kae_name} ✓` : `Logged, but email failed: ${r.email_error || 'SMTP error'}`, !!r.email_sent);
+      setInitialized(false);
+      refetchHistory();
+      refetchPreview();
+      onSubmitted?.(r.stage_bumped_to_submitted);
+    } catch (e: any) {
+      showToast(String(e?.message || 'Submission failed'), false);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div data-testid="kae-submit-panel" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ padding: 10, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12 }}>
+        <div style={{ fontWeight: 700, color: '#1E293B' }}>To: {preview.kae.full_name}</div>
+        <div style={{ color: '#64748B' }}>{preview.kae.email}</div>
+      </div>
+
+      <div>
+        <span style={lbl}>TRACKING SHEET TEMPLATE</span>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {(templates || []).map((t: any) => (
+            <button key={t.id} onClick={() => setTemplateId(t.id)}
+              style={{ fontSize: 11, fontWeight: 700, padding: '6px 12px', borderRadius: 999, cursor: 'pointer',
+                border: `1px solid ${templateId === t.id ? '#2563EB' : '#E2E8F0'}`,
+                background: templateId === t.id ? '#2563EB' : '#fff', color: templateId === t.id ? '#fff' : '#475569' }}>
+              {t.name}{t.client_name ? ` (${t.client_name})` : t.is_default ? ' (Default)' : ''}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <span style={lbl}>RESUME ATTACHMENT</span>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[
+            { key: 'clean_generated', label: 'Clean Summary', hint: 'Generated one-pager, no contact info' },
+            { key: 'redacted_original', label: 'Redacted Original', hint: 'Full resume text, contact info blanked' },
+          ].map(o => (
+            <button key={o.key} onClick={() => setResumeStyle(o.key as any)}
+              style={{ flex: 1, textAlign: 'left', padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                border: `1.5px solid ${resumeStyle === o.key ? '#2563EB' : '#E2E8F0'}`,
+                background: resumeStyle === o.key ? '#EFF6FF' : '#fff' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: resumeStyle === o.key ? '#1D4ED8' : '#1E293B' }}>{o.label}</div>
+              <div style={{ fontSize: 10, color: '#94A3B8' }}>{o.hint}</div>
+            </button>
+          ))}
+        </div>
+        {resumeStyle === 'redacted_original' && !preview.has_resume_text && (
+          <div style={{ fontSize: 10, color: '#DC2626', marginTop: 4 }}>No extracted resume text on file for this candidate — Clean Summary is recommended instead.</div>
+        )}
+      </div>
+
+      <div>
+        <span style={lbl}>TRACKING SHEET ROW (SL No {preview.auto_values?.sl_no})</span>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {(selectedTemplate?.columns || []).filter((c: any) => c.key !== 'sl_no').map((c: any) => (
+            <div key={c.key} style={{ gridColumn: c.key === 'skill_summary' ? '1 / -1' : undefined }}>
+              <label style={{ fontSize: 9, fontWeight: 700, color: '#94A3B8' }}>{c.label.toUpperCase()}</label>
+              <input value={fields[c.key] || ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2 }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#475569', cursor: 'pointer' }}>
+        <input type="checkbox" checked={ccSelf} onChange={e => setCcSelf(e.target.checked)} /> CC myself
+      </label>
+
+      <button onClick={send} disabled={sending}
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.7 : 1 }}>
+        <Send size={13} /> {sending ? 'Sending…' : 'Submit to KAE'}
+      </button>
+
+      {history && history.length > 0 && (
+        <div>
+          <span style={lbl}>SUBMISSION HISTORY</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {history.map((h: any) => (
+              <div key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', background: '#F8FAFC', border: '1px solid #F1F5F9', borderRadius: 8, fontSize: 11 }}>
+                {h.status === 'sent' ? <CheckCircle size={12} color="#16A34A" /> : <AlertTriangle size={12} color="#DC2626" />}
+                <span style={{ flex: 1 }}>SL#{h.field_values?.sl_no} to {h.kae_name || 'KAE'} · {h.resume_style === 'clean_generated' ? 'Clean' : 'Redacted'} · {h.template_name}</span>
+                <span style={{ color: '#94A3B8' }}>{new Date(h.sent_at).toLocaleDateString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1197,3 +1197,122 @@ clicked the bare table row instead of the actual view-icon trigger,
 making it look like the drawer feature was broken when it was the test
 that was wrong; re-verified against the real trigger before concluding
 anything.
+
+## Recruiter -> KAE candidate submission (tracking sheet + redacted resume), 2026-07-29
+User asked to check whether recruiters had a way to hand a candidate to
+the client-owning KAE with (a) the resume shared WITHOUT phone/email/
+personal details, (b) an Excel "tracking sheet" attached (example
+provided: SL No/Date/Partner/Name/Role/Total Exp/Relevant Exp/Skill
+summary/Notice Period/Mobile/Alt Number/Email/Current Location/
+Deployment Location/Current Company/CTC/ECTC, one row per submission),
+(c) multiple tracking-sheet templates selectable per client ("click
+types template"), all sent by real email and logged in the ATS. Checked
+first, built nothing until confirmed: grepped the whole repo for
+`tracking_sheet`/`submission_template` - zero hits anywhere. Adjacent
+pieces existed but nothing connected them - `client_portal_router`'s
+`/view/{token}` link already correctly excluded email/phone, `kae.py`
+had ownership/visibility/scorecard tracking but zero submission or
+notification hooks, `p28_p32.py`'s 4 CSV exports were generic bulk
+tenant-wide reports not per-candidate, and stage-change emails only
+ever notified the candidate, never the KAE.
+
+Asked 3 clarifying questions before building given the genuine scope
+(this is a new multi-part feature, not a wire-up-what-exists fix). User
+answered "both" on two of them:
+- **Templates: "both" flexible-with-toggles AND fully-separate-per-client.**
+  Resolved as one mechanism, not two - `tracking_sheet_templates` is
+  just a named, ordered column list (`{key,label}[]`) optionally pinned
+  to a `client_id` (NULL = global default). "Flexible with toggles" is
+  just a template that reuses most of the default's columns; "fully
+  separate" is just another template row with a different column set -
+  no separate code path needed for the two modes the user asked for.
+- **Redaction: "both" generated-clean AND redacted-original.** Resolved
+  as a per-submission `resume_style` choice (`clean_generated` |
+  `redacted_original`), picked by the recruiter each time they submit,
+  not a global setting.
+- **Delivery: real email, automatically** - unambiguous, built as such.
+
+Built: migration `sql/28_kae_submission.sql` (`tracking_sheet_templates`,
+`candidate_submissions` - both FORCE RLS, tenant_isolation policy; the
+per-tenant seed of one default 17-column template had to loop with
+`set_config('app.tenant_id',...)` per tenant since even `app_user` as
+table owner still needs it set to satisfy its own FORCE RLS policy on
+INSERT - a bare cross-tenant `INSERT...SELECT` was rejected outright).
+New router `backend/routers/kae_submission.py`:
+- `/submission-templates` CRUD + `/submission-templates/columns` (the
+  17-key registry: `auto:true` columns resolve live from candidate/
+  requisition/tenant data - name, phone, email, location, employer, exp,
+  notice period, CTC/ECTC, tenant name as "Partner"; `auto:false` ones
+  are per-submission free text the recruiter fills in - relevant exp
+  for *this* role, a skills/support/projects summary, deployment
+  location, alternate number - since none of those exist as stored
+  candidate fields).
+- `GET/POST /applications/{id}/submit-to-kae(/preview)` - resolves the
+  KAE via `client_owners` (`owner_type='kae', is_active`), resolves the
+  template (client-specific else tenant default), builds a *cumulative*
+  per-requisition tracking sheet (every prior `candidate_submissions`
+  row for that requisition, server-computed `sl_no`, re-rendered fresh
+  each send so the KAE always gets the full picture, not just one row),
+  generates the resume attachment per `resume_style`, sends one real
+  SMTP email (extends the existing `nda.py`-style `_send_via_smtp`
+  pattern to multiple attachments), logs to `candidate_submissions`
+  (best-effort email - a send failure still logs `status='failed'` +
+  `error_message` rather than losing the record), and bumps the
+  application to `submitted` only if it was in an earlier stage
+  (sourced/contacted/interested/nda/screened - never regresses or
+  errors on a candidate already past that point, e.g. l1_interview).
+  Writes `event_outbox` (`candidate.submitted_to_kae` +
+  `application.stage_changed` when bumped) and `audit_log`.
+- **Redaction only ever applies to the resume attachment, never the
+  tracking sheet** - the tracking sheet is the client's own internal
+  record and the user's own example row has full mobile/email in it;
+  only the resume hides contact details. `clean_generated` renders a
+  curated one-pager (name, designation, location, total exp, skills, a
+  trimmed auto-extracted summary) from structured fields, no phone/
+  email ever included. `redacted_original` renders the *full* extracted
+  `resume_text` with the candidate's own stored phone/email plus
+  generic email/phone regex patterns swapped for `[REDACTED]` - this is
+  regex-based redaction of extracted text, not true pixel-level PDF
+  redaction of the original file's layout (that would need exact
+  on-page text-position detection, a much bigger undertaking) and it
+  doesn't attempt full home-address stripping (no reliable zero-token
+  way to identify one in raw text) - phone + email were what the user
+  named explicitly and are what it reliably catches.
+
+Frontend: a "Submit to KAE" tab on the pipeline board's candidate drawer
+(recipient, click-to-pick template chips, Clean Summary/Redacted
+Original toggle, editable tracking-sheet-row fields pre-filled from
+auto values, submission history) - reuses the drawer's existing tabbed-
+panel convention (same shape as the NDA/Notes/Scorecards tabs already
+there) rather than a new modal pattern. Template management as a new
+"Tracking Sheet Templates" tab on `/ops-settings` (same tab convention
+as Matching Weights/SLA Tiers/Blocks already on that page) - column
+checkboxes from the registry, optional client pin, default-template
+flag; delete is blocked server-side on the default template so a
+tenant can never end up with zero fallback template.
+
+Verified for real, not code review: a throwaway candidate+application
+submitted twice via curl (clean then redacted) correctly produced
+`sl_no` 1 then 2, bumped stage sourced->submitted on the first call
+only, sent real SMTP mail through the tenant's actual configured
+Hostinger relay (`email_sent:true`), and logged both rows - all cleaned
+up after (deleted the throwaway `client_owners`/application/candidate/
+`consent_records` rows so no residue was left on a real client). Then,
+separately, called the exact same `_build_tracking_excel`/
+`_build_clean_resume_pdf`/`_build_redacted_resume_pdf` functions
+directly inside the backend container against a test candidate whose
+resume text deliberately included ampersands ("Sales & Marketing",
+"R&D") to check the reportlab-Paragraph-mini-XML escaping was correct
+(an unescaped `&` there crashes generation) - loaded the Excel back
+with openpyxl and confirmed the tracking sheet correctly *includes*
+phone/email in both rows, extracted both PDFs with pdfminer and
+confirmed phone/email are absent from both while the candidate's name
+and unrelated resume content (including the ampersand lines) survived
+intact. Added a permanent "S14 KAE Candidate Submission" suite to
+`qa_automation.spec.ts` (throwaway client+requisition+candidate so
+repeat runs never touch a real client's `client_owners` or risk its
+3-KAE limit; API-level preview/submit/history checks plus one real
+browser-driven send through the actual drawer UI and one real create+
+delete through the actual Templates admin UI) - full suite now 132
+passed / 2 skipped / 0 failed (up from the prior 127/2/0 baseline, zero
+regressions).
