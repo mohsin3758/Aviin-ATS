@@ -1148,3 +1148,52 @@ wrong-name cases from Bug 3 and everyone else pattern-matched but not
 individually verified - soft-delete is reversible, but "looks like a
 weird name" was not treated as sufficient grounds to act on without
 reading the actual content first.
+
+**Follow-up, same day - Bug 3 investigated further, closed with no action
+needed.** User asked to fix the wrong-name-extraction bug next. Ran the
+real `extract_name_v2()`/`parse_resume_v2()` directly against the actual
+stored resume text for the failing cases (Muskan D, Manjunath) - both now
+extract correctly. Git history shows the parser file's only commit
+predates every affected record, but this project has an established
+pattern (documented repeatedly above) of large batches of uncommitted
+work landing all at once, so the code actually running on 2026-07-05 was
+very likely an earlier, buggier version than what's live now - already
+fixed through normal iteration, never retroactively reprocessed onto old
+records. Checked all 11 remaining suspect records: 10 were already
+`is_active=false` (soft-deleted by someone before this investigation
+started, not by this session) and therefore not visible to recruiters at
+all. The 1 still-active case ("Rise") has no recoverable better name
+anywhere in its available text, filename, email, or phone - left
+untouched rather than guessed. No code changed, no data changed - the
+honest conclusion was that there was nothing left to safely do.
+
+## Resume download missing from Candidate/Resume Inbox pages, 2026-07-29
+User pointed at a candidate detail page and a list quick-view drawer,
+neither showing any way to download the original resume file. Checked
+before building: the backend (`GET /resume-intake/{resume_file_id}/
+download`, `candidates.py`'s `get_candidate()` already returning
+`latest_resume_file_id`/`latest_resume_file_name`) and even a working
+`downloadResume()` helper all already existed - the button was just never
+wired to anything visible. It only existed buried in the candidate detail
+page's "Parse History" tab (a technical-sounding tab nobody would think
+to check for this), and nowhere at all on the list drawer or Resume
+Inbox.
+
+Added a real "Download Resume" button in three places: the candidate
+detail page's main header (next to Email/WhatsApp/Edit/Share Status, not
+just Parse History), the list page's quick-view drawer (next to RESUME
+EXTRACT - required a small extra fetch since the list endpoint doesn't
+return `latest_resume_file_id`, only the single-candidate GET does), and
+Resume Inbox (both a compact icon in the table row and a full button in
+the detail drawer, using `item.id` directly since resume-inbox queue rows
+already are `resume_files` rows).
+
+Verified for real, not just "the code looks right": downloaded the exact
+same real 249,670-byte PDF (Prakashraj B's actual resume) through all
+four button locations via genuine Playwright download events, confirmed
+byte-identical to a direct curl against the backend endpoint. One test
+script mistake caught and fixed along the way - the drawer test initially
+clicked the bare table row instead of the actual view-icon trigger,
+making it look like the drawer feature was broken when it was the test
+that was wrong; re-verified against the real trigger before concluding
+anything.

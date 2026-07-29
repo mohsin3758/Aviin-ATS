@@ -2,6 +2,7 @@
 import { useState, useCallback, useMemo, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { authHeaders } from '@/lib/auth';
 import {
   Inbox, RefreshCw, Play, FileText, User, Mail, Phone, MapPin,
   Briefcase, Clock, CheckCircle, XCircle, AlertCircle, Star,
@@ -44,6 +45,23 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api';
 const gx = (mo: number) => { if (!mo) return 'Fresher'; const y = Math.floor(mo / 12), m = mo % 12; return y ? `${y}y${m ? ` ${m}m` : ''}` : `${mo}mo`; };
 const fdt = (s: string) => { if (!s) return '—'; return new Date(s).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); };
 const fsize = (b: number) => b ? `${(b / 1024).toFixed(0)} KB` : '';
+
+// No download option existed anywhere on this page even though the
+// backend endpoint (resume_intake.py's /{resume_file_id}/download) has
+// worked the whole time - item.id here IS the resume_file_id already
+// returned by GET /resume-intake/queue.
+async function downloadResumeFile(fileId: string, fileName: string) {
+  try {
+    const resp = await fetch(`${API_URL}/resume-intake/${fileId}/download`, { headers: authHeaders() });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName || 'resume';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
+}
 
 /** Get colour for a JD match percentage */
 function matchColor(pct: number) {
@@ -342,6 +360,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
         {/* Actions */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
           {item.candidate_id && <a href={`/candidates/${item.candidate_id}`} style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#1e40af', color: '#fff', borderRadius: 8, fontSize: 13, fontWeight: 700, textDecoration: 'none' }}><User size={13} /> View in ATS</a>}
+          <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fff', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Download size={13} /> Download Resume File</button>
           <button onClick={onEdit} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Edit3 size={13} /> Edit & Approve</button>
           <button onClick={onApprove} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#059669', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><CheckCircle size={13} /> Quick Approve</button>
           <button onClick={onReparse} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#f1f5f9', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><RotateCcw size={13} /> Re-parse</button>
@@ -708,6 +727,7 @@ function ResumeInboxPageInner() {
                       <td style={{ padding: '10px 8px' }}>
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={e => { e.stopPropagation(); setEditItem(r); }} title="Edit & Approve" style={{ padding: '4px 8px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Edit</button>
+                          <button onClick={e => { e.stopPropagation(); downloadResumeFile(r.id, r.file_name); }} title="Download resume file" style={{ padding: '4px 6px', background: 'none', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', color: '#374151', display: 'flex', alignItems: 'center' }}><Download size={11} /></button>
                           {r.candidate_id && <a href={`/candidates/${r.candidate_id}`} onClick={e => e.stopPropagation()} style={{ padding: '4px 6px', color: '#1e40af', fontSize: 11, fontWeight: 600, textDecoration: 'none', display: 'flex', alignItems: 'center' }}><ExternalLink size={11} /></a>}
                         </div>
                       </td>

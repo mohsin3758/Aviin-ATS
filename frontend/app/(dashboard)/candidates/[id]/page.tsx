@@ -1401,6 +1401,13 @@ export default function CandidateProfilePage() {
                   border:'none',background:'#7c3aed',color:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',whiteSpace:'nowrap'}}>
                 <Share2 size={13}/> Share Status
               </button>
+              {candidate.latest_resume_file_id && (
+                <button onClick={() => downloadResume(candidate.latest_resume_file_id, candidate.latest_resume_file_name)}
+                  style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
+                    border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#1e40af',whiteSpace:'nowrap'}}>
+                  <Download size={13}/> Download Resume
+                </button>
+              )}
             </div>
           </div>
 

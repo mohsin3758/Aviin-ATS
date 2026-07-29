@@ -31,6 +31,22 @@ const timeAgo = (ts:string|null|undefined) => {
   return 'just now';
 };
 
+// Resume download — no download option existed anywhere reachable from
+// the Candidates list (only buried in the detail page's Parse History
+// tab), even though the backend endpoint has worked the whole time.
+async function downloadResume(fileId: string, fileName: string) {
+  try {
+    const resp = await fetch(`${API}/resume-intake/${fileId}/download`, { headers: authHeaders() });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName || 'resume';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
+}
+
 // Fallback (used only until /settings/pipeline-stages loads). Also the
 // live keys were wrong here before this fix (nda_pre_contract/hired don't
 // match the real stage keys nda/placed, so candidates in those stages —
@@ -111,6 +127,10 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
 // ── Quick-View Drawer ─────────────────────────────────────────────────────────
 function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChanged}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void;stageMap:Record<string,{bg:string;color:string;label:string}>;allTags:any[];onTagsChanged:()=>void}) {
   const {data:apps} = useFetch<any>(`/candidates/${candidate.id}/applications`);
+  // List rows don't carry latest_resume_file_id (only the single-candidate
+  // GET does) - fetched separately here rather than widening the list
+  // query, same pattern this drawer already uses for /applications.
+  const {data:fullCand} = useFetch<any>(`/candidates/${candidate.id}`);
   const {data:candTagsRaw,refetch:refetchCandTags} = useFetch<any[]>(`/candidate-tags/candidate/${candidate.id}`);
   const candTags:any[] = Array.isArray(candTagsRaw)?candTagsRaw:[];
   const [showTagPicker,setShowTagPicker] = useState(false);
@@ -250,7 +270,15 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
         {/* Resume preview */}
         {candidate.resume_text && (
           <div style={{padding:'14px 22px',flex:1}}>
-            <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>RESUME EXTRACT</div>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'8px'}}>
+              <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b'}}>RESUME EXTRACT</div>
+              {fullCand?.latest_resume_file_id && (
+                <button onClick={()=>downloadResume(fullCand.latest_resume_file_id, fullCand.latest_resume_file_name)}
+                  style={{display:'flex',alignItems:'center',gap:'4px',padding:'3px 9px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'11px',fontWeight:'600',color:'#1e40af'}}>
+                  <Download size={11}/>Download
+                </button>
+              )}
+            </div>
             <pre style={{fontSize:'11px',color:'#374151',lineHeight:'1.5',whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:'200px',overflowY:'auto',background:'#f8fafc',padding:'10px',borderRadius:'6px',margin:0}}>{candidate.resume_text.slice(0,800)}{candidate.resume_text.length>800?'...':''}</pre>
           </div>
         )}
