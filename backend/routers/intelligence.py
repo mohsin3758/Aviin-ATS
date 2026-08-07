@@ -169,100 +169,112 @@ async def parse_jd(body: JdParseRequest, actor: Actor = Depends(get_actor)):
 
 # ── Candidate Scoring (P19) ──────────────────────────────
 
+async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisition_id: Optional[str] = None,
+                                required_exp_yr_min: float = 0, required_exp_yr_max: Optional[float] = None,
+                                required_education: Optional[str] = None, jd_text: Optional[str] = None):
+    """Core of /intelligence/score, pulled out so it's callable from
+    non-HTTP contexts (e.g. auto-scoring on resume intake) on a caller-
+    supplied connection, not just via the ScoreRequest/Actor HTTP path."""
+    cand = await conn.fetchrow("""
+        SELECT ca.id, ca.total_exp_mo, ca.resume_text, ca.resume_embedding::text AS emb,
+               cpd.extracted_skills, cpd.education_level,
+               cpd.total_years_exp, cpd.max_gap_months, cpd.avg_tenure_months,
+               cpd.job_count
+        FROM candidates ca
+        LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id=ca.id AND cpd.tenant_id=ca.tenant_id
+        WHERE ca.id=$1 AND ca.tenant_id=$2
+    """, candidate_id, tenant_id)
+    if not cand:
+        raise HTTPException(404, "Candidate not found")
+    # Auto-parse if not already done
+    if not cand.get("extracted_skills") and cand.get("resume_text"):
+        from routers.ner import parse_resume
+        parsed = parse_resume(cand["resume_text"] or "")
+        await conn.execute("""
+            INSERT INTO candidate_parsed_data
+              (tenant_id, candidate_id, extracted_skills, education_level,
+               total_years_exp, job_count, max_gap_months, avg_tenure_months)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT (tenant_id, candidate_id) DO UPDATE SET
+              extracted_skills=EXCLUDED.extracted_skills
+        """, tenant_id, candidate_id,
+            parsed.get("extracted_skills",[]),
+            parsed.get("education_level","Other"),
+            parsed.get("total_years_exp"),
+            parsed.get("job_count",0),
+            parsed.get("max_gap_months",0),
+            parsed.get("avg_tenure_months",0))
+        # Refresh cand
+        cand = await conn.fetchrow("""
+            SELECT ca.id, ca.total_exp_mo, ca.resume_text, ca.resume_embedding::text AS emb,
+                   cpd.extracted_skills, cpd.education_level,
+                   cpd.total_years_exp, cpd.max_gap_months, cpd.avg_tenure_months, cpd.job_count
+            FROM candidates ca
+            LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id=ca.id AND cpd.tenant_id=ca.tenant_id
+            WHERE ca.id=$1 AND ca.tenant_id=$2
+        """, candidate_id, tenant_id)
+
+    parsed_data = dict(cand)
+    skill_sim = 0.0
+
+    # Semantic similarity via embed service
+    if jd_text and cand["resume_text"]:
+        try:
+            embeddings = await get_embedding([cand["resume_text"], jd_text])
+            skill_sim  = max(0.0, cosine_sim(embeddings[0], embeddings[1]))
+        except Exception:
+            skill_sim = 0.5  # fallback if embed service issues
+
+    scores = score_candidate(
+        parsed_data,
+        candidate_exp_mo=cand["total_exp_mo"] or 0,
+        required_exp_yr_min=required_exp_yr_min,
+        required_exp_yr_max=required_exp_yr_max,
+        skill_similarity=skill_sim,
+        required_education=required_education,
+    )
+    scores["skill_match_details"] = json.dumps({"cosine_similarity": round(skill_sim, 4)})
+
+    row = await conn.fetchrow("""
+        INSERT INTO candidate_scores
+          (tenant_id, candidate_id, requisition_id,
+           skill_match_score, experience_score, stability_score,
+           education_score, fraud_risk_score, readiness_index, readiness_grade,
+           has_gap_flag, duplicate_flag, inconsistency_flag, skill_match_details)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
+        ON CONFLICT (tenant_id, candidate_id, requisition_id) DO UPDATE SET
+          skill_match_score = EXCLUDED.skill_match_score,
+          experience_score  = EXCLUDED.experience_score,
+          stability_score   = EXCLUDED.stability_score,
+          education_score   = EXCLUDED.education_score,
+          fraud_risk_score  = EXCLUDED.fraud_risk_score,
+          readiness_index   = EXCLUDED.readiness_index,
+          readiness_grade   = EXCLUDED.readiness_grade,
+          has_gap_flag      = EXCLUDED.has_gap_flag,
+          skill_match_details = EXCLUDED.skill_match_details,
+          scored_at         = now()
+        RETURNING *
+    """,
+        tenant_id, candidate_id, requisition_id,
+        scores["skill_match_score"], scores["experience_score"],
+        scores["stability_score"],  scores["education_score"],
+        scores["fraud_risk_score"], scores["readiness_index"],
+        scores["readiness_grade"],  scores["has_gap_flag"],
+        scores["duplicate_flag"],   scores["inconsistency_flag"],
+        json.dumps({"cosine_similarity": round(skill_sim, 4)}),
+    )
+    return dict(row)
+
+
 @router.post("/score")
 async def score_one(body: ScoreRequest, actor: Actor = Depends(get_actor)):
     """Score a single candidate against a JD (or standalone)."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        cand = await conn.fetchrow("""
-            SELECT ca.id, ca.total_exp_mo, ca.resume_text, ca.resume_embedding::text AS emb,
-                   cpd.extracted_skills, cpd.education_level,
-                   cpd.total_years_exp, cpd.max_gap_months, cpd.avg_tenure_months,
-                   cpd.job_count
-            FROM candidates ca
-            LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id=ca.id AND cpd.tenant_id=ca.tenant_id
-            WHERE ca.id=$1 AND ca.tenant_id=$2
-        """, body.candidate_id, actor.tenant_id)
-        if not cand:
-            raise HTTPException(404, "Candidate not found")
-        # Auto-parse if not already done
-        if not cand.get("extracted_skills") and cand.get("resume_text"):
-            from routers.ner import parse_resume
-            import json as _json
-            parsed = parse_resume(cand["resume_text"] or "")
-            await conn.execute("""
-                INSERT INTO candidate_parsed_data
-                  (tenant_id, candidate_id, extracted_skills, education_level,
-                   total_years_exp, job_count, max_gap_months, avg_tenure_months)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-                ON CONFLICT (tenant_id, candidate_id) DO UPDATE SET
-                  extracted_skills=EXCLUDED.extracted_skills
-            """, actor.tenant_id, body.candidate_id,
-                parsed.get("extracted_skills",[]),
-                parsed.get("education_level","Other"),
-                parsed.get("total_years_exp"),
-                parsed.get("job_count",0),
-                parsed.get("max_gap_months",0),
-                parsed.get("avg_tenure_months",0))
-            # Refresh cand
-            cand = await conn.fetchrow("""
-                SELECT ca.id, ca.total_exp_mo, ca.resume_text, ca.resume_embedding::text AS emb,
-                       cpd.extracted_skills, cpd.education_level,
-                       cpd.total_years_exp, cpd.max_gap_months, cpd.avg_tenure_months, cpd.job_count
-                FROM candidates ca
-                LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id=ca.id AND cpd.tenant_id=ca.tenant_id
-                WHERE ca.id=$1 AND ca.tenant_id=$2
-            """, body.candidate_id, actor.tenant_id)
-
-        parsed_data = dict(cand)
-        skill_sim = 0.0
-
-        # Semantic similarity via embed service
-        if body.jd_text and cand["resume_text"]:
-            try:
-                embeddings = await get_embedding([cand["resume_text"], body.jd_text])
-                skill_sim  = max(0.0, cosine_sim(embeddings[0], embeddings[1]))
-            except Exception:
-                skill_sim = 0.5  # fallback if embed service issues
-
-        scores = score_candidate(
-            parsed_data,
-            candidate_exp_mo=cand["total_exp_mo"] or 0,
-            required_exp_yr_min=body.required_exp_yr_min,
-            required_exp_yr_max=body.required_exp_yr_max,
-            skill_similarity=skill_sim,
-            required_education=body.required_education,
+        return await score_candidate_core(
+            conn, actor.tenant_id, body.candidate_id, body.requisition_id,
+            body.required_exp_yr_min, body.required_exp_yr_max,
+            body.required_education, body.jd_text,
         )
-        scores["skill_match_details"] = json.dumps({"cosine_similarity": round(skill_sim, 4)})
-
-        row = await conn.fetchrow("""
-            INSERT INTO candidate_scores
-              (tenant_id, candidate_id, requisition_id,
-               skill_match_score, experience_score, stability_score,
-               education_score, fraud_risk_score, readiness_index, readiness_grade,
-               has_gap_flag, duplicate_flag, inconsistency_flag, skill_match_details)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
-            ON CONFLICT (tenant_id, candidate_id, requisition_id) DO UPDATE SET
-              skill_match_score = EXCLUDED.skill_match_score,
-              experience_score  = EXCLUDED.experience_score,
-              stability_score   = EXCLUDED.stability_score,
-              education_score   = EXCLUDED.education_score,
-              fraud_risk_score  = EXCLUDED.fraud_risk_score,
-              readiness_index   = EXCLUDED.readiness_index,
-              readiness_grade   = EXCLUDED.readiness_grade,
-              has_gap_flag      = EXCLUDED.has_gap_flag,
-              skill_match_details = EXCLUDED.skill_match_details,
-              scored_at         = now()
-            RETURNING *
-        """,
-            actor.tenant_id, body.candidate_id, body.requisition_id,
-            scores["skill_match_score"], scores["experience_score"],
-            scores["stability_score"],  scores["education_score"],
-            scores["fraud_risk_score"], scores["readiness_index"],
-            scores["readiness_grade"],  scores["has_gap_flag"],
-            scores["duplicate_flag"],   scores["inconsistency_flag"],
-            json.dumps({"cosine_similarity": round(skill_sim, 4)}),
-        )
-    return dict(row)
 
 
 @router.post("/score/bulk")

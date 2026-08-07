@@ -256,11 +256,13 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
 
         total = skill_score + exp_score + desig_score + loc_score
         matched_names = [s for s in (c.get('skills') or []) if s.lower() in req_lower]
+        missing_names = [s for s in req_skills if s.lower() not in cand_skills_lower]
 
         scored.append({
             **c,
             'rank_score':      total,
             'matched_skills':  matched_names,
+            'missing_skills':  missing_names,
             'skill_match_pct': round(skill_pct * 100),
         })
 
@@ -407,10 +409,29 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
             " ORDER BY created_at DESC LIMIT 1",
             candidate_id, actor.tenant_id
         )
+        # AI scores (one per requisition scored against, e.g. via auto-score
+        # on resume intake or a manual /intelligence/score call).
+        score_rows = await conn.fetch(
+            """SELECT cs.readiness_index, cs.readiness_grade, cs.skill_match_score,
+                      cs.experience_score, cs.stability_score, cs.education_score,
+                      cs.scored_at, cs.requisition_id, r.title AS requisition_title,
+                      r.skills_required
+               FROM candidate_scores cs LEFT JOIN requisitions r ON r.id=cs.requisition_id
+               WHERE cs.candidate_id=$1 AND cs.tenant_id=$2
+               ORDER BY cs.scored_at DESC LIMIT 5""",
+            candidate_id, actor.tenant_id)
     d = dict(row)
     if rf:
         d['latest_resume_file_id'] = str(rf['id'])
         d['latest_resume_file_name'] = rf['file_name']
+    cand_skills_lower = {s.lower() for s in (d.get('skills') or [])}
+    scores_out = []
+    for sr in score_rows:
+        s = dict(sr)
+        req_skills = s.pop('skills_required', None) or []
+        s['missing_skills'] = [x for x in req_skills if x.lower() not in cand_skills_lower]
+        scores_out.append(s)
+    d['ai_scores'] = scores_out
     return d
 
 

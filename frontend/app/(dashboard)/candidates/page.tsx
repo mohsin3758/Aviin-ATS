@@ -1025,7 +1025,10 @@ export default function CandidatesPage() {
                   <div style={{flex:1}}>
                     <div style={{fontSize:'13px',fontWeight:'700',color:'#0f172a'}}>{c.full_name}</div>
                     <div style={{fontSize:'11px',color:'#64748b'}}>{c.current_designation||'—'} · {c.current_employer||'—'} · {c.total_exp_mo>0?gx(c.total_exp_mo):'—'}</div>
-                    {c.matched_skills?.length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'4px'}}>{c.matched_skills.slice(0,4).map((s:string)=><span key={s} style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#d1fae5',color:'#065f46',fontWeight:'600'}}>{s}</span>)}</div>}
+                    {(c.matched_skills?.length>0||c.missing_skills?.length>0)&&<div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'4px'}}>
+                      {c.matched_skills?.slice(0,4).map((s:string)=><span key={'m-'+s} style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#d1fae5',color:'#065f46',fontWeight:'600'}}>{s}</span>)}
+                      {c.missing_skills?.slice(0,4).map((s:string)=><span key={'x-'+s} title="Missing from this candidate's profile" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#fee2e2',color:'#991b1b',fontWeight:'600'}}>✕ {s}</span>)}
+                    </div>}
                   </div>
                   <div style={{textAlign:'right',flexShrink:0}}>
                     <div style={{fontSize:'20px',fontWeight:'800',color:c.rank_score>=70?'#16a34a':c.rank_score>=40?'#d97706':'#94a3b8'}}>{Math.round(c.rank_score||0)}%</div>

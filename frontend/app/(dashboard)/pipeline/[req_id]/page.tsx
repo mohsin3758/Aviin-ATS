@@ -46,6 +46,7 @@ interface MatchCandidate {
   fit_score: number;
   skill_overlap: number;
   skills: string[];
+  missing_skills?: string[];
 }
 
 interface Requisition {
@@ -156,6 +157,13 @@ export default function KanbanPage() {
                         <span key={s} className="text-xs bg-white border border-gray-200 text-gray-600 px-1 rounded">{s}</span>
                       ))}
                     </div>
+                    {m.missing_skills && m.missing_skills.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {m.missing_skills.slice(0, 3).map(s => (
+                          <span key={s} title="Missing from this candidate's profile" className="text-xs bg-red-50 border border-red-200 text-red-700 px-1 rounded">✕ {s}</span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
                 {!matchError && matches.length === 0 && (

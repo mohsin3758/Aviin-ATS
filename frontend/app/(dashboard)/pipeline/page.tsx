@@ -28,6 +28,11 @@ const DEFAULT_STAGES = [
   { key: 'rejected',       label: 'Rejected',       color: '#DC2626', light: '#FEF2F2' },
 ];
 
+// Stages that auto-notify the candidate (email + WhatsApp) on entry — the
+// backend (_notify_stage_change_bg) already supports every stage, this is
+// deliberately scoped to just the 3 the business asked for.
+const _AUTO_NOTIFY_STAGES = new Set(['l1_interview', 'l2_interview', 'rejected']);
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function gx(mo: number) {
   if (!mo) return '0mo';
@@ -134,8 +139,11 @@ function PipelineInner() {
     router.replace(`/pipeline?job=${id}`, { scroll: false });
   }
 
+  // L1/L2/Rejected auto-notify the candidate (email + WhatsApp, backend
+  // already supports both — it just was never triggered here before).
   const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string) => {
     if (fromStage === toStage) return;
+    const sendEmail = _AUTO_NOTIFY_STAGES.has(toStage);
     setBoard(prev => {
       const app = prev[fromStage]?.find((a: any) => a.id === appId);
       if (!app) return prev;
@@ -147,7 +155,7 @@ function PipelineInner() {
     });
     if (selected?.id === appId) setSelected((s: any) => s ? { ...s, stage: toStage } : s);
     try {
-      await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify({ stage: toStage, send_email: false }) });
+      await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify({ stage: toStage, send_email: sendEmail }) });
       showToast(`Moved to ${ALL_STAGES.find((s: any) => s.key === toStage)?.label || toStage}`);
       refreshStats();
     } catch (e: any) {

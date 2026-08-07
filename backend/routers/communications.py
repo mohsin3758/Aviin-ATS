@@ -497,6 +497,16 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
         return {"success": True, "results": results, "to": to_name}
 
 
+def _personalize(text: Optional[str], name: Optional[str]) -> Optional[str]:
+    """{name}/{first_name} substitution — matches the {name} placeholder
+    convention _notify_stage_change_bg already uses for WhatsApp templates."""
+    if not text:
+        return text
+    full = name or "there"
+    first = full.split(" ")[0] if full else "there"
+    return text.replace("{name}", full).replace("{first_name}", first)
+
+
 @router.post("/bulk-send")
 async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -518,22 +528,23 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
         smtp = await _get_smtp(conn, actor.tenant_id)
         sent = failed = skipped = 0
         for cand in cands:
+            msg = _personalize(body.message, cand["full_name"])
             if body.channel in ("email","both"):
                 if not cand["email"] or not smtp: skipped += 1
                 else:
-                    subj = body.subject or "AVIIN Jobs - Update"
-                    _send_email_bg(smtp, cand["email"], subj, body.message)
+                    subj = _personalize(body.subject, cand["full_name"]) or "AVIIN Jobs - Update"
+                    _send_email_bg(smtp, cand["email"], subj, msg)
                     await _log(conn, actor.tenant_id, str(cand["id"]), None, "email", subj,
-                               body.message, "sent", str(actor.user_id), body.template_id, body.stage,
+                               msg, "sent", str(actor.user_id), body.template_id, body.stage,
                                cand["email"], None)
                     sent += 1
             if body.channel in ("whatsapp","both"):
                 if not cand["phone"]: skipped += 1
                 else:
-                    ok = await _send_wa(cand["phone"], body.message)
+                    ok = await _send_wa(cand["phone"], msg)
                     st = "sent" if ok else "failed"
                     await _log(conn, actor.tenant_id, str(cand["id"]), None, "whatsapp", None,
-                               body.message, st, str(actor.user_id), body.template_id, body.stage,
+                               msg, st, str(actor.user_id), body.template_id, body.stage,
                                None, None)
                     if ok: sent += 1
                     else: failed += 1

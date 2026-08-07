@@ -1841,7 +1841,8 @@ export default function MailboxPage() {
                 ))}
               </div>
               {(bulk.channel==='email'||bulk.channel==='both')&&<input value={bulk.subject} onChange={e=>setBulk(p=>({...p,subject:e.target.value}))} placeholder="Subject..." style={{padding:'9px 12px',border:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'13px',outline:'none',color:'#1e293b'}}/>}
-              <textarea value={bulk.message} onChange={e=>setBulk(p=>({...p,message:e.target.value}))} rows={5} placeholder="Message body..." style={{padding:'10px 12px',border:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'13px',outline:'none',resize:'vertical',fontFamily:'inherit',lineHeight:'1.6',color:'#1e293b'}}/>
+              <textarea value={bulk.message} onChange={e=>setBulk(p=>({...p,message:e.target.value}))} rows={5} placeholder="Message body... use {name} or {first_name} to personalize" style={{padding:'10px 12px',border:'1px solid #e2e8f0',borderRadius:'8px',fontSize:'13px',outline:'none',resize:'vertical',fontFamily:'inherit',lineHeight:'1.6',color:'#1e293b'}}/>
+              <div style={{fontSize:'11px',color:'#94a3b8'}}>Tip: <code>{'{name}'}</code> and <code>{'{first_name}'}</code> are replaced with each candidate's own name — every recipient gets their own copy.</div>
               {bulk.stage&&<div style={{padding:'9px 12px',background:'#fef9c3',border:'1px solid #fde68a',borderRadius:'8px',fontSize:'12px',color:'#92400e'}}>Sends to ALL candidates in <strong>{bulk.stage.replace(/_/g,' ')}</strong></div>}
               <div style={{display:'flex',gap:'9px',justifyContent:'flex-end'}}>
                 <button onClick={()=>setShowBulk(false)} style={{padding:'9px 18px',border:'1px solid #e2e8f0',borderRadius:'8px',background:'white',color:'#475569',fontSize:'13px',fontWeight:'600',cursor:'pointer'}}>Cancel</button>

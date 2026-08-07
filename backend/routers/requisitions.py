@@ -240,10 +240,21 @@ async def match_candidates_for_requisition(
     requisition_id: str, limit: int = 10, actor: Actor = Depends(get_actor)
 ):
     """T1: pgvector cosine similarity + skill overlap (see match_candidates() in
-    sql/04_phase3_ai_engine.sql). RLS makes a wrong-tenant requisition_id yield []."""
+    sql/04_phase3_ai_engine.sql). RLS makes a wrong-tenant requisition_id yield [].
+    match_candidates() itself only returns a skill_overlap COUNT, not which
+    skills are missing — computed here in Python from skills_required so a
+    recruiter can see exactly why a candidate scored the way they did."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT * FROM match_candidates($1, $2)", requisition_id, limit)
-    return [dict(r) for r in rows]
+        req_skills = await conn.fetchval(
+            "SELECT skills_required FROM requisitions WHERE id=$1", requisition_id) or []
+    out = []
+    for r in rows:
+        d = dict(r)
+        cand_lower = {s.lower() for s in (d.get("skills") or [])}
+        d["missing_skills"] = [s for s in req_skills if s.lower() not in cand_lower]
+        out.append(d)
+    return out
 
 
 @router.get("/{requisition_id}/match-recruiters")

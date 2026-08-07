@@ -1506,6 +1506,34 @@ export default function CandidateProfilePage() {
         {/* Profile tab */}
         {activeTab==='profile' && (
           <div data-testid="profile-panel" style={{marginTop:'16px',display:'flex',flexDirection:'column',gap:'16px'}}>
+            {candidate.ai_scores?.length > 0 && (
+              <div data-testid="ai-score-panel" style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
+                <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>AI Match Score</h3>
+                {candidate.ai_scores.map((s:any,i:number)=>(
+                  <div key={i} style={{display:'flex',gap:'14px',padding:'12px 0',borderBottom:i<candidate.ai_scores.length-1?'1px solid #f1f5f9':'none'}}>
+                    <div style={{textAlign:'center',flexShrink:0}}>
+                      <div style={{fontSize:'26px',fontWeight:'900',color:s.readiness_index>=80?'#16a34a':s.readiness_index>=60?'#0891b2':s.readiness_index>=40?'#d97706':'#dc2626'}}>
+                        {Math.round(s.readiness_index||0)}%
+                      </div>
+                      <div style={{fontSize:'9px',color:'#94a3b8',fontWeight:'700'}}>{s.readiness_grade||''}</div>
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:'12px',fontWeight:'700',color:'#0f172a'}}>{s.requisition_title||'Standalone score (no JD)'}</div>
+                      <div style={{fontSize:'10px',color:'#94a3b8',marginTop:'2px'}}>
+                        Skills {Math.round(s.skill_match_score||0)}% · Experience {Math.round(s.experience_score||0)}% · Stability {Math.round(s.stability_score||0)}% · Education {Math.round(s.education_score||0)}%
+                      </div>
+                      {s.missing_skills?.length>0 && (
+                        <div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'6px'}}>
+                          {s.missing_skills.slice(0,8).map((sk:string)=>(
+                            <span key={sk} title="Missing from this candidate's profile" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#fee2e2',color:'#991b1b',fontWeight:'600'}}>✕ {sk}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
               <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>
                 Application History ({applications.length})

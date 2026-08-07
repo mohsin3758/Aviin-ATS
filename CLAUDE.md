@@ -1316,3 +1316,141 @@ browser-driven send through the actual drawer UI and one real create+
 delete through the actual Templates admin UI) - full suite now 132
 passed / 2 skipped / 0 failed (up from the prior 127/2/0 baseline, zero
 regressions).
+
+## Feature-completeness audit against a 20-item requirements list, 2026-08-07/08
+User pasted a long checklist (Naukri/LinkedIn integration, resume auto-
+screening + score explanation, JD auto-send, bulk email personalization,
+stage-change reminders, email/WhatsApp read tracking, a resume-upload
+tracking-sheet popup, AI ranking for Account Managers, real-time dedup,
+MS Teams, rejection feedback, Canva/image resume conversion, multi-board
+job posting, Boolean search generation, plus a separate list: WhatsApp
+Business reminders + inbound resume auto-save, personalized call letters
+with a logo, capacity/leave/performance-based auto-assign, per-role
+submission limits, and 4 specific contact-stripped resume formats) and
+asked for a research-only audit against actual code, not assumptions.
+Ran 4 parallel research agents (no code changes) covering: resume AI-
+scoring/dedup/formats; email+WhatsApp automation; external integrations;
+and feedback/call-letters/auto-assign/limits. Findings (grounded in real
+file/route reads, not naming-convention guesses):
+- **Built solidly**: real-time duplicate detection on Save
+  (`GET /candidates/check-duplicate`), and recruiter auto-assignment
+  (`match_recruiters()` in `sql/24_scoring_engine_rewrite.sql` - genuinely
+  weights capacity, skill overlap, client blocks + relationship, leave,
+  performance, location, tenure, urgency; only seniority/language are
+  documented zero-weight placeholders since no such data exists anywhere).
+- **Partial, each with a real gap**: resume scoring exists but never
+  auto-fired on upload; skill-overlap is shown but not what's *missing*;
+  bulk email exists but sends one identical string to everyone (no
+  personalization, unlike its WhatsApp-bulk sibling which already does
+  per-recipient templating); L1/L2/Rejected notifications are fully coded
+  in `_notify_stage_change_bg` (email + WAHA WhatsApp together) but every
+  real UI call site hardcoded `send_email:false`, so none of it actually
+  fired; rejection writes a free-text `reason`, no structured taxonomy;
+  OCR extracts text but doesn't reformat into a standard template; only
+  Facebook auto-posts jobs, everything else (70+ boards incl. Naukri/
+  Indeed) is a manual share-dialog or copy-paste link; the KAE tracking-
+  sheet feature sends an Excel attachment, not inline-email-body content,
+  and triggers from the pipeline drawer, not a post-upload popup.
+- **Not built at all**: Naukri/LinkedIn (only a stored URL string exists,
+  no OAuth/posting/pull API for either), MS Teams (only an unrelated
+  Slack/Teams/Discord webhook notifier exists), email open/read tracking,
+  auto-send-JD-to-candidate, Boolean-search generation, call letters
+  (and no PDF generator anywhere embeds an actual logo image, only text),
+  per-recruiter submission limits, and the 4 specific resume-format
+  variants (2 different styles exist from the KAE feature, none match).
+
+User picked a start: Tier-0 "quick wins" first (small fixes to code that
+mostly already worked), with Naukri/LinkedIn/Teams parked until real
+partner/API credentials exist - nothing to build there without them.
+
+## Tier-0 quick wins built, 2026-08-08
+Four small, high-value fixes, chosen because each was mostly-already-built
+and just needed a real hookup, not new capability:
+
+- **L1/L2/Rejected auto email+WhatsApp** - `_notify_stage_change_bg`
+  (`applications.py`) already sent both correctly; it just never fired
+  because both real UI call sites (`pipeline/page.tsx`'s `moveStage`,
+  `requisitions/[id]/page.tsx`'s `moveStage`) hardcoded/defaulted
+  `send_email` to `false`. Added a small `_AUTO_NOTIFY_STAGES` set
+  (`l1_interview`/`l2_interview`/`rejected` - deliberately just those 3,
+  matching what was actually asked, not every stage) and compute the flag
+  from the target stage instead of hardcoding it, so drag-and-drop, quick-
+  move buttons, and any other caller all get correct behavior automatically.
+  Verified for real: moved a throwaway candidate to `l1_interview` via the
+  same request shape the fixed frontend now sends and confirmed the
+  backend log showed `Stage email [l1_interview] sent to ...` (WhatsApp
+  correctly skipped - no consent on file for the throwaway candidate,
+  HARD RULE #7 working as intended).
+- **Bulk email personalization** - `/communications/bulk-send` sent the
+  exact same string to every recipient; added `{name}`/`{first_name}`
+  substitution (matching the `{name}` convention `_notify_stage_change_bg`
+  already uses for WhatsApp templates, not inventing a new mustache
+  syntax) applied to both subject and body, for both the email and
+  WhatsApp channels this endpoint handles. Added a placeholder hint in the
+  bulk-composer UI so recruiters actually know it exists. Verified via a
+  real send + reading back the logged `candidate_messages` row: subject
+  "Hi {first_name}" -> "Hi QA", body correctly substituted the full name,
+  no literal `{name}` left in the output.
+- **Missing-skills display ("why this score")** - `/candidates/rank`
+  already computed `matched_skills`; added `missing_skills` (required
+  minus matched) right next to it. Also extended
+  `/requisitions/{id}/match-candidates` (backed by the `match_candidates()`
+  SQL function, which only returns a `skill_overlap` COUNT) with the same
+  missing-skills list, computed in Python from `requisitions.skills_required`
+  rather than touching the SQL function. Shown as red "✕ Skill" badges next
+  to the existing green matched-skill badges on the Candidates page, the
+  legacy `/pipeline/[req_id]` match-cards panel, and a new "AI Match Score"
+  card on the Candidate 360 profile tab. Verified with a real candidate
+  missing 2 of 4 required skills - both endpoints and the UI correctly
+  showed `Docker`/`Kubernetes` as missing.
+- **Auto-score on resume upload** - resume intake
+  (`resume_intake_service.py`) created candidates and matched them to a
+  requisition but never scored them against that JD; scoring only ran
+  when someone manually hit `/intelligence/score`. Extracted that
+  endpoint's logic into a reusable `score_candidate_core()` (still used by
+  the HTTP endpoint too, just no longer inline in the route handler), and
+  call it from resume intake right after a requisition match, fire-and-
+  forget on its own fresh connection via `asyncio.create_task` - not
+  awaited on the intake's own `conn`, because that file has extensive
+  existing comments about how one failed SQL query poisons the rest of
+  that transaction for every later item in the same batch, and scoring
+  makes a real network call to the embed service that has no business
+  being able to take candidate/resume creation down with it if it's slow
+  or fails. Also added an `ai_scores` array (readiness index/grade, score
+  breakdown, missing skills) to `GET /candidates/{id}` and a matching "AI
+  Match Score" card on Candidate 360 - the auto-score was pointless
+  without somewhere to actually see it. Verified for real: called the
+  exact function the intake hook calls, against a live candidate+
+  requisition pair, confirmed a genuine `candidate_scores` row was written
+  (readiness_index=59.25, grade C) and that it round-tripped correctly
+  through `GET /candidates/{id}`. Scope note: this covers the email-intake
+  pipeline specifically (the highest-volume real path) - a separate manual
+  single-candidate or bulk-CV upload UI, if one gets built out further,
+  would need the same hookup added to it too.
+
+All four verified with real data end-to-end (not code review), all test
+data cleaned up after (including hard-deleting a throwaway requisition
+via psql, since unlike a stray candidate a fake requisition shows up
+prominently in real job pickers/lists). Added a permanent "S15 Tier-0
+Quick Wins" suite to `qa_automation.spec.ts` covering all 4. Full suite
+run immediately after: 135 passed / 2 skipped / 3 failed - all 3 failures
+were `429 Too many login attempts`, from this session's own repeated
+back-to-back Playwright runs exhausting the 10-per-15-min login rate
+limiter (the exact known false-failure pattern documented earlier in this
+file under "QA suite fixed and run for real"), confirmed by re-running
+the same 3 tests moments later and seeing `global-setup` itself 429 on
+login - not a real regression. Waited out the window and re-ran clean:
+138 passed / 2 skipped / 0 failed.
+
+Side finding while cleaning up: S14 (KAE submission) and the new S15 both
+create a throwaway requisition per run with no delete-after, and both
+suites have now been run enough times (across today and 2026-07-29) that
+8 stray "QA KAE Test Role"/"QA Tier0 Test Role {stamp}" requisitions had
+piled up - genuinely visible clutter in real requisition/job-picker lists,
+unlike a stray candidate that just sits in pagination. Deleted all 8 (and
+their cascaded assignments/assignment_event/recruiter_tasks/applications/
+candidate_scores/candidate_submissions rows) via psql. Not fixed at the
+test-suite level (would mean adding real DELETE endpoints or reaching for
+raw SQL from Playwright, neither of which fits this file's established
+conventions) - flagging as a known gap: repeated S14/S15 runs will keep
+adding one stray requisition each until this gets a real fixture.
