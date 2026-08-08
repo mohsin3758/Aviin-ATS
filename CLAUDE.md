@@ -1747,3 +1747,149 @@ an embedded company logo, and a look at free job-board auto-posting.
   after staging the new files (`git add -A` first - the untracked-file
   gap this same check documented catching once before, see the device-
   monitoring entry above).
+
+## WhatsApp reconnected + 4 real bugs found and fixed via genuine live testing, 2026-08-08
+User reconnected the WAHA `default` session (a static QR artifact from an
+earlier session was tried first and correctly identified as unfixable -
+WAHA QR codes expire in ~20-30s and a published artifact is always stale by
+the time it's opened; the Artifact sandbox's CSP also blocks any live-poll
+redesign, confirmed earlier this session). Real fix: WAHA's own dashboard
+(`http://<vps-ip>:3002/dashboard/`, nginx basic auth `admin`/
+`aviinATS2026secure`) shows a live, self-refreshing QR - the dashboard's
+own Worker entry needed its API Key field filled in (`aviinATS2026secure`,
+the same `WAHA_API_KEY` docker-compose already sets) before it would even
+list sessions; once connected, scanning from the phone worked immediately,
+with the session surviving every subsequent container restart in this list
+(WEBJS persists its auth in the `waha_data` volume).
+
+What followed was requested explicitly as **genuine** verification (send a
+real WhatsApp message, check real logs/DB), not code-review - and every
+single step surfaced a real, previously-invisible bug, each fixed and
+re-verified against real inbound messages before moving to the next:
+
+1. **Webhook URL point at a stale, dead IP.** Both WAHA sessions'
+   `config.webhooks[].url` were hardcoded to `http://172.21.0.2:8080/...`
+   - a real ok address *at the time it was set*, but the backend container
+   has been recreated many times since (every `docker compose up -d
+   backend` during today's Tier-2 work alone), and Docker reassigns a new
+   internal IP on every recreate. Every inbound WhatsApp event had been
+   silently failing delivery (`ECONNREFUSED`, confirmed in `aviin_waha`'s
+   own logs, retried 15x then dropped) for an unknown but clearly
+   nonzero period. Fixed by pointing both sessions at the container's
+   stable Docker DNS name instead (`http://backend:8080/whatsapp-bot/
+   webhook` - `backend` is a real alias on `aviin_backend`, confirmed via
+   `docker inspect`) via a direct `PUT /api/sessions/{name}` call to WAHA -
+   this is real *at rest* WAHA session config, not application code, so
+   there was nothing in this repo to fix for this half of the bug, but it
+   will silently break again after every future backend recreation if
+   this doesn't get an equivalent permanent fix (e.g. pinning it in the
+   WAHA session-creation code, currently `whatsapp.py`'s `start_session`
+   creates sessions with `config: {"webhooks": []}` - empty - so nothing
+   in this codebase ever sets a webhook URL in the first place; it must
+   have been set by hand at some point outside version control).
+2. **WAHA engine bug silently dropping every inbound `message` event
+   before it could even build a webhook payload** - confirmed in
+   `aviin_waha` logs: `Caught error, dropping value from, event: 'message'
+   ... TypeError: Cannot read properties of undefined (reading
+   'includes')`, thrown deep inside `whatsapp-web.js`'s `getChatById` via
+   Puppeteer, reproduced identically across 3 separate real test sends. A
+   session restart did not clear it. Root-caused to the WAHA image being
+   over a month stale (`2026.6.2`, `2026-06-27` build) against a moving
+   target (`whatsapp-web.js` chases WhatsApp Web's own client-side
+   changes, including its newer LID identifier system below). Fixed with
+   `docker compose pull waha && docker compose up -d waha`
+   (`2026.6.2` -> `2026.7.2`) - the session's own auth survived the
+   recreate (persisted in the `waha_data` volume), no re-scan needed.
+   This is an upstream image, not application code - nothing to change in
+   this repo, but worth remembering as the first thing to try if this
+   class of silent-drop error reappears.
+3. **`_download_waha_media()` (`whatsapp_bot.py`) used WAHA's own
+   self-referencing media URL verbatim** - WAHA's webhook payload embeds
+   `media.url` as `http://localhost:3000/api/files/...`, correct from
+   *WAHA's own container's* point of view (it serves files on its own
+   port 3000) but meaningless from the *backend* container's network
+   namespace, where `localhost` is the backend's own loopback with
+   nothing on port 3000 (`httpx` failed with "All connection attempts
+   failed" - confirmed via a temporary debug print of the raw media
+   dict, removed after diagnosis). Fixed by rewriting just the URL's
+   host/scheme to `WAHA_URL` (already a real env var,
+   `http://waha:3000`) while keeping WAHA's own path/query untouched.
+4. **WhatsApp's newer privacy-preserving "LID" sender identifiers have no
+   phone number anywhere in the message payload at all** - for some
+   senders, WAHA's `payload.from` is now e.g. `"184018024837218@lid"`
+   instead of the traditional `"<phone>@c.us"`; inspecting a complete
+   real payload (`_data` and all) confirmed there is genuinely no
+   phone-based JID anywhere in it for these senders, only the LID and a
+   `notifyName` display string - not a WAHA bug, a real WhatsApp platform
+   behavior. The old code's naive `from_.replace("@c.us","").replace
+   ("@g.us","")` left `"184018024837218@lid"` completely unstripped, and
+   downstream phone-normalization (`resume_intake_service.py`'s
+   `upsert_candidate`, which right-truncates to the last 10 digits for
+   matching) turned that into a garbage 10-digit value that happened to
+   look like a plausible phone number, silently corrupting the
+   `candidates.phone` column for every LID-sender. Found WAHA's own
+   (undocumented in its OpenAPI listing, found by directly probing
+   plausible endpoint shapes) LID-resolution endpoint by trial:
+   `GET /api/{session}/lids/{lid}` -> `{"lid": "...", "pn":
+   "<real>@c.us"}` - confirmed correct against the real phone number the
+   user independently stated out loud, verified via a real function call.
+   New `_resolve_phone()` helper in `whatsapp_bot.py` calls this for any
+   `@lid` sender before anything else touches `phone`, with a
+   best-effort fallback if WAHA's own resolution ever fails. **Separately
+   confirmed NOT a bug**: after this fix, several different real test
+   candidates (different names, different resumes) sent from the same
+   real WhatsApp number still collapsed into one existing candidate
+   record (a pre-existing `"E2E WA Test"` fixture from 2026-07-16,
+   correctly phone-matched) - `upsert_candidate`'s `UPDATE` path
+   deliberately never overwrites `full_name`/`phone` on a match, only
+   `COALESCE`s in still-empty fields, by design (protects a real
+   identity's core fields from being clobbered by a later, possibly
+   worse-quality resend) - correct behavior for the feature's real
+   use case (one candidate, one phone, resending their own updated
+   resume), just not a fit for the test scenario used here (one
+   recruiter forwarding several different people's resumes from their
+   own number) - explained to the user rather than "fixed," since
+   there was nothing wrong to fix.
+5. **Real, separate classifier bug, found while testing #4**: 2 of the
+   real DOCX resumes sent during this session (`... Data Platform Lead -
+   Remote.docx`, `...Data platform lead- 6.2 yrs.docx`) were rejected as
+   "doesn't look like a resume" despite genuinely extracting thousands of
+   characters of real resume content (confirmed via the same temporary
+   debug-print-then-remove approach as #3). Root cause:
+   `document_classifier.py`'s `NON_RESUME_FILENAME_SIGNALS` included a
+   bare `r'form'` (meant to catch government/tax *forms*) and `r'contract'`
+   (meant to catch employment *contracts*) with no word-boundary
+   anchoring at all, so `re.search` matched them as plain substrings -
+   `r'form'` matched inside **"Platform"** (a filename containing "Data
+   Platform Lead" force-rejected regardless of actual content, confirmed
+   directly: `classify_from_filename()` returned `NON_RESUME_HINT` for
+   both real filenames, and the "belt-and-suspenders" override at the
+   bottom of `classify_document()` forces `REJECT` on that hint
+   regardless of how strongly the content itself scored as a resume -
+   confirmed `doc_class=RESUME` internally while `is_resume=False`
+   externally, the direct fingerprint of this exact bypass). Any resume
+   from a Platform Engineer/Platform Architect/Platform Lead - a common
+   real job title - would have silently hit this. First fix attempt
+   (`\bform\b`/`\bcontract\b`) was too narrow: Python regex `\b` doesn't
+   fire against underscores (`\w` includes `_`), so it would have failed
+   to catch legitimately-named files like `Application_Form.docx` or
+   `Employment_Contract.docx` - a real regression caught before deploy by
+   testing both directions, not just the reported case. Final fix uses
+   `(?:^|_)form(?:_|\.|$)` / `(?:^|_)contract(?:_|\.|$)`, matching the
+   normalization `classify_from_filename()` already does (spaces/hyphens
+   -> underscores) - verified against 6 real and constructed filenames
+   covering both the original bug and the near-regression, all correct,
+   before deploying. Verified for real: the exact 2 previously-rejected
+   files, resent by the user after the fix, were both accepted
+   (`resume_files` rows confirmed in the DB with real timestamps).
+
+Also fixed along the way: a `.gitignore` entry for `tests/tests/` and
+`test-results/` (16 stray Playwright screenshot artifacts had accumulated
+untracked in the repo from an earlier ad-hoc capture, unrelated to any
+real feature - excluded rather than committed). All 2 genuinely-new
+throwaway candidate records created during this testing session
+(`Faizal`, `Paresh W`, both phone `8024837218` - both artifacts of the
+LID bug above, before the fix landed) were soft-deleted via the real
+`DELETE /candidates/{id}` API afterward; the pre-existing `"E2E WA Test"`
+fixture record was left as-is (predates this session, already a known
+test fixture, harmless).

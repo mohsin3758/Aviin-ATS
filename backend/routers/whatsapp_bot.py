@@ -40,11 +40,17 @@ async def send_wa(phone: str, message: str) -> bool:
 
 # ─── Inbound resume via WhatsApp ──────────────────────────────────────────────
 # Built against WAHA's documented webhook contract for media messages
-# (payload.hasMedia + payload.media.{url,mimetype,filename}) — this session's
-# WAHA instance has no connected session (status: FAILED, needs a QR re-scan
-# by the team) so this could not be exercised against a real inbound
-# WhatsApp message; the downstream parse/classify/upsert pipeline was
-# verified directly against a real downloadable PDF instead. See CLAUDE.md.
+# (payload.hasMedia + payload.media.{url,mimetype,filename}) — verified
+# end-to-end against real inbound WhatsApp messages with real resume
+# attachments (2026-08-08, see CLAUDE.md). Fixed three real bugs found only
+# by that live testing: the webhook URL WAHA stores can go stale after any
+# backend container recreation (now points at the stable "backend" Docker
+# service name, not a raw IP); WAHA's own media.url embeds its own
+# self-referencing host ("localhost:3000", meaningless outside its own
+# container) instead of a URL this container can actually reach; and
+# WhatsApp's newer privacy-preserving "LID" sender identifiers (no phone
+# number anywhere in the message payload at all) need a separate resolution
+# call (see _resolve_phone).
 _RESUME_MIME_HINTS = ("pdf", "msword", "wordprocessingml")
 
 
@@ -52,13 +58,24 @@ async def _download_waha_media(media: dict) -> Optional[bytes]:
     url = media.get("url")
     if not url:
         return None
+    # WAHA embeds its own self-referencing host in the media URL (e.g.
+    # "http://localhost:3000/...", correct from WAHA's own container's point
+    # of view since it serves files on its own port 3000) — but that host is
+    # meaningless from the backend container's network namespace, where
+    # "localhost" is the backend's own loopback with nothing on port 3000.
+    # Rewrite to the real internal Docker service address before fetching.
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    waha_parts = urlsplit(WAHA_URL)
+    url = urlunsplit((waha_parts.scheme, waha_parts.netloc, parts.path, parts.query, parts.fragment))
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(url, headers={"X-Api-Key": WAHA_KEY})
             if r.status_code == 200:
                 return r.content
+            print(f"WAHA media download got status {r.status_code} for {url}")
     except Exception as ex:
-        print(f"WAHA media download failed: {ex}")
+        print(f"WAHA media download failed: {ex} (url={url})")
     return None
 
 
@@ -160,6 +177,29 @@ async def handle_cmd(phone: str, text: str, tenant_id: str) -> str:
         else:
             return HELP_MSG
 
+async def _resolve_phone(from_: str) -> str:
+    """WhatsApp's newer privacy-preserving LID identifiers (e.g.
+    "184018024837218@lid") replace the real phone-based JID entirely in the
+    message payload — there is no phone number anywhere in the webhook data
+    for these senders, confirmed by inspecting a real payload end-to-end.
+    WAHA exposes a real resolution endpoint for this (undocumented in its
+    OpenAPI listing, found by probing): GET /api/{session}/lids/{lid} ->
+    {"lid": "...", "pn": "<real>@c.us"}."""
+    if "@lid" not in from_:
+        return from_.replace("@c.us", "").replace("@g.us", "")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{WAHA_URL}/api/{SESSION}/lids/{from_}",
+                                  headers={"X-Api-Key": WAHA_KEY})
+            if r.status_code == 200:
+                pn = r.json().get("pn", "")
+                if pn:
+                    return pn.replace("@c.us", "")
+    except Exception as ex:
+        print(f"LID resolution failed: {ex} (lid={from_})")
+    return from_.replace("@lid", "")  # last resort — not a real phone number
+
+
 @router.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -167,7 +207,7 @@ async def webhook(request: Request):
         msg  = data.get("payload", {})
         text = (msg.get("body") or "").strip()
         from_  = msg.get("from", "")
-        phone  = from_.replace("@c.us","").replace("@g.us","")
+        phone  = await _resolve_phone(from_)
         has_media = bool(msg.get("hasMedia"))
         # Media messages often have an empty/caption-only body — check media
         # BEFORE the text-emptiness bail below, or a resume with no caption
