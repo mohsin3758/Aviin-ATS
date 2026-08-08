@@ -110,6 +110,7 @@ export default function RequisitionPipelinePage() {
   const [drawerTab, setDrawerTab] = useState('profile');
   const { toast, show: showToast } = useToast();
   const dragRef = useRef<{ id: string; fromStage: string } | null>(null);
+  const [pendingReject, setPendingReject] = useState<{ appId: string; fromStage: string } | null>(null);
 
   // Sync board from fetch
   useEffect(() => {
@@ -121,7 +122,7 @@ export default function RequisitionPipelinePage() {
   // supports both — it was just never triggered because every caller here used
   // to hardcode/default send_email to false). Other stages stay manual/silent
   // unless a caller explicitly passes sendEmail.
-  const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, sendEmailOverride?: boolean) => {
+  const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, sendEmailOverride?: boolean, extra: Record<string, any> = {}) => {
     if (fromStage === toStage) return;
     const sendEmail = sendEmailOverride ?? _AUTO_NOTIFY_STAGES.has(toStage);
 
@@ -140,7 +141,7 @@ export default function RequisitionPipelinePage() {
     try {
       await apiFetch(`/applications/${appId}/stage`, {
         method: 'PATCH',
-        body: JSON.stringify({ stage: toStage, send_email: sendEmail }),
+        body: JSON.stringify({ stage: toStage, send_email: sendEmail, ...extra }),
       });
       showToast(`Moved to ${ALL_STAGES.find((s: any) => s.key === toStage)?.label || toStage}`);
       refreshStats();
@@ -161,6 +162,7 @@ export default function RequisitionPipelinePage() {
     if (!dragRef.current) return;
     const { id, fromStage } = dragRef.current;
     dragRef.current = null;
+    if (toStage === 'rejected') { setPendingReject({ appId: id, fromStage }); return; }
     moveStage(id, fromStage, toStage);
   }
 
@@ -362,13 +364,23 @@ export default function RequisitionPipelinePage() {
         <CandidateDrawer
           app={selected}
           onClose={() => setSelected(null)}
-          onMoveStage={(toStage: string) => moveStage(selected.id, selected.stage, toStage)}
+          onMoveStage={(toStage: string, extra?: Record<string, any>) => moveStage(selected.id, selected.stage, toStage, undefined, extra)}
+          onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
           drawerTab={drawerTab}
           setDrawerTab={setDrawerTab}
           showToast={showToast}
           stages={STAGES}
           allStages={ALL_STAGES}
         />
+      )}
+
+      {pendingReject && (
+        <RejectReasonModal
+          onCancel={() => setPendingReject(null)}
+          onConfirm={(reason_code: string, reason: string) => {
+            moveStage(pendingReject.appId, pendingReject.fromStage, 'rejected', undefined, { reason_code, reason: reason || undefined });
+            setPendingReject(null);
+          }} />
       )}
 
       {/* ── TOAST ─────────────────────────────────────────────────────────── */}
@@ -382,6 +394,48 @@ export default function RequisitionPipelinePage() {
 }
 
 // ── Candidate Card ────────────────────────────────────────────────────────────
+// ── Reject Reason Modal ──────────────────────────────────────────────────────
+function RejectReasonModal({ onCancel, onConfirm }: any) {
+  const { data: reasons } = useFetch<any[]>('/rejection-reasons');
+  const [code, setCode] = useState('');
+  const [notes, setNotes] = useState('');
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    if (reasons && reasons.length > 0 && !code) setCode(reasons[0].code);
+  }, [reasons]);
+
+  const confirm = () => {
+    if (!code) { setErr('Select a reason'); return; }
+    onConfirm(code, notes);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
+      <div style={{ width: 420, maxWidth: '92vw', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B', marginBottom: 4 }}>Reject Candidate</div>
+        <div style={{ fontSize: 12, color: '#64748B', marginBottom: 16 }}>Pick a reason — this is shared directly with the assigned recruiter.</div>
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>REASON</label>
+        <select value={code} onChange={e => setCode(e.target.value)}
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 12px', color: '#1E293B' }}>
+          {(reasons || []).map((r: any) => <option key={r.code} value={r.code}>{r.label}</option>)}
+        </select>
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>ADDITIONAL NOTES (OPTIONAL)</label>
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3}
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 12px', resize: 'vertical', fontFamily: 'inherit' }} />
+
+        {err && <div style={{ color: '#DC2626', fontSize: 12, marginBottom: 8 }}>{err}</div>}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onCancel} style={{ padding: '8px 16px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+          <button onClick={confirm} style={{ padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Reject Candidate</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CandidateCard({ app, stageColor, onClick, onDragStart, onMoveStage }: any) {
   const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
   const skills: string[] = app.skills || [];
@@ -436,7 +490,7 @@ function CandidateCard({ app, stageColor, onClick, onDragStart, onMoveStage }: a
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
 
@@ -485,7 +539,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, drawerTab, setDrawerTab, s
                 style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #CBD5E140', background: app.stage === 'hold' ? '#94A3B8' : '#F8FAFC', color: app.stage === 'hold' ? '#fff' : '#94A3B8' }}>
                 Hold
               </button>
-              <button onClick={() => onMoveStage('rejected')}
+              <button onClick={() => onRequestReject()}
                 style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>
                 Reject
               </button>
@@ -980,6 +1034,7 @@ function SummaryTab({ req, stats, board, stages }: any) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <AssignedRecruiterCard reqId={req.id} />
       {req.approval_status !== 'approved' && <ApprovalChainCard reqId={req.id} approvalStatus={req.approval_status} />}
+      {req.submission_limit_per_recruiter != null && <SubmissionLimitCard reqId={req.id} limit={req.submission_limit_per_recruiter} />}
       <Card title="Job Details">
         {req.description && <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{req.description}</div>}
       </Card>
@@ -1050,6 +1105,30 @@ function ActivitiesTab({ reqId, board }: any) {
 }
 
 // ── Shared UI components ──────────────────────────────────────────────────────
+function SubmissionLimitCard({ reqId, limit }: { reqId: string; limit: number }) {
+  const { data } = useFetch<any>(`/requisitions/${reqId}/submission-usage`);
+  const rows = data?.by_recruiter || [];
+  return (
+    <Card title="Submission Limit">
+      <div style={{ fontSize: 12, color: '#64748B', marginBottom: 10 }}>{limit} candidate{limit !== 1 ? 's' : ''} per recruiter, max</div>
+      {rows.length === 0 && <div style={{ fontSize: 12, color: '#94A3B8' }}>No submissions yet.</div>}
+      {rows.map((r: any) => {
+        const used = Number(r.used);
+        const atLimit = used >= limit;
+        return (
+          <div key={r.assigned_recruiter_id} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+            <span style={{ fontSize: 12, color: '#374151', minWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.recruiter_name || 'Unassigned'}</span>
+            <div style={{ flex: 1, height: 6, background: '#F1F5F9', borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${Math.min(100, (used / limit) * 100)}%`, background: atLimit ? '#DC2626' : '#2563EB', borderRadius: 3 }} />
+            </div>
+            <span style={{ fontSize: 12, fontWeight: 700, color: atLimit ? '#DC2626' : '#1E293B', minWidth: 40, textAlign: 'right' }}>{used}/{limit}</span>
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: '14px 16px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>

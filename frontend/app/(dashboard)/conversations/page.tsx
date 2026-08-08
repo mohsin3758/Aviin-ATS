@@ -1464,6 +1464,7 @@ export default function MailboxPage() {
                           {!isDraft&&<span style={{fontSize:'9px',padding:'1px 4px',borderRadius:'3px',background:chClr+'15',color:chClr,fontWeight:'600',textTransform:'capitalize'}}>{item.channel}</span>}
                           {isDraft&&<span style={{fontSize:'9px',padding:'1px 4px',borderRadius:'3px',background:'#6366f115',color:'#6366f1',fontWeight:'600'}}>Draft</span>}
                           {!isDraft&&item.status&&<span style={{fontSize:'9px',padding:'1px 4px',borderRadius:'3px',background:(ST_CLR[item.status]||'#64748b')+'15',color:ST_CLR[item.status]||'#64748b',fontWeight:'600'}}>{item.status}</span>}
+                          {!isDraft&&item.channel==='email'&&(item as any).email_opened_at&&<span title={`Opened ${new Date((item as any).email_opened_at).toLocaleString()}`} style={{fontSize:'9px',padding:'1px 4px',borderRadius:'3px',background:'#16a34a15',color:'#16a34a',fontWeight:'600'}}>👁 Opened</span>}
                           {folder==='inbox'&&item.msg_count>1&&<span style={{fontSize:'9px',color:'#64748b',fontWeight:'600'}}>{item.msg_count}</span>}
                           {(item as any).resume_tag?.detected&&<ResumeTag tag={(item as any).resume_tag}/>}
                           {isUnread&&<span style={{fontSize:'9px',padding:'1px 5px',borderRadius:'8px',background:'#3b82f615',color:'#3b82f6',fontWeight:'700'}}>NEW</span>}

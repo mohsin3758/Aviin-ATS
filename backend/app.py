@@ -1,7 +1,7 @@
 from routers.signatures import router as sig_router
 from routers.clients import router as clients_router
 from routers.user_mail import router as user_mail_router
-from routers.communications import router as comm_router
+from routers.communications import router as comm_router, tracking_router as email_tracking_router
 """AIrecruit (AVIIN ATS) — FastAPI backend.
 
 P1: candidate/requisition/pipeline/offer/assignment/consent/scorecard
@@ -187,6 +187,7 @@ app.include_router(clients_router)
 app.include_router(candidates.router)
 app.include_router(requisitions.router)
 app.include_router(applications.router)
+app.include_router(applications.rejection_reasons_router)
 app.include_router(offers.router)
 from routers.offers import offer_sign_public
 app.include_router(offer_sign_public)
@@ -273,6 +274,7 @@ app.include_router(phase3.auto_interview_router)
 app.include_router(phase3.waha_router)
 app.include_router(phase3.auto_offer_router)
 app.include_router(comm_router)
+app.include_router(email_tracking_router)
 app.include_router(user_mail_router)
 app.include_router(sig_router)
 app.include_router(phase3.schedule_router)

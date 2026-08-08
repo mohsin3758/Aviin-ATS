@@ -1454,3 +1454,158 @@ test-suite level (would mean adding real DELETE endpoints or reaching for
 raw SQL from Playwright, neither of which fits this file's established
 conventions) - flagging as a known gap: repeated S14/S15 runs will keep
 adding one stray requisition each until this gets a real fixture.
+
+## Tier-1 features built, 2026-08-08
+User asked to build the 6 Tier-1 items from the earlier feature-completeness
+audit (rejection taxonomy, AM ranked view, JD auto-send, per-role submission
+limits, email tracking, WhatsApp inbound resume + auto-reply) and fix the
+stray-requisition QA gap noted above.
+
+- **Rejection taxonomy** - new `rejection_reasons` (tenant-configurable,
+  12 seeded defaults: skills_mismatch, experience_mismatch, salary_
+  expectations, notice_period, failed_screening, failed_interview,
+  client_feedback, candidate_withdrew, location_mismatch, duplicate,
+  not_relevant, other) and `application_rejections` (structured per-
+  rejection log, separate from `applications` so history survives re-
+  rejection) tables, `sql/29_tier1_features.sql`. `PATCH /applications/
+  {id}/stage` now requires `reason_code` when `stage='rejected'` (400 if
+  missing/unknown), validates against the tenant's active taxonomy, and
+  writes a real `notifications` row directly to the assigned recruiter (or
+  `recipient_role='manager'` if unassigned) - not routed through n8n's
+  `w4_pipeline_stage_change_alert` workflow like other stage-change alerts,
+  since that workflow's `fire_count=0` reliability was never confirmed (see
+  earlier "Deep DB-vs-sidebar audit round 4"); this one is directly,
+  verifiably reliable. New `GET/POST /rejection-reasons` (admin/manager-
+  gated writes) and `GET /applications/{id}/rejection`. Frontend: both
+  pipeline drawers' bare "Reject" button now opens a shared
+  `RejectReasonModal` (reason dropdown + optional notes) instead of firing
+  the stage change directly - wired through both the drawer button AND
+  drag-and-drop-into-Rejected-column (a card dragged onto the Rejected
+  column now opens the same modal via a `pendingReject` state at the board
+  level, rather than silently 400ing).
+- **AM ranked view** - there's no formal `account_manager` auth role in
+  this system (`users.role` is just admin/manager/recruiter), so
+  `GET /intelligence/candidates` is gated to admin/manager OR anyone
+  holding a real `client_owners` assignment (kae/account_manager/
+  secondary) - reusing the schema's own existing "manages client accounts"
+  concept rather than inventing a new role. Rewritten to query
+  `candidate_scores` directly instead of `v_candidate_intelligence` (that
+  view only ever surfaced one most-recent score per candidate with no
+  indication of which requisition it was scored against - useless for
+  "who should I present for THIS role"); now returns one row per
+  (candidate, requisition) scored pair with `requisition_title`/
+  `client_name` joined in, sorted by fit. `/intelligence` page's "Scored
+  Candidates" tab shows the Role/Client column and a clear "restricted"
+  message (not a misleading "no candidates yet") when the 403 fires.
+  **Real regression caught by the full QA suite, not manual testing**: the
+  role-gate initially broke `GET /intelligence/candidates returns array`
+  (an existing S9 test using tenant-only `x-tenant-id` auth, no JWT) -
+  `actor.role` is `None` for that access pattern (trusted internal/
+  automation path, e.g. n8n), and `None not in ("admin","manager")` was
+  incorrectly treating it as an under-privileged real user and blocking it
+  with a `client_owners` lookup on a null `user_id`. Fixed by exempting
+  `actor.role is None` from the gate entirely.
+- **JD auto-send** - `_notify_stage_change_bg` now fetches the
+  requisition's title/description/location/employment_type and appends a
+  "--- Job Description: ... ---" block to both the email body and the
+  WhatsApp text specifically on the `contacted` stage (the moment a
+  candidate is actually being reached out to about a role) - not every
+  stage, which would just repeat it. Verified for real: moved a throwaway
+  application to `contacted`, confirmed `candidate_messages.body` (see
+  next item - stage-change emails are now logged there too) contained the
+  actual JD text.
+- **Per-role submission limits** - `requisitions.submission_limit_per_
+  recruiter` (nullable, NULL = unlimited default). `POST /applications`
+  counts existing applications for (requisition, recruiter) and 400s at
+  the limit. **Real bug found by the automated test suite, not manual
+  curl**: the limit check correctly fell back to `actor.user_id` for
+  *counting* when `assigned_recruiter_id` wasn't given in the request, but
+  the INSERT still stored the literal (often-NULL) `body.assigned_
+  recruiter_id` - so an unassigned submission was counted-for-the-check
+  against the actor but never actually *stored* against them, meaning it
+  would never count on a second call. A recruiter submitting without ever
+  passing `assigned_recruiter_id` explicitly could submit unlimited
+  candidates despite a configured limit. Fixed by storing `recruiter_for_
+  limit` (the same fallback value) as the actual `assigned_recruiter_id`,
+  not the raw request field - "who submitted this" now always resolves to
+  someone. New requisition form field + a per-recruiter usage bar
+  (`GET /requisitions/{id}/submission-usage`) on the requisition detail
+  page's Summary tab.
+- **Email open/read tracking** - `candidate_messages.tracking_token`
+  (unique uuid, separate from the message's own id - a leaked message id
+  used elsewhere for inbox links shouldn't double as a forgeable open-
+  tracking key), `email_opened_at`, `email_open_count`. Public (no-auth)
+  `GET /track/open/{token}.gif` returns a real 1x1 transparent GIF and
+  does `email_opened_at = COALESCE(email_opened_at, now())` +
+  `email_open_count += 1` - `candidate_messages` has no RLS at all
+  (checked: `relrowsecurity=false` - a separate, flagged-not-fixed finding,
+  see below) so this needed no anonymous-token-resolves-tenant machinery,
+  a plain `db.system_conn()` update by token was enough. Wired into
+  `/communications/send`, `/communications/bulk-send`, and stage-change
+  emails (which weren't logged to `candidate_messages` at all before this -
+  now they are, closing a separate gap where stage emails were invisible
+  in the Conversations inbox). Plain-text bodies get wrapped as minimal
+  HTML with the pixel appended; already-HTML bodies just get the pixel
+  appended directly. Conversations inbox list shows a green "Opened"
+  badge with the real timestamp on hover. Verified for real: hit the
+  pixel endpoint twice against a real logged message, confirmed
+  `email_opened_at` stayed fixed at the first hit while `email_open_count`
+  incremented 1 then 2.
+- **WhatsApp inbound resume + auto-reply** - `whatsapp_bot.py`'s webhook
+  only ever read `payload.body` (text) and bailed immediately if empty,
+  which would silently drop a resume sent with no caption. Now checks
+  `payload.hasMedia` *before* that bail, and for PDF/DOC/DOCX media, downloads
+  via WAHA's media URL, runs it through the exact same regex-NER pipeline
+  as email intake (`extract_text_from_attachment` -> `classify_document` ->
+  `parse_resume_v2` -> `upsert_candidate`, all reused directly, not
+  reimplemented), sets the parsed phone to the verified WhatsApp sender's
+  number (authoritative - overrides whatever the resume text itself says),
+  logs a `resume_files` row (`job_board='whatsapp'`), and replies with a
+  real WhatsApp confirmation message. **Honest verification gap**: this
+  session's WAHA instance has session status `FAILED` (needs a QR re-scan
+  by the team - a pre-existing condition, not something this work broke),
+  so the real inbound-webhook path could not be exercised against a
+  genuine WhatsApp message. Verified instead by calling the exact same
+  extract/classify/parse/upsert functions the handler calls, against a
+  real synthetic PDF built with reportlab (had to make the content
+  realistically dense - an early too-sparse attempt was correctly REJECTED
+  by the document classifier, which is the classifier working as intended,
+  not a bug) - confirmed name/email/skills extraction, `source='whatsapp'`
+  tagging, and phone correctly normalized to the standard 10-digit form
+  matching this codebase's existing India-phone convention. First attempt
+  accidentally reused a real existing candidate's resume file, which
+  matched their existing record via `upsert_candidate`'s own dedup logic
+  and bumped their `updated_at` (content-identical, not real corruption,
+  but a real methodology mistake - caught and corrected by re-testing
+  with a definitely-new synthetic candidate instead, and the one spurious
+  `resume_files` row it created was deleted).
+- **Stray-requisition QA gap, actually fixed this time** - previous entry
+  above just documented the gap; this session gave it a real fix. Added
+  `DELETE /requisitions/{id}` (soft `is_active=false`, admin/manager-only)
+  - genuinely didn't exist before (the requisitions list/detail pages'
+  existing Delete button, confirm-dialog and all, had been silently 404ing
+  this whole time, swallowed by an empty `catch{}`, now works for free).
+  `GET /requisitions` filters `is_active IS NOT FALSE` by default (new
+  `include_inactive` param to see soft-deleted ones). S14 and S15's
+  `afterAll` hooks now actually call this endpoint instead of just having
+  a comment saying they should. Verified: 13 stray requisitions accumulated
+  across today's repeated test runs, all confirmed `is_active=false` and
+  invisible in the default list/job-picker.
+
+**Flagged, not fixed (out of scope for this batch)**: `candidate_messages`
+has no RLS at all (`relrowsecurity=false`) - discovered while building
+email tracking, not something this session's rules required fixing since
+nothing currently exploits it, but worth a real audit given how much
+candidate-facing content flows through that table.
+
+New permanent "S16 Tier-1 Features" suite (7 tests, its own throwaway
+candidates + a submission-limited requisition + a separate unlimited one
+so the JD-send/AM-view/tracking/delete tests aren't accidentally blocked
+by the submission-limit test's own usage). Full suite: 145 passed / 2
+skipped / 0 failed on a clean run. Two earlier runs showed 2 late-running
+S16 tests failing (`email open tracking`, `requisition soft-delete`) with
+symptoms matching request-volume load on the *global* rate limiter (not
+the login one) rather than the login-specific 429 seen elsewhere today -
+confirmed as transient by re-running clean twice, not a real bug, but
+worth knowing the full 147-test suite can occasionally flake near its
+tail end under back-to-back invocations.

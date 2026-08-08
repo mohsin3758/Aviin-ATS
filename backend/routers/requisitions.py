@@ -21,7 +21,8 @@ FIELDS = """id, tenant_id, client_id, title, description, skills_required,
             budget_min, budget_max, bill_rate,
             work_mode, priority, deadline, expected_start_date,
             education_required, shift_type, notice_period_max,
-            industry, client_name, approval_status"""
+            industry, client_name, approval_status,
+            submission_limit_per_recruiter, is_active"""
 
 # Gap-audit item 09: hierarchy/approval-chain routing. requisitions.approval_
 # status existed since an early migration but defaulted to 'approved' with
@@ -68,10 +69,13 @@ async def list_requisitions(
     work_mode: str | None = None,
     search: str | None = None,
     limit: int | None = None,
+    include_inactive: bool = False,
     actor: Actor = Depends(get_actor),
 ):
     conditions: list[str] = []
     params: list = []
+    if not include_inactive:
+        conditions.append("is_active IS NOT FALSE")
     if status:
         params.append(status)
         conditions.append(f"status = ${len(params)}")
@@ -112,10 +116,10 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(get
                    budget_min, budget_max, bill_rate,
                    work_mode, priority, deadline, expected_start_date,
                    education_required, shift_type, notice_period_max,
-                   industry, client_name)
+                   industry, client_name, submission_limit_per_recruiter)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                        $20, $21, $22, $23, $24)
+                        $20, $21, $22, $23, $24, $25)
                 RETURNING {FIELDS}""",
             actor.tenant_id, body.client_id, body.title, body.description,
             body.skills_required, body.location, body.employment_type,
@@ -124,7 +128,7 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(get
             body.budget_min, body.budget_max, body.bill_rate,
             body.work_mode, body.priority, body.deadline, body.expected_start_date,
             body.education_required, body.shift_type, body.notice_period_max,
-            body.industry, body.client_name,
+            body.industry, body.client_name, body.submission_limit_per_recruiter,
         )
 
         result = dict(row)
@@ -185,6 +189,41 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
     if row is None:
         raise HTTPException(status_code=404, detail="Requisition not found")
     return dict(row)
+
+
+@router.delete("/{requisition_id}")
+async def delete_requisition(requisition_id: str, actor: Actor = Depends(get_actor)):
+    """Soft-delete (is_active=false) — was entirely missing (the only way to
+    remove a bad/duplicate/test requisition was a raw multi-table cascade
+    DELETE by hand, see CLAUDE.md). Soft, not hard: applications/assignments/
+    scores tied to a real requisition shouldn't vanish just because the
+    requisition itself got archived."""
+    if actor.role not in ("admin", "manager"):
+        raise HTTPException(403, "Only admin/manager can delete a requisition")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchval(
+            "UPDATE requisitions SET is_active=false, updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING id",
+            requisition_id, actor.tenant_id)
+    if not row:
+        raise HTTPException(404, "Requisition not found")
+    return {"ok": True}
+
+
+@router.get("/{requisition_id}/submission-usage")
+async def submission_usage(requisition_id: str, actor: Actor = Depends(get_actor)):
+    """Per-recruiter submission count against this role's limit — powers the
+    "X/Y submissions used" indicator on the requisition page."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        limit = await conn.fetchval(
+            "SELECT submission_limit_per_recruiter FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            requisition_id, actor.tenant_id)
+        rows = await conn.fetch(
+            """SELECT a.assigned_recruiter_id, u.full_name AS recruiter_name, count(*) AS used
+               FROM applications a LEFT JOIN users u ON u.id = a.assigned_recruiter_id
+               WHERE a.requisition_id=$1 AND a.tenant_id=$2 AND a.assigned_recruiter_id IS NOT NULL
+               GROUP BY a.assigned_recruiter_id, u.full_name ORDER BY count(*) DESC""",
+            requisition_id, actor.tenant_id)
+    return {"limit": limit, "by_recruiter": [dict(r) for r in rows]}
 
 
 @router.get("/{requisition_id}/pipeline")

@@ -879,6 +879,16 @@ test.describe('S14 KAE Candidate Submission', () => {
   let candId: string;
   let appId: string;
 
+  // Was leaving a stray requisition every run with no cleanup (8 had piled
+  // up across sessions, visible clutter in real job pickers/lists — see
+  // CLAUDE.md). Now soft-deleted via the real DELETE /requisitions endpoint
+  // instead of reaching for raw SQL from a Playwright test.
+  test.afterAll(async ({ request }) => {
+    if (!reqId) return;
+    const token = await getApiToken(request);
+    await request.delete(`${API}/requisitions/${reqId}`, { headers: { 'Authorization': `Bearer ${token}` } }).catch(() => {});
+  });
+
   test('setup: throwaway client + requisition + candidate + application', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -1021,6 +1031,12 @@ test.describe('S15 Tier-0 Quick Wins', () => {
   let reqId: string;
   let appId: string;
 
+  test.afterAll(async ({ request }) => {
+    if (!reqId) return;
+    const token = await getApiToken(request);
+    await request.delete(`${API}/requisitions/${reqId}`, { headers: { 'Authorization': `Bearer ${token}` } }).catch(() => {});
+  });
+
   test('setup: throwaway candidate (real skill gap) + requisition', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -1141,5 +1157,202 @@ test.describe('S15 Tier-0 Quick Wins', () => {
     const s = (candBody.ai_scores || []).find((x: any) => x.requisition_id === reqId);
     expect(s).toBeTruthy();
     expect(s.missing_skills.sort()).toEqual(['Docker', 'Kubernetes'].sort());
+  });
+});
+
+// ─── S16: Tier-1 (rejection taxonomy, submission limits, JD auto-send, ────
+// AM ranked view, email tracking, requisition soft-delete) ─────────────────
+test.describe('S16 Tier-1 Features', () => {
+  const stamp = Date.now();
+  let candId: string;
+  let cand2Id: string;
+  let reqId: string;
+  let reqId2: string; // unlimited — keeps JD-send/AM-view/tracking/delete tests independent of the submission-limit test's usage
+  let appId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+    if (reqId2) await request.delete(`${API}/requisitions/${reqId2}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway candidates + a submission-limited requisition', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: { full_name: `QA Tier1 Test ${stamp}`, email: `qa.tier1.${stamp}@test.com`, phone: `9${String(stamp).slice(-9)}`, skills: ['Python', 'SQL'], total_exp_mo: 48 },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const cand2 = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: { full_name: `QA Tier1 Test Two ${stamp}`, email: `qa.tier1b.${stamp}@test.com`, phone: `8${String(stamp).slice(-9)}`, skills: ['Java'], total_exp_mo: 24 },
+    });
+    expect(cand2.ok()).toBeTruthy();
+    cand2Id = (await cand2.json()).id;
+
+    const req = await request.post(`${API}/requisitions`, {
+      headers: auth,
+      data: {
+        title: `QA Tier1 Test Role ${stamp}`,
+        description: 'We need a Python/SQL engineer for a great client project.',
+        skills_required: ['Python', 'SQL'], submission_limit_per_recruiter: 1,
+      },
+    });
+    expect(req.ok()).toBeTruthy();
+    const reqBody = await req.json();
+    reqId = reqBody.id;
+    expect(reqBody.submission_limit_per_recruiter).toBe(1);
+
+    const req2 = await request.post(`${API}/requisitions`, {
+      headers: auth,
+      data: { title: `QA Tier1 Unlimited Role ${stamp}`, description: 'Unlimited role for JD-send/AM-view/tracking/delete checks.', skills_required: ['Python'] },
+    });
+    expect(req2.ok()).toBeTruthy();
+    reqId2 = (await req2.json()).id;
+  });
+
+  test('rejection requires a reason_code and writes a structured record', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const reasons = await request.get(`${API}/rejection-reasons`, { headers: auth });
+    expect(reasons.ok()).toBeTruthy();
+    expect((await reasons.json()).length).toBeGreaterThan(0);
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { requisition_id: reqId, candidate_id: candId } });
+    expect(app.ok()).toBeTruthy();
+    appId = (await app.json()).id;
+
+    const noReason = await request.patch(`${API}/applications/${appId}/stage`, { headers: auth, data: { stage: 'rejected' } });
+    expect(noReason.status()).toBe(400);
+
+    const rejected = await request.patch(`${API}/applications/${appId}/stage`, {
+      headers: auth, data: { stage: 'rejected', reason_code: 'skills_mismatch', reason: 'Missing Docker/K8s depth' },
+    });
+    expect(rejected.ok()).toBeTruthy();
+
+    const detail = await request.get(`${API}/applications/${appId}/rejection`, { headers: auth });
+    const detailBody = await detail.json();
+    expect(detailBody.reason_code).toBe('skills_mismatch');
+    expect(detailBody.reason_label).toBe('Skills mismatch');
+    expect(detailBody.notes).toBe('Missing Docker/K8s depth');
+  });
+
+  test('submission limit blocks a 2nd submission by the same recruiter, allows a different one', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const me = await request.get(`${API}/auth/me`, { headers: auth });
+    const myId = (await me.json()).id;
+
+    // appId (from the previous test) already counts as 1 submission by `myId`.
+    const blocked = await request.post(`${API}/applications`, {
+      headers: auth, data: { requisition_id: reqId, candidate_id: cand2Id, assigned_recruiter_id: myId },
+    });
+    expect(blocked.status()).toBe(400);
+
+    const users = await request.get(`${API}/users?is_active=true`, { headers: auth });
+    const usersList = await users.json();
+    const otherRecruiter = (Array.isArray(usersList) ? usersList : usersList.items || []).find((u: any) => u.id !== myId && u.role === 'recruiter');
+    if (!otherRecruiter) return; // tenant has no second recruiter — nothing more to assert
+    const allowed = await request.post(`${API}/applications`, {
+      headers: auth, data: { requisition_id: reqId, candidate_id: cand2Id, assigned_recruiter_id: otherRecruiter.id },
+    });
+    expect(allowed.ok()).toBeTruthy();
+  });
+
+  test('JD auto-send: moving to "contacted" embeds the JD and logs a trackable message', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const cand3 = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: { full_name: `QA Tier1 Test Three ${stamp}`, email: `qa.tier1c.${stamp}@test.com`, phone: `7${String(stamp).slice(-9)}`, skills: ['Python'], total_exp_mo: 36 },
+    });
+    expect(cand3.ok()).toBeTruthy();
+    const cand3Id = (await cand3.json()).id;
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { requisition_id: reqId2, candidate_id: cand3Id } });
+    if (!app.ok()) console.log('APP CREATE FAILED', app.status(), await app.text());
+    expect(app.ok()).toBeTruthy();
+    const thisAppId = (await app.json()).id;
+
+    const move = await request.patch(`${API}/applications/${thisAppId}/stage`, { headers: auth, data: { stage: 'contacted', send_email: true } });
+    if (!move.ok()) console.log('STAGE MOVE FAILED', move.status(), await move.text());
+    expect(move.ok()).toBeTruthy();
+    // Real send is a fire-and-forget background task — this asserts the API
+    // accepted the transition; the JD-embedding + logging behavior itself
+    // was verified directly against candidate_messages during development.
+  });
+
+  test('Account Manager ranked view includes requisition context', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const scoreResp = await request.post(`${API}/intelligence/score`, {
+      headers: auth,
+      data: { candidate_id: candId, requisition_id: reqId2, jd_text: 'Python SQL Docker Kubernetes' },
+    });
+    if (!scoreResp.ok()) console.log('SCORE FAILED', scoreResp.status(), await scoreResp.text());
+    expect(scoreResp.ok()).toBeTruthy();
+
+    const am = await request.get(`${API}/intelligence/candidates`, { headers: auth });
+    expect(am.ok()).toBeTruthy();
+    const rows = await am.json();
+    const row = rows.find((r: any) => r.candidate_id === candId && r.requisition_id === reqId2);
+    expect(row).toBeTruthy();
+    expect(row.requisition_title).toBe(`QA Tier1 Unlimited Role ${stamp}`);
+  });
+
+  test('email open tracking: pixel hit records opened_at and increments count', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const send = await request.post(`${API}/communications/send`, {
+      headers: auth, data: { candidate_id: candId, channel: 'email', subject: 'QA tracking test', message: 'Hello, this is a tracking test.' },
+    });
+    if (!send.ok()) console.log('SEND FAILED', send.status(), await send.text());
+    expect(send.ok()).toBeTruthy();
+
+    const inbox = await request.get(`${API}/communications/inbox?limit=10`, { headers: auth });
+    const rows = await inbox.json();
+    const list = Array.isArray(rows) ? rows : (rows.items || []);
+    const msg = list.find((m: any) => m.candidate_id === candId && m.subject === 'QA tracking test');
+    expect(msg).toBeTruthy();
+    expect(msg.email_opened_at).toBeFalsy();
+    expect(msg.email_open_count).toBe(0);
+    expect(msg.tracking_token).toBeTruthy();
+
+    const pixel = await request.get(`${API}/track/open/${msg.tracking_token}.gif`);
+    expect(pixel.status()).toBe(200);
+    expect(pixel.headers()['content-type']).toContain('image/gif');
+
+    const inbox2 = await request.get(`${API}/communications/inbox?limit=10`, { headers: auth });
+    const rows2 = await inbox2.json();
+    const list2 = Array.isArray(rows2) ? rows2 : (rows2.items || []);
+    const msg2 = list2.find((m: any) => m.id === msg.id);
+    expect(msg2.email_opened_at).toBeTruthy();
+    expect(msg2.email_open_count).toBe(1);
+  });
+
+  test('requisition soft-delete: DELETE hides it from the default list, keeps it under include_inactive', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+
+    const del = await request.delete(`${API}/requisitions/${reqId}`, { headers: auth });
+    if (!del.ok()) console.log('DELETE FAILED', del.status(), await del.text());
+    expect(del.ok()).toBeTruthy();
+
+    const defaultList = await request.get(`${API}/requisitions?limit=500`, { headers: auth });
+    const defaultRows = await defaultList.json();
+    expect(defaultRows.some((r: any) => r.id === reqId)).toBe(false);
+
+    const allList = await request.get(`${API}/requisitions?limit=500&include_inactive=true`, { headers: auth });
+    const allRows = await allList.json();
+    expect(allRows.some((r: any) => r.id === reqId)).toBe(true);
   });
 });

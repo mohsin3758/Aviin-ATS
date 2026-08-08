@@ -359,15 +359,50 @@ async def list_intelligence(
     grade: Optional[str] = None,
     actor: Actor = Depends(get_actor)
 ):
-    """List all candidates with their intelligence scores."""
+    """Tenant-wide, cross-recruiter ranked candidate list — the "Account
+    Manager view": every scored (candidate, requisition) pair, sorted by
+    fit, regardless of which recruiter submitted the candidate. There's no
+    formal "account_manager" auth role in this system (users.role is just
+    admin/manager/recruiter) — visibility here is admin/manager always, or
+    anyone holding a real client_owners assignment (kae/account_manager/
+    secondary), matching how "manages client accounts" is actually modeled
+    elsewhere in the schema.
+
+    Deliberately queries candidate_scores directly rather than
+    v_candidate_intelligence — that view only surfaces each candidate's
+    single most-recent score with no indication of which requisition it
+    was scored against, which isn't useful for "who should I present for
+    THIS role."""
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # actor.role is None for x-tenant-id-only access (no JWT) — that's
+        # the trusted internal/automation path (n8n, etc.), not a real user
+        # role, so it's exempt from this gate rather than being treated as
+        # "not admin/manager" and blocked.
+        if actor.role is not None and actor.role not in ("admin", "manager"):
+            is_am = await conn.fetchval(
+                "SELECT 1 FROM client_owners WHERE tenant_id=$1 AND user_id=$2 AND is_active LIMIT 1",
+                actor.tenant_id, actor.user_id)
+            if not is_am:
+                raise HTTPException(403, "Account Manager view requires admin/manager role or a client ownership assignment")
         rows = await conn.fetch("""
-            SELECT * FROM v_candidate_intelligence
-            WHERE ($1::numeric IS NULL OR readiness_index >= $1)
-              AND ($2::text IS NULL OR readiness_grade = $2)
-            ORDER BY readiness_index DESC NULLS LAST
-            LIMIT 100
-        """, min_score, grade)
+            SELECT ca.id AS candidate_id, ca.full_name, ca.email, ca.skills, ca.total_exp_mo,
+                   ca.location, ca.current_employer, ca.current_designation,
+                   cpd.extracted_skills, cpd.education_level, cpd.total_years_exp,
+                   cs.readiness_index, cs.readiness_grade, cs.skill_match_score,
+                   cs.experience_score, cs.stability_score, cs.education_score,
+                   cs.has_gap_flag, cs.duplicate_flag, cs.scored_at,
+                   cs.requisition_id, r.title AS requisition_title, r.client_id, cl.name AS client_name
+            FROM candidate_scores cs
+            JOIN candidates ca ON ca.id = cs.candidate_id AND ca.tenant_id = cs.tenant_id
+            LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id = ca.id AND cpd.tenant_id = ca.tenant_id
+            LEFT JOIN requisitions r ON r.id = cs.requisition_id
+            LEFT JOIN clients cl ON cl.id = r.client_id
+            WHERE cs.tenant_id = $1
+              AND ($2::numeric IS NULL OR cs.readiness_index >= $2)
+              AND ($3::text IS NULL OR cs.readiness_grade = $3)
+            ORDER BY cs.readiness_index DESC NULLS LAST
+            LIMIT 200
+        """, actor.tenant_id, min_score, grade)
     return [dict(r) for r in rows]
 
 

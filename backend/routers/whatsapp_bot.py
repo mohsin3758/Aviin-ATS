@@ -37,6 +37,80 @@ async def send_wa(phone: str, message: str) -> bool:
     except Exception:
         return False
 
+
+# ─── Inbound resume via WhatsApp ──────────────────────────────────────────────
+# Built against WAHA's documented webhook contract for media messages
+# (payload.hasMedia + payload.media.{url,mimetype,filename}) — this session's
+# WAHA instance has no connected session (status: FAILED, needs a QR re-scan
+# by the team) so this could not be exercised against a real inbound
+# WhatsApp message; the downstream parse/classify/upsert pipeline was
+# verified directly against a real downloadable PDF instead. See CLAUDE.md.
+_RESUME_MIME_HINTS = ("pdf", "msword", "wordprocessingml")
+
+
+async def _download_waha_media(media: dict) -> Optional[bytes]:
+    url = media.get("url")
+    if not url:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers={"X-Api-Key": WAHA_KEY})
+            if r.status_code == 200:
+                return r.content
+    except Exception as ex:
+        print(f"WAHA media download failed: {ex}")
+    return None
+
+
+async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str) -> str:
+    """Download + parse an inbound WhatsApp resume attachment, upsert a
+    candidate (same regex-NER pipeline as email intake), log a resume_files
+    row, and return the WhatsApp reply text to send back."""
+    from services.resume_intake_service import (
+        extract_text_from_attachment, upsert_candidate, save_resume_file,
+    )
+    from services.document_classifier import classify_document
+    from services.improved_parser import parse_resume_v2
+    import json as _json
+
+    mimetype = (media.get("mimetype") or "").lower()
+    filename = media.get("filename") or "resume.pdf"
+    if not any(h in mimetype for h in _RESUME_MIME_HINTS) and not filename.lower().endswith((".pdf", ".doc", ".docx")):
+        return "We can only accept resumes as PDF or Word documents right now."
+
+    data = await _download_waha_media(media)
+    if not data:
+        return "We couldn't download your file — please try sending it again."
+
+    text = extract_text_from_attachment(data, mimetype, filename)
+    if not text or len(text.strip()) < 50:
+        return "We received your file but couldn't read its contents — please send a PDF or Word resume."
+
+    doc_result = classify_document(text, filename)
+    if not doc_result.is_resume and doc_result.decision == "REJECT":
+        return "Thanks for sharing, but this doesn't look like a resume — please send your CV as a PDF or Word file."
+
+    parsed = parse_resume_v2(text, from_name="", from_email="", filename=filename)
+    parsed["phone"] = phone  # authoritative — this WhatsApp number is a verified real channel identity
+
+    file_path = save_resume_file(data, tenant_id, filename)
+    async with db.tenant_conn(tenant_id) as conn:
+        candidate_id = await upsert_candidate(
+            conn, tenant_id, parsed, "whatsapp", "WhatsApp Inbound",
+            f"{phone}@whatsapp", file_path, text)
+        await conn.execute(
+            """INSERT INTO resume_files
+                 (tenant_id, candidate_id, job_board, job_board_label, source_email,
+                  file_name, file_path, mime_type, file_size,
+                  parse_status, parsed_data, parse_confidence, routing_decision)
+               VALUES ($1,$2,'whatsapp','WhatsApp Inbound',$3,$4,$5,$6,$7,'auto_accepted',$8,$9,'auto_accepted')""",
+            tenant_id, candidate_id, f"{phone}@whatsapp", filename, file_path, mimetype, len(data),
+            _json.dumps(parsed), round(float(parsed.get("_confidence", 0.7) or 0.7), 3))
+
+    first_name = (parsed.get("name") or "").split()[0] if parsed.get("name") else ""
+    greeting = f"Thanks {first_name}!" if first_name else "Thanks!"
+    return f"{greeting} We've received your resume and added it to our system. Our recruitment team will review it and reach out if there's a matching opportunity."
+
 async def handle_cmd(phone: str, text: str, tenant_id: str) -> str:
     cmd = text.strip().upper().split()[0] if text.strip() else "HELP"
     async with db.tenant_conn(tenant_id) as conn:
@@ -94,13 +168,22 @@ async def webhook(request: Request):
         text = (msg.get("body") or "").strip()
         from_  = msg.get("from", "")
         phone  = from_.replace("@c.us","").replace("@g.us","")
-        if not text or msg.get("fromMe") or "@g.us" in from_:
+        has_media = bool(msg.get("hasMedia"))
+        # Media messages often have an empty/caption-only body — check media
+        # BEFORE the text-emptiness bail below, or a resume with no caption
+        # would be silently dropped.
+        if (not text and not has_media) or msg.get("fromMe") or "@g.us" in from_:
             return {"ok": True}
         async with db.system_conn() as conn:
             tenant = await conn.fetchrow("SELECT id FROM tenants LIMIT 1")
         if not tenant:
             return {"ok": True}
-        response = await handle_cmd(phone, text, str(tenant["id"]))
+        tenant_id = str(tenant["id"])
+        if has_media:
+            reply = await _handle_inbound_resume(phone, msg.get("media") or {}, tenant_id)
+            await send_wa(phone, reply)
+            return {"ok": True}
+        response = await handle_cmd(phone, text, tenant_id)
         await send_wa(phone, response)
     except Exception as e:
         print(f"WhatsApp webhook error: {e}")

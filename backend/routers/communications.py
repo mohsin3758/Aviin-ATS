@@ -1,19 +1,40 @@
 """Phase R2 - Communication Hub (webmail v3 - full featured)"""
-import os, smtplib, threading
+import os, smtplib, threading, base64
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, List
 import json
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 import httpx
 import db
 from deps import Actor, get_actor
 
 router = APIRouter(prefix="/communications", tags=["communications"])
+# Public (no auth) — the recipient's own email client fetches this, not the
+# ATS. tracking_token (a random uuid, not the message id) is the security
+# boundary, same pattern as the anonymous NDA/offer sign links.
+tracking_router = APIRouter(tags=["email-tracking"])
 WAHA_BASE = os.getenv("WAHA_URL", "http://waha:3000")
 WAHA_KEY = os.getenv("WAHA_API_KEY", "aviinATS2026secure")
 WAHA_SESSION = "default"
+
+_PIXEL_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+
+
+@tracking_router.get("/track/open/{token}.gif")
+async def track_email_open(token: str):
+    try:
+        async with db.system_conn() as conn:
+            await conn.execute(
+                """UPDATE candidate_messages
+                   SET email_opened_at = COALESCE(email_opened_at, now()), email_open_count = email_open_count + 1
+                   WHERE tracking_token = $1""",
+                token)
+    except Exception as ex:
+        print(f"Email open tracking error: {ex}")
+    return Response(content=_PIXEL_GIF, media_type="image/gif",
+                     headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
 
 MSG_COLS = """cm.id, cm.candidate_id,
     COALESCE(c.full_name, cm.to_email, 'External') AS candidate_name,
@@ -21,6 +42,7 @@ MSG_COLS = """cm.id, cm.candidate_id,
     cm.channel, cm.direction, cm.subject, cm.body, cm.status,
     cm.stage_at_send, cm.created_at, cm.deleted_at,
     cm.is_read, cm.is_starred, cm.to_email, cm.cc,
+    cm.email_opened_at, cm.email_open_count, cm.tracking_token,
     u.full_name AS sent_by_name"""
 
 MSG_JOINS = """FROM candidate_messages cm
@@ -78,16 +100,39 @@ async def _send_wa(phone: str, message: str) -> bool:
 
 async def _log(conn, tenant_id, cand_id, app_id, channel, subject, body, status,
                sent_by, tmpl_id=None, stage=None, to_email=None, cc=None):
+    """Returns {id, tracking_token} on success so callers can embed an open-
+    tracking pixel keyed to this specific message, or None on failure."""
     try:
-        await conn.execute(
+        row = await conn.fetchrow(
             """INSERT INTO candidate_messages
                (tenant_id,candidate_id,application_id,channel,direction,subject,body,
                 status,sent_by,template_id,stage_at_send,is_read,to_email,cc)
-               VALUES($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10,TRUE,$11,$12)""",
+               VALUES($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10,TRUE,$11,$12)
+               RETURNING id, tracking_token""",
             tenant_id, cand_id, app_id, channel, subject, body, status,
             sent_by, tmpl_id, stage, to_email, cc)
+        return dict(row) if row else None
     except Exception as ex:
         print(f"Log error: {ex}")
+        return None
+
+
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://ats.aviinjobs.com")
+
+
+def _with_tracking_pixel(body_text: str, tracking_token) -> str:
+    """Wraps a message body as HTML with an invisible 1x1 open-tracking
+    pixel — only for candidate-facing email, never for the plain-text copy
+    stored in candidate_messages.body (that stays the clean original)."""
+    if not tracking_token:
+        return body_text or ""
+    pixel_url = f"{PUBLIC_BASE_URL}/track/open/{tracking_token}.gif"
+    pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none" alt="" />'
+    if "<" in (body_text or "") and ">" in (body_text or ""):
+        return (body_text or "") + pixel_tag
+    import html as _html
+    escaped = _html.escape(body_text or "").replace("\n", "<br>")
+    return f'<html><body style="font-family:sans-serif;font-size:14px;color:#1e293b;white-space:normal;">{escaped}{pixel_tag}</body></html>'
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
@@ -477,10 +522,11 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
             elif not smtp: results["email"] = "smtp_not_configured"
             else:
                 subj = body.subject or "AVIIN Jobs Services"
-                _send_email_bg(smtp, to_email, subj, body.message, body.cc, body.bcc)
-                await _log(conn, actor.tenant_id, body.candidate_id, body.application_id,
+                logged = await _log(conn, actor.tenant_id, body.candidate_id, body.application_id,
                            "email", subj, body.message, "sent", str(actor.user_id),
                            body.template_id, body.stage, to_email, body.cc)
+                tracked = _with_tracking_pixel(body.message, logged["tracking_token"] if logged else None)
+                _send_email_bg(smtp, to_email, subj, tracked, body.cc, body.bcc)
                 results["email"] = "sent"
 
         if body.channel in ("whatsapp", "both"):
@@ -533,10 +579,14 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
                 if not cand["email"] or not smtp: skipped += 1
                 else:
                     subj = _personalize(body.subject, cand["full_name"]) or "AVIIN Jobs - Update"
-                    _send_email_bg(smtp, cand["email"], subj, msg)
-                    await _log(conn, actor.tenant_id, str(cand["id"]), None, "email", subj,
+                    # Log first so the send can embed a pixel keyed to this
+                    # exact message row; candidate_messages.body stays the
+                    # clean original text, the pixel only rides on the SMTP copy.
+                    logged = await _log(conn, actor.tenant_id, str(cand["id"]), None, "email", subj,
                                msg, "sent", str(actor.user_id), body.template_id, body.stage,
                                cand["email"], None)
+                    tracked = _with_tracking_pixel(msg, logged["tracking_token"] if logged else None)
+                    _send_email_bg(smtp, cand["email"], subj, tracked)
                     sent += 1
             if body.channel in ("whatsapp","both"):
                 if not cand["phone"]: skipped += 1

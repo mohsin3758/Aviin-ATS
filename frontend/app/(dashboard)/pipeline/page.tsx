@@ -98,6 +98,10 @@ function PipelineInner() {
   const [addCandidateOpen, setAddCandidateOpen] = useState(false);
   const { toast, show: showToast } = useToast();
   const dragRef = useRef<{ id: string; fromStage: string } | null>(null);
+  // Rejecting now requires a reason_code — shared across both ways a card
+  // can be rejected (drag-drop into the Rejected column, or the drawer's
+  // Reject button), so there's one modal, not two divergent flows.
+  const [pendingReject, setPendingReject] = useState<{ appId: string; fromStage: string } | null>(null);
 
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
   const ALL_STAGES = useMemo(() => {
@@ -141,7 +145,7 @@ function PipelineInner() {
 
   // L1/L2/Rejected auto-notify the candidate (email + WhatsApp, backend
   // already supports both — it just was never triggered here before).
-  const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string) => {
+  const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, extra: Record<string, any> = {}) => {
     if (fromStage === toStage) return;
     const sendEmail = _AUTO_NOTIFY_STAGES.has(toStage);
     setBoard(prev => {
@@ -155,7 +159,7 @@ function PipelineInner() {
     });
     if (selected?.id === appId) setSelected((s: any) => s ? { ...s, stage: toStage } : s);
     try {
-      await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify({ stage: toStage, send_email: sendEmail }) });
+      await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify({ stage: toStage, send_email: sendEmail, ...extra }) });
       showToast(`Moved to ${ALL_STAGES.find((s: any) => s.key === toStage)?.label || toStage}`);
       refreshStats();
     } catch (e: any) {
@@ -357,7 +361,12 @@ function PipelineInner() {
               return (
                 <div key={stage.key} style={{ flexShrink: 0, width: 246, display: 'flex', flexDirection: 'column', background: '#F8FAFC', border: '1px solid #E5E9F0', borderTop: `3px solid ${stage.color}`, borderRadius: 12, overflow: 'hidden' }}
                   onDragOver={e => e.preventDefault()}
-                  onDrop={e => { e.preventDefault(); if (!dragRef.current) return; const { id, fromStage } = dragRef.current; dragRef.current = null; moveStage(id, fromStage, stage.key); }}>
+                  onDrop={e => {
+                    e.preventDefault(); if (!dragRef.current) return;
+                    const { id, fromStage } = dragRef.current; dragRef.current = null;
+                    if (stage.key === 'rejected') { setPendingReject({ appId: id, fromStage }); return; }
+                    moveStage(id, fromStage, stage.key);
+                  }}>
 
                   {/* Column header */}
                   <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', background: '#fff', borderBottom: '1px solid #F1F5F9', flexShrink: 0 }}>
@@ -387,7 +396,7 @@ function PipelineInner() {
       {/* ── DRAWER ──────────────────────────────────────────────────────── */}
       {selected && (
         <CandidateDrawer app={selected} onClose={() => setSelected(null)}
-          onMoveStage={(toStage: string) => moveStage(selected.id, selected.stage, toStage)}
+          onMoveStage={(toStage: string, extra?: Record<string, any>) => moveStage(selected.id, selected.stage, toStage, extra)}
           onSubmittedToKae={(bumped: boolean) => {
             if (bumped) {
               setBoard(prev => {
@@ -404,6 +413,7 @@ function PipelineInner() {
             }
             refreshStats();
           }}
+          onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
           drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES} />
       )}
 
@@ -412,6 +422,16 @@ function PipelineInner() {
         <AddCandidateModal jobId={selectedJobId} board={board}
           onClose={() => setAddCandidateOpen(false)}
           onAdded={() => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast('Candidate(s) added to pipeline'); }} />
+      )}
+
+      {/* ── REJECT REASON MODAL ─────────────────────────────────────────── */}
+      {pendingReject && (
+        <RejectReasonModal
+          onCancel={() => setPendingReject(null)}
+          onConfirm={(reason_code: string, reason: string) => {
+            moveStage(pendingReject.appId, pendingReject.fromStage, 'rejected', { reason_code, reason: reason || undefined });
+            setPendingReject(null);
+          }} />
       )}
 
       {/* ── TOAST ───────────────────────────────────────────────────────── */}
@@ -491,7 +511,7 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart }: any
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -536,7 +556,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, drawerTa
                 </button>
               ))}
               <button onClick={() => onMoveStage('hold')} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #CBD5E140', background: app.stage === 'hold' ? '#94A3B8' : '#F8FAFC', color: app.stage === 'hold' ? '#fff' : '#94A3B8' }}>Hold</button>
-              <button onClick={() => onMoveStage('rejected')} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>Reject</button>
+              <button onClick={() => onRequestReject()} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>Reject</button>
             </div>
           </div>
 
@@ -1096,6 +1116,48 @@ function ActivityTab({ candidateId }: any) {
 // Shows candidates ranked by JD-match score (match_candidates(): 60% resume/JD
 // embedding similarity + 40% skill overlap, pre-sorted highest→lowest), not a
 // plain alphabetical/text search — matches how a recruiter actually shortlists.
+// ── Reject Reason Modal ──────────────────────────────────────────────────────
+function RejectReasonModal({ onCancel, onConfirm }: any) {
+  const { data: reasons } = useFetch<any[]>('/rejection-reasons');
+  const [code, setCode] = useState('');
+  const [notes, setNotes] = useState('');
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    if (reasons && reasons.length > 0 && !code) setCode(reasons[0].code);
+  }, [reasons]);
+
+  const confirm = () => {
+    if (!code) { setErr('Select a reason'); return; }
+    onConfirm(code, notes);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
+      <div style={{ width: 420, maxWidth: '92vw', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B', marginBottom: 4 }}>Reject Candidate</div>
+        <div style={{ fontSize: 12, color: '#64748B', marginBottom: 16 }}>Pick a reason — this is shared directly with the assigned recruiter.</div>
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>REASON</label>
+        <select value={code} onChange={e => setCode(e.target.value)}
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 12px', color: '#1E293B' }}>
+          {(reasons || []).map((r: any) => <option key={r.code} value={r.code}>{r.label}</option>)}
+        </select>
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>ADDITIONAL NOTES (OPTIONAL)</label>
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3}
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 12px', resize: 'vertical', fontFamily: 'inherit' }} />
+
+        {err && <div style={{ color: '#DC2626', fontSize: 12, marginBottom: 8 }}>{err}</div>}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onCancel} style={{ padding: '8px 16px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+          <button onClick={confirm} style={{ padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Reject Candidate</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AddCandidateModal({ jobId, board, onClose, onAdded }: any) {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());

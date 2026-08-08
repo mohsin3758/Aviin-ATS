@@ -10,7 +10,7 @@ export default function IntelligencePage() {
   const [parsing, setParsing] = useState(false);
   const [parseResult, setParseResult] = useState<any>(null);
   const { data: stats } = useFetch<any>('/intelligence/stats');
-  const { data: candidates } = useFetch<any[]>('/intelligence/candidates');
+  const { data: candidates, error: candidatesError } = useFetch<any[]>('/intelligence/candidates');
 
   async function parseResume() {
     if (!candId) return;
@@ -56,12 +56,24 @@ export default function IntelligencePage() {
             <h3>AI-Scored Candidates</h3>
             <span className="badge badge-purple">BGE-small + sklearn</span>
           </div>
+          {candidatesError ? (
+            <div className="text-center py-10 px-4" style={{ color:'var(--gray-400)' }}>
+              This Account Manager view is restricted to admin/manager, or a user holding a client ownership assignment (KAE/Account Manager) under Settings › Client Owners.
+            </div>
+          ) : (
+          <>
+          <p className="text-xs px-4 pt-2" style={{ color: 'var(--gray-400)' }}>
+            Every scored candidate x role pairing, ranked by fit — regardless of which recruiter submitted them.
+          </p>
           <table className="data-table">
-            <thead><tr><th>Candidate</th><th>Experience</th><th>Education</th><th>Skills</th><th>Readiness Score</th><th>Grade</th><th>Flags</th></tr></thead>
+            <thead><tr><th>Candidate</th><th>Role</th><th>Experience</th><th>Education</th><th>Skills</th><th>Readiness Score</th><th>Grade</th><th>Flags</th></tr></thead>
             <tbody>
-              {(candidates||[]).slice(0,15).map((c:any) => (
-                <tr key={c.id}>
+              {(candidates||[]).slice(0,50).map((c:any, i:number) => (
+                <tr key={`${c.candidate_id}-${c.requisition_id || i}`}>
                   <td><div className="font-medium text-sm">{c.full_name}</div><div className="text-xs" style={{ color:'var(--gray-400)' }}>{c.email}</div></td>
+                  <td className="text-xs">
+                    {c.requisition_title ? <><div className="font-medium">{c.requisition_title}</div>{c.client_name && <div style={{ color:'var(--gray-400)' }}>{c.client_name}</div>}</> : <span style={{ color:'var(--gray-400)' }}>Standalone</span>}
+                  </td>
                   <td className="text-sm">{c.total_years_exp != null ? `${c.total_years_exp}yr` : `${Math.round((c.total_exp_mo||0)/12)}yr`}</td>
                   <td><span className="badge badge-gray text-xs">{c.education_level||'—'}</span></td>
                   <td className="text-xs" style={{ color:'var(--gray-500)' }}>{(c.extracted_skills||c.skills||[]).slice(0,3).join(', ')}</td>
@@ -77,9 +89,11 @@ export default function IntelligencePage() {
                   <td className="text-xs">{c.has_gap_flag && <span className="badge badge-amber">⚠ Gap</span>}</td>
                 </tr>
               ))}
-              {!candidates?.length && <tr><td colSpan={7} className="text-center py-8" style={{ color:'var(--gray-400)' }}>No scored candidates yet. Parse resumes first.</td></tr>}
+              {!candidates?.length && <tr><td colSpan={8} className="text-center py-8" style={{ color:'var(--gray-400)' }}>No scored candidates yet. Parse resumes first.</td></tr>}
             </tbody>
           </table>
+          </>
+          )}
         </div>
       )}
 

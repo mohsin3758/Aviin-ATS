@@ -71,6 +71,7 @@ class RequisitionCreate(BaseModel):
     employment_type: EmploymentType = "contract"
     positions_count: int = 1
     sla_hours: Optional[int] = None
+    submission_limit_per_recruiter: Optional[int] = None
     # New fields
     experience_min: int = 0
     experience_max: int = 10
@@ -113,6 +114,8 @@ class RequisitionUpdate(BaseModel):
     notice_period_max: Optional[int] = None
     industry: Optional[str] = None
     client_name: Optional[str] = None
+    submission_limit_per_recruiter: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 class ApplicationCreate(BaseModel):
@@ -127,7 +130,8 @@ class StageUpdate(BaseModel):
     # stages beyond the original 13 (see sql/16_custom_stages.sql). Validated
     # against that tenant's pipeline_stage_config in applications.py instead.
     stage: str
-    reason: Optional[str] = None
+    reason: Optional[str] = None          # free-text notes (rejection: optional extra detail)
+    reason_code: Optional[str] = None     # structured taxonomy code, required when stage=='rejected'
     custom_message: Optional[str] = None
     send_email: bool = True
 

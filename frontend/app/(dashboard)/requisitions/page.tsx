@@ -21,6 +21,7 @@ const EMPTY_FORM = {
   employment_type: 'contract', work_mode: 'onsite', shift_type: 'day',
   positions_count: 1,
   location: '', expected_start_date: '', deadline: '', sla_hours: '' as any,
+  submission_limit_per_recruiter: '' as any,
   experience_min: 0, experience_max: 10, notice_period_max: 60,
   education_required: '',
   budget_min: '' as any, budget_max: '' as any, bill_rate: '' as any,
@@ -360,6 +361,7 @@ function RequisitionsPageInner() {
       expected_start_date: req.expected_start_date ? req.expected_start_date.substring(0, 10) : '',
       deadline: req.deadline ? req.deadline.substring(0, 10) : '',
       sla_hours: req.sla_hours ?? '',
+      submission_limit_per_recruiter: req.submission_limit_per_recruiter ?? '',
       experience_min: req.experience_min ?? 0,
       experience_max: req.experience_max ?? 10,
       notice_period_max: req.notice_period_max ?? 60,
@@ -406,7 +408,7 @@ function RequisitionsPageInner() {
     try {
       const payload: any = { ...form };
       // Convert empty strings to null for numeric/date fields
-      ['sla_hours', 'budget_min', 'budget_max', 'bill_rate'].forEach(k => {
+      ['sla_hours', 'budget_min', 'budget_max', 'bill_rate', 'submission_limit_per_recruiter'].forEach(k => {
         if (payload[k] === '' || payload[k] === null) payload[k] = undefined;
         else payload[k] = Number(payload[k]);
       });
@@ -650,6 +652,10 @@ function RequisitionsPageInner() {
           <FormField label="SLA Hours" hint="Fill-by SLA in hours">
             <input type="number" style={inputStyle} min={1} placeholder="e.g. 72"
               value={form.sla_hours} onChange={fNum('sla_hours')} />
+          </FormField>
+          <FormField label="Submission Limit / Recruiter" hint="Max candidates one recruiter can submit for this role — blank = unlimited">
+            <input type="number" style={inputStyle} min={1} placeholder="Unlimited"
+              value={form.submission_limit_per_recruiter} onChange={fNum('submission_limit_per_recruiter')} />
           </FormField>
         </FormRow>
 

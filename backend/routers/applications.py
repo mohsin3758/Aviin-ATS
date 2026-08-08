@@ -1,6 +1,7 @@
 import json
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 import db
 import events, asyncio
@@ -8,6 +9,49 @@ from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
 
 router = APIRouter(prefix="/applications", tags=["applications"])
+rejection_reasons_router = APIRouter(prefix="/rejection-reasons", tags=["applications"])
+
+
+class RejectionReasonIn(BaseModel):
+    code: str
+    label: str
+    sort_order: int = 0
+
+
+@rejection_reasons_router.get("")
+async def list_rejection_reasons(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM rejection_reasons WHERE tenant_id=$1 AND is_active ORDER BY sort_order, label",
+            actor.tenant_id)
+    return [dict(r) for r in rows]
+
+
+@rejection_reasons_router.post("")
+async def create_rejection_reason(body: RejectionReasonIn, actor: Actor = Depends(get_actor)):
+    if actor.role not in ("admin", "manager"):
+        raise HTTPException(403, "Only admin/manager can manage the rejection reason taxonomy")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO rejection_reasons (tenant_id, code, label, sort_order)
+               VALUES ($1,$2,$3,$4)
+               ON CONFLICT (tenant_id, code) DO UPDATE SET label=EXCLUDED.label, sort_order=EXCLUDED.sort_order, is_active=true
+               RETURNING *""",
+            actor.tenant_id, body.code, body.label, body.sort_order)
+    return dict(row)
+
+
+@rejection_reasons_router.delete("/{reason_id}")
+async def delete_rejection_reason(reason_id: str, actor: Actor = Depends(get_actor)):
+    if actor.role not in ("admin", "manager"):
+        raise HTTPException(403, "Only admin/manager can manage the rejection reason taxonomy")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchval(
+            "UPDATE rejection_reasons SET is_active=false WHERE id=$1 AND tenant_id=$2 RETURNING id",
+            reason_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "Rejection reason not found")
+    return {"ok": True}
 
 FIELDS = """id, tenant_id, requisition_id, candidate_id, stage, fit_score,
             assigned_recruiter_id, created_at, updated_at"""
@@ -71,13 +115,35 @@ async def create_application(body: ApplicationCreate, actor: Actor = Depends(get
         if existing:
             raise HTTPException(status_code=409, detail="Application already exists for this candidate/requisition")
 
+        # Per-role submission cap. NULL limit (the default) = unlimited, no
+        # behavior change unless an admin sets one on the requisition.
+        recruiter_for_limit = body.assigned_recruiter_id or actor.user_id
+        if recruiter_for_limit:
+            req_row = await conn.fetchrow(
+                "SELECT submission_limit_per_recruiter FROM requisitions WHERE id=$1", body.requisition_id)
+            limit = req_row["submission_limit_per_recruiter"] if req_row else None
+            if limit is not None:
+                used = await conn.fetchval(
+                    "SELECT count(*) FROM applications WHERE requisition_id=$1 AND assigned_recruiter_id=$2",
+                    body.requisition_id, recruiter_for_limit)
+                if used >= limit:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Submission limit reached for this role ({limit} per recruiter) — {used} already submitted",
+                    )
+
         # allow stage override (default 'sourced')
         initial_stage = body.stage or 'sourced'
+        # Default assigned_recruiter_id to the creating user when not given —
+        # "who submitted this" needs to be attributable for the submission
+        # limit above to mean anything on a second call; leaving it NULL
+        # here while the limit check above counted it against actor.user_id
+        # would silently never count against anyone.
         row = await conn.fetchrow(
             f"""INSERT INTO applications (tenant_id, requisition_id, candidate_id, assigned_recruiter_id, stage)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING {FIELDS}""",
-            actor.tenant_id, body.requisition_id, body.candidate_id, body.assigned_recruiter_id, initial_stage,
+            actor.tenant_id, body.requisition_id, body.candidate_id, recruiter_for_limit, initial_stage,
         )
 
         await events.write_outbox(
@@ -102,11 +168,41 @@ async def get_application(application_id: str, actor: Actor = Depends(get_actor)
     return dict(row)
 
 
-async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, custom_msg=None):
+@router.get("/{application_id}/rejection")
+async def get_application_rejection(application_id: str, actor: Actor = Depends(get_actor)):
+    """Most recent structured rejection reason for this application, if any."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM application_rejections WHERE application_id=$1 AND tenant_id=$2 ORDER BY rejected_at DESC LIMIT 1",
+            application_id, actor.tenant_id)
+    return dict(row) if row else None
+
+
+async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, custom_msg=None, requisition_id=None, application_id=None):
     """Background: WhatsApp + email + n8n on stage change."""
     import httpx, smtplib, os
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
+
+    # JD auto-send: "contacted" is the moment a candidate is actually being
+    # reached out to about a specific role, so that's where the JD content
+    # rides along on both channels — not every stage, which would just be
+    # repeating it.
+    jd_block = ""
+    if stage == "contacted" and requisition_id:
+        try:
+            async with db.tenant_conn(tenant_id) as _jconn:
+                _req = await _jconn.fetchrow(
+                    "SELECT title, description, location, employment_type FROM requisitions WHERE id=$1",
+                    requisition_id)
+            if _req and _req["description"]:
+                jd_block = (
+                    f"\n\n--- Job Description: {_req['title']} ---\n"
+                    f"{_req['location'] or ''}{' · ' if _req['location'] else ''}{(_req['employment_type'] or '').replace('_',' ').title()}\n\n"
+                    f"{_req['description']}"
+                )
+        except Exception as _jex:
+            print(f"JD auto-send fetch failed: {_jex}")
 
     MSGS = {
         "contacted":      f"We have reviewed your profile and would like to connect with you regarding an exciting opportunity. Our recruitment team will reach out shortly to discuss the role in detail.",
@@ -159,7 +255,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                 wa_templates = json.loads(wa_templates)
         wa_text = (wa_templates.get(stage, {}) or {}).get("message") or msg_text
         if wa_text:
-            wa_text = wa_text.replace("{name}", str(name))
+            wa_text = wa_text.replace("{name}", str(name)) + jd_block
 
         if has_consent and phone and wa_text:
             session_info = await _check_waha()
@@ -220,8 +316,29 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _em["Subject"]=_subj
                     _em["From"]=f"{_fn} <{_f}>"
                     _em["To"]=email
-                    _body = "Dear " + str(name) + "," + chr(10) + chr(10) + str(msg_text) + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviinjobs.com"
-                    _em.attach(MIMEText(_body,"plain"))
+                    _body = "Dear " + str(name) + "," + chr(10) + chr(10) + str(msg_text) + jd_block + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviinjobs.com"
+
+                    # Log to candidate_messages so it shows in Conversations
+                    # and so open-tracking has a row to key against — stage-
+                    # change emails weren't logged there at all before this.
+                    _logged = await _conn.fetchrow(
+                        """INSERT INTO candidate_messages
+                             (tenant_id,candidate_id,application_id,channel,direction,subject,body,
+                              status,stage_at_send,is_read,to_email)
+                           VALUES ($1,$2,$3,'email','outbound',$4,$5,'sent',$6,TRUE,$7)
+                           RETURNING tracking_token""",
+                        tenant_id, candidate_id, application_id, _subj, _body, stage, email)
+                    _tracked_body = _body
+                    if _logged and _logged["tracking_token"]:
+                        import html as _html
+                        _pixel = f'<img src="https://ats.aviinjobs.com/track/open/{_logged["tracking_token"]}.gif" width="1" height="1" style="display:none" alt="" />'
+                        _tracked_body = (
+                            f'<html><body style="font-family:sans-serif;font-size:14px;color:#1e293b;">'
+                            f'{_html.escape(_body).replace(chr(10), "<br>")}{_pixel}</body></html>'
+                        )
+                        _em.attach(MIMEText(_tracked_body, "html"))
+                    else:
+                        _em.attach(MIMEText(_body, "plain"))
 
                     _attach_choice = _tmpl.get("attachment")
                     if _attach_choice in ("nda_template", "contract_template"):
@@ -321,15 +438,56 @@ async def update_stage(application_id: str, body: StageUpdate, actor: Actor = De
             "JOIN candidates c ON c.id=a.candidate_id WHERE a.id=$1", application_id)
 
         if body.stage == "rejected":
+            if not body.reason_code:
+                raise HTTPException(status_code=400, detail="reason_code is required when rejecting a candidate (see GET /rejection-reasons)")
+            reason_row = await conn.fetchrow(
+                "SELECT code, label FROM rejection_reasons WHERE tenant_id=$1 AND code=$2 AND is_active",
+                actor.tenant_id, body.reason_code)
+            if not reason_row:
+                raise HTTPException(status_code=400, detail=f"Unknown rejection reason_code '{body.reason_code}' — see GET /rejection-reasons")
+
+            await conn.execute(
+                """INSERT INTO application_rejections
+                     (tenant_id, application_id, candidate_id, requisition_id, reason_code, reason_label, notes, rejected_by)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                actor.tenant_id, application_id, row["candidate_id"], row["requisition_id"],
+                reason_row["code"], reason_row["label"], body.reason, actor.user_id,
+            )
+
             await events.write_assignment_event(
                 conn, actor.tenant_id, "candidate.rejected",
                 reason=body.reason, actor_user_id=actor.user_id,
-                metadata={"application_id": application_id, "from_stage": old["stage"]},
+                metadata={"application_id": application_id, "from_stage": old["stage"], "reason_code": reason_row["code"]},
             )
             await events.write_audit(
                 conn, actor.tenant_id, actor.user_id, "reject", "application", application_id,
-                before={"stage": old["stage"]}, after={"stage": "rejected", "reason": body.reason},
+                before={"stage": old["stage"]},
+                after={"stage": "rejected", "reason_code": reason_row["code"], "reason_label": reason_row["label"], "notes": body.reason},
             )
+
+            # Structured feedback shared directly with the recruiter — a
+            # real notification, not just a free-text audit-log entry they'd
+            # have to go dig up. Falls back to the manager role if the
+            # application has no assigned recruiter. Matches the working
+            # notifications-insert convention (nda.py/scheduler.py) — the
+            # message/status-column mismatch bug documented earlier in
+            # CLAUDE.md means this exact column set matters.
+            _rej_cand = await conn.fetchrow("SELECT full_name FROM candidates WHERE id=$1", row["candidate_id"])
+            _rej_req = await conn.fetchrow("SELECT title FROM requisitions WHERE id=$1", row["requisition_id"]) if row["requisition_id"] else None
+            _notif_title = f"Candidate rejected: {_rej_cand['full_name'] if _rej_cand else 'Candidate'}"
+            _notif_body = f"{_rej_req['title'] if _rej_req else 'Role'} — {reason_row['label']}" + (f". {body.reason}" if body.reason else "")
+            if row["assigned_recruiter_id"]:
+                await conn.execute(
+                    """INSERT INTO notifications (tenant_id,user_id,recipient_user_id,title,body,type,resource,resource_id,channel)
+                       VALUES ($1,$2,$2,$3,$4,'warning','application',$5,'inapp')""",
+                    actor.tenant_id, row["assigned_recruiter_id"], _notif_title, _notif_body, application_id,
+                )
+            else:
+                await conn.execute(
+                    """INSERT INTO notifications (tenant_id,recipient_role,title,body,type,resource,resource_id,channel)
+                       VALUES ($1,'manager',$2,$3,'warning','application',$4,'inapp')""",
+                    actor.tenant_id, _notif_title, _notif_body, application_id,
+                )
 
     # Send notification using candidate info fetched inside conn block
     try:
@@ -339,7 +497,9 @@ async def update_stage(application_id: str, body: StageUpdate, actor: Actor = De
                 _notif_cand["cid"], body.stage,
                 _notif_cand["email"], _notif_cand["full_name"],
                 actor.tenant_id,
-                custom_msg=body.custom_message
+                custom_msg=body.custom_message,
+                requisition_id=row["requisition_id"],
+                application_id=application_id,
             ))
     except Exception as _ex:
         print(f"Stage notification error: {_ex}")
