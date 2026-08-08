@@ -488,6 +488,12 @@ async def update_stage(application_id: str, body: StageUpdate, actor: Actor = De
                        VALUES ($1,'manager',$2,$3,'warning','application',$4,'inapp')""",
                     actor.tenant_id, _notif_title, _notif_body, application_id,
                 )
+            try:
+                from routers.final_features import notify_event
+                await notify_event(actor.tenant_id, "candidate_rejected", f"❌ {_notif_title} — {_notif_body}",
+                                    {"application_id": application_id, "reason_code": reason_row["code"]})
+            except Exception:
+                pass  # webhook delivery is best-effort, never blocks the actual stage change
 
     # Send notification using candidate info fetched inside conn block
     try:

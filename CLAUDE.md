@@ -1893,3 +1893,76 @@ LID bug above, before the fix landed) were soft-deleted via the real
 `DELETE /candidates/{id}` API afterward; the pre-existing `"E2E WA Test"`
 fixture record was left as-is (predates this session, already a known
 test fixture, harmless).
+
+## MS Teams notifications: real event wiring + 2 more real bugs, 2026-08-08
+Same day, follow-up to the WhatsApp session above. Checked before building
+anything (established discipline throughout this project): a Slack/Teams/
+Discord webhook notifier already existed and was fully wired end-to-end on
+the frontend (`frontend/app/(dashboard)/integrations/page.tsx` - add/list/
+test a webhook, already usable today) and had a correct MS Teams
+`MessageCard` payload builder (`send_webhook()` in
+`backend/routers/final_features.py`). What was missing, exactly as flagged
+in the earlier feature-completeness audit: **no real hiring event anywhere
+in the codebase ever called it** - the only live trigger was a Monday-9AM
+weekly-KPI cron job, and `POST /integrations/notify` (the generic
+dispatcher) had zero other callers anywhere in the app.
+
+- Extracted `notify_event(tenant_id, event, message, data)` in
+  `final_features.py` - a plain importable version of `notify_all`'s
+  dispatch logic, since internal callers (a scheduler job, a stage-change
+  handler) have a `tenant_id` on hand but no HTTP `Actor` to satisfy the
+  `Depends(get_actor)`-gated endpoint.
+- Wired two real, high-signal events: **`candidate_rejected`**
+  (`applications.py`, right where the existing structured in-app
+  notification already fires on a real rejection - same rich context:
+  candidate name, role, reason) and **`sla_breach`/`stalled_assignment`**
+  (`scheduler.py`'s `_handle_escalation_alert`, at the exact point tier-1
+  already fires once per alert and dedupes - these alerts previously only
+  ever produced a dashboard card someone had to go check, per the earlier
+  "Operational Alerts" audit finding; this makes them push-visible for
+  free, using the same fire-once guard, no new noise). Deliberately did
+  NOT wire every stage change - a team channel getting pinged on every
+  `sourced`->`contacted` move would be noise, not signal.
+- **Real bug #1** (found by direct code reading, not testing): the
+  original `send_weekly_kpi_summary()` bypassed `send_webhook()` entirely
+  and POSTed a raw `{"text": ...}` body straight to every webhook
+  regardless of platform - not the MS Teams `MessageCard` shape a real
+  Teams incoming-webhook connector expects, and it never updated
+  `send_count`/`last_sent_at`, so the Integrations page could never show
+  this scheduled send as having happened even when it silently "worked."
+  Rewritten to route through `notify_event()` like every other trigger.
+- **Real bug #2**, genuinely deeper, only found because the fix above was
+  actually *run*, not just read: `send_weekly_kpi_summary()` crashed every
+  single time - `invalid input syntax for type uuid: ""`. Root cause:
+  `webhook_integrations` has `FORCE ROW LEVEL SECURITY` with a policy that
+  casts `app.tenant_id` to `::uuid`; `db.system_conn()` deliberately sets
+  `app.tenant_id=''` for "return everything, admin query" semantics
+  (works fine for tables whose RLS policy tolerates that), but casting an
+  empty string to `::uuid` is a hard Postgres error, not zero rows. This
+  exact code path - querying `webhook_integrations` directly through
+  `system_conn()` - was **already in the original, pre-existing
+  implementation**, meaning weekly KPI webhook delivery had silently
+  thrown and been swallowed by its own `try/except` since the feature was
+  built; nobody had seen it work, ever. Fixed to match the pattern
+  `process_sla_escalations()` already uses correctly one function up: list
+  tenant IDs from the `tenants` table via `system_conn()` (no RLS-cast
+  issue there), then open a real per-tenant `tenant_conn()` before
+  touching `webhook_integrations`.
+- Verified all four paths for real, not by reading code: registered a
+  genuine `platform=teams` webhook via the real `POST /integrations/
+  webhooks` API pointed at a throwaway local HTTP listener (bound to the
+  Docker bridge gateway IP so the backend container could actually reach
+  it - a public tunnel/webhook.site was tried first and blocked by this
+  environment's own tool-permission classifier for reaching an external
+  third-party service from production; the local-listener approach avoids
+  that entirely and proves the same thing). Confirmed real, correctly-
+  shaped `MessageCard` JSON arrived for: the existing test button, a real
+  candidate rejection via `PATCH /applications/{id}/stage`, a disposable
+  SLA-breach alert fired directly against a throwaway requisition (not a
+  real one - `find_sla_breaches()` already had real live breaches on real
+  requisitions at the time, deliberately left untouched rather than used
+  as a test fixture), and the weekly KPI job after both fixes landed.
+  All throwaway data (client/requisition/candidate/application/
+  consent_records/the test webhook row - no `DELETE` endpoint exists for
+  webhooks, removed directly via SQL as a documented last resort) cleaned
+  up afterward, confirmed zero residue.

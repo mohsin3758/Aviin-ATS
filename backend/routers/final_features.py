@@ -653,16 +653,17 @@ async def test_webhook(webhook_id: str, actor: Actor = Depends(get_actor)):
             """, webhook_id)
     return {"sent": success, "platform": row['platform'], "name": row['name']}
 
-@notif_router.post("/notify")
-async def notify_all(event: str, message: str, data: dict = {},
-                      actor: Actor = Depends(get_actor)):
-    """Send notification to all active webhooks subscribed to an event."""
-    async with db.tenant_conn(actor.tenant_id) as conn:
+async def notify_event(tenant_id: str, event: str, message: str, data: dict = {}) -> int:
+    """Plain importable version of notify_all's dispatch logic, for internal
+    callers (scheduler jobs, stage-change handlers) that already have a
+    tenant_id and don't have an HTTP Actor to hand to a Depends()-gated
+    endpoint. Returns the number of webhooks actually notified."""
+    async with db.tenant_conn(tenant_id) as conn:
         hooks = await conn.fetch("""
             SELECT * FROM webhook_integrations
             WHERE tenant_id=$1 AND is_active
               AND ($2=ANY(events) OR events='{}'::text[] OR events IS NULL)
-        """, actor.tenant_id, event)
+        """, tenant_id, event)
         sent = 0
         for h in hooks:
             ok = await send_webhook(h['webhook_url'], h['platform'], message, data)
@@ -672,6 +673,14 @@ async def notify_all(event: str, message: str, data: dict = {},
                     WHERE id=$1
                 """, h['id'])
                 sent += 1
+    return sent
+
+
+@notif_router.post("/notify")
+async def notify_all(event: str, message: str, data: dict = {},
+                      actor: Actor = Depends(get_actor)):
+    """Send notification to all active webhooks subscribed to an event."""
+    sent = await notify_event(actor.tenant_id, event, message, data)
     return {"event": event, "webhooks_notified": sent}
 
 

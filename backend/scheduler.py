@@ -214,6 +214,17 @@ async def _handle_escalation_alert(conn, tenant_id, alert_id, alert_type, requis
             "UPDATE automation_workflows SET last_fired_at=now(), fire_count=fire_count+1 WHERE tenant_id=$1 AND webhook_path=$2",
             tenant_id, webhook_path,
         )
+        # Push the same alert to any configured Slack/Teams/Discord webhook
+        # (routers/final_features.py) - these alerts previously only ever
+        # produced a dashboard card someone had to go check; this makes
+        # them push-visible without adding a new notification channel.
+        try:
+            from routers.final_features import notify_event
+            icon = "🔴" if alert_type == "sla_breach" else "🟡"
+            await notify_event(tenant_id, alert_type, f"{icon} {title}",
+                                {"alert_type": alert_type, "requisition_id": str(requisition_id) if requisition_id else None})
+        except Exception as e:
+            logger.warning(f"SLA escalation webhook notify failed for {alert_id}: {e}")
         if recruiter_id:
             manager = await conn.fetchrow("SELECT reporting_to FROM users WHERE id=$1", recruiter_id)
             if manager and manager["reporting_to"]:
@@ -521,23 +532,42 @@ async def run_gdpr_archive():
         logger.error(f"GDPR archive error: {e}")
 
 async def send_weekly_kpi_summary():
-    """Monday 9AM: send weekly KPI summary via webhook integrations."""
+    """Monday 9AM: send weekly KPI summary via webhook integrations.
+
+    Was posting a raw {"text": ...} body straight to every webhook regardless
+    of platform - a Slack-shaped payload, which happens to render as plain
+    text on Discord too but is NOT what Teams' incoming-webhook connector
+    expects (it wants the MessageCard shape send_webhook() already builds),
+    and it never touched send_count/last_sent_at, so the Integrations page
+    would never show this scheduled send as having happened. Now routes
+    through the same notify_event() used by every other webhook trigger.
+
+    Also fixes a second, deeper real bug caught by actually running this
+    function (not just reading it): the original query read
+    webhook_integrations directly through db.system_conn(), but that table
+    has FORCE ROW LEVEL SECURITY with a policy that casts app.tenant_id to
+    ::uuid - system_conn() deliberately sets app.tenant_id='' for
+    "return everything" admin queries, and casting '' to uuid raises a hard
+    Postgres error rather than returning no rows. This function had
+    silently thrown (caught by the outer try/except, logged, never seen)
+    every single time it ran, since it was written. Fixed by following the
+    same pattern process_sla_escalations() already uses: list tenants from
+    the tenants table (no such RLS-cast problem there) via system_conn(),
+    then open a real per-tenant tenant_conn() before touching
+    webhook_integrations.
+    """
     logger.info("scheduler: weekly KPI summary")
     try:
-        import httpx
+        from routers.final_features import notify_event
         async with db.system_conn() as conn:
-            hooks = await conn.fetch("""
-                SELECT wi.*, t.id AS tenant_id FROM webhook_integrations wi
-                JOIN tenants t ON t.id=wi.tenant_id
-                WHERE wi.is_active AND ('weekly_kpi'=ANY(wi.events) OR wi.events='{}'::text[])
-            """)
-        for h in hooks:
+            tenants = await conn.fetch("SELECT id FROM tenants")
+        message = f"📊 Weekly KPI Summary from AVIIN ATS — {date.today()}"
+        for t in tenants:
+            tid = str(t["id"])
             try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(h["webhook_url"],
-                        json={"text": f"📊 Weekly KPI Summary from AVIIN ATS — {__import__('datetime').date.today()}"})
-            except Exception:
-                pass
+                await notify_event(tid, "weekly_kpi", message)
+            except Exception as e:
+                logger.warning(f"Weekly KPI webhook send failed for tenant {tid}: {e}")
     except Exception as e:
         logger.error(f"Weekly KPI error: {e}")
 
