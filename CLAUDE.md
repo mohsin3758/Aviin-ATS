@@ -1966,3 +1966,83 @@ dispatcher) had zero other callers anywhere in the app.
   consent_records/the test webhook row - no `DELETE` endpoint exists for
   webhooks, removed directly via SQL as a documented last resort) cleaned
   up afterward, confirmed zero residue.
+
+## Job-board research + dashboard redesign + 10 new free boards, 2026-08-08
+User was dissatisfied with the `/job-sharing` UI and asked for deep research
+on how CEIPAL and other top staffing ATS platforms handle free job-board
+distribution and resume pulling, then to rebuild the dashboard to match.
+
+**Research** (delivered as an Artifact, not just chat text - dense enough to
+want as a reference doc): checked CEIPAL's own integration pages (Dice,
+Naukri), Zoho Recruit's published free-board list, Broadbean/eQuest/Appcast,
+Naukri RMS third-party coverage, and Indeed's real Partner Docs (Indeed
+Apply, Job Sync API, Disposition Sync API). Headline finding: **no staffing
+ATS at any price point has a free, automated, zero-click posting API to
+Naukri/Monster/LinkedIn/any major paid board** - confirmed directly, not
+assumed: Zoho Recruit's own "free" boards post via plain HTML forms, not
+API, and CEIPAL's 30+-board claim runs through third-party marketplace
+partners, not bespoke integrations, plus a "job board spend management"
+feature that only makes sense if most of what flows through it is paid.
+Zoho's "Resume Extractor" (a paid Chrome extension for manual profile
+capture) is the exact same mechanism as AVIIN's existing Captured Profiles
+feature - parity with what a market leader sells as premium, not a gap.
+The one real automated-resume-pull mechanism found (Indeed Apply) requires
+a signed Developer Partner Agreement, same category of blocker as
+LinkedIn/Naukri - not free/self-serve. Net: AVIIN's existing architecture
+(real APIs where genuinely free - Facebook/Telegram/Google-for-Jobs -
+plus one-time XML feed registration plus manual-link portals) already
+matches or exceeds what top platforms actually ship for free; the one
+concrete, buildable finding was **10 real free boards not yet in the
+directory**, cross-checked against Zoho's own published list: Jobrapido,
+JobisJob, Recruit.net, Gigajob, Expertini, Tip Top Job, WhatJobs,
+PostJobFree, Dr.Jobs (first dedicated Gulf-region entry beyond the existing
+UAE/Saudi-generic four), and ApplyMyJobs (first ANZ-specific entry). Added
+to `job_portals.py` - portal count 73 -> 83, verified live via the real
+`GET /job-sharing/portals` API.
+
+**Dashboard redesign** - the actual UX complaint. Previous structure mixed
+three different kinds of thing on one long scrolling page: one-time account
+connections (Facebook/Telegram cards), a numbered "1. Select / 2. Auto-Share
+/ 3. Post to more" wizard-style per-job flow, and a separate Dashboard tab -
+with the connection cards always visible above the job picker even before a
+job was selected. Redesigned into a clear 3-tab IA matching how top
+platforms actually separate these concerns (setup vs. action vs. reporting):
+- **Distribute** (default) - job picker with a live location/type summary
+  once selected, then an "Auto channels" grid redesigned from flat gray
+  buttons into icon-based cards (real per-platform colors: LinkedIn blue,
+  WhatsApp green, Telegram sky, etc., via `CHANNEL_META`) each showing a
+  clear Auto-post/Share-dialog/Posted state badge, then the manual-portal
+  grid with category **chips** (click to filter) replacing the old plain
+  `<select>` dropdown - matches how most modern SaaS filter UIs work and
+  is more scannable than a dropdown for 11 categories.
+- **Integrations** (new) - Facebook/Telegram connection cards + the
+  Indeed/Jooble free-feed registration, pulled out of the per-job flow
+  since connecting an account is a one-time setup action, not something
+  that belongs mixed into "post this specific job" every time.
+- **Analytics** (renamed from "Dashboard") - existing `DashboardView`,
+  unchanged.
+Header now shows a live "X/2 accounts connected" count plus an amber dot
+on the Integrations tab when zero accounts are connected, so the
+connection-status signal that used to require scrolling past two big cards
+is now visible without leaving the Distribute tab.
+
+Verified for real via headless-browser interaction, not just a successful
+build: all three tabs render correctly, the channel-status badges reflect
+real connection state, category-chip filtering correctly surfaces the new
+boards (confirmed WhatJobs/Recruit.net appear under the Aggregators chip).
+**One real test-script mistake caught before it became a false "bug"**: an
+early verification pass used a text-based selector (`button:has-text
+("Analytics")`) to click the Analytics tab, which silently matched the
+*sidebar's* own "Analytics" nav link instead of the new tab button (both
+say "Analytics," DOM order put the sidebar first) - looked exactly like a
+broken tab click until traced with a screenshot. Fixed by adding explicit
+`data-testid="tab-distribute"/"tab-integrations"/"tab-analytics"` to the
+tab buttons (same convention used elsewhere in this app) rather than
+guessing at a better text selector - re-verified clean immediately after.
+Updated the one permanent test that depended on the old always-visible
+Telegram card (`S17`) to click into the Integrations tab first, and added
+two more: an Analytics-tab render check and a direct API check that all 10
+new board keys are present. Full suite re-run clean: only the same 2
+already-documented pre-existing S16 flaky tests (tail-end request-volume
+flakiness under back-to-back full runs, unrelated to this work) - all
+job-sharing-specific tests passed clean in isolation.

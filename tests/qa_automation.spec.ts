@@ -1562,9 +1562,37 @@ test.describe.serial('S17 Tier-2 Features', () => {
     }
   });
 
-  test('job-sharing page: Telegram Channel connection card renders', async ({ page }) => {
+  test('job-sharing page: 3-tab redesign — Integrations tab shows Telegram Channel connection card', async ({ page }) => {
+    // Facebook/Telegram connection cards moved off the default tab into a
+    // dedicated Integrations tab in the 2026-08-08 dashboard redesign (see
+    // CLAUDE.md) — connecting an account is one-time setup, not part of the
+    // per-job Distribute flow, so it no longer renders on initial page load.
     await page.goto(`${BASE}/job-sharing`);
     await page.waitForTimeout(1500);
+    await expect(page.locator('[data-testid="tab-distribute"]')).toBeVisible();
+    await page.click('[data-testid="tab-integrations"]');
+    await page.waitForTimeout(800);
     await expect(page.locator('text=Telegram Channel — Real Automatic Posting')).toBeVisible();
+    await expect(page.locator('text=Facebook Page — Real Automatic Posting')).toBeVisible();
+  });
+
+  test('job-sharing page: Analytics tab renders portal stats', async ({ page }) => {
+    await page.goto(`${BASE}/job-sharing`);
+    await page.waitForTimeout(1500);
+    await page.click('[data-testid="tab-analytics"]');
+    await page.waitForTimeout(1500);
+    await expect(page.locator('text=Total Portals')).toBeVisible();
+  });
+
+  test('job-sharing page: new free boards from the 2026-08-08 research are live', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/job-sharing/portals`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    const keys = body.portals.map((p: any) => p.key);
+    for (const k of ['drjobs', 'jobrapido', 'jobisjob', 'recruitnet', 'gigajob', 'expertini', 'tiptopjob', 'whatjobs', 'postjobfree', 'applymyjobs']) {
+      expect(keys).toContain(k);
+    }
   });
 });

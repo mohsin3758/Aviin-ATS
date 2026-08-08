@@ -93,6 +93,7 @@ _PORTALS = [
     ('bayt',          'Bayt.com',              'gulf', 'https://www.bayt.com', False),
     ('gulftalent',    'GulfTalent',            'gulf', 'https://www.gulftalent.com', False),
     ('monstergulf',   'Monster Gulf',          'gulf', 'https://www.monstergulf.com', False),
+    ('drjobs',        'Dr.Jobs',               'gulf', 'https://www.drjobs.ae', False),
 
     # ── Aggregators / meta-search (index listings automatically) ───────────
     ('jooble',        'Jooble',                'aggregator', 'https://jooble.org', False),
@@ -104,6 +105,18 @@ _PORTALS = [
     ('talent_com',    'Talent.com',            'aggregator', 'https://www.talent.com', False),
     ('linkup',        'LinkUp',                'aggregator', 'https://www.linkup.com', False),
     ('google_jobs',   'Google for Jobs',       'aggregator', 'https://www.google.com/search?q=jobs', False),
+    # Round 2 (2026-08-08 free-board research, confirmed via Zoho Recruit's
+    # own published free-board list) — meta-search/aggregator sites that
+    # accept free listings the same way Jooble/Adzuna/Trovit already do.
+    ('jobrapido',     'Jobrapido',             'aggregator', 'https://www.jobrapido.com', False),
+    ('jobisjob',      'JobisJob',              'aggregator', 'https://www.jobisjob.com', False),
+    ('recruitnet',    'Recruit.net',           'aggregator', 'https://www.recruit.net', False),
+    ('gigajob',       'Gigajob',               'aggregator', 'https://www.gigajob.com', False),
+    ('expertini',     'Expertini',             'aggregator', 'https://www.expertini.com', False),
+    ('tiptopjob',     'Tip Top Job',           'aggregator', 'https://www.tiptopjob.com', False),
+    ('whatjobs',      'WhatJobs',              'aggregator', 'https://www.whatjobs.com', False),
+    ('postjobfree',   'PostJobFree',           'aggregator', 'https://www.postjobfree.com', False),
+    ('applymyjobs',   'ApplyMyJobs (AU/NZ)',   'aggregator', 'https://www.applymyjobs.com.au', False),
 
     # ── Government / PSU (India) ────────────────────────────────────────────
     ('ncs_gov',       'National Career Service','government', 'https://www.ncs.gov.in', False),

@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, LayoutGrid, BarChart3, Facebook, Link2, Unlink, Send } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, BarChart3, Facebook, Link2, Unlink, Send, Linkedin, Twitter, Mail, MessageCircle, Plug, Briefcase, MapPin } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -77,6 +77,18 @@ function ReportIssueModal({ portal, reqId, onClose, onReported }: {
     </div>
   );
 }
+
+// Per-channel visual identity for the redesigned "Distribute" grid — icon +
+// brand-ish accent so the channel row is scannable at a glance instead of
+// six identically-styled gray buttons.
+const CHANNEL_META: Record<string, { icon: any; ring: string; iconBg: string; iconColor: string }> = {
+  linkedin: { icon: Linkedin,      ring: 'ring-[#0A66C2]/20', iconBg: 'bg-[#0A66C2]/10', iconColor: 'text-[#0A66C2]' },
+  whatsapp: { icon: MessageCircle, ring: 'ring-[#25D366]/20', iconBg: 'bg-[#25D366]/10', iconColor: 'text-[#128C4A]' },
+  facebook: { icon: Facebook,      ring: 'ring-[#1877F2]/20', iconBg: 'bg-[#1877F2]/10', iconColor: 'text-[#1877F2]' },
+  twitter:  { icon: Twitter,       ring: 'ring-gray-900/10',  iconBg: 'bg-gray-900/5',    iconColor: 'text-gray-900' },
+  telegram: { icon: Send,          ring: 'ring-[#26A5E4]/20', iconBg: 'bg-[#26A5E4]/10', iconColor: 'text-[#26A5E4]' },
+  email:    { icon: Mail,          ring: 'ring-gray-400/20',  iconBg: 'bg-gray-100',      iconColor: 'text-gray-600' },
+};
 
 const INTEGRATION_STYLES: Record<string, { border: string; dot: string }> = {
   auto_share:   { border: 'border-l-blue-500',  dot: 'bg-blue-500' },
@@ -417,9 +429,66 @@ function TelegramConnectionCard({ onStatusChange }: { onStatusChange: (connected
   );
 }
 
+// ─── Integrations tab ───────────────────────────────────────────────────────
+// Pulled the two "connect once" API integrations plus the free-feed
+// registration out of the per-job Distribute flow into their own settings
+// area — connecting a Page/bot is a one-time setup action, not something
+// that belongs mixed into "post this specific job" every time.
+function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgStatus }: any) {
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start gap-3 border rounded-xl px-4 py-3.5 bg-white">
+        <div className="p-2 rounded-lg bg-purple-50 shrink-0"><Plug className="h-4 w-4 text-purple-600" /></div>
+        <div>
+          <div className="text-sm font-semibold text-gray-900">Connect your accounts once</div>
+          <div className="text-xs text-gray-500 mt-0.5">
+            These connections apply to every future job — set them up here, then use the Distribute tab to actually post.
+          </div>
+        </div>
+      </div>
+
+      <FacebookConnectionCard onStatusChange={onFbStatus} />
+      <TelegramConnectionCard onStatusChange={onTgStatus} />
+
+      {feedInfo && (
+        <Card className="border-green-200 bg-green-50/40">
+          <CardHeader>
+            <h2 className="font-semibold flex items-center gap-1.5"><Zap className="h-4 w-4 text-green-600" /> Automatic Distribution (Free, Zero-Click)</h2>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-gray-600 mb-3">
+              This is the real "post once, auto-distribute everywhere" mechanism — the same one every ATS actually relies on for
+              its free tier. <strong>Google for Jobs</strong> is already fully automatic (structured data ships on every job
+              listing — nothing to set up). For Indeed/Jooble's free organic listings, register the feed URL below <em>once</em> —
+              every future open requisition then appears automatically, no manual posting, ever again.
+            </p>
+            <div className="flex items-center gap-2 mb-3">
+              <input readOnly value={feedInfo.feed_url}
+                className="flex-1 border rounded-lg px-2.5 py-1.5 text-xs bg-white font-mono text-gray-600" />
+              <button onClick={onCopyFeed}
+                className="flex items-center gap-1 text-xs text-white bg-green-600 hover:bg-green-700 rounded-lg px-3 py-1.5 shrink-0">
+                <Copy className="h-3 w-3" /> {feedCopied ? 'Copied!' : 'Copy Feed URL'}
+              </button>
+            </div>
+            <div className="grid sm:grid-cols-2 gap-2">
+              {(feedInfo.registration_steps || []).map((s: any) => (
+                <a key={s.platform} href={s.url} target="_blank" rel="noopener noreferrer"
+                  className="border rounded-lg px-3 py-2 text-xs bg-white hover:border-green-300 hover:bg-green-50">
+                  <div className="font-medium text-gray-700">{s.platform}</div>
+                  <div className="text-gray-400 mt-0.5">{s.how}</div>
+                </a>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 function JobSharingPageInner() {
   const searchParams = useSearchParams();
-  const [tab, setTab] = useState<'share' | 'dashboard'>('share');
+  const [tab, setTab] = useState<'distribute' | 'integrations' | 'analytics'>('distribute');
   const { data: reqs } = useFetch<any[]>('/requisitions');
   const [selId, setSelId] = useState('');
   useEffect(() => {
@@ -548,222 +617,243 @@ function JobSharingPageInner() {
   // clicks it not knowing it's a known dead link.
   const flaggedKeys = useMemo(() => new Set(openIssues.map((i: any) => i.portal_key)), [openIssues]);
 
+  const selectedReq = (reqs || []).find((r: any) => r.id === selId);
+  const connectedCount = (fbConnected ? 1 : 0) + (tgConnected ? 1 : 0);
+
   return (
     <div className="space-y-6" data-testid="job-sharing-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-lg bg-purple-50"><Share2 className="h-5 w-5 text-purple-600" /></div>
           <div>
-            <h1 className="text-2xl font-bold">Job Sharing — {totalPortals || '70+'} Free Portals</h1>
-            <p className="text-sm text-gray-500">One click auto-shares to LinkedIn/WhatsApp/Facebook/X/Telegram/Email · JD auto-copied for the rest, ready to paste</p>
+            <h1 className="text-2xl font-bold">Job Distribution</h1>
+            <p className="text-sm text-gray-500">Post once, reach {totalPortals || '80+'} free job boards · {connectedCount}/2 accounts connected for real automatic posting</p>
           </div>
         </div>
-        <div className="flex items-center border rounded-lg overflow-hidden">
-          <button onClick={() => setTab('share')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium ${tab === 'share' ? 'bg-purple-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>
-            <LayoutGrid className="h-3.5 w-3.5" /> Share
+        <div className="flex items-center border rounded-lg overflow-hidden bg-white">
+          <button data-testid="tab-distribute" onClick={() => setTab('distribute')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium ${tab === 'distribute' ? 'bg-purple-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>
+            <Share2 className="h-3.5 w-3.5" /> Distribute
           </button>
-          <button onClick={() => setTab('dashboard')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-l ${tab === 'dashboard' ? 'bg-purple-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>
-            <BarChart3 className="h-3.5 w-3.5" /> Dashboard
+          <button data-testid="tab-integrations" onClick={() => setTab('integrations')}
+            className={`relative flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-l ${tab === 'integrations' ? 'bg-purple-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>
+            <Plug className="h-3.5 w-3.5" /> Integrations
+            {connectedCount === 0 && (
+              <span className={`w-1.5 h-1.5 rounded-full ${tab === 'integrations' ? 'bg-white' : 'bg-amber-500'}`} />
+            )}
+          </button>
+          <button data-testid="tab-analytics" onClick={() => setTab('analytics')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-l ${tab === 'analytics' ? 'bg-purple-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>
+            <BarChart3 className="h-3.5 w-3.5" /> Analytics
           </button>
         </div>
       </div>
 
-      {tab === 'dashboard' ? <DashboardView /> : (<>
+      {tab === 'analytics' && <DashboardView />}
 
-      {feedInfo && (
-        <Card className="border-green-200 bg-green-50/40">
-          <CardHeader>
-            <h2 className="font-semibold flex items-center gap-1.5"><Zap className="h-4 w-4 text-green-600" /> Automatic Distribution (Free, Zero-Click)</h2>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-gray-600 mb-3">
-              This is the real "post once, auto-distribute everywhere" mechanism — the same one every ATS actually relies on for
-              its free tier. <strong>Google for Jobs</strong> is already fully automatic (structured data ships on every job
-              listing — nothing to set up). For Indeed/Jooble's free organic listings, register the feed URL below <em>once</em> —
-              every future open requisition then appears automatically, no manual posting, ever again.
-            </p>
-            <div className="flex items-center gap-2 mb-3">
-              <input readOnly value={feedInfo.feed_url}
-                className="flex-1 border rounded-lg px-2.5 py-1.5 text-xs bg-white font-mono text-gray-600" />
-              <button onClick={() => navigator.clipboard.writeText(feedInfo.feed_url).then(() => { setFeedCopied(true); setTimeout(() => setFeedCopied(false), 2000); })}
-                className="flex items-center gap-1 text-xs text-white bg-green-600 hover:bg-green-700 rounded-lg px-3 py-1.5 shrink-0">
-                <Copy className="h-3 w-3" /> {feedCopied ? 'Copied!' : 'Copy Feed URL'}
-              </button>
-            </div>
-            <div className="grid sm:grid-cols-2 gap-2">
-              {(feedInfo.registration_steps || []).map((s: any) => (
-                <a key={s.platform} href={s.url} target="_blank" rel="noopener noreferrer"
-                  className="border rounded-lg px-3 py-2 text-xs bg-white hover:border-green-300 hover:bg-green-50">
-                  <div className="font-medium text-gray-700">{s.platform}</div>
-                  <div className="text-gray-400 mt-0.5">{s.how}</div>
-                </a>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
+      {tab === 'integrations' && (
+        <IntegrationsTab
+          feedInfo={feedInfo} feedCopied={feedCopied}
+          onCopyFeed={() => navigator.clipboard.writeText(feedInfo.feed_url).then(() => { setFeedCopied(true); setTimeout(() => setFeedCopied(false), 2000); })}
+          onFbStatus={setFbConnected} onTgStatus={setTgConnected}
+        />
       )}
 
-      <FacebookConnectionCard onStatusChange={setFbConnected} />
-      <TelegramConnectionCard onStatusChange={setTgConnected} />
-
-      <Card><CardHeader><h2 className="font-semibold">1. Select Open Requisition</h2></CardHeader><CardContent>
-        <select value={selId} onChange={e => { setSelId(e.target.value); setPosted({}); }}
-          className="w-full border rounded-lg px-3 py-2 text-sm">
-          <option value="">Choose requisition...</option>
-          {(reqs || []).filter((r: any) => r.status === 'open').map((r: any) => (
-            <option key={r.id} value={r.id}>{r.title} — {r.location}</option>
-          ))}
-        </select>
-      </CardContent></Card>
-
-      {selId && (loading ? <div className="flex justify-center py-10"><Spinner size="lg" /></div> : links && (<>
+      {tab === 'distribute' && (<>
         <Card>
-          <CardHeader className="flex items-center justify-between">
-            <h2 className="font-semibold">2. Auto-Share</h2>
-            <div className="flex items-center gap-2">
-              <button onClick={clearShared} disabled={clearing || sharedCount === 0}
-                title="Clear posted checkmarks for this requisition"
-                className="flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-800 border rounded-lg px-2.5 py-1.5 disabled:opacity-40">
-                <RotateCcw className="h-3.5 w-3.5" /> Clear
-              </button>
-              <button onClick={shareToAllAuto}
-                className="flex items-center gap-1.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg px-3 py-1.5">
-                <Share2 className="h-3.5 w-3.5" /> Share to All 6
-              </button>
-            </div>
-          </CardHeader>
+          <CardHeader><h2 className="font-semibold flex items-center gap-1.5"><Briefcase className="h-4 w-4 text-gray-400" /> Choose a job</h2></CardHeader>
           <CardContent>
-            <p className="text-xs text-gray-400 mb-3">
-              WhatsApp, Telegram, X and Email open with the message already typed in. Facebook and LinkedIn open with an
-              empty box — both platforms block any tool from pre-filling someone's own post text (their anti-spam policy,
-              not something specific to this) — the message is copied to your clipboard automatically, so it's one paste (Ctrl/Cmd+V).
-            </p>
-            <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-              {autoPortals.map(p => {
-                const isFbAuto = p.key === 'facebook' && fbConnected;
-                const isTgAuto = p.key === 'telegram' && tgConnected;
-                const isAuto = isFbAuto || isTgAuto;
-                const busy = (isFbAuto && fbPosting) || (isTgAuto && tgPosting);
-                return (
-                  <div key={p.key} className="relative group">
-                    <button onClick={() => openPortal(p)} disabled={busy}
-                      title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : isAuto ? 'Posts automatically via connected API' : undefined}
-                      className={`w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-60
-                        ${flaggedKeys.has(p.key) ? 'bg-amber-500 text-white' : isAuto ? 'bg-blue-600 text-white' : 'bg-gray-800 text-white'}`}>
-                      {busy ? <Spinner size="sm" /> :
-                       flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5" /> :
-                       posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> :
-                       isAuto ? <Zap className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
-                      {p.name}
-                    </button>
-                    <button onClick={() => setIssuePortal(p)} title="Report issue"
-                      className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Flag className="h-3 w-3 text-red-500" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex items-center justify-between flex-wrap gap-2">
-            <h2 className="font-semibold">3. Post to {manualPortals.length} More Free Portals</h2>
-            <div className="flex items-center gap-2 flex-wrap">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
-                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search portal..."
-                  className="pl-7 pr-2 py-1.5 border rounded-lg text-xs w-40" />
+            <select value={selId} onChange={e => { setSelId(e.target.value); setPosted({}); }}
+              className="w-full border rounded-lg px-3 py-2 text-sm">
+              <option value="">Select an open requisition to distribute…</option>
+              {(reqs || []).filter((r: any) => r.status === 'open').map((r: any) => (
+                <option key={r.id} value={r.id}>{r.title} — {r.location}</option>
+              ))}
+            </select>
+            {selectedReq && (
+              <div className="mt-3 flex items-center gap-2 flex-wrap text-xs text-gray-500">
+                <span className="inline-flex items-center gap-1"><MapPin className="h-3 w-3" /> {selectedReq.location || 'Location TBD'}</span>
+                {selectedReq.employment_type && <><span className="text-gray-300">·</span><span>{selectedReq.employment_type}</span></>}
               </div>
-              <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
-                className="border rounded-lg px-2 py-1.5 text-xs">
-                <option value="">All categories</option>
-                {categories.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
-              </select>
-              <button onClick={() => navigator.clipboard.writeText(links.job_description_text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })}
-                className="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-800 border rounded-lg px-2.5 py-1.5">
-                <Copy className="h-3 w-3" /> {copied ? 'Copied!' : 'Copy JD'}
+            )}
+          </CardContent>
+        </Card>
+
+        {selId && (loading ? <div className="flex justify-center py-10"><Spinner size="lg" /></div> : links && (<>
+          <Card>
+            <CardHeader className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <h2 className="font-semibold">Auto channels</h2>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Facebook and Telegram post for real with zero clicks once connected (see the Integrations tab). The rest open pre-filled — WhatsApp, Telegram share-dialog, X and Email have the message typed in already; Facebook and LinkedIn block pre-filled text platform-wide, so those two copy the message to your clipboard first (one paste).
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button onClick={clearShared} disabled={clearing || sharedCount === 0}
+                  title="Clear posted checkmarks for this requisition"
+                  className="flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-800 border rounded-lg px-2.5 py-1.5 disabled:opacity-40">
+                  <RotateCcw className="h-3.5 w-3.5" /> Clear
+                </button>
+                <button onClick={shareToAllAuto}
+                  className="flex items-center gap-1.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg px-3 py-1.5">
+                  <Share2 className="h-3.5 w-3.5" /> Distribute to all {autoPortals.length}
+                </button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                {autoPortals.map(p => {
+                  const isFbAuto = p.key === 'facebook' && fbConnected;
+                  const isTgAuto = p.key === 'telegram' && tgConnected;
+                  const isAuto = isFbAuto || isTgAuto;
+                  const busy = (isFbAuto && fbPosting) || (isTgAuto && tgPosting);
+                  const isDone = !!posted[p.key];
+                  const isFlagged = flaggedKeys.has(p.key);
+                  const meta = CHANNEL_META[p.key];
+                  const Icon = meta?.icon || ExternalLink;
+                  return (
+                    <div key={p.key} className="relative group">
+                      <button onClick={() => openPortal(p)} disabled={busy}
+                        title={isFlagged ? 'Known issue reported for this portal' : isAuto ? 'Posts automatically via connected API' : undefined}
+                        className={`w-full flex flex-col items-center gap-1.5 py-3.5 px-2 rounded-xl border-2 text-center transition-colors
+                          ${isFlagged ? 'bg-amber-50 border-amber-300' :
+                            isDone ? 'bg-green-50 border-green-300' :
+                            'bg-white border-gray-200 hover:border-gray-300'}`}>
+                        <div className={`relative w-9 h-9 rounded-full flex items-center justify-center ${meta?.iconBg || 'bg-gray-100'}`}>
+                          {busy ? <Spinner size="sm" /> : <Icon className={`h-4.5 w-4.5 ${meta?.iconColor || 'text-gray-500'}`} style={{ width: 18, height: 18 }} />}
+                          {isAuto && !busy && (
+                            <span className="absolute -bottom-0.5 -right-0.5 bg-blue-600 rounded-full p-[3px] ring-2 ring-white">
+                              <Zap className="h-2 w-2 text-white" />
+                            </span>
+                          )}
+                          {isDone && !busy && (
+                            <span className="absolute -bottom-0.5 -right-0.5 bg-green-600 rounded-full p-[3px] ring-2 ring-white">
+                              <CheckCircle2 className="h-2 w-2 text-white" />
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-medium text-gray-800">{p.name}</span>
+                        <span className={`text-[10px] font-medium ${isFlagged ? 'text-amber-700' : isAuto ? 'text-blue-600' : isDone ? 'text-green-700' : 'text-gray-400'}`}>
+                          {isFlagged ? 'Issue reported' : isAuto ? 'Auto-post' : isDone ? 'Posted' : 'Share dialog'}
+                        </span>
+                      </button>
+                      <button onClick={() => setIssuePortal(p)} title="Report issue"
+                        className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Flag className="h-3 w-3 text-red-500" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex items-center justify-between flex-wrap gap-2">
+              <h2 className="font-semibold">{manualPortals.length} more free portals</h2>
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                  <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search portal..."
+                    className="pl-7 pr-2 py-1.5 border rounded-lg text-xs w-40" />
+                </div>
+                <button onClick={() => navigator.clipboard.writeText(links.job_description_text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })}
+                  className="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-800 border rounded-lg px-2.5 py-1.5">
+                  <Copy className="h-3 w-3" /> {copied ? 'Copied!' : 'Copy JD'}
+                </button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-xs text-gray-400 mb-3">
+                No public posting API exists for these (true of nearly every free board — they require your own logged-in employer account). Each card copies the job description and opens the portal to paste + submit. Hover and click the flag to report a broken link.
+              </p>
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                <button onClick={() => setCatFilter('')}
+                  className={`text-xs font-medium px-3 py-1 rounded-full border transition-colors ${!catFilter ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>
+                  All ({manualPortals.length})
+                </button>
+                {categories.map(c => {
+                  const count = manualPortals.filter(p => p.category === c).length;
+                  return (
+                    <button key={c} onClick={() => setCatFilter(catFilter === c ? '' : c)}
+                      className={`text-xs font-medium px-3 py-1 rounded-full border transition-colors ${catFilter === c ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>
+                      {CATEGORY_LABELS[c] || c} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="space-y-4">
+                {Object.entries(grouped).map(([cat, list]) => (
+                  <div key={cat}>
+                    {!catFilter && <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2">{CATEGORY_LABELS[cat] || cat} ({list.length})</div>}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                      {list.map(p => (
+                        <div key={p.key} className="relative group">
+                          <button onClick={() => openPortal(p)} title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : undefined}
+                            className={`w-full flex items-center justify-between gap-1.5 py-2 px-3 rounded-lg text-xs font-medium border transition-colors
+                              ${flaggedKeys.has(p.key) ? 'bg-amber-50 border-amber-300 text-amber-800' :
+                                posted[p.key] ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-700 hover:border-purple-300 hover:bg-purple-50'}`}>
+                            <span className="truncate">{p.name}</span>
+                            {flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> :
+                             posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <ExternalLink className="h-3 w-3 shrink-0 text-gray-400" />}
+                          </button>
+                          <button onClick={() => setIssuePortal(p)} title="Report issue"
+                            className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <Flag className="h-3 w-3 text-red-500" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {Object.keys(grouped).length === 0 && (
+                  <div className="text-center py-8 text-sm text-gray-400">No portals match "{search}"</div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex items-center justify-between">
+              <h2 className="font-semibold">WhatsApp message preview</h2>
+              <button onClick={() => navigator.clipboard.writeText(links.whatsapp_message)}
+                className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 border rounded px-2 py-1">
+                <Copy className="h-3 w-3" /> Copy
               </button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-gray-400 mb-3">
-              These portals don't offer a public posting API (true of nearly every free job board — they require your own logged-in
-              employer account). Each button copies the job description and opens the portal so you can paste + submit. Hover a
-              portal and click the flag to report a broken link — amber ⚠ means someone already has.
-            </p>
-            <div className="space-y-4">
-              {Object.entries(grouped).map(([cat, list]) => (
-                <div key={cat}>
-                  <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2">{CATEGORY_LABELS[cat] || cat} ({list.length})</div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-                    {list.map(p => (
-                      <div key={p.key} className="relative group">
-                        <button onClick={() => openPortal(p)} title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : undefined}
-                          className={`w-full flex items-center justify-between gap-1.5 py-2 px-3 rounded-lg text-xs font-medium border transition-colors
-                            ${flaggedKeys.has(p.key) ? 'bg-amber-50 border-amber-300 text-amber-800' :
-                              posted[p.key] ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-700 hover:border-purple-300 hover:bg-purple-50'}`}>
-                          <span className="truncate">{p.name}</span>
-                          {flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> :
-                           posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <ExternalLink className="h-3 w-3 shrink-0 text-gray-400" />}
-                        </button>
-                        <button onClick={() => setIssuePortal(p)} title="Report issue"
-                          className="absolute -top-1.5 -right-1.5 bg-white border border-gray-200 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <Flag className="h-3 w-3 text-red-500" />
-                        </button>
-                      </div>
-                    ))}
+            </CardHeader>
+            <CardContent><pre className="text-sm bg-gray-50 rounded-xl p-4 whitespace-pre-wrap font-sans">{links.whatsapp_message}</pre></CardContent>
+          </Card>
+
+          <div className="text-xs text-gray-400">
+            {sharedCount} of {totalPortals} portals posted for this requisition · Resumes from applicants who apply via email (most free portals notify by email)
+            land automatically in Resume Inbox, source-tagged by portal.
+          </div>
+        </>))}
+
+        {openIssues.length > 0 && (
+          <Card>
+            <CardHeader><h2 className="font-semibold text-red-600">Reported Issues ({openIssues.length})</h2></CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {openIssues.map((i: any) => (
+                  <div key={i.id} className="flex items-center justify-between gap-3 border rounded-lg px-3 py-2 text-sm">
+                    <div className="min-w-0">
+                      <span className="font-medium">{i.portal_name}</span>
+                      <span className="text-gray-400 mx-1.5">·</span>
+                      <span className="text-xs text-gray-500">{ISSUE_TYPES.find(t => t.value === i.issue_type)?.label || i.issue_type}</span>
+                      {i.requisition_title && <span className="text-xs text-gray-400"> · {i.requisition_title}</span>}
+                      {i.note && <div className="text-xs text-gray-500 truncate">{i.note}</div>}
+                    </div>
+                    <button onClick={() => resolveIssue(i.id)}
+                      className="shrink-0 text-xs px-2.5 py-1 rounded-lg border text-green-700 border-green-200 bg-green-50 hover:bg-green-100">
+                      Resolve
+                    </button>
                   </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex items-center justify-between">
-            <h2 className="font-semibold">WhatsApp Message</h2>
-            <button onClick={() => navigator.clipboard.writeText(links.whatsapp_message)}
-              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 border rounded px-2 py-1">
-              <Copy className="h-3 w-3" /> Copy
-            </button>
-          </CardHeader>
-          <CardContent><pre className="text-sm bg-gray-50 rounded-xl p-4 whitespace-pre-wrap font-sans">{links.whatsapp_message}</pre></CardContent>
-        </Card>
-
-        <div className="text-xs text-gray-400">
-          {sharedCount} of {totalPortals} portals posted for this requisition · Resumes from applicants who apply via email (most free portals notify by email)
-          land automatically in Resume Inbox, source-tagged by portal.
-        </div>
-      </>))}
-
-      {openIssues.length > 0 && (
-        <Card>
-          <CardHeader><h2 className="font-semibold text-red-600">Reported Issues ({openIssues.length})</h2></CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {openIssues.map((i: any) => (
-                <div key={i.id} className="flex items-center justify-between gap-3 border rounded-lg px-3 py-2 text-sm">
-                  <div className="min-w-0">
-                    <span className="font-medium">{i.portal_name}</span>
-                    <span className="text-gray-400 mx-1.5">·</span>
-                    <span className="text-xs text-gray-500">{ISSUE_TYPES.find(t => t.value === i.issue_type)?.label || i.issue_type}</span>
-                    {i.requisition_title && <span className="text-xs text-gray-400"> · {i.requisition_title}</span>}
-                    {i.note && <div className="text-xs text-gray-500 truncate">{i.note}</div>}
-                  </div>
-                  <button onClick={() => resolveIssue(i.id)}
-                    className="shrink-0 text-xs px-2.5 py-1 rounded-lg border text-green-700 border-green-200 bg-green-50 hover:bg-green-100">
-                    Resolve
-                  </button>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </>)}
 
       {issuePortal && (
