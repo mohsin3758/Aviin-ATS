@@ -357,6 +357,8 @@ async def score_bulk(body: BulkScoreRequest, actor: Actor = Depends(get_actor)):
 async def list_intelligence(
     min_score: Optional[float] = None,
     grade: Optional[str] = None,
+    requisition_id: Optional[str] = None,
+    candidate_id: Optional[str] = None,
     actor: Actor = Depends(get_actor)
 ):
     """Tenant-wide, cross-recruiter ranked candidate list — the "Account
@@ -372,7 +374,18 @@ async def list_intelligence(
     v_candidate_intelligence — that view only surfaces each candidate's
     single most-recent score with no indication of which requisition it
     was scored against, which isn't useful for "who should I present for
-    THIS role."""
+    THIS role."
+
+    requisition_id/candidate_id added 2026-08-09: the unfiltered view is
+    ORDER BY readiness_index DESC LIMIT 200 - a deliberate, reasonable cap
+    for "show me the best candidates tenant-wide", but it means there was
+    previously no way to reliably ask "show me every scored candidate for
+    THIS specific role" on a tenant with more than 200 higher-or-equal-
+    scoring pairs (this one has 500+) - arguably the more common real
+    question an account manager actually has. min_score alone can't
+    substitute for this: filtering to >= a given score still returns
+    whatever's within the top 200 of that filtered set, which is not the
+    same as "all of them" once the filtered set itself exceeds 200 rows."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         # actor.role is None for x-tenant-id-only access (no JWT) — that's
         # the trusted internal/automation path (n8n, etc.), not a real user
@@ -400,9 +413,11 @@ async def list_intelligence(
             WHERE cs.tenant_id = $1
               AND ($2::numeric IS NULL OR cs.readiness_index >= $2)
               AND ($3::text IS NULL OR cs.readiness_grade = $3)
+              AND ($4::uuid IS NULL OR cs.requisition_id = $4)
+              AND ($5::uuid IS NULL OR cs.candidate_id = $5)
             ORDER BY cs.readiness_index DESC NULLS LAST
             LIMIT 200
-        """, actor.tenant_id, min_score, grade)
+        """, actor.tenant_id, min_score, grade, requisition_id, candidate_id)
     return [dict(r) for r in rows]
 
 

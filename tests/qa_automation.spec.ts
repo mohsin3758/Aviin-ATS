@@ -1025,7 +1025,15 @@ test.describe('S14 KAE Candidate Submission', () => {
 // missing-skills assertions have something real to find; cleaned up in an
 // afterAll since (unlike a candidate) a stray requisition shows up
 // prominently in real job pickers/lists, not just buried in pagination.
-test.describe('S15 Tier-0 Quick Wins', () => {
+// .serial() (root-caused 2026-08-09, see CLAUDE.md): this project's
+// retries:1 means a failing test retries in a fresh worker process with no
+// module state, and empirically Playwright then continues the REST of a
+// plain describe block in that same fresh worker rather than returning to
+// the original one - so one transient failure anywhere in this block was
+// cascading into every later test seeing undefined candId/reqId, not just
+// the one that actually failed. .serial() makes a failure retry the whole
+// block from 'setup' again instead, which fixes it at the root.
+test.describe.serial('S15 Tier-0 Quick Wins', () => {
   const stamp = Date.now();
   let candId: string;
   let reqId: string;
@@ -1106,12 +1114,17 @@ test.describe('S15 Tier-0 Quick Wins', () => {
     expect(r.ok()).toBeTruthy();
     expect((await r.json()).sent).toBe(1);
 
-    const inbox = await request.get(`${API}/communications/inbox?limit=10`, { headers: { 'Authorization': `Bearer ${token}` } });
-    const rows = await inbox.json();
-    const list = Array.isArray(rows) ? rows : (rows.items || []);
-    const msg = list.find((m: any) => m.candidate_id === candId);
+    // /communications/inbox?limit=N is a "N most recently active threads
+    // tenant-wide" view (DISTINCT ON candidate, ordered by last activity) -
+    // on a busy shared tenant, this candidate's brand-new thread can
+    // legitimately fall out of a small limit before this query runs, a
+    // real race unrelated to whether bulk-send actually worked (root-caused
+    // 2026-08-09, see CLAUDE.md). /thread/{candId} is scoped to exactly
+    // this candidate and has no such race.
+    const thread = await request.get(`${API}/communications/thread/${candId}`, { headers: { 'Authorization': `Bearer ${token}` } });
+    const threadBody = await thread.json();
+    const msg = (threadBody.messages || []).find((m: any) => m.subject === 'Hi QA');
     expect(msg).toBeTruthy();
-    expect(msg.subject).toBe(`Hi QA`);
     expect(msg.body).toContain(`Dear QA Tier0 Test ${stamp},`);
     expect(msg.body).not.toContain('{name}');
   });
@@ -1162,7 +1175,8 @@ test.describe('S15 Tier-0 Quick Wins', () => {
 
 // ─── S16: Tier-1 (rejection taxonomy, submission limits, JD auto-send, ────
 // AM ranked view, email tracking, requisition soft-delete) ─────────────────
-test.describe('S16 Tier-1 Features', () => {
+// .serial() - same root cause and fix as S15 above.
+test.describe.serial('S16 Tier-1 Features', () => {
   const stamp = Date.now();
   let candId: string;
   let cand2Id: string;
@@ -1300,7 +1314,21 @@ test.describe('S16 Tier-1 Features', () => {
     if (!scoreResp.ok()) console.log('SCORE FAILED', scoreResp.status(), await scoreResp.text());
     expect(scoreResp.ok()).toBeTruthy();
 
-    const am = await request.get(`${API}/intelligence/candidates`, { headers: auth });
+    // /intelligence/candidates is ORDER BY readiness_index DESC LIMIT 200 -
+    // a deliberate design for its real "show me the best candidates" use
+    // case, not a bug, but it means an unfiltered (or min_score-only)
+    // query has no guarantee of surfacing any one specific (candidate,
+    // requisition) pair on a data-rich tenant - this one has 500+ real
+    // historical scores at or above a plain mid-range test score, so even
+    // filtering by min_score still overflows the 200 cap (root-caused
+    // 2026-08-09, see CLAUDE.md - a different bug class than the retry/
+    // state issue fixed on the two tests above, despite looking like the
+    // same "flaky" symptom from the outside). Added a real requisition_id
+    // filter param to the endpoint instead (a genuinely useful "candidates
+    // scored for this specific role" view, not just a test workaround) -
+    // this guarantees inclusion regardless of how many other candidates
+    // outrank it tenant-wide.
+    const am = await request.get(`${API}/intelligence/candidates?requisition_id=${reqId2}`, { headers: auth });
     expect(am.ok()).toBeTruthy();
     const rows = await am.json();
     const row = rows.find((r: any) => r.candidate_id === candId && r.requisition_id === reqId2);
@@ -1318,10 +1346,14 @@ test.describe('S16 Tier-1 Features', () => {
     if (!send.ok()) console.log('SEND FAILED', send.status(), await send.text());
     expect(send.ok()).toBeTruthy();
 
-    const inbox = await request.get(`${API}/communications/inbox?limit=10`, { headers: auth });
-    const rows = await inbox.json();
-    const list = Array.isArray(rows) ? rows : (rows.items || []);
-    const msg = list.find((m: any) => m.candidate_id === candId && m.subject === 'QA tracking test');
+    // /communications/inbox?limit=N is a "N most recently active threads
+    // tenant-wide" view, not "last N messages" - on a busy shared tenant
+    // this candidate's brand-new message can legitimately fall out of a
+    // small limit before this query runs (root-caused 2026-08-09, see
+    // CLAUDE.md). /thread/{candId} is scoped to exactly this candidate.
+    const thread = await request.get(`${API}/communications/thread/${candId}`, { headers: auth });
+    const threadBody = await thread.json();
+    const msg = (threadBody.messages || []).find((m: any) => m.subject === 'QA tracking test');
     expect(msg).toBeTruthy();
     expect(msg.email_opened_at).toBeFalsy();
     expect(msg.email_open_count).toBe(0);
@@ -1331,10 +1363,9 @@ test.describe('S16 Tier-1 Features', () => {
     expect(pixel.status()).toBe(200);
     expect(pixel.headers()['content-type']).toContain('image/gif');
 
-    const inbox2 = await request.get(`${API}/communications/inbox?limit=10`, { headers: auth });
-    const rows2 = await inbox2.json();
-    const list2 = Array.isArray(rows2) ? rows2 : (rows2.items || []);
-    const msg2 = list2.find((m: any) => m.id === msg.id);
+    const thread2 = await request.get(`${API}/communications/thread/${candId}`, { headers: auth });
+    const thread2Body = await thread2.json();
+    const msg2 = (thread2Body.messages || []).find((m: any) => m.id === msg.id);
     expect(msg2.email_opened_at).toBeTruthy();
     expect(msg2.email_open_count).toBe(1);
   });

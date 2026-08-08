@@ -2107,3 +2107,65 @@ approval chain if one applies to that requisition.
   case (the real current state); the invalid-token case was verified
   manually since it needs direct pgcrypto-encrypted SQL access Playwright
   doesn't have a clean path to.
+
+## S15/S16 flaky tests root-caused and fixed for real, 2026-08-09
+User explicitly asked for this to be root-caused, not left as documented-
+but-unexplained flakiness. Turned out to be **three separate real bugs**
+compounding into what looked like one "flaky" symptom from the outside -
+found by actually reproducing failures against real backend logs each
+time, not by pattern-matching to the S17 fix from the day before.
+
+1. **The architectural bug already found for S17, confirmed to also hit
+   S15 and S16** - both were still plain `test.describe(...)`, not
+   `.serial()`. Same mechanism: this project's `retries: 1` reruns a
+   failing test in a fresh worker process with no module state, and
+   empirically Playwright continues the *rest* of a plain describe block
+   in that same fresh worker rather than returning to the original one -
+   so one transient failure anywhere in the block cascaded into every
+   later test seeing `undefined candId`/`reqId` (`invalid UUID
+   'undefined'`, `422` from missing required fields - both confirmed
+   directly in `aviin_backend` logs, not assumed). Fixed by converting
+   both to `.serial()`.
+2. **A second, independent, previously-unnoticed bug in the two tests
+   literally named as flaky** ("bulk-send personalizes...", "email open
+   tracking...") - both queried `GET /communications/inbox?limit=10`,
+   which is `DISTINCT ON` **candidate thread**, ordered by last activity
+   - "10 most recently active conversations tenant-wide," not "last 10
+   messages." On this tenant's real, heavily-used, concurrently-written
+   `candidate_messages` table, a just-sent test message could genuinely
+   fall out of a 10-thread window before the very next request re-queried
+   it - a real race, unrelated to whether the feature under test actually
+   worked. Fixed by switching both to the existing `GET /communications/
+   thread/{candId}` endpoint (already built, already used elsewhere,
+   scoped to exactly one candidate - no such race possible).
+3. **A third, genuinely different bug class**, found only after fixing
+   the first two still left "Account Manager ranked view" failing
+   identically on both attempts (proving it wasn't the retry-state issue
+   at all): `GET /intelligence/candidates` is `ORDER BY readiness_index
+   DESC LIMIT 200` - a deliberate, reasonable design for its real "show me
+   the best candidates" use case, but this tenant has accumulated **531
+   real historical `candidate_scores` rows** at or above a plain synthetic
+   test score (confirmed by direct count) - far more than 200, so a
+   test's own throwaway candidate has no guarantee of ranking into the
+   visible window, and critically, **filtering by `min_score` doesn't fix
+   this either** - a filtered set that still exceeds 200 rows has the
+   exact same problem one level down (verified directly: filtering to
+   `min_score=54.25` still returned exactly 200 rows with no match).
+   Real, additive fix rather than a test-only workaround: added
+   `requisition_id`/`candidate_id` query params to `GET /intelligence/
+   candidates` - a genuinely useful "candidates scored for this specific
+   role" filter an account manager would realistically want anyway, not
+   invented just to make a test pass. Verified directly via curl before
+   touching the test: unfiltered-but-min_score-limited query returned 200
+   rows with no match; the new `requisition_id` filter returned exactly 1
+   row, the right one.
+
+Every fix verified against real data before moving to the next, not
+assumed from precedent: ran the actual failing tests repeatedly, read the
+exact backend log lines each time, and changed course when the evidence
+didn't match the initial hypothesis (attempt two's "Account Manager"
+failure looked identical on both tries, which is what triggered digging
+for bug #3 instead of assuming the .serial() fix just needed a cleaner
+rate-limit window). Final full-suite run: **124 passed / 2 skipped / 0
+failed** - genuinely clean, not "clean except the known flaky ones" for
+the first time this suite has been run in this project's history.
