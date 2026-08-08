@@ -27,3 +27,5 @@ waha.env
 *.tsbuildinfo
 tests/.auth/
 
+tests/tests/
+test-results/

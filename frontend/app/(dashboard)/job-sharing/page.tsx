@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, LayoutGrid, BarChart3, Facebook, Link2, Unlink } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, LayoutGrid, BarChart3, Facebook, Link2, Unlink, Send } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -336,6 +336,87 @@ function FacebookConnectionCard({ onStatusChange }: { onStatusChange: (connected
   );
 }
 
+function TelegramConnectionCard({ onStatusChange }: { onStatusChange: (connected: boolean) => void }) {
+  const { data: status, refetch } = useFetch<any>('/job-sharing/telegram/status');
+  const [showForm, setShowForm] = useState(false);
+  const [botToken, setBotToken] = useState('');
+  const [chatId, setChatId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => { if (status) onStatusChange(!!status.connected); }, [status]);
+
+  async function connect() {
+    if (!botToken || !chatId) { setErr('Bot Token and Channel/Chat ID are both required'); return; }
+    setSaving(true); setErr('');
+    try {
+      await apiFetch('/job-sharing/telegram/connect', { method: 'POST', body: JSON.stringify({ bot_token: botToken, chat_id: chatId }) });
+      setShowForm(false); setBotToken(''); setChatId('');
+      refetch();
+    } catch (e: any) { setErr(e.message || 'Connection failed'); }
+    finally { setSaving(false); }
+  }
+
+  async function disconnect() {
+    if (!confirm('Disconnect this Telegram channel? "Telegram" will go back to opening the share dialog instead of posting automatically.')) return;
+    await apiFetch('/job-sharing/telegram/disconnect', { method: 'DELETE' });
+    refetch();
+  }
+
+  return (
+    <Card className="border-sky-200 bg-sky-50/40">
+      <CardHeader>
+        <h2 className="font-semibold flex items-center gap-1.5"><Send className="h-4 w-4 text-sky-600" /> Telegram Channel — Real Automatic Posting</h2>
+      </CardHeader>
+      <CardContent>
+        {status?.connected ? (
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-sm">
+              <CheckCircle2 className="h-4 w-4 text-green-600" />
+              <span>Connected to <strong>{status.channel_name}</strong> — Telegram posts go out automatically now, no dialog, no paste.</span>
+            </div>
+            <button onClick={disconnect} className="flex items-center gap-1 text-xs text-red-600 hover:text-red-800 border border-red-200 rounded-lg px-2.5 py-1.5">
+              <Unlink className="h-3 w-3" /> Disconnect
+            </button>
+          </div>
+        ) : showForm ? (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-500 mb-2">
+              One-time setup: message <code className="bg-white px-1 rounded border">@BotFather</code> on Telegram, send{' '}
+              <code className="bg-white px-1 rounded border">/newbot</code> and follow the prompts to get a Bot Token (instant,
+              no review). Then add that bot as an <strong>admin</strong> of your job-alerts channel and paste the channel's
+              Chat ID below (for a public channel, its @username works too, e.g. <code className="bg-white px-1 rounded border">@yourchannel</code>).
+            </p>
+            {err && <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">{err}</div>}
+            <input value={botToken} onChange={e => setBotToken(e.target.value)} placeholder="Bot Token" type="password"
+              className="w-full border rounded-lg px-2.5 py-1.5 text-sm" />
+            <input value={chatId} onChange={e => setChatId(e.target.value)} placeholder="Channel Chat ID (e.g. @yourchannel or -100...)"
+              className="w-full border rounded-lg px-2.5 py-1.5 text-sm" />
+            <div className="flex items-center gap-2">
+              <button onClick={connect} disabled={saving}
+                className="flex items-center gap-1.5 text-xs font-medium text-white bg-sky-600 hover:bg-sky-700 rounded-lg px-3 py-1.5 disabled:opacity-50">
+                <Link2 className="h-3.5 w-3.5" /> {saving ? 'Verifying...' : 'Connect'}
+              </button>
+              <button onClick={() => { setShowForm(false); setErr(''); }} className="text-xs text-gray-500 px-2 py-1.5">Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <p className="text-xs text-gray-600">
+              Not connected — Telegram currently opens a share dialog you have to click through. Connect a bot for genuinely
+              automatic posting to your own job-alerts channel instead (free, no approval process, ~2 minutes to set up).
+            </p>
+            <button onClick={() => setShowForm(true)}
+              className="flex items-center gap-1.5 text-xs font-medium text-white bg-sky-600 hover:bg-sky-700 rounded-lg px-3 py-1.5 shrink-0">
+              <Link2 className="h-3.5 w-3.5" /> Connect Telegram Channel
+            </button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function JobSharingPageInner() {
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<'share' | 'dashboard'>('share');
@@ -358,6 +439,8 @@ function JobSharingPageInner() {
   const [clearing, setClearing] = useState(false);
   const [fbConnected, setFbConnected] = useState(false);
   const [fbPosting, setFbPosting] = useState(false);
+  const [tgConnected, setTgConnected] = useState(false);
+  const [tgPosting, setTgPosting] = useState(false);
 
   useEffect(() => {
     // Restore real server-recorded share state on load/select (was
@@ -399,11 +482,24 @@ function JobSharingPageInner() {
     } finally { setFbPosting(false); }
   }
 
+  async function postToTelegramApi() {
+    setTgPosting(true);
+    try {
+      const res = await apiFetch('/job-sharing/telegram/post', { method: 'POST', body: JSON.stringify({ req_id: selId }) });
+      setPosted(p => ({ ...p, telegram: true }));
+      refetchShared();
+      window.open(res.post_url, '_blank', 'noopener,noreferrer');
+    } catch (e: any) {
+      alert(`Telegram post failed: ${e.message || 'unknown error'}`);
+    } finally { setTgPosting(false); }
+  }
+
   function openPortal(p: Portal) {
-    // A connected Facebook Page posts for real, no dialog at all - see
-    // postToFacebookApi. Everything else still uses the share-dialog/
-    // homepage link.
+    // A connected Facebook Page / Telegram channel posts for real, no
+    // dialog at all - see postToFacebookApi/postToTelegramApi. Everything
+    // else still uses the share-dialog/homepage link.
     if (p.key === 'facebook' && fbConnected) { postToFacebookApi(); return; }
+    if (p.key === 'telegram' && tgConnected) { postToTelegramApi(); return; }
     // Facebook and LinkedIn both stopped letting any tool pre-fill the
     // actual post text years ago (anti-spam policy - not fixable, applies
     // to every product, not just this one) - their dialogs open with a
@@ -422,6 +518,7 @@ function JobSharingPageInner() {
     autoPortals.forEach((p, i) => {
       setTimeout(() => {
         if (p.key === 'facebook' && fbConnected) { postToFacebookApi(); return; }
+        if (p.key === 'telegram' && tgConnected) { postToTelegramApi(); return; }
         window.open(p.link, '_blank', 'noopener,noreferrer');
         logShare(p.key, p.link);
       }, i * 250);
@@ -509,6 +606,7 @@ function JobSharingPageInner() {
       )}
 
       <FacebookConnectionCard onStatusChange={setFbConnected} />
+      <TelegramConnectionCard onStatusChange={setTgConnected} />
 
       <Card><CardHeader><h2 className="font-semibold">1. Select Open Requisition</h2></CardHeader><CardContent>
         <select value={selId} onChange={e => { setSelId(e.target.value); setPosted({}); }}
@@ -545,17 +643,19 @@ function JobSharingPageInner() {
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
               {autoPortals.map(p => {
                 const isFbAuto = p.key === 'facebook' && fbConnected;
-                const busy = isFbAuto && fbPosting;
+                const isTgAuto = p.key === 'telegram' && tgConnected;
+                const isAuto = isFbAuto || isTgAuto;
+                const busy = (isFbAuto && fbPosting) || (isTgAuto && tgPosting);
                 return (
                   <div key={p.key} className="relative group">
                     <button onClick={() => openPortal(p)} disabled={busy}
-                      title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : isFbAuto ? 'Posts automatically via connected Page API' : undefined}
+                      title={flaggedKeys.has(p.key) ? 'Known issue reported for this portal' : isAuto ? 'Posts automatically via connected API' : undefined}
                       className={`w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-60
-                        ${flaggedKeys.has(p.key) ? 'bg-amber-500 text-white' : isFbAuto ? 'bg-blue-600 text-white' : 'bg-gray-800 text-white'}`}>
+                        ${flaggedKeys.has(p.key) ? 'bg-amber-500 text-white' : isAuto ? 'bg-blue-600 text-white' : 'bg-gray-800 text-white'}`}>
                       {busy ? <Spinner size="sm" /> :
                        flaggedKeys.has(p.key) ? <AlertTriangle className="h-3.5 w-3.5" /> :
                        posted[p.key] ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> :
-                       isFbAuto ? <Zap className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
+                       isAuto ? <Zap className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
                       {p.name}
                     </button>
                     <button onClick={() => setIssuePortal(p)} title="Report issue"

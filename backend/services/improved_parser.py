@@ -604,6 +604,37 @@ def extract_linkedin_v2(text: str) -> Optional[str]:
     return None
 
 
+_PROJECT_HEADING_RE = re.compile(
+    r'^\s*(?:key\s+)?projects?(?:\s+(?:details|experience|handled|worked))?\s*:?\s*$',
+    re.I | re.M)
+
+
+def extract_projects_section(text: str) -> Optional[str]:
+    """Best-effort "Projects" section extraction — this codebase's resume
+    fields (skills/company/designation/experience_years/education) are all
+    single-value regex pulls; nothing extracts a distinct projects block,
+    which the "Projects only" resume-sharing format needs. Finds a
+    standalone "Projects" heading line and captures everything up to the
+    next recognized section header (reusing SECTION_HEADERS, same
+    boundary-detection convention as the rest of this file) or end of text.
+    Deliberately conservative — no heading match, no guess."""
+    if not text:
+        return None
+    m = _PROJECT_HEADING_RE.search(text)
+    if not m:
+        return None
+    start = m.end()
+    rest = text[start:]
+    end = len(rest)
+    for line_m in re.finditer(r'^\s*([A-Za-z][A-Za-z /&\-]{2,40})\s*:?\s*$', rest, re.M):
+        candidate = line_m.group(1).strip().lower()
+        if candidate in SECTION_HEADERS and candidate != 'projects':
+            end = line_m.start()
+            break
+    section = rest[:end].strip()
+    return section[:3000] if section else None
+
+
 def calc_confidence(parsed: dict) -> float:
     """
     Compute parse confidence score (0.0 - 1.0).

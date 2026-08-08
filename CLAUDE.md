@@ -1609,3 +1609,141 @@ the login one) rather than the login-specific 429 seen elsewhere today -
 confirmed as transient by re-running clean twice, not a real bug, but
 worth knowing the full 147-test suite can occasionally flake near its
 tail end under back-to-back invocations.
+
+## Tier-2 features built, 2026-08-08
+Follow-up to the same feature-completeness audit as Tier-0/Tier-1 above.
+User picked Tier-2 next: Canva/image-resume standardization, the 4
+specific contact-stripped resume-format variants, KAE tracking-sheet
+rework (inline email body instead of Excel attachment), call letters with
+an embedded company logo, and a look at free job-board auto-posting.
+
+- **6 resume formats for KAE submission** (`kae_submission.py`) - was 2
+  (`clean_generated`/`redacted_original`), now 6: **manual** (recruiter
+  types the summary from scratch - a new `GET .../manual-draft` endpoint
+  pre-fills auto-extracted fields as a starting point, but the final PDF
+  renders only what was actually submitted, verbatim), **projects_only**
+  (new `extract_projects_section()` in `improved_parser.py`, reusing the
+  existing `SECTION_HEADERS` set as the boundary detector - contact info
+  AND employer/company history both stripped, only project descriptions
+  shown), **confidential** (current employer name replaced with
+  "Confidential" both structurally and via regex substitution anywhere it
+  appears in the free-text summary), **anonymized** (name replaced with
+  "First S." - first name + surname initial, using the *last* word's
+  first letter rather than literally the second word, since 3+-word Indian
+  names are common; employer replaced with "AviinTech Business
+  Solutions"). `candidate_submissions.resume_style` CHECK constraint
+  widened (`sql/30_tier2_resume_formats.sql`) - table is owned by
+  `app_user`, confirmed no postgres-superuser escalation needed (unlike
+  `requisitions`/`candidate_messages` in earlier Tier-1 migrations).
+  Pipeline drawer's "Submit to KAE" tab RESUME FORMAT grid expanded
+  2->6 tiles; picking "Manual Editing" reveals an editable form pre-filled
+  from the draft endpoint.
+- **KAE tracking sheet: inline HTML email body, not an Excel attachment**
+  - user's explicit ask ("in the E-mail body, Not Excel file"). New
+  `_build_tracking_html_table()` renders the same cumulative per-
+  requisition row set as an inline `<table>` (header styled, alternating
+  row shading); `_send_kae_email()` gained a `body_html_extra` param that
+  wraps it in a `MIMEMultipart("alternative")` plain+HTML body. The old
+  `_build_tracking_excel()` had zero remaining callers after the rework -
+  deleted rather than left as unused legacy code. Redaction still only
+  ever applies to the resume attachment, never the tracking table (the
+  table is the client's own internal record and matches the user's own
+  example row, which includes phone/email).
+- **Standardized resume on Candidate 360** (the "Canva/image resume ->
+  standard format" ask) - new `GET /candidates/{id}/standard-resume`
+  reuses `_build_clean_resume_pdf` from `kae_submission.py` directly
+  (cross-module import, not duplicated PDF logic) - renders whatever's in
+  the parsed candidate record into a clean one-pager regardless of what
+  format/quality the original resume file was in (a Canva graphic, a
+  scanned image, a messy multi-column layout, etc. - useful precisely
+  *because* it doesn't touch the original file). New "Standard Resume
+  (PDF)" button on the Candidate 360 header, next to the existing
+  "Download Resume" (original file) button.
+- **Call letters with an embedded company logo** (new
+  `backend/routers/call_letters.py`, `backend/assets/aviintech-logo.png`)
+  - the first PDF generator anywhere in this codebase to embed an actual
+  logo *image* via reportlab's `Image` flowable (offer letters/NDAs only
+  ever rendered the company name as text). `POST /call-letters/generate`
+  (renders + emails + logs to `candidate_messages` + writes
+  `event_outbox` per HARD RULE #5/#6) and `POST /call-letters/preview`
+  (same render, no email/log side effect, for a quick look before
+  sending). Deliberately did NOT add a "hiring drive" management entity -
+  interview date/time/venue/mode are typed per call letter, not pulled
+  from a stored drive record, since that would be a materially bigger
+  feature than what was asked for. New "Call Letter" tab on the pipeline
+  drawer (date/time/mode/venue/notes form, Preview PDF opens a real
+  popup, Generate & Send emails it).
+- **Free job-board research, then Telegram auto-post built** - re-audited
+  every major job board (Naukri, Indeed's non-feed posting, Monster,
+  Shine, TimesJobs, LinkedIn's job-post API) and confirmed none offer free
+  auto-posting without a paid/partner-approved API - nothing new to add
+  there beyond what P29/round-4-audit already built (Facebook auto-post,
+  Google for Jobs via schema.org structured data, Indeed's manual
+  XML-feed registration). Found one genuinely free, zero-approval channel
+  not yet built: **Telegram channel auto-posting**, same "own Page/own
+  bot, no App Review" tier as the Facebook Page integration - a Telegram
+  bot token has no review process at all (instant via @BotFather), and
+  many India recruiter communities already run Telegram job-alert
+  channels. Built end-to-end (`sql/31_telegram_channel.sql`, new
+  `/job-sharing/telegram/{connect,status,disconnect,post}` endpoints,
+  `TelegramConnectionCard` on the Job Sharing page, same connect-once/
+  post-automatically UX as Facebook). `/job-sharing/dashboard` marks
+  Telegram `auto_api` (not just `auto_share`) once connected, same as
+  Facebook. **Two real bugs caught by self-review before deploying, not
+  by the user**: the private-channel deep-link URL used
+  `chat_id_str.lstrip('-100')` - `str.lstrip()` strips any characters in
+  the given *set*, not a literal prefix, so a real `-100xxxxxxxxxx` chat
+  ID would have had extra leading digits mangled off; fixed to a literal
+  4-char slice. The MarkdownV2 escaper also didn't escape a literal
+  backslash first, which would have double-escaped anything already
+  containing one. Both fixed pre-deploy. **Honest verification gap**:
+  same shape as the WhatsApp-inbound gap in Tier-1 - no real Telegram bot/
+  channel exists to test the actual happy-path post against, so this was
+  verified via every negative path for real (invalid token rejected,
+  posting without a connection 400s, disconnect/reconnect round-trips)
+  plus a live browser click-through of the connection card, rather than a
+  genuine end-to-end successful post.
+- **New permanent "S17 Tier-2 Features" suite** (9 tests: setup, all 6
+  resume formats submitted end-to-end with distinct `sl_no` rows, the
+  manual-draft endpoint, both call-letter endpoints, the standardized-
+  resume endpoint, both new UI surfaces via real browser interaction, and
+  Telegram's negative paths). Deliberately written with
+  `test.describe.serial(...)` instead of the plain `test.describe(...)`
+  every earlier suite (S1-S16) uses - **found a real fragility in the
+  existing pattern, not by reasoning about it but by hitting it**: this
+  project's `retries: 1` means a failing test reruns in a **fresh worker
+  process**, which does not share the `let candId/reqId/...` state a
+  `setup` test earlier in the same file set - so one transient failure
+  (a global-rate-limit 429 from firing ~150 tests in quick succession)
+  cascaded into a run showing 11 unrelated-looking failures, most of them
+  literally `invalid UUID 'undefined'` or a 422 from a silently-dropped
+  `undefined` field in a JSON body. `.serial()` makes a retry rerun the
+  *whole block* from `setup`, which turned that into a single clean,
+  reproducible failure instead of an 11-item false-failure cascade - and
+  confirmed the fix by reproducing the exact same cascade pattern on
+  S15/S16 (untouched, still plain `test.describe`) in the same runs,
+  while S17 stayed either fully clean or failed exactly once,
+  deterministically. Not retrofitted onto S1-S16 (out of scope for this
+  batch - a real, now-understood, pre-existing characteristic of this
+  suite, previously described in this file only as "can occasionally
+  flake," now with a concrete mechanism).
+- **One real test-writing bug caught by the serial fix's clean
+  reproduction** (not an app bug): the S17 setup candidate was created
+  with a `current_designation` field in the request body - `CandidateCreate`
+  (`backend/schemas.py`) has no such field at all, so Pydantic silently
+  dropped it (that column is only ever populated by resume parsing, never
+  by the manual create/update API). Fixed the test to not send or assert
+  on a value the API was never going to accept.
+- Full suite, final clean run: **S17 9/9 passing.** S15 (pre-existing,
+  untouched by this batch) still showed 3 failures with *varying* failure
+  modes between the original attempt and its retry (a message not found
+  in one, a request outright failing in the other) - consistent with
+  genuine environmental/timing flakiness under a big back-to-back run
+  rather than a deterministic bug, and already documented above as a
+  known characteristic of this suite. Flagged honestly rather than
+  silently reported as all-green; not investigated further since it's
+  outside this batch's scope and pre-dates every change in it.
+- Zero-token audit: `CONFIRMED CLEAN` (343 files, 0 external API refs)
+  after staging the new files (`git add -A` first - the untracked-file
+  gap this same check documented catching once before, see the device-
+  monitoring entry above).

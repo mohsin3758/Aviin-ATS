@@ -435,6 +435,34 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
     return d
 
 
+@router.get("/{candidate_id}/standard-resume")
+async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get_actor)):
+    """Renders the candidate's parsed data into a clean, standardized
+    one-pager PDF — the "Canva/image resume -> standard format" ask.
+    Whatever the ORIGINAL resume looked like (a Canva export, a scanned
+    image via OCR, a plain-text doc), the OUTPUT here is always the same
+    consistent layout, because it's built from parsed structured fields,
+    not the original file. Reuses the exact same renderer already proven
+    for the KAE-submission "Clean Summary" style, rather than a second
+    near-duplicate PDF builder."""
+    from fastapi.responses import StreamingResponse
+    import io as _io, re as _re
+    from routers.kae_submission import _build_clean_resume_pdf
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT full_name, phone, email, location, current_employer, current_designation, "
+            "total_exp_mo, skills, resume_text FROM candidates WHERE id=$1 AND tenant_id=$2",
+            candidate_id, actor.tenant_id)
+    if not row:
+        raise HTTPException(404, "Candidate not found")
+    pdf_bytes = _build_clean_resume_pdf(row)
+    safe_name = _re.sub(r"[^A-Za-z0-9_-]+", "_", row["full_name"] or "candidate")
+    return StreamingResponse(
+        _io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="Standard_Resume_{safe_name}.pdf"'})
+
+
 @router.patch("/{candidate_id}")
 @router.put("/{candidate_id}")
 async def update_candidate(candidate_id: str, body: CandidateUpdate, actor: Actor = Depends(get_actor)):

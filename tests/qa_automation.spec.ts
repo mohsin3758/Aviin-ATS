@@ -1356,3 +1356,215 @@ test.describe('S16 Tier-1 Features', () => {
     expect(allRows.some((r: any) => r.id === reqId)).toBe(true);
   });
 });
+
+// ─── S17: Tier-2 (resume format variants, standardized Candidate 360 ───────
+// resume, call letters with embedded logo, Telegram auto-post) ─────────────
+// Own throwaway client/requisition/candidate/application, deleted in
+// afterAll — unlike S14's KAE suite these don't touch client_owners or any
+// per-client limit, so a hard cleanup is both possible and preferable here.
+// .serial() (unlike the plain test.describe used by S14/S15/S16) so that if
+// this project's retries:1 kicks in, Playwright reruns the WHOLE block from
+// 'setup' onward instead of retrying a single downstream test in a fresh
+// worker process where the shared clientId/reqId/candId/appId closures were
+// never set — that state loss is what turned one transient rate-limit 429
+// into a cascade of "invalid UUID 'undefined'" failures during this suite's
+// first full run.
+test.describe.serial('S17 Tier-2 Features', () => {
+  const stamp = Date.now();
+  let clientId: string;
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+
+  test.afterAll(async ({ request }) => {
+    // No DELETE /applications/{id} endpoint exists (confirmed). The client
+    // is deliberately NOT hard-deleted here: clients.py's DELETE is a real
+    // hard DELETE FROM clients, and requisitions.client_id is a plain FK
+    // with no ON DELETE clause — since the requisition below is only
+    // soft-deleted (is_active=false, matching every other soft-delete
+    // convention in this codebase), that row still exists and would make
+    // the client hard-delete 500 on the FK constraint (same failure shape
+    // as the consent_records/candidates FK hit during manual Tier-2
+    // cleanup earlier this session). Soft-deleting the candidate +
+    // requisition already removes this test data from every real
+    // recruiter-facing list; matches S14's established convention of
+    // leaving what can't be cleanly hard-deleted rather than fighting it.
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway client + requisition + candidate + application', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA Tier2 Test Client ${stamp}` } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+
+    const r = await request.post(`${API}/requisitions`, { headers: auth, data: { client_id: clientId, title: 'QA Tier2 Test Role', skills_required: ['Python'] } });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `QA Tier2 Format Test ${stamp}`,
+        email: `qa.tier2.${stamp}@test.com`,
+        phone: `9${String(stamp).slice(-9)}`,
+        skills: ['Python', 'AWS'],
+        total_exp_mo: 72,
+        location: 'Pune, Maharashtra',
+        current_employer: 'QA Test Employer Co',
+        // current_designation is deliberately NOT sent here — CandidateCreate
+        // (backend/schemas.py) has no such field at all, so Pydantic would
+        // silently drop it; that column is only ever populated by resume
+        // parsing, never by the manual create/update API. Confirmed by
+        // reading schemas.py directly, not assumed.
+        resume_text: `QA Tier2 Format Test ${stamp}\nSenior Engineer with Python and AWS experience.\nPROJECTS\nBuilt a real thing with real impact.\nEDUCATION\nB.Tech.`,
+      },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { requisition_id: reqId, candidate_id: candId } });
+    expect(app.ok()).toBeTruthy();
+    appId = (await app.json()).id;
+  });
+
+  test('candidate 360: standardized resume PDF downloads for a real candidate', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/candidates/${candId}/standard-resume`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    expect(r.headers()['content-type']).toContain('application/pdf');
+    const buf = await r.body();
+    expect(buf.byteLength).toBeGreaterThan(500);
+    expect(buf.slice(0, 4).toString()).toBe('%PDF');
+  });
+
+  test('manual-draft endpoint returns auto-extracted fields for the manual resume format', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/applications/${appId}/submit-to-kae/manual-draft`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    expect(body.name).toBe(`QA Tier2 Format Test ${stamp}`);
+    expect(body.location).toBe('Pune, Maharashtra');
+    expect(body.skills).toBe('Python, AWS');
+    // designation is not asserted here — current_designation can't be set
+    // via POST /candidates (see the setup step above), so it's genuinely ''
+    // for this throwaway candidate; the field's presence in the response
+    // shape (not its value) is what this endpoint needs to prove.
+    expect(typeof body.designation).toBe('string');
+  });
+
+  test('all 6 resume formats submit successfully to a KAE and log distinct sl_no rows', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const me = await request.get(`${API}/auth/me`, { headers: auth });
+    const adminId = (await me.json()).id;
+    const assign = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: clientId, user_id: adminId, owner_type: 'kae' } });
+    expect(assign.ok()).toBeTruthy();
+
+    for (const style of ['clean_generated', 'projects_only', 'confidential', 'anonymized', 'redacted_original']) {
+      const r = await request.post(`${API}/applications/${appId}/submit-to-kae`, { headers: auth, data: { resume_style: style, cc_self: false } });
+      if (!r.ok()) console.log(`${style} FAILED`, r.status(), await r.text());
+      expect(r.ok()).toBeTruthy();
+    }
+
+    const manualDraft = await (await request.get(`${API}/applications/${appId}/submit-to-kae/manual-draft`, { headers: auth })).json();
+    const manualSubmit = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
+      headers: auth, data: { resume_style: 'manual', cc_self: false, manual_resume: manualDraft },
+    });
+    expect(manualSubmit.ok()).toBeTruthy();
+
+    const hist = await request.get(`${API}/applications/${appId}/submissions`, { headers: auth });
+    const rows = await hist.json();
+    expect(rows.length).toBe(6);
+    const slNos = rows.map((r: any) => r.field_values?.sl_no).sort();
+    expect(slNos).toEqual(['1', '2', '3', '4', '5', '6']);
+  });
+
+  test('call letter: preview returns a real PDF, generate logs candidate_messages + event_outbox', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const payload = {
+      application_id: appId, interview_date: '2026-09-15', interview_time: '11:00 AM',
+      venue: 'AviinTech Office, Pune', mode: 'in_person', notes: 'QA regression test.',
+    };
+
+    const preview = await request.post(`${API}/call-letters/preview`, { headers: auth, data: payload });
+    expect(preview.ok()).toBeTruthy();
+    expect(preview.headers()['content-type']).toContain('application/pdf');
+    const pdfBuf = await preview.body();
+    expect(pdfBuf.slice(0, 4).toString()).toBe('%PDF');
+
+    const gen = await request.post(`${API}/call-letters/generate`, { headers: auth, data: { ...payload, send_email: true } });
+    expect(gen.ok()).toBeTruthy();
+    const genBody = await gen.json();
+    expect(genBody.ok).toBe(true);
+    expect(genBody.candidate_name).toBe(`QA Tier2 Format Test ${stamp}`);
+
+    const missingReq = await request.post(`${API}/call-letters/generate`, {
+      headers: auth, data: { application_id: '00000000-0000-0000-0000-000000000000', interview_date: '2026-09-15', mode: 'in_person' },
+    });
+    expect(missingReq.status()).toBe(404);
+  });
+
+  test('pipeline drawer: Call Letter tab renders and opens a real PDF preview', async ({ page }) => {
+    await page.goto(`${BASE}/pipeline?job=${reqId}`);
+    await page.waitForTimeout(1500);
+    await page.click(`div[draggable="true"]:has-text("QA Tier2 Format Test ${stamp}")`, { timeout: 15000 });
+    await page.click('button:has-text("Call Letter")');
+    await page.waitForSelector('[data-testid="call-letter-panel"]', { state: 'visible', timeout: 10000 });
+    await page.fill('input[type="date"]', '2026-09-20');
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup', { timeout: 10000 }),
+      page.click('button:has-text("Preview PDF")'),
+    ]);
+    expect(popup).toBeTruthy();
+    await popup.close();
+  });
+
+  test('candidate 360: Standard Resume button triggers a real PDF download', async ({ page }) => {
+    await page.goto(`${BASE}/candidates/${candId}`);
+    await page.waitForTimeout(1500);
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 10000 }),
+      page.click('button:has-text("Standard Resume")'),
+    ]);
+    expect(download.suggestedFilename()).toContain('Standard_Resume_');
+  });
+
+  test('Telegram: status defaults disconnected, connect rejects an invalid bot token, post 400s when not connected', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const status = await request.get(`${API}/job-sharing/telegram/status`, { headers: auth });
+    expect(status.ok()).toBeTruthy();
+    // Not asserting connected:false here — a real tenant may have genuinely
+    // connected a channel by the time this runs; this just proves the
+    // endpoint answers correctly either way.
+    expect(typeof (await status.json()).connected).toBe('boolean');
+
+    const badConnect = await request.post(`${API}/job-sharing/telegram/connect`, {
+      headers: auth, data: { bot_token: '123456:FAKE-invalid-token-xyz', chat_id: '@somechannel' },
+    });
+    expect(badConnect.status()).toBe(400);
+
+    const currentStatus = await (await request.get(`${API}/job-sharing/telegram/status`, { headers: auth })).json();
+    if (!currentStatus.connected) {
+      const post = await request.post(`${API}/job-sharing/telegram/post`, { headers: auth, data: { req_id: reqId } });
+      expect(post.status()).toBe(400);
+    }
+  });
+
+  test('job-sharing page: Telegram Channel connection card renders', async ({ page }) => {
+    await page.goto(`${BASE}/job-sharing`);
+    await page.waitForTimeout(1500);
+    await expect(page.locator('text=Telegram Channel — Real Automatic Posting')).toBeVisible();
+  });
+});

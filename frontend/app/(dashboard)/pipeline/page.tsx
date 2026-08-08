@@ -566,6 +566,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
               { key: 'nda', icon: <FileSignature size={12} />, label: 'NDA' },
               { key: 'kae', icon: <Send size={12} />, label: 'Submit to KAE' },
+              { key: 'call-letter', icon: <Calendar size={12} />, label: 'Call Letter' },
               { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes', count: Array.isArray(app.app_notes) ? app.app_notes.length : 0 },
               { key: 'scorecards', icon: <Star size={12} />, label: 'Scorecards' },
               { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
@@ -586,6 +587,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
           {drawerTab === 'profile' && <ProfileTab app={app} apiUrl={API_URL} />}
           {drawerTab === 'nda' && <NdaTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'kae' && <SubmitKaeTab appId={app.id} showToast={showToast} onSubmitted={onSubmittedToKae} />}
+          {drawerTab === 'call-letter' && <CallLetterTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'notes' && <NotesTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'scorecards' && <ScorecardsTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'activity' && <ActivityTab candidateId={app.candidate_id} />}
@@ -823,16 +825,133 @@ function NdaTab({ appId, showToast }: any) {
 }
 
 // ── Submit to KAE Tab ────────────────────────────────────────────────────────
+function CallLetterTab({ appId, showToast }: any) {
+  const [interviewDate, setInterviewDate] = useState('');
+  const [interviewTime, setInterviewTime] = useState('');
+  const [venue, setVenue] = useState('');
+  const [mode, setMode] = useState('in_person');
+  const [notes, setNotes] = useState('');
+  const [sendEmail, setSendEmail] = useState(true);
+  const [busy, setBusy] = useState<'preview' | 'send' | null>(null);
+
+  const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em', marginBottom: 6, display: 'block' };
+  const inputStyle: React.CSSProperties = { width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 };
+
+  const payload = () => ({
+    application_id: appId,
+    interview_date: interviewDate,
+    interview_time: interviewTime || undefined,
+    venue: venue || undefined,
+    mode,
+    notes: notes || undefined,
+  });
+
+  const preview = async () => {
+    if (!interviewDate) { showToast('Interview date is required', false); return; }
+    setBusy('preview');
+    try {
+      const res = await fetch(`${API}/call-letters/preview`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload()),
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d?.detail || 'Preview failed'); }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (e: any) {
+      showToast(String(e?.message || 'Preview failed'), false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const send = async () => {
+    if (!interviewDate) { showToast('Interview date is required', false); return; }
+    setBusy('send');
+    try {
+      const r = await apiFetch('/call-letters/generate', {
+        method: 'POST',
+        body: JSON.stringify({ ...payload(), send_email: sendEmail }),
+      });
+      showToast(r.email_sent ? `Call letter sent to ${r.candidate_name} ✓` : (sendEmail ? `Generated, but email failed: ${r.email_error || 'SMTP error'}` : 'Call letter generated'), sendEmail ? !!r.email_sent : true);
+    } catch (e: any) {
+      showToast(String(e?.message || 'Failed to generate call letter'), false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div data-testid="call-letter-panel" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <div>
+          <span style={lbl}>INTERVIEW DATE</span>
+          <input type="date" value={interviewDate} onChange={e => setInterviewDate(e.target.value)} style={inputStyle} />
+        </div>
+        <div>
+          <span style={lbl}>TIME (OPTIONAL)</span>
+          <input type="time" value={interviewTime} onChange={e => setInterviewTime(e.target.value)} style={inputStyle} />
+        </div>
+      </div>
+
+      <div>
+        <span style={lbl}>MODE</span>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[{ key: 'in_person', label: 'In-Person' }, { key: 'virtual', label: 'Virtual' }].map(o => (
+            <button key={o.key} onClick={() => setMode(o.key)}
+              style={{ flex: 1, padding: '7px 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                border: `1.5px solid ${mode === o.key ? '#2563EB' : '#E2E8F0'}`,
+                background: mode === o.key ? '#EFF6FF' : '#fff', color: mode === o.key ? '#1D4ED8' : '#475569' }}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <span style={lbl}>{mode === 'virtual' ? 'MEETING LINK' : 'VENUE'}</span>
+        <input value={venue} onChange={e => setVenue(e.target.value)}
+          placeholder={mode === 'virtual' ? 'https://meet.google.com/...' : 'Office address'} style={inputStyle} />
+      </div>
+
+      <div>
+        <span style={lbl}>ADDITIONAL NOTES (OPTIONAL)</span>
+        <textarea rows={3} value={notes} onChange={e => setNotes(e.target.value)}
+          style={{ ...inputStyle, fontFamily: 'inherit', resize: 'vertical' }} />
+      </div>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#475569', cursor: 'pointer' }}>
+        <input type="checkbox" checked={sendEmail} onChange={e => setSendEmail(e.target.checked)} /> Email to candidate
+      </label>
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={preview} disabled={busy !== null}
+          style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px', background: '#fff', color: '#2563EB', border: '1px solid #2563EB', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.7 : 1 }}>
+          <FileText size={13} /> {busy === 'preview' ? 'Opening…' : 'Preview PDF'}
+        </button>
+        <button onClick={send} disabled={busy !== null}
+          style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.7 : 1 }}>
+          <Send size={13} /> {busy === 'send' ? 'Sending…' : sendEmail ? 'Generate & Send' : 'Generate'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
   const { data: preview, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-kae/preview`);
   const { data: templates } = useFetch<any[]>('/submission-templates');
   const { data: history, refetch: refetchHistory } = useFetch<any[]>(`/applications/${appId}/submissions`);
   const [templateId, setTemplateId] = useState('');
-  const [resumeStyle, setResumeStyle] = useState<'clean_generated' | 'redacted_original'>('clean_generated');
+  const [resumeStyle, setResumeStyle] = useState('clean_generated');
   const [fields, setFields] = useState<Record<string, string>>({});
   const [ccSelf, setCcSelf] = useState(true);
   const [sending, setSending] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const [manualDraft, setManualDraft] = useState<Record<string, string> | null>(null);
+  const [manualLoading, setManualLoading] = useState(false);
 
   useEffect(() => {
     if (preview && !initialized) {
@@ -841,6 +960,16 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
       setInitialized(true);
     }
   }, [preview, initialized]);
+
+  useEffect(() => {
+    if (resumeStyle === 'manual' && !manualDraft) {
+      setManualLoading(true);
+      apiFetch(`/applications/${appId}/submit-to-kae/manual-draft`)
+        .then((d: any) => setManualDraft(d))
+        .catch(() => setManualDraft({ name: '', designation: '', location: '', total_exp: '', skills: '', summary: '' }))
+        .finally(() => setManualLoading(false));
+    }
+  }, [resumeStyle, appId, manualDraft]);
 
   const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em', marginBottom: 6, display: 'block' };
 
@@ -860,11 +989,15 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
   const selectedTemplate = (templates || []).find((t: any) => t.id === templateId);
 
   const send = async () => {
+    if (resumeStyle === 'manual' && !manualDraft) return;
     setSending(true);
     try {
       const r = await apiFetch(`/applications/${appId}/submit-to-kae`, {
         method: 'POST',
-        body: JSON.stringify({ template_id: templateId, resume_style: resumeStyle, field_values: fields, cc_self: ccSelf }),
+        body: JSON.stringify({
+          template_id: templateId, resume_style: resumeStyle, field_values: fields, cc_self: ccSelf,
+          manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
+        }),
       });
       showToast(r.email_sent ? `Sent to ${r.kae_name} ✓` : `Logged, but email failed: ${r.email_error || 'SMTP error'}`, !!r.email_sent);
       setInitialized(false);
@@ -900,14 +1033,18 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
       </div>
 
       <div>
-        <span style={lbl}>RESUME ATTACHMENT</span>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <span style={lbl}>RESUME FORMAT</span>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           {[
             { key: 'clean_generated', label: 'Clean Summary', hint: 'Generated one-pager, no contact info' },
+            { key: 'manual', label: 'Manual Editing', hint: 'Edit the summary yourself before sending' },
+            { key: 'projects_only', label: 'Projects Only', hint: 'Contact & employment history removed' },
+            { key: 'confidential', label: 'Confidential Company', hint: 'Company & projects marked Confidential' },
+            { key: 'anonymized', label: 'Anonymized', hint: 'Name + employer masked (AviinTech Business Solutions)' },
             { key: 'redacted_original', label: 'Redacted Original', hint: 'Full resume text, contact info blanked' },
           ].map(o => (
-            <button key={o.key} onClick={() => setResumeStyle(o.key as any)}
-              style={{ flex: 1, textAlign: 'left', padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+            <button key={o.key} onClick={() => setResumeStyle(o.key)}
+              style={{ textAlign: 'left', padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
                 border: `1.5px solid ${resumeStyle === o.key ? '#2563EB' : '#E2E8F0'}`,
                 background: resumeStyle === o.key ? '#EFF6FF' : '#fff' }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: resumeStyle === o.key ? '#1D4ED8' : '#1E293B' }}>{o.label}</div>
@@ -915,10 +1052,34 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
             </button>
           ))}
         </div>
-        {resumeStyle === 'redacted_original' && !preview.has_resume_text && (
+        {(resumeStyle === 'redacted_original' || resumeStyle === 'projects_only') && !preview.has_resume_text && (
           <div style={{ fontSize: 10, color: '#DC2626', marginTop: 4 }}>No extracted resume text on file for this candidate — Clean Summary is recommended instead.</div>
         )}
       </div>
+
+      {resumeStyle === 'manual' && (
+        <div>
+          <span style={lbl}>EDIT BEFORE SENDING</span>
+          {manualLoading || !manualDraft ? (
+            <div style={{ fontSize: 11, color: '#94A3B8' }}>Loading draft…</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {(['name', 'designation', 'location', 'total_exp', 'skills'] as const).map(k => (
+                <div key={k}>
+                  <label style={{ fontSize: 9, fontWeight: 700, color: '#94A3B8' }}>{k.replace('_', ' ').toUpperCase()}</label>
+                  <input value={manualDraft[k] || ''} onChange={e => setManualDraft({ ...manualDraft, [k]: e.target.value })}
+                    style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2 }} />
+                </div>
+              ))}
+              <div>
+                <label style={{ fontSize: 9, fontWeight: 700, color: '#94A3B8' }}>SUMMARY</label>
+                <textarea rows={6} value={manualDraft.summary || ''} onChange={e => setManualDraft({ ...manualDraft, summary: e.target.value })}
+                  style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2, fontFamily: 'inherit', resize: 'vertical' }} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div>
         <span style={lbl}>TRACKING SHEET ROW (SL No {preview.auto_values?.sl_no})</span>

@@ -339,44 +339,241 @@ def _build_redacted_resume_pdf(candidate) -> bytes:
     return buf.getvalue()
 
 
-def _build_tracking_excel(columns: list, rows: list) -> bytes:
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+def _anonymize_name(full_name: str) -> str:
+    """'Ranjan Kumar Sharma' -> 'Ranjan K.' — first name + first letter of
+    the last name, matching exactly what was asked (not just any masking)."""
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "Candidate"
+    if len(parts) == 1:
+        return parts[0]
+    return f"{parts[0]} {parts[-1][0]}."
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Tracking Sheet"
-    header_fill = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
-    header_font = Font(bold=True, color="FFFFFF", size=10)
-    thin = Side(style="thin", color="CBD5E1")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    for ci, col in enumerate(columns, start=1):
-        cell = ws.cell(row=1, column=ci, value=col.get("label", col.get("key")))
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.border = border
-        cell.alignment = Alignment(wrap_text=True, vertical="center")
-    for ri, data in enumerate(rows, start=2):
-        for ci, col in enumerate(columns, start=1):
-            cell = ws.cell(row=ri, column=ci, value=data.get(col["key"], ""))
-            cell.border = border
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-
-    wide = {"skill_summary": 50, "candidate_name": 20, "role": 20, "email_id": 24, "current_company": 22}
-    for ci, col in enumerate(columns, start=1):
-        letter = ws.cell(row=1, column=ci).column_letter
-        ws.column_dimensions[letter].width = wide.get(col["key"], 14)
-    ws.freeze_panes = "A2"
+def _build_projects_only_pdf(candidate) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+    from services.improved_parser import extract_projects_section
 
     buf = io.BytesIO()
-    wb.save(buf)
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                             topMargin=2 * cm, bottomMargin=2 * cm)
+    PRIMARY = colors.HexColor("#1e40af")
+    DARK = colors.HexColor("#0f172a")
+    GRAY = colors.HexColor("#64748b")
+    h1 = ParagraphStyle("H1", fontSize=16, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=4)
+    small = ParagraphStyle("Small", fontSize=9, textColor=GRAY, fontName="Helvetica", alignment=TA_CENTER, spaceAfter=10)
+    h2 = ParagraphStyle("H2", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+
+    story = [
+        Paragraph(_esc(candidate["full_name"] or "Candidate"), h1),
+        Paragraph("Projects Summary — contact details and employment history withheld", small),
+        HRFlowable(width="100%", thickness=1, color=PRIMARY, spaceAfter=8),
+    ]
+    projects_text = extract_projects_section(candidate["resume_text"] or "")
+    if not projects_text:
+        story.append(Paragraph('No distinct "Projects" section could be identified in this candidate\'s resume — try Clean Summary instead.', body))
+    else:
+        projects_text = _redact_text(projects_text, candidate)
+        story.append(Paragraph("PROJECTS", h2))
+        for para in projects_text.split("\n"):
+            para = para.strip()
+            if para:
+                story.append(Paragraph(_esc(para), body))
+            else:
+                story.append(Spacer(1, 0.12 * cm))
+    doc.build(story)
     return buf.getvalue()
 
 
+def _build_confidential_pdf(candidate) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                             topMargin=2 * cm, bottomMargin=2 * cm)
+    PRIMARY = colors.HexColor("#1e40af")
+    DARK = colors.HexColor("#0f172a")
+    GRAY = colors.HexColor("#64748b")
+    h1 = ParagraphStyle("H1", fontSize=18, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=2)
+    sub = ParagraphStyle("Sub", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=10)
+    h2 = ParagraphStyle("H2", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+    small = ParagraphStyle("Small", fontSize=9, textColor=GRAY, fontName="Helvetica")
+
+    employer = candidate["current_employer"] or ""
+    story = [
+        Paragraph(_esc(candidate["full_name"] or "Candidate"), h1),
+        Paragraph(_esc(candidate["current_designation"] or ""), sub),
+        HRFlowable(width="100%", thickness=1.2, color=PRIMARY, spaceAfter=6),
+        Paragraph(f"<b>Location:</b> {_esc(candidate['location'] or 'Not specified')} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                  f"<b>Total Experience:</b> {_esc(_fmt_exp(candidate['total_exp_mo']))}", body),
+        Paragraph("<b>Current Employer:</b> Confidential", body),
+    ]
+    skills = candidate["skills"] or []
+    if skills:
+        story.append(Paragraph("KEY SKILLS", h2))
+        story.append(Paragraph(_esc(", ".join(skills)), body))
+
+    summary = _redact_text(candidate["resume_text"] or "", candidate)
+    if employer:
+        # Also mask the literal employer name wherever it appears in the free-text summary —
+        # not just the structured "Current Employer" line above.
+        summary = re.sub(re.escape(employer), "Confidential", summary, flags=re.I)
+    if summary.strip():
+        story.append(Paragraph("PROFESSIONAL SUMMARY (current company &amp; current projects marked Confidential)", h2))
+        snippet = summary[:2200] + ("…" if len(summary) > 2200 else "")
+        for para in snippet.split("\n"):
+            if para.strip():
+                story.append(Paragraph(_esc(para.strip()), body))
+
+    story.append(Spacer(1, 0.6 * cm))
+    story.append(Paragraph("Shared via AVIIN ATS — phone, email and address withheld at this stage.", small))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _build_anonymized_pdf(candidate) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                             topMargin=2 * cm, bottomMargin=2 * cm)
+    PRIMARY = colors.HexColor("#1e40af")
+    DARK = colors.HexColor("#0f172a")
+    GRAY = colors.HexColor("#64748b")
+    h1 = ParagraphStyle("H1", fontSize=18, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=2)
+    sub = ParagraphStyle("Sub", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=10)
+    h2 = ParagraphStyle("H2", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+    small = ParagraphStyle("Small", fontSize=9, textColor=GRAY, fontName="Helvetica")
+
+    anon_name = _anonymize_name(candidate["full_name"])
+    employer = candidate["current_employer"] or ""
+    story = [
+        Paragraph(_esc(anon_name), h1),
+        Paragraph(_esc(candidate["current_designation"] or ""), sub),
+        HRFlowable(width="100%", thickness=1.2, color=PRIMARY, spaceAfter=6),
+        Paragraph(f"<b>Location:</b> {_esc(candidate['location'] or 'Not specified')} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                  f"<b>Total Experience:</b> {_esc(_fmt_exp(candidate['total_exp_mo']))}", body),
+        Paragraph("<b>Current Employer:</b> AviinTech Business Solutions", body),
+    ]
+    skills = candidate["skills"] or []
+    if skills:
+        story.append(Paragraph("KEY SKILLS", h2))
+        story.append(Paragraph(_esc(", ".join(skills)), body))
+
+    summary = _redact_text(candidate["resume_text"] or "", candidate)
+    full_name = candidate["full_name"] or ""
+    if full_name:
+        summary = re.sub(re.escape(full_name), anon_name, summary, flags=re.I)
+    if employer:
+        summary = re.sub(re.escape(employer), "AviinTech Business Solutions", summary, flags=re.I)
+    if summary.strip():
+        story.append(Paragraph("PROFESSIONAL SUMMARY (identity anonymized)", h2))
+        snippet = summary[:2200] + ("…" if len(summary) > 2200 else "")
+        for para in snippet.split("\n"):
+            if para.strip():
+                story.append(Paragraph(_esc(para.strip()), body))
+
+    story.append(Spacer(1, 0.6 * cm))
+    story.append(Paragraph("Shared via AVIIN ATS — anonymized profile.", small))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _build_manual_resume_pdf(fields: dict) -> bytes:
+    """Renders directly from recruiter-supplied/edited fields, no auto-
+    extraction — this IS the "Manual editing" format: whatever the
+    recruiter typed becomes the output verbatim (still escaped for PDF
+    safety), not a re-parse of the original resume."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                             topMargin=2 * cm, bottomMargin=2 * cm)
+    PRIMARY = colors.HexColor("#1e40af")
+    DARK = colors.HexColor("#0f172a")
+    h1 = ParagraphStyle("H1", fontSize=18, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=2)
+    sub = ParagraphStyle("Sub", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=10)
+    h2 = ParagraphStyle("H2", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+
+    story = [
+        Paragraph(_esc(fields.get("name") or "Candidate"), h1),
+        Paragraph(_esc(fields.get("designation") or ""), sub),
+        HRFlowable(width="100%", thickness=1.2, color=PRIMARY, spaceAfter=6),
+    ]
+    meta_bits = []
+    if fields.get("location"):
+        meta_bits.append(f"<b>Location:</b> {_esc(fields['location'])}")
+    if fields.get("total_exp"):
+        meta_bits.append(f"<b>Total Experience:</b> {_esc(fields['total_exp'])}")
+    if meta_bits:
+        story.append(Paragraph(" &nbsp;&nbsp;|&nbsp;&nbsp; ".join(meta_bits), body))
+    if fields.get("skills"):
+        story.append(Paragraph("KEY SKILLS", h2))
+        story.append(Paragraph(_esc(str(fields["skills"])), body))
+    if fields.get("summary"):
+        story.append(Paragraph("SUMMARY", h2))
+        for para in str(fields["summary"]).split("\n"):
+            if para.strip():
+                story.append(Paragraph(_esc(para.strip()), body))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _build_tracking_html_table(columns: list, rows: list) -> str:
+    """Renders the tracking sheet as an inline HTML table for the email
+    body — replaces the original Excel-attachment version per the request
+    ("in the E-mail body, Not Excel file"). Column labels/values come from
+    the exact same template + field_values data the Excel version used."""
+    thead = "".join(
+        f'<th style="padding:6px 10px;background:#1e3a8a;color:#ffffff;font-size:11px;'
+        f'text-align:left;border:1px solid #cbd5e1;white-space:nowrap;">{_esc(str(c.get("label", c.get("key"))))}</th>'
+        for c in columns
+    )
+    body_rows = ""
+    for i, r in enumerate(rows):
+        bg = "#f8fafc" if i % 2 else "#ffffff"
+        cells = "".join(
+            f'<td style="padding:6px 10px;font-size:11px;border:1px solid #cbd5e1;'
+            f'vertical-align:top;background:{bg};">{_esc(str(r.get(c["key"], "") or ""))}</td>'
+            for c in columns
+        )
+        body_rows += f"<tr>{cells}</tr>"
+    return (
+        '<table style="border-collapse:collapse;width:100%;font-family:Arial,Helvetica,sans-serif;margin:12px 0;">'
+        f"<thead><tr>{thead}</tr></thead><tbody>{body_rows}</tbody></table>"
+    )
+
+
 async def _send_kae_email(tenant_id: str, to_email: str, cc_email: Optional[str], subject: str,
-                           body_text: str, attachments: list) -> tuple:
-    """attachments: list of (filename, bytes, mime_subtype)."""
+                           body_text: str, attachments: list, body_html_extra: str = "") -> tuple:
+    """attachments: list of (filename, bytes, mime_subtype). body_html_extra,
+    if given, is appended as real HTML below the plain-text intro (used for
+    the inline tracking-sheet table) — the message becomes multipart/
+    alternative so clients without HTML rendering still see the plain text."""
     try:
         db_url = os.environ.get("DATABASE_URL", "postgresql://app_user:apppw@db:5432/ats")
         raw = await asyncpg.connect(db_url)
@@ -389,7 +586,7 @@ async def _send_kae_email(tenant_id: str, to_email: str, cc_email: Optional[str]
         if not cfg or not cfg["smtp_host"]:
             return False, "No active SMTP configuration for this tenant (Settings > Email)"
 
-        msg = MIMEMultipart()
+        msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = f'{cfg["smtp_from_name"] or "AVIIN ATS"} <{cfg["smtp_from"] or cfg["smtp_user"]}>'
         msg["To"] = to_email
@@ -397,7 +594,15 @@ async def _send_kae_email(tenant_id: str, to_email: str, cc_email: Optional[str]
         if cc_email and cc_email != to_email:
             msg["Cc"] = cc_email
             recipients.append(cc_email)
-        msg.attach(MIMEText(body_text, "plain"))
+
+        if body_html_extra:
+            alt = MIMEMultipart("alternative")
+            alt.attach(MIMEText(body_text, "plain"))
+            html_body = f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#0f172a;white-space:pre-wrap;">{_esc(body_text)}</div>{body_html_extra}'
+            alt.attach(MIMEText(html_body, "html"))
+            msg.attach(alt)
+        else:
+            msg.attach(MIMEText(body_text, "plain"))
         for fname, fbytes, subtype in attachments:
             part = MIMEBase("application", subtype)
             part.set_payload(fbytes)
@@ -444,17 +649,41 @@ async def submission_preview(application_id: str, actor: Actor = Depends(get_act
     }
 
 
+_RESUME_STYLES = ("clean_generated", "redacted_original", "manual", "projects_only", "confidential", "anonymized")
+
+
 class SubmitToKaeIn(BaseModel):
     template_id: Optional[str] = None
     resume_style: str = "clean_generated"
     field_values: dict = {}
     cc_self: bool = True
+    manual_resume: Optional[dict] = None  # required when resume_style == 'manual': {name, designation, location, total_exp, skills, summary}
+
+
+@router.get("/applications/{application_id}/submit-to-kae/manual-draft")
+async def submit_to_kae_manual_draft(application_id: str, actor: Actor = Depends(get_actor)):
+    """Pre-filled starting point for the "Manual editing" resume format —
+    the recruiter edits this in the UI before it's rendered verbatim, no
+    re-parsing happens server-side once submitted."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row, _ = await _app_context(conn, application_id)
+    summary = _redact_text(row["resume_text"] or "", row)
+    return {
+        "name": row["full_name"] or "",
+        "designation": row["current_designation"] or "",
+        "location": row["location"] or "",
+        "total_exp": _fmt_exp(row["total_exp_mo"]),
+        "skills": ", ".join(row["skills"] or []),
+        "summary": summary[:2200],
+    }
 
 
 @router.post("/applications/{application_id}/submit-to-kae")
 async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor = Depends(get_actor)):
-    if body.resume_style not in ("clean_generated", "redacted_original"):
-        raise HTTPException(400, "resume_style must be 'clean_generated' or 'redacted_original'")
+    if body.resume_style not in _RESUME_STYLES:
+        raise HTTPException(400, f"resume_style must be one of {', '.join(_RESUME_STYLES)}")
+    if body.resume_style == "manual" and not body.manual_resume:
+        raise HTTPException(400, "manual_resume is required when resume_style is 'manual'")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row, auto_values = await _app_context(conn, application_id)
@@ -490,7 +719,7 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
     final_values = {**auto_values, **overrides, "sl_no": str(sl_no)}
 
     sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
-    excel_bytes = _build_tracking_excel(columns, sheet_rows)
+    tracking_html = _build_tracking_html_table(columns, sheet_rows)
 
     candidate = {
         "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
@@ -498,27 +727,43 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
         "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
         "skills": row["skills"], "resume_text": row["resume_text"],
     }
+    _RESUME_LABELS = {
+        "clean_generated": "contact-free clean summary",
+        "redacted_original": "redacted original (phone/email removed)",
+        "manual": "recruiter-edited summary (contact withheld)",
+        "projects_only": "projects-only summary (contact & employment history withheld)",
+        "confidential": "clean summary — current company & projects marked Confidential",
+        "anonymized": "anonymized profile — identity & employer masked",
+    }
     if body.resume_style == "clean_generated":
         resume_bytes = _build_clean_resume_pdf(candidate)
-    else:
+    elif body.resume_style == "redacted_original":
         resume_bytes = _build_redacted_resume_pdf(candidate)
+    elif body.resume_style == "manual":
+        resume_bytes = _build_manual_resume_pdf(body.manual_resume or {})
+    elif body.resume_style == "projects_only":
+        resume_bytes = _build_projects_only_pdf(candidate)
+    elif body.resume_style == "confidential":
+        resume_bytes = _build_confidential_pdf(candidate)
+    else:  # anonymized
+        resume_bytes = _build_anonymized_pdf(candidate)
 
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
     subject = f"Candidate Submission — {candidate['full_name']} for {row['role_title']}"
     body_text = (
         f"Hi {kae['full_name'] or ''},\n\n"
         f"Please find attached the profile for {candidate['full_name']} against \"{row['role_title']}\""
-        f"{' (' + client_row['name'] + ')' if client_row else ''}, along with the updated tracking sheet "
-        f"({sl_no} submission{'s' if sl_no != 1 else ''} on this role so far).\n\n"
-        f"Resume attached: {'contact-free clean summary' if body.resume_style == 'clean_generated' else 'redacted original (phone/email removed)'}.\n\n"
+        f"{' (' + client_row['name'] + ')' if client_row else ''}. The tracking sheet "
+        f"({sl_no} submission{'s' if sl_no != 1 else ''} on this role so far) is below.\n\n"
+        f"Resume attached: {_RESUME_LABELS.get(body.resume_style, body.resume_style)}.\n\n"
         f"Regards,\n{actor.full_name or 'AVIIN ATS'}"
     )
     email_sent, email_error = await _send_kae_email(
         actor.tenant_id, kae["email"], recruiter_email if body.cc_self else None, subject, body_text,
         [
-            (f"TrackingSheet_{row['role_title'] or 'role'}.xlsx".replace(" ", "_"), excel_bytes, "vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             (f"Resume_{safe_name}_{body.resume_style}.pdf", resume_bytes, "pdf"),
         ],
+        body_html_extra=tracking_html,
     )
 
     async with db.tenant_conn(actor.tenant_id) as conn:

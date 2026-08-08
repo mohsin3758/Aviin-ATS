@@ -141,6 +141,146 @@ async def facebook_post(body: FacebookPostBody, actor: Actor = Depends(get_actor
     return {"posted": True, "post_url": post_url}
 
 
+# ─── Telegram channel: real automatic posting ─────────────────────────────────
+# Same "zero-approval, zero-cost" tier as the Facebook Page integration
+# above (sql/31_telegram_channel.sql) — a Telegram bot token has no
+# review process at all, and posting to a channel the bot administers is
+# a single Bot API call.
+class TelegramConnectBody(BaseModel):
+    bot_token: str
+    chat_id: str
+
+
+@router.post("/telegram/connect")
+async def telegram_connect(body: TelegramConnectBody, actor: Actor = Depends(get_actor)):
+    """Validates the bot token is real (via getMe) and that it can actually
+    post to the given chat_id (via a real sendMessage) before storing
+    anything — a bad token or a chat the bot isn't an admin of fails here,
+    not silently at post-time."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        me = await client.get(f"https://api.telegram.org/bot{body.bot_token}/getMe")
+    if me.status_code != 200 or not me.json().get("ok"):
+        raise HTTPException(400, "Telegram rejected this bot token")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        test = await client.post(
+            f"https://api.telegram.org/bot{body.bot_token}/sendMessage",
+            data={"chat_id": body.chat_id, "text": "✅ AVIIN ATS connected — job posts will appear here."})
+    if test.status_code != 200 or not test.json().get("ok"):
+        detail = test.json().get("description", "Telegram rejected this Channel/Chat ID — make sure the bot is added as an admin of the channel")
+        raise HTTPException(400, detail)
+    chat_info = test.json().get("result", {}).get("chat", {})
+    channel_name = chat_info.get("title") or chat_info.get("username") or body.chat_id
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await _set_encrypt_key(conn)
+        await conn.execute("""
+            INSERT INTO telegram_channel_connections
+              (tenant_id, chat_id, channel_name, bot_token_enc, connected_by, is_active)
+            VALUES ($1, $2, $3, pgp_sym_encrypt($4, current_setting('app.encrypt_key', true)), $5, TRUE)
+            ON CONFLICT (tenant_id) DO UPDATE SET
+              chat_id=EXCLUDED.chat_id, channel_name=EXCLUDED.channel_name,
+              bot_token_enc=EXCLUDED.bot_token_enc,
+              connected_by=EXCLUDED.connected_by, is_active=TRUE, updated_at=now()
+        """, actor.tenant_id, body.chat_id, channel_name, body.bot_token, actor.user_id)
+    return {"connected": True, "chat_id": body.chat_id, "channel_name": channel_name}
+
+
+@router.get("/telegram/status")
+async def telegram_status(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            SELECT chat_id, channel_name, is_active, updated_at
+            FROM telegram_channel_connections WHERE tenant_id=$1
+        """, actor.tenant_id)
+    if not row or not row["is_active"]:
+        return {"connected": False}
+    return {"connected": True, "chat_id": row["chat_id"], "channel_name": row["channel_name"],
+            "connected_at": row["updated_at"].isoformat()}
+
+
+@router.delete("/telegram/disconnect")
+async def telegram_disconnect(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute(
+            "UPDATE telegram_channel_connections SET is_active=FALSE, updated_at=now() WHERE tenant_id=$1",
+            actor.tenant_id)
+    return {"disconnected": True}
+
+
+class TelegramPostBody(BaseModel):
+    req_id: str
+
+
+@router.post("/telegram/post")
+async def telegram_post(body: TelegramPostBody, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await _set_encrypt_key(conn)
+        conn_row = await conn.fetchrow("""
+            SELECT chat_id, pgp_sym_decrypt(bot_token_enc, current_setting('app.encrypt_key', true)) AS token
+            FROM telegram_channel_connections WHERE tenant_id=$1 AND is_active=TRUE
+        """, actor.tenant_id)
+        if not conn_row:
+            raise HTTPException(400, "No Telegram channel connected - go to Settings to connect one first")
+
+        req = await conn.fetchrow(
+            "SELECT * FROM requisitions WHERE id=$1 AND tenant_id=$2", body.req_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+
+    title = req["title"]
+    loc = req["location"] or "Bengaluru"
+    skills = list(req["skills_required"] or [])
+    desc = (req["description"] or f"{title} opportunity")[:400]
+    job_url = f"{BASE_URL}/careers/{body.req_id}"
+    # Telegram's Markdown parse mode needs its own reserved characters
+    # escaped, distinct from HTML/reportlab escaping used elsewhere in
+    # this codebase — a literal '.', '-', '(' etc. in a job title breaks
+    # the whole message silently (Telegram just 400s) if left unescaped.
+    def _md_escape(s: str) -> str:
+        s = s.replace("\\", "\\\\")  # must run first, or later escapes get double-escaped
+        for ch in r"_*[]()~`>#+-=|{}.!":
+            s = s.replace(ch, f"\\{ch}")
+        return s
+    message = (
+        f"*{_md_escape(title)}*\n\n"
+        f"📍 {_md_escape(loc)} · {_md_escape(req['employment_type'] or 'Full-time')}\n"
+        f"{_md_escape(desc)}\n\n"
+        f"*Skills:* {_md_escape(', '.join(skills[:8]))}\n\n"
+        f"[Apply now]({job_url})"
+    )
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"https://api.telegram.org/bot{conn_row['token']}/sendMessage",
+            data={"chat_id": conn_row["chat_id"], "text": message, "parse_mode": "MarkdownV2",
+                  "disable_web_page_preview": "false"})
+    if r.status_code != 200 or not r.json().get("ok"):
+        detail = r.json().get("description", "Telegram post failed")
+        raise HTTPException(502, f"Telegram rejected the post: {detail}")
+
+    msg_id = r.json().get("result", {}).get("message_id", "")
+    raw_chat_id = str(conn_row["chat_id"])
+    if raw_chat_id.startswith("-100"):
+        # Private channel numeric ID - Telegram's own deep-link format
+        # strips exactly this literal 4-char prefix (str.lstrip() strips
+        # any of a *set* of characters, not a literal prefix, and would
+        # mangle a ...100... ID that happens to contain a "1"/"0" run).
+        post_url = f"https://t.me/c/{raw_chat_id[4:]}/{msg_id}"
+    elif raw_chat_id.startswith("@"):
+        post_url = f"https://t.me/{raw_chat_id[1:]}/{msg_id}"
+    else:
+        post_url = f"https://t.me/{raw_chat_id}/{msg_id}"
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute("""
+            INSERT INTO job_shares (tenant_id,requisition_id,platform,posted_by,share_url)
+            VALUES ($1,$2,'telegram',$3,$4) ON CONFLICT DO NOTHING
+        """, actor.tenant_id, body.req_id, actor.user_id, post_url)
+
+    return {"posted": True, "post_url": post_url}
+
+
 @router.get("/feed-info")
 async def feed_info(actor: Actor = Depends(get_actor)):
     """The actual free, automatic distribution mechanism: a standing XML
@@ -337,6 +477,8 @@ async def dashboard(actor: Actor = Depends(get_actor)):
         """, actor.tenant_id)
         fb_connected = await conn.fetchval(
             "SELECT is_active FROM facebook_page_connections WHERE tenant_id=$1", actor.tenant_id)
+        tg_connected = await conn.fetchval(
+            "SELECT is_active FROM telegram_channel_connections WHERE tenant_id=$1", actor.tenant_id)
 
     share_by_platform = {r["platform"]: r for r in share_rows}
     issues_by_portal = {r["portal_key"]: r["open_issues"] for r in issue_rows}
@@ -350,6 +492,10 @@ async def dashboard(actor: Actor = Depends(get_actor)):
         # through", so the dashboard should say so.
         for p in portals:
             if p["key"] == "facebook":
+                p["integration_type"] = "auto_api"
+    if tg_connected:
+        for p in portals:
+            if p["key"] == "telegram":
                 p["integration_type"] = "auto_api"
     portal_status = []
     integration_counts: dict[str, int] = {}

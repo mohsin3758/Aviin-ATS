@@ -74,6 +74,26 @@ async function downloadResume(fileId: string, fileName: string) {
   } catch (e) { alert('Download error: ' + String(e)); }
 }
 
+// Standardized one-pager rendered from parsed data — works regardless of
+// the original resume's format (Canva export, scanned image via OCR,
+// plain text), since it's built from structured fields, not the file.
+async function downloadStandardResume(candidateId: string, fullName: string) {
+  const token = localStorage.getItem('airecruit_token');
+  const apiBase = process.env.NEXT_PUBLIC_API_URL ?? '/api';
+  try {
+    const resp = await fetch(`${apiBase}/candidates/${candidateId}/standard-resume`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `Standard_Resume_${(fullName || 'candidate').replace(/[^A-Za-z0-9_-]+/g, '_')}.pdf`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
+}
+
 // ── Edit Modal ────────────────────────────────────────────────────────────────
 function EditModal({ cand, onClose, onSaved }: { cand: any; onClose: ()=>void; onSaved: (updated: any)=>void }) {
   const [form, setForm] = useState({
@@ -1408,6 +1428,12 @@ export default function CandidateProfilePage() {
                   <Download size={13}/> Download Resume
                 </button>
               )}
+              <button onClick={() => downloadStandardResume(candidate.id, candidate.full_name)}
+                title="A clean, standardized one-pager rendered from parsed data — useful regardless of what format the original resume was in"
+                style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
+                  border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#0f766e',whiteSpace:'nowrap'}}>
+                <Download size={13}/> Standard Resume (PDF)
+              </button>
             </div>
           </div>
 
