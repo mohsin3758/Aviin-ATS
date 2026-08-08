@@ -1,6 +1,7 @@
 """Free job-board distribution: LinkedIn/Naukri/Indeed links plus the full
 70+ portal directory (services/job_portals.py) for one-click sharing."""
 import os
+from typing import Optional
 from urllib.parse import urlencode, quote
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -93,24 +94,21 @@ class FacebookPostBody(BaseModel):
     req_id: str
 
 
-@router.post("/facebook/post")
-async def facebook_post(body: FacebookPostBody, actor: Actor = Depends(get_actor)):
-    """The real thing: POST /{page-id}/feed with a fully custom message,
-    genuinely automatic, no dialog, no paste. Requires facebook/connect
-    to have been called first (own-Page Standard Access token - see
-    sql/19_facebook_page_connection.sql for why no App Review is needed
-    for this specific case)."""
-    async with db.tenant_conn(actor.tenant_id) as conn:
+async def _post_to_facebook(tenant_id: str, req_id: str, posted_by: Optional[str]) -> dict:
+    """Plain importable core of facebook_post() below, for internal callers
+    (auto-distribute-on-open) that already have a tenant_id and don't have
+    an HTTP Actor. Raises HTTPException on failure same as the route."""
+    async with db.tenant_conn(tenant_id) as conn:
         await _set_encrypt_key(conn)
         conn_row = await conn.fetchrow("""
             SELECT page_id, pgp_sym_decrypt(page_access_token_enc, current_setting('app.encrypt_key', true)) AS token
             FROM facebook_page_connections WHERE tenant_id=$1 AND is_active=TRUE
-        """, actor.tenant_id)
+        """, tenant_id)
         if not conn_row:
             raise HTTPException(400, "No Facebook Page connected - go to Settings to connect one first")
 
         req = await conn.fetchrow(
-            "SELECT * FROM requisitions WHERE id=$1 AND tenant_id=$2", body.req_id, actor.tenant_id)
+            "SELECT * FROM requisitions WHERE id=$1 AND tenant_id=$2", req_id, tenant_id)
         if not req:
             raise HTTPException(404, "Requisition not found")
 
@@ -118,7 +116,7 @@ async def facebook_post(body: FacebookPostBody, actor: Actor = Depends(get_actor
     loc = req["location"] or "Bengaluru"
     skills = list(req["skills_required"] or [])
     desc = (req["description"] or f"{title} opportunity")[:400]
-    job_url = f"{BASE_URL}/careers/{body.req_id}"
+    job_url = f"{BASE_URL}/careers/{req_id}"
     message = f"We're hiring: {title}\n\nLocation: {loc} | {req['employment_type'] or 'Full-time'}\n{desc}\n\nSkills: {', '.join(skills[:8])}\n\nApply now: {job_url}"
 
     async with httpx.AsyncClient(timeout=20) as client:
@@ -132,13 +130,23 @@ async def facebook_post(body: FacebookPostBody, actor: Actor = Depends(get_actor
     post_id = r.json().get("id", "")  # format: {page_id}_{post_id}
     post_url = f"https://www.facebook.com/{post_id}" if post_id else f"https://www.facebook.com/{conn_row['page_id']}"
 
-    async with db.tenant_conn(actor.tenant_id) as conn:
+    async with db.tenant_conn(tenant_id) as conn:
         await conn.execute("""
             INSERT INTO job_shares (tenant_id,requisition_id,platform,posted_by,share_url)
             VALUES ($1,$2,'facebook',$3,$4) ON CONFLICT DO NOTHING
-        """, actor.tenant_id, body.req_id, actor.user_id, post_url)
+        """, tenant_id, req_id, posted_by, post_url)
 
     return {"posted": True, "post_url": post_url}
+
+
+@router.post("/facebook/post")
+async def facebook_post(body: FacebookPostBody, actor: Actor = Depends(get_actor)):
+    """The real thing: POST /{page-id}/feed with a fully custom message,
+    genuinely automatic, no dialog, no paste. Requires facebook/connect
+    to have been called first (own-Page Standard Access token - see
+    sql/19_facebook_page_connection.sql for why no App Review is needed
+    for this specific case)."""
+    return await _post_to_facebook(actor.tenant_id, body.req_id, actor.user_id)
 
 
 # ─── Telegram channel: real automatic posting ─────────────────────────────────
@@ -212,19 +220,20 @@ class TelegramPostBody(BaseModel):
     req_id: str
 
 
-@router.post("/telegram/post")
-async def telegram_post(body: TelegramPostBody, actor: Actor = Depends(get_actor)):
-    async with db.tenant_conn(actor.tenant_id) as conn:
+async def _post_to_telegram(tenant_id: str, req_id: str, posted_by: Optional[str]) -> dict:
+    """Plain importable core of telegram_post() below - same reasoning as
+    _post_to_facebook above."""
+    async with db.tenant_conn(tenant_id) as conn:
         await _set_encrypt_key(conn)
         conn_row = await conn.fetchrow("""
             SELECT chat_id, pgp_sym_decrypt(bot_token_enc, current_setting('app.encrypt_key', true)) AS token
             FROM telegram_channel_connections WHERE tenant_id=$1 AND is_active=TRUE
-        """, actor.tenant_id)
+        """, tenant_id)
         if not conn_row:
             raise HTTPException(400, "No Telegram channel connected - go to Settings to connect one first")
 
         req = await conn.fetchrow(
-            "SELECT * FROM requisitions WHERE id=$1 AND tenant_id=$2", body.req_id, actor.tenant_id)
+            "SELECT * FROM requisitions WHERE id=$1 AND tenant_id=$2", req_id, tenant_id)
         if not req:
             raise HTTPException(404, "Requisition not found")
 
@@ -232,7 +241,7 @@ async def telegram_post(body: TelegramPostBody, actor: Actor = Depends(get_actor
     loc = req["location"] or "Bengaluru"
     skills = list(req["skills_required"] or [])
     desc = (req["description"] or f"{title} opportunity")[:400]
-    job_url = f"{BASE_URL}/careers/{body.req_id}"
+    job_url = f"{BASE_URL}/careers/{req_id}"
     # Telegram's Markdown parse mode needs its own reserved characters
     # escaped, distinct from HTML/reportlab escaping used elsewhere in
     # this codebase — a literal '.', '-', '(' etc. in a job title breaks
@@ -272,13 +281,52 @@ async def telegram_post(body: TelegramPostBody, actor: Actor = Depends(get_actor
     else:
         post_url = f"https://t.me/{raw_chat_id}/{msg_id}"
 
-    async with db.tenant_conn(actor.tenant_id) as conn:
+    async with db.tenant_conn(tenant_id) as conn:
         await conn.execute("""
             INSERT INTO job_shares (tenant_id,requisition_id,platform,posted_by,share_url)
             VALUES ($1,$2,'telegram',$3,$4) ON CONFLICT DO NOTHING
-        """, actor.tenant_id, body.req_id, actor.user_id, post_url)
+        """, tenant_id, req_id, posted_by, post_url)
 
     return {"posted": True, "post_url": post_url}
+
+
+@router.post("/telegram/post")
+async def telegram_post(body: TelegramPostBody, actor: Actor = Depends(get_actor)):
+    return await _post_to_telegram(actor.tenant_id, body.req_id, actor.user_id)
+
+
+# ─── Auto-distribute when a requisition goes live ──────────────────────────
+# The only two channels with a real posting API (Facebook, Telegram) - every
+# other free board genuinely has no API to auto-post to (confirmed via the
+# 2026-08-08 research, see CLAUDE.md), so "auto-publish everywhere" isn't
+# literally possible; this is "auto-publish to the two channels that can be."
+# Called from requisitions.py at the two real "a job just became open"
+# moments: creation (when no approval gate applies) and the final approval
+# step clearing. Never raises - a failed auto-post must never break the
+# requisition create/approve flow it's attached to; each platform is
+# independent so one failing doesn't block the other.
+async def auto_distribute_on_open(tenant_id: str, req_id: str, posted_by: Optional[str]) -> dict:
+    results: dict = {}
+    async with db.tenant_conn(tenant_id) as conn:
+        already = {r["platform"] for r in await conn.fetch(
+            "SELECT DISTINCT platform FROM job_shares WHERE tenant_id=$1 AND requisition_id=$2 AND platform IN ('facebook','telegram')",
+            tenant_id, req_id)}
+        fb_connected = await conn.fetchval(
+            "SELECT is_active FROM facebook_page_connections WHERE tenant_id=$1", tenant_id)
+        tg_connected = await conn.fetchval(
+            "SELECT is_active FROM telegram_channel_connections WHERE tenant_id=$1", tenant_id)
+
+    if fb_connected and "facebook" not in already:
+        try:
+            results["facebook"] = await _post_to_facebook(tenant_id, req_id, posted_by)
+        except Exception as e:
+            results["facebook"] = {"posted": False, "error": str(e)}
+    if tg_connected and "telegram" not in already:
+        try:
+            results["telegram"] = await _post_to_telegram(tenant_id, req_id, posted_by)
+        except Exception as e:
+            results["telegram"] = {"posted": False, "error": str(e)}
+    return results
 
 
 @router.get("/feed-info")

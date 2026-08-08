@@ -442,7 +442,10 @@ function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgSta
         <div>
           <div className="text-sm font-semibold text-gray-900">Connect your accounts once</div>
           <div className="text-xs text-gray-500 mt-0.5">
-            These connections apply to every future job — set them up here, then use the Distribute tab to actually post.
+            Once connected, every new requisition posts here <strong>automatically</strong> the moment it goes open — right
+            when it's created (or, if this tenant uses the approval chain, the moment it clears final approval). No need to
+            visit the Distribute tab for these two — it's still there if you want to re-post, check status, or reach every
+            other free board (those don't have an API to auto-post to, so they stay manual for everyone, not just here).
           </div>
         </div>
       </div>

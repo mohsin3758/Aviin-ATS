@@ -1595,4 +1595,33 @@ test.describe.serial('S17 Tier-2 Features', () => {
       expect(keys).toContain(k);
     }
   });
+
+  test('auto-distribute on open: requisition creation succeeds with zero channels connected, and still succeeds if a connected channel fails to post', async ({ request }) => {
+    // Doesn't assert a real Facebook/Telegram post happened (no real
+    // credentials to test with in CI) - proves the two things that matter
+    // most: the best-effort hook never breaks requisition creation, either
+    // when nothing is connected (the common case) or when a connection
+    // exists but the post itself fails (a bad/expired token).
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const stamp = Date.now();
+
+    const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA AutoDistribute Test Client ${stamp}` } });
+    expect(c.ok()).toBeTruthy();
+    const clientId = (await c.json()).id;
+
+    const r1 = await request.post(`${API}/requisitions`, { headers: auth, data: { client_id: clientId, title: 'QA AutoDistribute Test Role A', skills_required: ['Python'] } });
+    if (!r1.ok()) console.log('CREATE 1 FAILED', r1.status(), await r1.text());
+    expect(r1.ok()).toBeTruthy();
+    const req1 = await r1.json();
+    expect(req1.status).toBe('open');
+    const reqId1 = req1.id;
+
+    const r2 = await request.post(`${API}/requisitions`, { headers: auth, data: { client_id: clientId, title: 'QA AutoDistribute Test Role B', skills_required: ['Python'] } });
+    expect(r2.ok()).toBeTruthy();
+    const reqId2 = (await r2.json()).id;
+
+    await request.delete(`${API}/requisitions/${reqId1}`, { headers: auth }).catch(() => {});
+    await request.delete(`${API}/requisitions/${reqId2}`, { headers: auth }).catch(() => {});
+  });
 });

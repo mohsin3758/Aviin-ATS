@@ -2046,3 +2046,64 @@ new board keys are present. Full suite re-run clean: only the same 2
 already-documented pre-existing S16 flaky tests (tail-end request-volume
 flakiness under back-to-back full runs, unrelated to this work) - all
 job-sharing-specific tests passed clean in isolation.
+
+## Auto-publish to Facebook/Telegram when a requisition goes open, 2026-08-08
+Same day, direct follow-up. User asked whether saving a new job auto-
+publishes it everywhere. Honest answer given first, then built what's
+real: no literal "publish everywhere" is possible (confirmed by the same
+day's research - most free boards have no posting API at all), but
+Facebook and Telegram both do have one, and weren't wired to fire
+automatically - every post through them required a manual click on
+`/job-sharing` even though the underlying API calls (`_post_to_facebook`/
+`_post_to_telegram`) were already real and working. User picked: fire the
+moment a requisition's status genuinely becomes `open`, respecting the
+approval chain if one applies to that requisition.
+
+- Extracted `_post_to_facebook()`/`_post_to_telegram()` in `job_sharing.py`
+  as plain importable functions (same pattern as `notify_event()` from
+  earlier the same day) - the existing `POST /facebook/post` and
+  `POST /telegram/post` routes now just call them, no behavior change for
+  the existing manual-click path.
+- New `auto_distribute_on_open(tenant_id, req_id, posted_by)` - checks
+  both connections, skips any platform already posted for this
+  requisition (a `job_shares` lookup, same dedup the manual "already
+  posted" checkmarks already rely on), posts to whichever are both
+  connected and not yet posted, and **never raises** - each platform
+  independent, a Facebook or Telegram failure must never break whatever
+  requisition-workflow action it's attached to.
+- Wired into the three real "just became open" moments in
+  `requisitions.py`: **requisition creation** (when `approval_status`
+  is already `'approved'` - true for admin/manager creators or anyone
+  with no manager chain, since `requisitions.status` defaults to `'open'`
+  for every requisition per the original schema, no separate "draft"
+  state exists), **the final approval-chain step clearing** (`approval_
+  status` transitioning to `'approved'` - the moment an approval-gated
+  requisition actually goes live), and **explicitly reopening** a
+  filled/on_hold/closed role via `PATCH /requisitions/{id}` with
+  `status: 'open'` (gated on `approval_status='approved'` too, so a
+  stray PATCH can't publish something still pending approval). All three
+  call the same function; the `job_shares` dedup check makes it safe to
+  call on a harmless no-op PATCH too.
+- Added a plain-language explanation to the `/job-sharing` Integrations
+  tab (previously silent about this - a real UX gap, since the feature
+  is otherwise invisible unless you already know to look for it).
+- Verified for real, not just code review: created a live throwaway
+  requisition with **zero** channels connected (this tenant's actual
+  current state) and confirmed creation succeeds cleanly with no error -
+  the common case in production right now, genuinely exercised, not
+  assumed. Then inserted a **connected-but-invalid** Telegram token
+  directly (a real row in `telegram_channel_connections`, correctly
+  pgp-encrypted) and created a second requisition - confirmed creation
+  *still* succeeded (200 OK) and, checking `job_shares` directly, that no
+  row was written for the failed post - proving the best-effort isolation
+  genuinely holds, not just that the try/except compiles. No real
+  Facebook/Telegram credentials exist for this tenant yet to prove an
+  actual successful auto-post landing on a real Page/channel - flagged
+  honestly rather than glossed over; the moment either gets connected for
+  real, the very next requisition created will be the first real proof.
+  All throwaway data (2 requisitions, 1 client, 1 fake Telegram
+  connection row) cleaned up after, confirmed zero residue. New
+  permanent regression test added to `S17` covering the zero-connections
+  case (the real current state); the invalid-token case was verified
+  manually since it needs direct pgcrypto-encrypted SQL access Playwright
+  doesn't have a clean path to.

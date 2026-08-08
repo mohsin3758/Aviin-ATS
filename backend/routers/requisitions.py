@@ -9,6 +9,7 @@ import db
 import events
 from deps import Actor, get_actor
 from schemas import RequisitionCreate, RequisitionUpdate
+from routers.job_sharing import auto_distribute_on_open
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 
@@ -155,6 +156,21 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(get
             f"requisition.created:{row['id']}",
         )
 
+    # Auto-publish to Facebook/Telegram (the only two free boards with a
+    # real posting API - see CLAUDE.md's 2026-08-08 job-board research) the
+    # moment a requisition is genuinely live: status defaults to 'open' on
+    # every requisition (sql/01_phase1_schema.sql), so a requisition that
+    # DIDN'T need approval above is open right now. One that did need
+    # approval fires later, from the approval-step endpoint below instead -
+    # never here, or it'd publish a not-yet-approved role. Best-effort:
+    # never raises, so a Facebook/Telegram hiccup can't break requisition
+    # creation itself.
+    if result.get("approval_status") == "approved":
+        try:
+            await auto_distribute_on_open(actor.tenant_id, str(row["id"]), actor.user_id)
+        except Exception:
+            pass
+
     return result
 
 
@@ -188,7 +204,20 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
         row = await conn.fetchrow(sql, *params)
     if row is None:
         raise HTTPException(status_code=404, detail="Requisition not found")
-    return dict(row)
+    result = dict(row)
+
+    # Third "just went open" moment: explicitly reopening a filled/on_hold/
+    # closed role. auto_distribute_on_open's own job_shares check makes this
+    # safe to call even on a no-op "set status to open when it's already
+    # open" PATCH - it just won't re-post. Still gated on approval_status so
+    # a role stuck pending approval can't get published by a stray PATCH.
+    if updates.get("status") == "open" and result.get("approval_status") == "approved":
+        try:
+            await auto_distribute_on_open(actor.tenant_id, requisition_id, actor.user_id)
+        except Exception:
+            pass
+
+    return result
 
 
 @router.delete("/{requisition_id}")
@@ -342,6 +371,7 @@ class ApprovalAction(BaseModel):
 
 
 async def _act_on_step(requisition_id: str, step_id: str, body: ApprovalAction, actor: Actor, approve: bool):
+    fully_approved = False
     async with db.tenant_conn(actor.tenant_id) as conn:
         step = await conn.fetchrow(
             "SELECT * FROM requisition_approval_steps WHERE id=$1 AND tenant_id=$2 AND requisition_id=$3",
@@ -383,6 +413,7 @@ async def _act_on_step(requisition_id: str, step_id: str, body: ApprovalAction, 
                     conn, actor.tenant_id, "requisition.approved",
                     {"requisition_id": requisition_id}, f"requisition.approved:{requisition_id}",
                 )
+                fully_approved = True
         else:
             await conn.execute(
                 "UPDATE requisition_approval_steps SET status='rejected', comment=$1, acted_at=now() WHERE id=$2",
@@ -398,6 +429,17 @@ async def _act_on_step(requisition_id: str, step_id: str, body: ApprovalAction, 
                 conn, actor.tenant_id, "requisition.rejected",
                 {"requisition_id": requisition_id, "reason": body.comment}, f"requisition.rejected:{requisition_id}",
             )
+
+    # The role only became genuinely live just now (status has been 'open'
+    # since creation, but approval_status was gating it) - this is the other
+    # real "just went open" moment, matching the same-shaped hook at
+    # creation time above. Best-effort, same reasoning.
+    if fully_approved:
+        try:
+            await auto_distribute_on_open(actor.tenant_id, requisition_id, actor.user_id)
+        except Exception:
+            pass
+
     return {"approved": approve}
 
 
