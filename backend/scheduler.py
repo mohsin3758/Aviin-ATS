@@ -269,8 +269,28 @@ async def run_pipeline_auto_move():
                         "SELECT id, name, stage_from, stage_to, conditions FROM stage_rules WHERE enabled=TRUE AND tenant_id=$1",
                         t["tenant_id"]
                     )
+                    if not rules:
+                        continue
                     import json as _json
+                    # pipeline_stage_config has FORCE ROW LEVEL SECURITY (the
+                    # outer system_conn's app.tenant_id='' would crash the
+                    # ::uuid cast in its policy, same class of bug found and
+                    # fixed in send_weekly_kpi_summary — needs a real per-
+                    # tenant connection). Stages are deletable (Settings >
+                    # Pipeline Stages); a rule pointing at a since-deleted
+                    # stage_to must not write it, or the candidate would
+                    # silently vanish from every Kanban board.
+                    async with db.tenant_conn(tid) as _sconn:
+                        configured = {r["stage_key"] for r in await _sconn.fetch(
+                            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1", tid)}
+                    valid_stages = configured if configured else {
+                        "sourced","contacted","interested","nda","screened","submitted",
+                        "l1_interview","l2_interview","offer","offer_accepted","placed","rejected","hold",
+                    }
                     for rule in rules:
+                        if rule["stage_to"] not in valid_stages:
+                            logger.warning(f"Auto-move rule '{rule['name']}' targets deleted stage '{rule['stage_to']}' for tenant {tid} — skipped")
+                            continue
                         conds = rule["conditions"] if isinstance(rule["conditions"], list) else _json.loads(rule["conditions"] or "[]")
                         apps = await conn.fetch(
                             "SELECT a.id, a.stage, a.candidate_id, a.fit_score, c.total_exp_mo, c.ai_match_score, c.expected_ctc, c.notice_period_days, c.full_name FROM applications a JOIN candidates c ON c.id=a.candidate_id WHERE a.stage=$1 AND a.tenant_id=$2",

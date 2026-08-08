@@ -32,6 +32,7 @@ from pydantic import BaseModel
 
 import db
 import events
+from routers.pipeline_stages import is_valid_stage
 from deps import Actor, get_actor
 
 router = APIRouter(prefix="/applications", tags=["nda"])
@@ -500,15 +501,21 @@ async def _on_nda_signed(tenant_id: str, application_id: str):
         if old is None or old["stage"] == "screened":
             return
 
-        row = await conn.fetchrow(
-            "UPDATE applications SET stage='screened', updated_at=now() WHERE id=$1 RETURNING updated_at",
-            application_id,
-        )
-        await events.write_outbox(
-            conn, tenant_id, "application.stage_changed",
-            {"application_id": application_id, "from": old["stage"], "to": "screened", "reason": "nda_signed"},
-            f"application.stage_changed:{application_id}:{row['updated_at'].isoformat()}",
-        )
+        # 'screened' is a deletable stage (Settings > Pipeline Stages) — if
+        # this tenant removed it, still notify below but don't write a
+        # candidate into a stage with no display config (they'd silently
+        # vanish from every Kanban board instead of just being hidden).
+        stage_bumped = await is_valid_stage(conn, tenant_id, "screened")
+        if stage_bumped:
+            row = await conn.fetchrow(
+                "UPDATE applications SET stage='screened', updated_at=now() WHERE id=$1 RETURNING updated_at",
+                application_id,
+            )
+            await events.write_outbox(
+                conn, tenant_id, "application.stage_changed",
+                {"application_id": application_id, "from": old["stage"], "to": "screened", "reason": "nda_signed"},
+                f"application.stage_changed:{application_id}:{row['updated_at'].isoformat()}",
+            )
 
         req = await conn.fetchrow("SELECT client_id, title FROM requisitions WHERE id=$1", old["requisition_id"])
         cand = await conn.fetchrow(
@@ -537,8 +544,9 @@ async def _on_nda_signed(tenant_id: str, application_id: str):
 
         title = f"NDA signed - {cand_name} ready for internal screening"
         body_txt = (
-            f"{cand_name} has signed their NDA for {job_title} and moved to Screened. "
-            f"Please schedule an internal screening video call before submitting to the client."
+            f"{cand_name} has signed their NDA for {job_title}"
+            + (" and moved to Screened. " if stage_bumped else ". ")
+            + "Please schedule an internal screening video call before submitting to the client."
         )
         for uid in recipient_ids:
             await conn.execute(

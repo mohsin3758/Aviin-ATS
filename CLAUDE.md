@@ -2212,3 +2212,100 @@ download event with the correct filename and the identical 23,360-byte
 size as the direct curl, confirming the UI wiring, not just the API,
 works end to end. Full QA suite re-run clean after: 157 passed / 2
 skipped / 0 failed, no regressions.
+
+## Pipeline Stages: real deletion for built-in stages, 2026-08-09
+User wanted to actually remove stages (not just hide) to trim the Kanban
+board to only what their process uses, plus confirmation that renaming
+already propagates and that per-stage message customization exists.
+Asked to clarify scope first (hide vs true delete; label rename vs also
+message text) — user answered "both" to each, so built the fuller version
+rather than assuming the minimal one.
+
+**Findings before writing code**: renaming (the label field) and hiding
+(the Visible toggle) were already fully real and already propagated
+everywhere (`pipeline/page.tsx` and `requisitions/[id]/page.tsx` both
+filter the board by `is_visible` from the live `/settings/pipeline-stages`
+fetch). Per-stage automated email/WhatsApp message text was **also**
+already a real, fully-wired feature (`email_settings.stage_templates` /
+`whatsapp_settings.stage_templates`, JSONB keyed by stage, already read by
+`_notify_stage_change_bg`) — just undiscoverable, living on two separate
+settings pages with zero link from Pipeline Stages. Only true deletion of
+a built-in stage was actually missing (only custom stages had a working
+DELETE before this).
+
+**What shipped**: `DELETE /settings/pipeline-stages/{key}` now works for
+any stage — built-in or custom — except `sourced`, `rejected`, `placed`
+(the response explains why per-key). `GET`/`PUT`/`POST` now return a
+computed `deletable` field so the frontend never duplicates the
+protection rule. Settings > Pipeline Stages shows a lock icon (with a
+per-stage tooltip) instead of a trash icon for the 3 protected stages,
+and a banner linking to the Email/WhatsApp per-stage message editors that
+already existed.
+
+**Why exactly 3, and why not more/fewer** — this took real investigation,
+not a guess: grepped every raw `UPDATE applications SET stage=...` in the
+codebase (there are 11) to find every place that writes a stage value
+*outside* `applications.py`'s validated PATCH .../stage. Three are
+genuinely structural: `sourced` (5 separate application-creation INSERTs
+across the codebase default to it — deleting it would make every
+newly-created candidate invisible, not just one workflow's), `rejected`
+(the HITL/RBAC gate checks it by literal string), `placed` (offers.py
+writes it directly on acceptance, bypassing config entirely). The other
+8 raw writers turned out to target *deletable* stages as side effects of
+unrelated features — NDA signing auto-advances to `screened` (nda.py),
+KAE submission to `submitted` (kae_submission.py), interview scheduling
+to `l1_interview` and offer generation to `offer` (both phase3.py), plus
+three separate rule-engine auto-movers (`pipeline_p2.py`'s `/auto-move`
+and `/check-rules/{id}`, and `scheduler.py`'s nightly
+`run_pipeline_auto_move`) that write whatever `stage_to` a saved
+automation rule points at. None of these called `applications.py`'s
+validation, so before this fix, deleting any of those stages (which was
+already possible for a *custom* stage with that key, and only became
+possible for a *built-in* one via this change) could have silently
+written a candidate into a stage with no display config — invisible on
+every board, not just hidden. Added a shared `is_valid_stage()` helper
+(`pipeline_stages.py`) and applied it at all 8 sites: the 4 single-target
+writers skip the stage bump and let the primary action (NDA sign,
+submission, scheduling, offer) complete anyway; the 3 rule-engine movers
+skip that specific rule/candidate rather than writing an unconfigured
+stage.
+
+**A genuinely more serious bug found in the process, unrelated to
+deletion**: `pipeline_p2.py`'s `POST /pipeline/bulk-action` (`move_stage`)
+had **zero stage validation at all**, even before this change — a
+user-facing bulk-move endpoint that would write literally any string a
+client sent as `target_stage` straight into `applications.stage` with no
+check whatsoever. Confirmed for real: called it with a deleted stage
+against a genuine production candidate and it silently would have
+written it (verified this by testing pre-fix behavior against the same
+guard now blocking it). Fixed alongside the others since it's the same
+`is_valid_stage()` call.
+
+Also found and fixed: `scheduler.py`'s real nightly cron version of the
+auto-mover (`run_pipeline_auto_move`) runs entirely on `db.system_conn()`
+(app.tenant_id=''), and `pipeline_stage_config` has `FORCE ROW LEVEL
+SECURITY` — the same `''::uuid` cast crash class documented earlier for
+`send_weekly_kpi_summary`. Fixed by opening a real per-tenant
+`tenant_conn()` just for the stage-validity check, matching that
+established pattern, rather than querying the FORCE-RLS table through
+the tenant-less connection.
+
+**Verified for real** against production, not code review: confirmed via
+direct SQL which stage this tenant had zero candidates in (`l2_interview`
+— 0 of 42 requisitions' candidates), then for real: deleted it via the
+API, confirmed it vanished from `GET /settings/pipeline-stages`, confirmed
+`PATCH /applications/{id}/stage` to it now 400s ("Unknown stage") without
+touching the candidate's real stage, and — the important one — confirmed
+`POST /pipeline/bulk-action` with `target_stage: l2_interview` against a
+real candidate now correctly fails closed (`success:0`, clear reason) with
+the candidate's DB row provably unchanged, where before this fix it would
+have silently written it. Ran a real headless-browser click-through of
+Settings > Pipeline Stages too: 3 lock icons with correct per-stage
+tooltips, the Email/WhatsApp cross-links present, and a live delete via
+the actual trash-icon button (confirmed the row disappeared from the
+rendered page, not just the API). Restored `l2_interview` to its exact
+original label/color/order/visibility afterward via a single-row PUT
+(not "Restore Defaults", which would have reverted every OTHER stage's
+custom label/color/order too) and confirmed the full 14-row config
+matched the pre-test snapshot exactly. Full QA suite re-run clean after:
+157 passed / 2 skipped / 0 failed.

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
 from routers.p23_p27 import _suggest_interviewer
+from routers.pipeline_stages import is_valid_stage
 
 log = logging.getLogger(__name__)
 
@@ -180,8 +181,11 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
              [app["email"]] if app["email"] else [],
              ics)
 
-        # Move to interview stage if not already
-        if app["stage"] != "interview":
+        # Move to interview stage if not already — 'l1_interview' is a
+        # deletable stage (Settings > Pipeline Stages); if this tenant
+        # removed it, the interview itself is still scheduled, just skip
+        # the stage bump rather than writing an unconfigured stage value.
+        if app["stage"] != "interview" and await is_valid_stage(conn, actor.tenant_id, "l1_interview"):
             await conn.execute("UPDATE applications SET stage='l1_interview', updated_at=NOW() WHERE id=$1", body.application_id)
 
         # Update invite_sent_at
@@ -334,8 +338,11 @@ HR Team, {company}"""
         """, offer_id, actor.tenant_id, body.application_id,
              body.ctc_offered, body.currency, joining_date_obj, offer_text)
 
-        # Move to offer stage
-        await conn.execute("UPDATE applications SET stage='offer', updated_at=NOW() WHERE id=$1", body.application_id)
+        # Move to offer stage — 'offer' is a deletable stage (Settings >
+        # Pipeline Stages); if this tenant removed it, the offer record
+        # itself is still created, just skip the stage bump.
+        if await is_valid_stage(conn, actor.tenant_id, "offer"):
+            await conn.execute("UPDATE applications SET stage='offer', updated_at=NOW() WHERE id=$1", body.application_id)
 
         return {
             "offer_id": offer_id,

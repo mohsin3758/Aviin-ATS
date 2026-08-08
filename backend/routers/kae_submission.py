@@ -37,6 +37,7 @@ from pydantic import BaseModel
 import db
 import events
 from deps import Actor, get_actor
+from routers.pipeline_stages import is_valid_stage
 
 router = APIRouter(tags=["kae-submission"])
 
@@ -779,7 +780,7 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
         )
 
         bumped = False
-        if row["stage"] in _PRE_SUBMIT_STAGES:
+        if row["stage"] in _PRE_SUBMIT_STAGES and await is_valid_stage(conn, actor.tenant_id, "submitted"):
             await conn.execute("UPDATE applications SET stage='submitted', updated_at=now() WHERE id=$1", application_id)
             bumped = True
             await events.write_outbox(

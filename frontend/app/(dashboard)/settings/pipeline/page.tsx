@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2, Zap, ToggleLeft, ToggleRight } from 'lucide-react';
+import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2, Zap, ToggleLeft, ToggleRight, Lock } from 'lucide-react';
 
 interface StageRow {
   stage_key: string;
@@ -10,6 +10,7 @@ interface StageRow {
   display_order: number;
   is_visible: boolean;
   is_custom?: boolean;
+  deletable?: boolean;
 }
 
 const SWATCHES = ['#6366F1', '#06B6D4', '#3B82F6', '#F59E0B', '#0891B2', '#64748B', '#7C3AED', '#9333EA', '#CA8A04', '#059669', '#16A34A', '#94A3B8', '#DC2626', '#EC4899', '#14B8A6'];
@@ -98,9 +99,16 @@ export default function PipelineStagesSettings() {
         <div>
           <h1 style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', margin: 0 }}>Pipeline Stages</h1>
           <p style={{ fontSize: 13, color: '#64748b', margin: '2px 0 0' }}>
-            Reorder, rename, recolor, hide, or add stages on the Kanban board. The 13 built-in stages can't be deleted (some drive HITL/analytics rules) — custom stages you add can be.
+            Reorder, rename, recolor, hide, or delete stages on the Kanban board — the name field is your own terminology, it's used everywhere the stage appears. Only <b>Sourced</b>, <b>Rejected</b>, and <b>Placed</b> can't be deleted (only hidden), since other features are wired to those three exact stages; every other stage, built-in or custom, can be removed once no one is currently in it.
           </p>
         </div>
+      </div>
+
+      <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 8, background: '#eff6ff', border: '1px solid #bfdbfe', fontSize: 12, color: '#1e40af', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        Want to change the automated email/WhatsApp text sent when a candidate enters a stage? That's a separate per-stage message editor:
+        <a href="/settings/email" style={{ color: '#1e40af', fontWeight: 700, textDecoration: 'underline' }}>Email templates</a>
+        <span>·</span>
+        <a href="/whatsapp" style={{ color: '#1e40af', fontWeight: 700, textDecoration: 'underline' }}>WhatsApp templates</a>
       </div>
 
       {msg && (
@@ -143,12 +151,17 @@ export default function PipelineStagesSettings() {
               {r.is_visible ? <Eye size={12} /> : <EyeOff size={12} />} {r.is_visible ? 'Visible' : 'Hidden'}
             </button>
 
-            {r.is_custom && (
+            {r.deletable !== false ? (
               <button onClick={() => deleteStage(r.stage_key, r.label)} disabled={deletingKey === r.stage_key}
-                title="Delete this custom stage"
+                title="Delete this stage (only works if no candidates are currently in it)"
                 style={{ width: 28, height: 28, borderRadius: 6, border: '1px solid #fee2e2', background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0, padding: 0 }}>
                 <Trash2 size={12} style={{ color: '#dc2626' }} />
               </button>
+            ) : (
+              <div title={`"${r.label}" can only be hidden, not deleted — ${r.stage_key === 'placed' ? 'offer acceptance sets this stage directly' : r.stage_key === 'sourced' ? 'every new candidate starts in this stage' : 'rejecting a candidate is gated to this exact stage'}`}
+                style={{ width: 28, height: 28, borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Lock size={11} style={{ color: '#94a3b8' }} />
+              </div>
             )}
           </div>
         ))}

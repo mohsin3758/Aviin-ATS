@@ -36,6 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
+from routers.pipeline_stages import is_valid_stage
 
 log = logging.getLogger(__name__)
 
@@ -234,11 +235,13 @@ def _eval(val, op, threshold):
         return (op==">" and v>t) or (op=="<" and v<t) or (op==">=" and v>=t) or (op=="<=" and v<=t) or (op=="==" and v==t) or (op=="!=" and v!=t)
     except: return str(val)==str(threshold) if op=="==" else str(val)!=str(threshold)
 
+_DEFAULT_STAGE_KEYS = frozenset({"sourced","contacted","interested","nda","screened","submitted","l1_interview","l2_interview","offer","offer_accepted","placed","rejected","hold"})
+
+
 @metrics_router.post("/auto-move")
 async def trigger_auto_move(bg: BackgroundTasks, actor: Actor = Depends(get_actor)):
     moved = []
     errors = []
-    VALID_STAGES = {"sourced","contacted","interested","nda","screened","submitted","l1_interview","l2_interview","offer","offer_accepted","placed","rejected","hold"}
     async with db.tenant_conn(actor.tenant_id) as conn:
         rules = await conn.fetch("""
             SELECT id, name, stage_from, stage_to, conditions FROM stage_rules
@@ -246,6 +249,15 @@ async def trigger_auto_move(bg: BackgroundTasks, actor: Actor = Depends(get_acto
 
         if not rules:
             return {"moved": 0, "detail": "No enabled rules. Create rules in the Auto Rules panel."}
+
+        # Stage keys are tenant-configurable and can be deleted (pipeline_stages.py)
+        # — a stale rule pointing at a since-deleted stage must not move a candidate
+        # into it, or they'd silently vanish from every Kanban board (no display
+        # config left for that key). Validate against the tenant's real config,
+        # same fallback-to-defaults pattern applications.py's update_stage uses.
+        configured = {r["stage_key"] for r in await conn.fetch(
+            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1", actor.tenant_id)}
+        VALID_STAGES = configured if configured else _DEFAULT_STAGE_KEYS
 
         for rule in rules:
             if rule["stage_to"] not in VALID_STAGES:
@@ -307,6 +319,10 @@ async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = De
                     results["failed"] += 1; continue
 
                 if action.action == "move_stage" and action.target_stage:
+                    if not await is_valid_stage(conn, actor.tenant_id, action.target_stage):
+                        results["failed"] += 1
+                        results["details"].append({"name": app["full_name"], "status": f"unknown stage '{action.target_stage}'"})
+                        continue
                     old_stage = app["stage"]
                     await conn.execute("UPDATE applications SET stage=$1, updated_at=NOW() WHERE id=$2",
                                        action.target_stage, app_id)
@@ -788,6 +804,8 @@ async def check_rules_for_application(application_id: str, bg: BackgroundTasks, 
         """, app["stage"], actor.tenant_id)
 
         for rule in rules:
+            if not await is_valid_stage(conn, actor.tenant_id, rule["stage_to"]):
+                continue  # rule targets a since-deleted stage — skip, don't write it
             conds = rule["conditions"] if isinstance(rule["conditions"], list) else json.loads(rule["conditions"] or "[]")
             if all(_eval(app.get(co.get("field")), co.get("op",">"), co.get("value",0)) for co in conds):
                 # Rule matches — auto-move
