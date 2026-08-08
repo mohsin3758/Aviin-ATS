@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { getTokenPayload } from '@/lib/auth';
+import { getTokenPayload, authHeaders, API } from '@/lib/auth';
 import {
   ArrowLeft, MapPin, Users, Clock, Briefcase, Edit, BarChart2,
   Plus, X, ChevronDown, Mail, Phone, Download, ExternalLink,
@@ -31,6 +31,23 @@ const DEFAULT_STAGES = [
 // backend (_notify_stage_change_bg) already supports every stage, this is
 // deliberately scoped to just the 3 the business asked for.
 const _AUTO_NOTIFY_STAGES = new Set(['l1_interview', 'l2_interview', 'rejected']);
+
+// Resume download must go through the auth-gated /resume-intake download
+// endpoint — resume_path is a raw storage path with no static file route
+// serving it (confirmed 404 in production), unlike resume_file_id which
+// resolves through the same working endpoint candidates/[id] already uses.
+async function downloadResume(fileId: string, fileName: string) {
+  try {
+    const resp = await fetch(`${API}/resume-intake/${fileId}/download`, { headers: authHeaders() });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName || 'resume';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function gx(mo: number) {
@@ -577,7 +594,6 @@ function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, drawerTab
 // ── Profile Tab ───────────────────────────────────────────────────────────────
 function ProfileTab({ app }: any) {
   const skills: string[] = app.skills || [];
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* Contact */}
@@ -627,12 +643,12 @@ function ProfileTab({ app }: any) {
       </Card>
 
       {/* Resume */}
-      {app.resume_path && (
+      {app.resume_file_id && (
         <Card title="Resume">
-          <a href={`${API_URL}${app.resume_path}`} target="_blank" rel="noreferrer"
-            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, textDecoration: 'none', color: '#15803D', fontSize: 12, fontWeight: 700 }}>
+          <button onClick={() => downloadResume(app.resume_file_id, app.resume_file_name)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, cursor: 'pointer', color: '#15803D', fontSize: 12, fontWeight: 700 }}>
             <Download size={13} /> Download Resume
-          </a>
+          </button>
         </Card>
       )}
 

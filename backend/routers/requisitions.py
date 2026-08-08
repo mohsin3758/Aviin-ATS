@@ -264,6 +264,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
                       c.current_designation, c.current_employer, c.location,
                       c.resume_path, c.expected_ctc, c.notice_period_days,
                       c.jd_match_score, c.ai_match_score,
+                      rf.id AS resume_file_id, rf.file_name AS resume_file_name,
                       a.stage, a.fit_score, a.app_notes, a.app_tags,
                       a.rejected_reason, a.assigned_recruiter_id,
                       a.created_at, a.updated_at,
@@ -272,6 +273,11 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
                       )::int AS scorecard_count
                FROM applications a
                JOIN candidates c ON c.id = a.candidate_id
+               LEFT JOIN LATERAL (
+                   SELECT id, file_name FROM resume_files rf
+                   WHERE rf.candidate_id = c.id AND rf.tenant_id = a.tenant_id
+                   ORDER BY rf.created_at DESC LIMIT 1
+               ) rf ON true
                WHERE a.requisition_id = $1
                ORDER BY a.updated_at DESC""",
             requisition_id,

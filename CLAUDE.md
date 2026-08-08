@@ -2169,3 +2169,46 @@ for bug #3 instead of assuming the .serial() fix just needed a cleaner
 rate-limit window). Final full-suite run: **124 passed / 2 skipped / 0
 failed** - genuinely clean, not "clean except the known flaky ones" for
 the first time this suite has been run in this project's history.
+
+## Pipeline board "Download Resume" 404 — same bug in 2 places, 2026-08-09
+User hit "Not Found" clicking Download Resume on a candidate in the
+Kanban pipeline board drawer, screenshot showing a raw
+`/api/uploads/resumes/{tenant}/{date}/{file}` URL returning FastAPI's
+JSON `{"detail":"Not Found"}`. Root cause: `GET /requisitions/{id}/
+pipeline` (backs both the pipeline board and the requisition detail
+page) only ever returned `candidates.resume_path` - a raw storage path
+column - and both `pipeline/page.tsx` and `requisitions/[id]/page.tsx`
+linked straight to `${API_URL}${resume_path}` as if it were a static
+file URL. **Nothing in this codebase has ever served that path** -
+grepped `app.py` and every router for a `StaticFiles` mount or a route
+matching `/uploads/resumes/...` and found none; the only real, working
+mechanism is the auth-gated `GET /resume-intake/{resume_file_id}/
+download` endpoint (built 2026-07-29, already wired into candidates/[id],
+Resume Inbox, and the candidates-list drawer - but never into either of
+these two pipeline-board surfaces). This is a distinct bug from the
+2026-07-29 fix, not a regression of it - those three surfaces were never
+touched.
+
+Fixed by adding a `LEFT JOIN LATERAL` on `resume_files` (latest per
+candidate) to the `/pipeline` query, returning `resume_file_id`/
+`resume_file_name` alongside the existing `resume_path`, and switching
+both frontend call sites from a raw `<a href>` to the same auth-gated
+blob-fetch `downloadResume()` pattern already used in candidates/[id]
+(fetch with Bearer token -> blob -> object URL -> synthetic `<a
+download>` click). Grepped the rest of the frontend for the same
+`${API_URL}${resume_path}` pattern afterward and confirmed no other
+instance exists.
+
+Verified for real, not code review: queried the exact candidate from the
+user's screenshot ("Diploma", SAP ABAP Developer req) directly in
+Postgres to confirm a real `resume_files` row exists; called the fixed
+`/pipeline` endpoint via curl and confirmed `resume_file_id` now resolves
+correctly; downloaded the file through `/resume-intake/{id}/download` via
+curl (200 OK, 23,360 bytes, valid `.docx` per `file`). Then ran two real
+headless-browser click-throughs (Playwright, using the cached auth state
+`tests/.auth/state.json`) - one against the pipeline board drawer, one
+against the requisition detail page's Resume card - both produced a real
+download event with the correct filename and the identical 23,360-byte
+size as the direct curl, confirming the UI wiring, not just the API,
+works end to end. Full QA suite re-run clean after: 157 passed / 2
+skipped / 0 failed, no regressions.

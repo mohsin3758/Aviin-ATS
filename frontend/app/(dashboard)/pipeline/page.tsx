@@ -72,6 +72,24 @@ function avatarColor(name: string) {
   return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }
 
+// Resume download must go through the auth-gated /resume-intake download
+// endpoint — c.resume_path is a raw storage path with no static file route
+// serving it (confirmed 404 in production), unlike resume_file_id which
+// resolves through the same working endpoint candidates/[id] and Resume
+// Inbox already use.
+async function downloadResume(fileId: string, fileName: string) {
+  try {
+    const resp = await fetch(`${API}/resume-intake/${fileId}/download`, { headers: authHeaders() });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName || 'resume';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
+}
+
 function useToast() {
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const show = useCallback((msg: string, ok = true) => {
@@ -632,11 +650,11 @@ function ProfileTab({ app, apiUrl }: any) {
           ))}
         </InfoCard>
       )}
-      {app.resume_path && (
-        <a href={`${apiUrl}${app.resume_path}`} target="_blank" rel="noreferrer"
-          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 14px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 10, textDecoration: 'none', color: '#15803D', fontSize: 12, fontWeight: 700 }}>
+      {app.resume_file_id && (
+        <button onClick={() => downloadResume(app.resume_file_id, app.resume_file_name)}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 14px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 10, cursor: 'pointer', color: '#15803D', fontSize: 12, fontWeight: 700 }}>
           <Download size={13} /> Download Resume
-        </a>
+        </button>
       )}
       <a href={`/candidates/${app.candidate_id}`} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 14px', background: '#1E40AF', color: '#fff', borderRadius: 8, textDecoration: 'none', fontSize: 12, fontWeight: 700, width: 'fit-content' }}>
         <ExternalLink size={12} /> Full ATS Profile
