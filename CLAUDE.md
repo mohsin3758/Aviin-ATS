@@ -2694,3 +2694,80 @@ reported as fact, not just trusted from the agent output:
 
 Deliberately did not fix any of the above — reported to the user the same
 way the Pipeline/Candidates audit was, for them to prioritize.
+
+## Fixed #1 (BGV consent) and #2 (Analytics stage-key bugs), 2026-08-09
+Direct follow-up — user picked the two most severe findings from the
+4-area audit above to fix now.
+
+**#1 — HARD RULE #12 consent gap, all 5 missing paths fixed.** Each
+follows the same `INSERT INTO consent_records (tenant_id,candidate_id,
+data_category,channel,consent_given,consent_text)` shape already
+established by the two working paths (manual add, NDA e-sign), just with
+a `channel` naming the actual path (`email`, `bulk_import`,
+`agency_portal`, `browser_extension`, `public_job_board`) and
+`consent_text` stating what genuinely happened — not a copy-pasted
+generic string:
+- `resume_intake_service.py`'s `upsert_candidate()` — only on the
+  genuine-creation branch, not the existing-candidate UPDATE branch
+  (which already has a consent record from whenever that candidate was
+  first created).
+- `import_router.py` — both CSV and Excel bulk-import paths; had to
+  switch their `INSERT INTO candidates` from `conn.execute()` to
+  `conn.fetchval(... RETURNING id)` since neither previously captured
+  the new candidate's id at all.
+- `ops_gaps.py`'s `convert_agency_submission()`.
+- `gap_features.py`'s `ext_capture_convert()` (browser-extension →
+  candidate).
+- **`p28_p32.py`'s `public_apply()` — the worst offender, handled
+  differently from the other 4 on purpose.** This is the one path where
+  the applicant IS the one directly submitting their own data through a
+  form they see, so unlike the other 4 (staff-initiated, where an
+  attestation-style consent record matches this codebase's own
+  established pattern), a genuine explicit consent checkbox is both
+  meaningful and achievable here. Added a real required checkbox +
+  DPDP-2023-worded copy to **both** public apply forms found —
+  `careers/page.tsx`'s inline modal and the per-job
+  `[jobId]/JobDetailClient.tsx`'s modal are two separate, nearly-
+  identical copies of the same form that both needed the fix. Backend
+  now hard-rejects (400) any submission with `consent_given` not
+  explicitly `true`, rather than defaulting it — this is the one path
+  where silently defaulting consent would have defeated the entire
+  point of the fix.
+
+**#2 — hardcoded `stage='interview'`/`stage='hired'` (neither is a real
+value) or a fixed stage list omitting custom rounds, fixed everywhere
+found**: `/reports/recruiter-performance`, `/client-portal/requisitions/
+{client_name}`, `/export/requisitions` CSV, `/pipeline/intelligence`'s
+"Offer Ready" query, `/pipeline/copilot`'s "At Risk"/"Upcoming
+Interviews" queries (both fully orphaned — zero frontend callers, fixed
+anyway rather than leave a known-wrong landmine for a future revival),
+and `analytics.py`'s `hiring-funnel`. Two different fix shapes depending
+on the bug: `stage='hired'` → `stage='placed'` (a plain wrong-literal
+typo fix, `'hired'` was never a real value in this system); `stage=
+'interview'`/hardcoded `l1_interview`,`l2_interview` lists → `stage LIKE
+'%interview%'` or a live query against `pipeline_stage_config` ordered by
+`display_order` (the same "read the tenant's real config, don't
+hardcode" pattern already used today for stage deletion and the default
+add-stage policy) — genuinely dynamic across custom rounds, not just
+patched for this tenant's specific `l3_interview`.
+
+Verified for real against production, not code review: `/reports/
+recruiter-performance` went from 0 placements/0 interviews for every
+recruiter to real non-zero totals (2 placements, 19 interviews across
+real assigned-recruiter applications); `/client-portal/requisitions/
+Invenio` now shows real interview counts instead of 0; `/export/
+requisitions` CSV confirmed correct hire counts against the exact 3 real
+requisitions with real placements (2, 1, 1 — matching a direct SQL count
+by title); `/analytics/hiring-funnel` now includes a real `l3_interview:
+1` row that was silently dropped before. For the consent fixes: created
+a real throwaway candidate via the public apply endpoint without
+consent (400, correctly rejected) and with consent (200, real
+`consent_records` row confirmed via SQL with the exact right
+`data_category`/`channel`/`consent_text`); real headless-browser
+click-through of the actual public careers page confirmed the Submit
+button is genuinely disabled until the checkbox is checked, and a real
+application went through once it was; real CSV bulk-import call
+confirmed a `bulk_import`-channel consent row is written. All test data
+(candidates, applications, consent_records) cleaned up afterward. Full
+QA suite re-run clean: 157 passed / 2 skipped / 0 failed, no
+regressions.

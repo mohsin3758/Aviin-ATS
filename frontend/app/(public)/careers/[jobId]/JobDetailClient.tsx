@@ -20,19 +20,21 @@ function ApplyModal({ job, onClose }: { job: Job; onClose: () => void }) {
     full_name: '', email: '', phone: '', location: '', current_employer: '',
     experience_months: '', cover_letter: '',
   });
+  const [consent, setConsent] = useState(false);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
   const [err, setErr] = useState('');
 
   async function apply() {
     if (!form.full_name || !form.email) { setErr('Name and email are required'); return; }
+    if (!consent) { setErr('Please confirm you consent to us storing and processing your details before submitting'); return; }
     setSaving(true); setErr('');
     try {
       const ref = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('ref') : null;
       const r = await fetch(`${API_BASE}/public/jobs/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, experience_months: Number(form.experience_months) || 0, job_id: job.id, tenant_id: TENANT_ID, ref }),
+        body: JSON.stringify({ ...form, experience_months: Number(form.experience_months) || 0, job_id: job.id, tenant_id: TENANT_ID, ref, consent_given: true }),
       });
       if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
       setDone(true);
@@ -93,13 +95,20 @@ function ApplyModal({ job, onClose }: { job: Job; onClose: () => void }) {
                   style={{ ...iStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }} />
               </div>
             </div>
-            <div style={{ display: 'flex', gap: '10px', marginTop: '20px', justifyContent: 'flex-end' }}>
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginTop: '16px', cursor: 'pointer' }}>
+              <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)}
+                style={{ marginTop: '2px', flexShrink: 0 }} />
+              <span style={{ fontSize: '12px', color: '#64748b', lineHeight: '1.5' }}>
+                I consent to AVIIN Jobs Services storing and processing my personal details above to consider me for this and similar roles, in line with the Digital Personal Data Protection Act, 2023.
+              </span>
+            </label>
+            <div style={{ display: 'flex', gap: '10px', marginTop: '16px', justifyContent: 'flex-end' }}>
               <button onClick={onClose} style={{ padding: '9px 18px', borderRadius: '8px', border: '1px solid #e2e8f0',
                 background: 'white', cursor: 'pointer', fontSize: '13px', fontWeight: '600', color: '#374151' }}>Cancel</button>
-              <button onClick={apply} disabled={saving}
+              <button onClick={apply} disabled={saving || !consent}
                 style={{ padding: '9px 20px', borderRadius: '8px', border: 'none',
-                  background: saving ? '#94a3b8' : '#1e40af',
-                  color: 'white', cursor: saving ? 'not-allowed' : 'pointer', fontSize: '13px', fontWeight: '600' }}>
+                  background: (saving || !consent) ? '#94a3b8' : '#1e40af',
+                  color: 'white', cursor: (saving || !consent) ? 'not-allowed' : 'pointer', fontSize: '13px', fontWeight: '600' }}>
                 {saving ? 'Submitting...' : 'Submit Application'}
               </button>
             </div>

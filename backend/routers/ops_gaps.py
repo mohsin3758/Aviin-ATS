@@ -436,6 +436,13 @@ async def convert_agency_submission(submission_id: str, actor: Actor = Depends(g
             actor.tenant_id, sub["full_name"], sub["email"], sub["phone"], sub["total_exp_mo"],
             sub["current_employer"], sub["current_designation"],
         )
+        # HARD RULE #12 — was missing on this path entirely (found in the
+        # 2026-08-09 BGV audit).
+        await conn.execute(
+            "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
+            "VALUES ($1,$2,'resume_processing','agency_portal',TRUE,$3)",
+            actor.tenant_id, cand["id"], f"Submitted via the empanelled agency portal (submission {submission_id}).",
+        )
         await conn.execute(
             """INSERT INTO applications (tenant_id, candidate_id, requisition_id, stage)
                VALUES ($1,$2,$3,'sourced') ON CONFLICT DO NOTHING""",

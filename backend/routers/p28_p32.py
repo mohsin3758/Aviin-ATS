@@ -76,7 +76,7 @@ async def export_requisitions(actor: Actor=Depends(get_actor)):
             SELECT r.title, r.status, r.employment_type, r.location,
                    r.positions_count, r.created_at::date AS opened_date,
                    COUNT(a.id) AS submissions,
-                   COUNT(a.id) FILTER (WHERE a.stage='hired') AS hires
+                   COUNT(a.id) FILTER (WHERE a.stage='placed') AS hires
             FROM requisitions r
             LEFT JOIN applications a ON a.requisition_id=r.id AND a.tenant_id=r.tenant_id
             WHERE r.tenant_id=$1
@@ -376,11 +376,25 @@ async def public_get_job(job_id: str, tenant_id: str):
 
 @public_jobs_router.post("/jobs/apply")
 async def public_apply(body: dict):
-    """No-auth public job application — uses db.tenant_conn for RLS."""
+    """No-auth public job application — uses db.tenant_conn for RLS.
+
+    HARD RULE #12: this is a genuinely public, anonymous endpoint that
+    stores name/email/phone/employer directly from an unauthenticated
+    applicant — the worst-case path for a missing consent_records row
+    (found in the 2026-08-09 BGV audit: this was the ONLY candidate-
+    creation path with zero consent trail at all, out of 8 checked).
+    Both public apply forms (careers/page.tsx and the per-job detail
+    page) now require a real checkbox before submitting and send
+    consent_given=true — reject outright if it's missing rather than
+    silently defaulting it, since this is the one path where genuine,
+    explicit, candidate-given consent is both meaningful and achievable.
+    """
     tenant_id = body.get('tenant_id', '')
     job_id = body.get('job_id', '')
     if not tenant_id or not job_id:
         raise HTTPException(status_code=400, detail="tenant_id and job_id required")
+    if not body.get('consent_given'):
+        raise HTTPException(status_code=400, detail="Consent to store and process your details is required to apply")
     async with _db_public.tenant_conn(tenant_id) as conn:
         job = await conn.fetchrow(
             "SELECT id FROM requisitions WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='open'",
@@ -401,6 +415,12 @@ async def public_apply(body: dict):
                  body.get('phone'), body.get('location'),
                  body.get('current_employer'),
                  int(body.get('experience_months', 0)))
+            await conn.execute(
+                "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
+                "VALUES ($1::uuid,$2,'resume_processing','public_job_board',TRUE,$3)",
+                tenant_id, cand['id'],
+                f"Applicant checked the DPDP 2023 consent box on the public job application form for job {job_id}.",
+            )
         await conn.execute("""
             INSERT INTO applications (tenant_id, candidate_id, requisition_id, stage)
             VALUES ($1::uuid, $2, $3::uuid, 'sourced')

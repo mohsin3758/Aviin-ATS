@@ -162,8 +162,12 @@ async def get_intelligence(req_id: str = None, actor: Actor = Depends(get_actor)
 
         # Strong Hire: high AI fit score (>= 0.65) in any active stage
         strong  = await conn.fetch(q("a.fit_score >= 0.65 AND a.stage NOT IN ('placed','rejected','hold')"))
-        # Offer Ready: cleared L1 interview (in L2) OR cleared all rounds (stage=offer)
-        offer_r = await conn.fetch(q("a.stage IN ('l2_interview','offer') AND a.stage NOT IN ('placed','rejected')"))
+        # Offer Ready: cleared L1 interview (in a later interview round —
+        # l2_interview, l3_interview, any tenant-added custom round beyond
+        # L1) OR cleared all rounds (stage=offer). Was hardcoded to just
+        # l2_interview, silently missing this tenant's real l3_interview
+        # stage (2026-08-09 Analytics audit).
+        offer_r = await conn.fetch(q("((a.stage LIKE '%interview%' AND a.stage <> 'l1_interview') OR a.stage = 'offer') AND a.stage NOT IN ('placed','rejected')"))
         # Join Ready: active offer given - likely to join
         join_r  = await conn.fetch(q("a.stage IN ('offer','offer_accepted')"))
         # Stuck: no stage movement in 7+ days (needs recruiter follow-up)
@@ -661,7 +665,7 @@ async def get_copilot(actor: Actor = Depends(get_actor)):
             SELECT a.id, a.candidate_id, a.stage, a.fit_score, a.updated_at,
                    c.full_name, c.email, c.phone, c.total_exp_mo, c.current_employer
             FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            WHERE a.stage IN ('submitted','interview','offer')
+            WHERE (a.stage IN ('submitted','offer') OR a.stage LIKE '%interview%')
             AND (a.fit_score < 0.40 OR a.updated_at < NOW() - INTERVAL '5 days')
             ORDER BY a.fit_score ASC NULLS FIRST LIMIT 10
         """)
@@ -671,7 +675,7 @@ async def get_copilot(actor: Actor = Depends(get_actor)):
             SELECT a.id, a.candidate_id, a.stage, a.fit_score, a.updated_at,
                    c.full_name, c.email, c.phone, c.total_exp_mo, c.current_employer
             FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            WHERE a.stage = 'interview'
+            WHERE a.stage LIKE '%interview%'
             ORDER BY a.updated_at DESC LIMIT 8
         """)
 

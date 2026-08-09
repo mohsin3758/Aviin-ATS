@@ -604,6 +604,13 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
                VALUES ($1,$2,$3,$4,$5,'extension') RETURNING id""",
             actor.tenant_id, cap["name"], cap["email"], cap["phone"], cap["current_company"],
         )
+        # HARD RULE #12 — was missing on this path entirely (found in the
+        # 2026-08-09 BGV audit).
+        await conn.execute(
+            "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
+            "VALUES ($1,$2,'resume_processing','browser_extension',TRUE,$3)",
+            actor.tenant_id, cand["id"], f"Captured via browser extension by recruiter {actor.user_id}.",
+        )
         await conn.execute("UPDATE extension_captures SET candidate_id=$1 WHERE id=$2",
                             cand["id"], capture_id)
     return {"candidate_id": str(cand["id"])}

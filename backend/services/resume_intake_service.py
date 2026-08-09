@@ -466,6 +466,16 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
         skills, exp_months, parsed.get('location'), parsed.get('current_company'),
         parsed.get('current_designation'), job_board, label, from_email,
         file_path, _clean_text(resume_text), parsed.get('linkedin_url'))
+    # HARD RULE #12: consent record before storing/processing candidate PII —
+    # was missing on this path entirely (found in the 2026-08-09 BGV audit).
+    # Only on genuine creation, not the existing_id UPDATE branch above,
+    # which already has a consent record from whenever that candidate was
+    # first created.
+    await conn.execute(
+        "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
+        "VALUES ($1,$2,'resume_processing','email',TRUE,$3)",
+        tenant_id, new_id, f"Resume received via email from {from_email} and processed for candidate matching.",
+    )
     return str(new_id)
 
 

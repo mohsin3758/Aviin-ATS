@@ -42,10 +42,10 @@ async def recruiter_performance(month: Optional[int]=None, year: Optional[int]=N
                 u.full_name AS recruiter,
                 u.email,
                 COUNT(DISTINCT a.id) AS total_submissions,
-                COUNT(DISTINCT a.id) FILTER (WHERE a.stage='interview') AS interviews,
+                COUNT(DISTINCT a.id) FILTER (WHERE a.stage LIKE '%interview%') AS interviews,
                 COUNT(DISTINCT a.id) FILTER (WHERE a.stage='offer') AS offers,
-                COUNT(DISTINCT a.id) FILTER (WHERE a.stage='hired') AS placements,
-                ROUND(COUNT(DISTINCT a.id) FILTER (WHERE a.stage='hired')::numeric /
+                COUNT(DISTINCT a.id) FILTER (WHERE a.stage='placed') AS placements,
+                ROUND(COUNT(DISTINCT a.id) FILTER (WHERE a.stage='placed')::numeric /
                       NULLIF(COUNT(DISTINCT a.id),0)*100,1) AS conversion_rate,
                 COALESCE(k.total_score,0) AS kpi_score,
                 COALESCE(k.grade,'—') AS grade,

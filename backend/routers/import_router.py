@@ -35,14 +35,20 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                         name, exp_mo, existing["id"])
                     updated += 1
                 else:
-                    await conn.execute(
+                    new_id = await conn.fetchval(
                         """INSERT INTO candidates (tenant_id,full_name,email,phone,location,
                            total_exp_mo,current_employer,skills,source)
-                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'csv_import')""",
+                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'csv_import') RETURNING id""",
                         actor.tenant_id, name, email or None,
                         (row.get("phone") or "").strip() or None,
                         (row.get("location") or "").strip() or None,
                         exp_mo, (row.get("current_employer") or "").strip() or None, skills)
+                    # HARD RULE #12 — was missing on this path entirely
+                    # (found in the 2026-08-09 BGV audit).
+                    await conn.execute(
+                        "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
+                        "VALUES ($1,$2,'resume_processing','bulk_import',TRUE,$3)",
+                        actor.tenant_id, new_id, f"Added via CSV bulk import by {actor.user_id}.")
                     created += 1
             except Exception as e:
                 errors += 1
@@ -92,14 +98,20 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                                        name, exp_mo, existing["id"])
                     updated += 1
                 else:
-                    await conn.execute("""
+                    new_id = await conn.fetchval("""
                         INSERT INTO candidates (tenant_id,full_name,email,phone,location,
                           total_exp_mo,current_employer,skills,source)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'excel_import')
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'excel_import') RETURNING id
                     """, actor.tenant_id, name, email or None,
                          str(d.get("phone","")).strip() or None,
                          str(d.get("location","")).strip() or None,
                          exp_mo, str(d.get("current_employer","")).strip() or None, skills)
+                    # HARD RULE #12 — was missing on this path entirely
+                    # (found in the 2026-08-09 BGV audit).
+                    await conn.execute(
+                        "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
+                        "VALUES ($1,$2,'resume_processing','bulk_import',TRUE,$3)",
+                        actor.tenant_id, new_id, f"Added via Excel bulk import by {actor.user_id}.")
                     created += 1
             except Exception as e:
                 errors += 1; errs.append({"row":i,"error":str(e)[:80]})

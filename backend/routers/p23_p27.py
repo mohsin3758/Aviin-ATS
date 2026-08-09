@@ -430,8 +430,8 @@ async def client_requisitions(client_name: str, actor: Actor=Depends(get_actor))
         rows = await conn.fetch("""
             SELECT r.id, r.title, r.status, r.created_at,
                    COUNT(a.id) AS total_submitted,
-                   COUNT(a.id) FILTER (WHERE a.stage='interview') AS interviews,
-                   COUNT(a.id) FILTER (WHERE a.stage='hired') AS hires
+                   COUNT(a.id) FILTER (WHERE a.stage LIKE '%interview%') AS interviews,
+                   COUNT(a.id) FILTER (WHERE a.stage='placed') AS hires
             FROM requisitions r
             LEFT JOIN applications a ON a.requisition_id=r.id AND a.tenant_id=r.tenant_id
             WHERE r.tenant_id=$1 AND r.client_name ILIKE '%'||$2||'%'

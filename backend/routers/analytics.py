@@ -61,23 +61,22 @@ async def active_placements(actor: Actor = Depends(get_actor)):
 async def hiring_funnel(actor: Actor = Depends(get_actor)):
     """Count of applications per stage + stage-to-stage conversion rates."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
-            SELECT stage, COUNT(*) AS cnt
-            FROM applications
-            GROUP BY stage
-            ORDER BY
-                ARRAY_POSITION(ARRAY[
-                    'sourced','contacted','interested','nda','screened',
-                    'submitted','l1_interview','l2_interview','offer',
-                    'offer_accepted','placed','rejected','hold'
-                ], stage)
-        """)
-    stages = [dict(r) for r in rows]
-    # Add conversion %: each stage vs previous non-terminal stage
-    FUNNEL = ['sourced','contacted','interested','nda','screened',
-              'submitted','l1_interview','l2_interview','offer',
-              'offer_accepted','placed']
-    by_stage = {r['stage']: r['cnt'] for r in stages}
+        rows = await conn.fetch("SELECT stage, COUNT(*) AS cnt FROM applications GROUP BY stage")
+        # Stages are tenant-configurable and can include custom rounds
+        # (this tenant has a real l3_interview) — the previous hardcoded
+        # FUNNEL list silently dropped any custom stage from the funnel
+        # and total_active count (2026-08-09 Analytics audit). Built from
+        # this tenant's real, ordered config instead; falls back to the
+        # original 11 defaults only if config hasn't been lazy-seeded yet.
+        configured = await conn.fetch(
+            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 "
+            "AND stage_key NOT IN ('rejected','hold') ORDER BY display_order",
+            actor.tenant_id)
+    FUNNEL = [r['stage_key'] for r in configured] if configured else [
+        'sourced','contacted','interested','nda','screened',
+        'submitted','l1_interview','l2_interview','offer','offer_accepted','placed',
+    ]
+    by_stage = {r['stage']: r['cnt'] for r in rows}
     funnel = []
     for s in FUNNEL:
         cnt = by_stage.get(s, 0)
