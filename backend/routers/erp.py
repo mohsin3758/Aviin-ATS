@@ -6,6 +6,7 @@ SET app.encrypt_key — never stored in the schema or returned in API responses.
 """
 
 import os
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -128,6 +129,9 @@ async def list_timesheets(status: Optional[str] = None, actor: Actor = Depends(g
 
 @router.post("/timesheets")
 async def create_timesheet(body: TimesheetCreate, actor: Actor = Depends(get_actor)):
+    # week_start is a plain str on the wire but asyncpg needs a real date
+    # object to bind against the DATE column — never caught before because
+    # this endpoint had zero UI/test callers until now.
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             """INSERT INTO timesheets
@@ -136,7 +140,7 @@ async def create_timesheet(body: TimesheetCreate, actor: Actor = Depends(get_act
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                RETURNING id, status, week_start, week_end, total_hours""",
             actor.tenant_id, body.placement_id, body.candidate_id, body.client_id,
-            body.week_start, body.regular_hours, body.overtime_hours, body.notes,
+            date.fromisoformat(body.week_start), body.regular_hours, body.overtime_hours, body.notes,
         )
     return dict(row)
 
@@ -204,7 +208,9 @@ async def generate_invoice(body: InvoiceGenerate, actor: Actor = Depends(get_act
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT generate_invoice_from_timesheets($1,$2,$3,$4,$5) AS invoice_id",
-            actor.tenant_id, body.client_id, body.period_start, body.period_end, body.gst_rate,
+            actor.tenant_id, body.client_id,
+            date.fromisoformat(body.period_start), date.fromisoformat(body.period_end),
+            body.gst_rate,
         )
     return {"invoice_id": str(row["invoice_id"])}
 
@@ -243,12 +249,14 @@ class PayrollRunCreate(BaseModel):
 @router.post("/payroll-runs")
 async def create_payroll_run(body: PayrollRunCreate, actor: Actor = Depends(get_actor)):
     """Creates a payroll run and generates payslips from approved timesheets."""
+    period_start = date.fromisoformat(body.pay_period_start)
+    period_end = date.fromisoformat(body.pay_period_end)
     async with db.tenant_conn(actor.tenant_id) as conn:
         async with conn.transaction():
             run = await conn.fetchrow(
                 """INSERT INTO payroll_runs(tenant_id, pay_period_start, pay_period_end)
                    VALUES ($1,$2,$3) RETURNING id""",
-                actor.tenant_id, body.pay_period_start, body.pay_period_end,
+                actor.tenant_id, period_start, period_end,
             )
             run_id = run["id"]
 
@@ -262,7 +270,7 @@ async def create_payroll_run(body: PayrollRunCreate, actor: Actor = Depends(get_
                    WHERE t.tenant_id = $1 AND t.status = 'approved'
                      AND t.week_start >= $2 AND t.week_end <= $3
                    GROUP BY t.candidate_id, t.placement_id""",
-                actor.tenant_id, body.pay_period_start, body.pay_period_end,
+                actor.tenant_id, period_start, period_end,
             )
 
             total_gross = total_tds = total_pf = 0.0

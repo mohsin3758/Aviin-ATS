@@ -45,7 +45,8 @@ async def skill_gap(actor: Actor = Depends(get_actor)):
 async def active_placements(actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
-            SELECT p.id, c.full_name AS candidate_name, cl.name AS client_name,
+            SELECT p.id, p.candidate_id, p.client_id,
+                   c.full_name AS candidate_name, cl.name AS client_name,
                    r.title AS req_title, p.start_date, p.end_date,
                    p.bill_rate, p.pay_rate, p.status
             FROM placements p

@@ -2943,3 +2943,110 @@ verified the write path end-to-end via a throwaway candidate: created a
 check, resolved it completed/clear, confirmed `/bgv/stats`'s `verified`
 count incremented by exactly 1. All test data cleaned up after. Full QA
 suite re-run clean: 157 passed / 2 skipped / 0 failed.
+
+## Finance/ERP UI forms built — 8 real dormant bugs found, all via genuine testing, 2026-08-09
+Last of the 4-area-audit findings the user picked to fix. Surveyed first
+(Explore agent, research only): timesheets, invoices, payroll, contractor
+PII, incentive scorecard approval, retention-bank release/forfeit, loyalty
+payout, account P&L entry, and collections entry all had real backend
+endpoints with **zero frontend write UI** — several pages' empty-state
+text literally said "call the API directly." Built real forms for all 9
+into the 4 existing pages (`finance`, `incentives`, `account-pl`,
+`collections`), reusing each page's existing display conventions rather
+than introducing a new one.
+
+**Fixed first: the retention_bank double-accrual bug** the audit flagged —
+`incentives.py`'s `approve_scorecard()` INSERT had `ON CONFLICT DO
+NOTHING` with no matching unique constraint (confirmed against
+`sql/07_phase15_incentives.sql`: only `id`, a fresh UUID every call, was
+ever unique), so re-approving a scorecard silently duplicated a held
+incentive row. `sql/36_retention_bank_dedup.sql` adds a real `UNIQUE
+(tenant_id, user_id, accrued_month, accrued_year)` index (checked both
+real tenants for existing duplicates first — zero found, safe to add) and
+the INSERT now targets it with `DO UPDATE ... WHERE status='held'`
+(stays in sync if the amount changes, but never overwrites an
+already-released/forfeited record).
+
+**Then, building the actual UI forms surfaced 8 more real bugs — every
+single one of these endpoints had literally never been called by
+anything before, ever, so nothing had caught any of them until now**:
+1. `POST /erp/timesheets`, `POST /erp/invoices/generate`,
+   `POST /erp/payroll-runs` — all three took date fields as plain `str`
+   and passed them straight to asyncpg against DATE-typed columns/
+   function params (`generate_invoice_from_timesheets(date,date,...)`),
+   crashing with `'str' object has no attribute 'toordinal'` on the very
+   first real call. Same bug class documented repeatedly elsewhere in
+   this project. Fixed with `date.fromisoformat(...)` at each call site.
+2. `PATCH /incentives/scorecard/{id}/status` (approve) — crashed with
+   `asyncpg.exceptions.AmbiguousParameterError: inconsistent types
+   deduced for parameter $4, integer versus smallint`. The retention_bank
+   INSERT reused `$4`/`$5` (accrued_month/year) both as raw binds to
+   SMALLINT columns and inside `make_date($5::int,$4::int,1)` — asyncpg
+   can't reconcile one parameter to two different inferred types in the
+   same prepared statement. Fixed by computing `release_due_date` in
+   Python (proper calendar-month arithmetic, not a fixed-day
+   approximation — verified against several month/year-rollover cases by
+   hand before deploying) instead of doing it in SQL.
+3. `PATCH /incentives/bank/{id}` (release/forfeit) — same root cause,
+   different parameter: `SET status=$1, released_at=CASE WHEN
+   $1='released' THEN now() ELSE NULL END` reused `$1` as both a direct
+   VARCHAR column assignment and a text comparison, `AmbiguousParameter
+   Error: text versus character varying`. Fixed by resolving the
+   `released_at` SQL literal (`now()`/`NULL`) in Python before building
+   the query, since `body.status` is already validated against a fixed
+   2-value set (no injection risk).
+4. `POST /incentives/loyalty/seed` — `ModuleNotFoundError: No module
+   named 'dateutil'`. The function imported `dateutil.relativedelta`
+   but **never actually called it** — the real milestone-date math a few
+   lines below already used `body.joining_date.replace(year=...)` with a
+   plain-stdlib Feb-29 fallback. Pure dead import; deleted it (and an
+   equally-unused redundant `from datetime import timedelta` next to it).
+5. **`process_retention_bank_releases()` and `check_loyalty_milestones()`
+   (`scheduler.py`) — the most consequential find of this batch: both
+   scheduled jobs (retention-bank release, loyalty pending→achieved) have
+   been silently failing on *every single run* since they were built,
+   for every tenant, forever.** Both query a FORCE-RLS table
+   (`retention_bank`/`loyalty_milestones`, policy casts `app.tenant_id`
+   to `::uuid`) through `db.system_conn()`, which deliberately sets
+   `app.tenant_id=''` for admin/cross-tenant reads — casting `''` to
+   `::uuid` is a hard Postgres error, silently swallowed by each
+   function's own generic `except Exception` logger. Exact same root
+   cause as `send_weekly_kpi_summary`/`run_pipeline_auto_move` fixed
+   earlier this project — same fix: list tenant IDs via `system_conn()`
+   (no RLS on `tenants` itself), then do the real UPDATE through a
+   per-tenant `tenant_conn()` in a loop. Verified for real, not just code
+   review: seeded real loyalty milestones with a past `milestone_date`,
+   confirmed they stayed `pending` before the fix even after manually
+   triggering the job (`POST /scheduler/trigger/loyalty`), then after
+   deploying the fix, triggered it again and watched all 4 genuinely flip
+   to `achieved` with real `achieved_at` timestamps.
+6. My own mistake, caught by testing rather than shipped: the Collections
+   page's stage dropdown listed guessed values (`sent_to_client`,
+   `follow_up`, `partial_payment`) that don't match `collection_records`'
+   real CHECK constraint (`invoice_raised, reminder_sent, escalated,
+   legal_notice, collected, written_off`) — a real update attempt 500'd
+   with `CheckViolationError`. Fixed the dropdown to the real allowed
+   values before considering this done.
+
+**Verified every one of the 9 write flows for real, end-to-end, after
+each fix** — not code review: timesheet create→submit→approve; invoice
+generate→mark-paid; payroll run generation (confirmed a *billed*
+timesheet correctly does NOT get pulled into payroll — that's the
+`generate_invoice_from_timesheets` function's own by-design status
+transition, not a bug — then proved payroll genuinely works against a
+second, still-`approved` timesheet, 1 real payslip generated with correct
+gross/net); contractor PII save + masked on-file check (confirmed the
+decrypted value is never returned, only `has_aadhaar`/`has_pan`/etc.
+booleans); scorecard create→**double**-approve (the actual dedup-bug
+regression test — confirmed exactly 1 retention_bank row, not 2, with the
+correct amount and release date); bank release and forfeit (with a real
+reason recorded); loyalty seed→scheduler-promote→mark-paid; account P&L
+create→finalize (confirmed CM = revenue − delivery − incentives − opcost
+matches the DB trigger's own formula); collections create→update. Real
+headless-browser click-through confirmed all 4 pages' new forms render
+and one real UI-driven timesheet creation actually persisted. All test
+data (timesheets, invoices, payroll runs, contractor PII, scorecards,
+retention_bank rows, loyalty milestones, account_pl/collection records)
+cleaned up afterward on both real tenants checked. Full QA suite re-run
+clean: 157 passed / 2 skipped / 0 failed, no regressions from any of the
+above.

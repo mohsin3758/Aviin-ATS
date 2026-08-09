@@ -25,48 +25,81 @@ async def _notify_n8n(path: str, payload: dict):
 
 
 async def process_retention_bank_releases():
-    """Release held retention bank amounts past their due_date."""
+    """Release held retention bank amounts past their due_date.
+
+    retention_bank has FORCE ROW LEVEL SECURITY with a policy that casts
+    app.tenant_id to ::uuid — db.system_conn() deliberately sets
+    app.tenant_id='' for admin/cross-tenant queries, and casting '' to
+    ::uuid is a hard Postgres error, not zero rows. This UPDATE ran
+    through system_conn() directly against a FORCE-RLS table, so it threw
+    on every single invocation and was silently swallowed by the bare
+    except below — retention bank has never actually auto-released for
+    any tenant since this job was built. Same root cause + same fix
+    already applied elsewhere in this codebase (send_weekly_kpi_summary,
+    run_pipeline_auto_move): list tenant IDs via system_conn() (no RLS on
+    `tenants` itself), then do the real UPDATE through a per-tenant
+    tenant_conn().
+    """
     logger.info("scheduler: processing retention bank releases")
     try:
         async with db.system_conn() as conn:
-            rows = await conn.fetch("""
-                UPDATE retention_bank
-                   SET status='released', released_at=now()
-                 WHERE status='held'
-                   AND release_due_date <= CURRENT_DATE
-                RETURNING tenant_id, user_id, amount, accrued_month, accrued_year
-            """)
+            tenant_ids = [r["id"] for r in await conn.fetch("SELECT id FROM tenants")]
+        total_released = 0
+        total_amount = 0.0
+        for tid in tenant_ids:
+            async with db.tenant_conn(str(tid)) as conn:
+                rows = await conn.fetch("""
+                    UPDATE retention_bank
+                       SET status='released', released_at=now()
+                     WHERE status='held'
+                       AND release_due_date <= CURRENT_DATE
+                    RETURNING user_id, amount, accrued_month, accrued_year
+                """)
             if rows:
-                logger.info(f"Released {len(rows)} retention bank entries")
-                await _notify_n8n("retention-bank-released", {
-                    "count": len(rows),
-                    "total": float(sum(r["amount"] for r in rows)),
-                    "date": str(date.today()),
-                })
+                total_released += len(rows)
+                total_amount += float(sum(r["amount"] for r in rows))
+        if total_released:
+            logger.info(f"Released {total_released} retention bank entries")
+            await _notify_n8n("retention-bank-released", {
+                "count": total_released,
+                "total": total_amount,
+                "date": str(date.today()),
+            })
     except Exception as e:
         logger.error(f"retention_bank_releases error: {e}")
 
 
 async def check_loyalty_milestones():
-    """Flag loyalty milestones that have passed their milestone_date."""
+    """Flag loyalty milestones that have passed their milestone_date.
+
+    Same FORCE-RLS + system_conn()-''::uuid bug as process_retention_bank_
+    releases() above (loyalty_milestones also has FORCE ROW LEVEL SECURITY)
+    — loyalty milestones have never actually auto-promoted pending ->
+    achieved for any tenant since this job was built. Same per-tenant fix.
+    """
     logger.info("scheduler: checking loyalty milestones")
     try:
         async with db.system_conn() as conn:
-            rows = await conn.fetch("""
-                UPDATE loyalty_milestones
-                   SET status='achieved', achieved_at=now()
-                 WHERE status='pending'
-                   AND milestone_date <= CURRENT_DATE
-                RETURNING tenant_id, user_id, milestone_years, bonus_amount
-            """)
-            if rows:
-                logger.info(f"Achieved {len(rows)} loyalty milestones")
-                await _notify_n8n("loyalty-milestone-achieved", {
-                    "count": len(rows),
-                    "milestones": [{"user_id": str(r["user_id"]),
-                                    "years": r["milestone_years"],
-                                    "bonus": float(r["bonus_amount"])} for r in rows],
-                })
+            tenant_ids = [r["id"] for r in await conn.fetch("SELECT id FROM tenants")]
+        all_rows = []
+        for tid in tenant_ids:
+            async with db.tenant_conn(str(tid)) as conn:
+                rows = await conn.fetch("""
+                    UPDATE loyalty_milestones
+                       SET status='achieved', achieved_at=now()
+                     WHERE status='pending'
+                       AND milestone_date <= CURRENT_DATE
+                    RETURNING user_id, milestone_years, bonus_amount
+                """)
+            all_rows.extend(rows)
+        if all_rows:
+            logger.info(f"Achieved {len(all_rows)} loyalty milestones")
+            await _notify_n8n("loyalty-milestone-achieved", {
+                "count": len(all_rows),
+                "milestones": [{"user_id": str(r["user_id"]),
+                                "years": r["milestone_years"],
+                                "bonus": float(r["bonus_amount"])} for r in all_rows],
+            })
     except Exception as e:
         logger.error(f"check_loyalty_milestones error: {e}")
 

@@ -155,19 +155,41 @@ async def approve_scorecard(
                 row['calculated_incentive'], row['immediate_payout'], row['retention_bank_amount'],
                 row['contribution_margin'],
             )
-            # Add to retention bank if amount > 0
+            # Add to retention bank if amount > 0. ON CONFLICT targets the
+            # real unique constraint (sql/36_retention_bank_dedup.sql) — a
+            # bare ON CONFLICT DO NOTHING had no matching constraint to fire
+            # on (only `id`, a fresh UUID every call), so re-approving the
+            # same scorecard (double-click, retry) silently double-accrued a
+            # held incentive. Update-in-place instead of no-op so a genuinely
+            # changed retention amount stays in sync, but only while still
+            # 'held' — never overwrite a record that's already been released
+            # or forfeited.
             if row['retention_bank_amount'] and row['retention_bank_amount'] > 0:
+                # release_due_date computed in Python, not SQL — the original
+                # `(make_date($5::int,$4::int,1) + interval '3 months')::date`
+                # reused $4/$5 both as raw SMALLINT-column binds and as
+                # explicit ::int casts in the same prepared statement, which
+                # asyncpg's parameter-type inference can't reconcile
+                # (asyncpg.exceptions.AmbiguousParameterError: inconsistent
+                # types deduced for parameter $4, integer versus smallint) —
+                # a real, previously-dormant bug never caught because nothing
+                # ever called this endpoint with status='approved' until this
+                # feature's UI added a real Approve button.
+                _total_months = row['period_month'] + 3
+                _extra_years, _new_month = divmod(_total_months - 1, 12)
+                release_due = date(row['period_year'] + _extra_years, _new_month + 1, 1)
                 await conn.execute("""
                     INSERT INTO retention_bank
                       (tenant_id, user_id, amount, accrued_month, accrued_year,
                        release_schedule, release_due_date)
-                    VALUES ($1,$2,$3,$4,$5,'quarterly',
-                            (make_date($5::int, $4::int, 1) + interval '3 months')::date)
-                    ON CONFLICT DO NOTHING
+                    VALUES ($1,$2,$3,$4,$5,'quarterly',$6)
+                    ON CONFLICT (tenant_id, user_id, accrued_month, accrued_year)
+                    DO UPDATE SET amount = EXCLUDED.amount
+                    WHERE retention_bank.status = 'held'
                 """,
                     actor.tenant_id, row['user_id'],
                     row['retention_bank_amount'],
-                    row['period_month'], row['period_year'],
+                    row['period_month'], row['period_year'], release_due,
                 )
     return dict(row)
 
@@ -295,11 +317,17 @@ async def update_bank_status(
 ):
     if body.status not in ('released', 'forfeited'):
         raise HTTPException(400, "status must be released or forfeited")
+    # released_at computed in Python, not a `$1='released'` SQL comparison —
+    # asyncpg inferred two different types for $1 from that comparison
+    # (text) vs. the direct `status = $1` column assignment (varchar),
+    # throwing AmbiguousParameterError on every call. Another real,
+    # previously-dormant bug: nothing ever called this endpoint until this
+    # feature's UI added a real Release/Forfeit action.
     async with db.tenant_conn(actor.tenant_id) as conn:
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(f"""
             UPDATE retention_bank
                SET status           = $1,
-                   released_at      = CASE WHEN $1='released' THEN now() ELSE NULL END,
+                   released_at      = {'now()' if body.status == 'released' else 'NULL'},
                    forfeited_reason = $2
              WHERE id = $3
             RETURNING *
@@ -328,8 +356,6 @@ async def seed_loyalty(body: LoyaltyIn, actor: Actor = Depends(get_actor)):
     created = []
     async with db.tenant_conn(actor.tenant_id) as conn:
         for yrs, bonus in {1: 15000, 2: 30000, 3: 50000, 5: 100000}.items():
-            from datetime import timedelta
-            from dateutil.relativedelta import relativedelta
             try:
                 ms_date = body.joining_date.replace(year=body.joining_date.year + yrs)
             except ValueError:
