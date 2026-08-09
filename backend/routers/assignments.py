@@ -35,8 +35,26 @@ async def list_assignments(requisition_id: str | None = None, actor: Actor = Dep
 
 
 @router.post("")
-async def create_assignment(body: AssignmentCreate, actor: Actor = Depends(get_actor)):
+async def create_assignment(
+    body: AssignmentCreate, actor: Actor = Depends(require_role("admin", "manager"))
+):
+    """Recommendation 4 (recruiter-assignment gap analysis): initial manual
+    assign had no role gate at all — any authenticated user (including a
+    recruiter) could assign anyone to any requisition, unlike /reassign
+    which was already admin/manager-only. Also guards against a second
+    'active' row on the same requisition — the table itself has no unique
+    constraint enforcing "one active assignment per requisition", so a
+    duplicate call previously landed silently instead of erroring."""
     async with db.tenant_conn(actor.tenant_id) as conn:
+        existing = await conn.fetchval(
+            "SELECT id FROM assignments WHERE requisition_id=$1 AND status='active'",
+            body.requisition_id,
+        )
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail="This requisition already has an active assignment — use /reassign instead",
+            )
         row = await conn.fetchrow(
             f"""INSERT INTO assignments (tenant_id, requisition_id, recruiter_id, match_score)
                 VALUES ($1, $2, $3, $4)

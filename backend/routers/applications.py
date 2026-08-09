@@ -439,13 +439,20 @@ async def update_stage(
         _auto_task = _auto_task_for_stage(body.stage)
         if _auto_task and row["assigned_recruiter_id"]:
             _cand = await conn.fetchrow("SELECT full_name FROM candidates WHERE id=$1", row["candidate_id"])
+            # Recommendation 3 (recruiter-assignment gap analysis): inherit
+            # the parent requisition's real priority instead of a hardcoded
+            # 'medium' — a critical-priority job's follow-up tasks previously
+            # got no more urgency than a low-priority job's.
+            _req_priority = await conn.fetchval(
+                "SELECT priority FROM requisitions WHERE id=$1", row["requisition_id"]) or "medium"
             await conn.execute(
                 """INSERT INTO recruiter_tasks
                      (tenant_id, requisition_id, application_id, candidate_name, recruiter_id, task_type, title, priority, status)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,'medium','pending')""",
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')""",
                 actor.tenant_id, row["requisition_id"], application_id,
                 _cand["full_name"] if _cand else None, row["assigned_recruiter_id"],
                 _auto_task["type"], _auto_task["title"].format(name=_cand["full_name"] if _cand else "candidate"),
+                _req_priority,
             )
 
         await events.write_outbox(

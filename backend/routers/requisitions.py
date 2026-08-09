@@ -10,7 +10,7 @@ import events
 from deps import Actor, get_actor
 from schemas import RequisitionCreate, RequisitionUpdate
 from routers.job_sharing import auto_distribute_on_open
-from permissions import require_permission
+from permissions import require_permission, get_job_visibility_scope
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 
@@ -98,11 +98,26 @@ async def list_requisitions(
             f"OR EXISTS (SELECT 1 FROM unnest(skills_required) s WHERE lower(s) LIKE lower(${len(params)})))"
         )
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    limit_clause = f"LIMIT {int(limit)}" if limit and limit > 0 else ""
-    sql = f"SELECT {FIELDS} FROM requisitions {where} ORDER BY created_at DESC {limit_clause}"
-
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Recommendation 2 (recruiter-assignment gap analysis): a role whose
+        # job_visibility_scope is 'assigned_only' only sees requisitions
+        # they hold a real active assignment on — previously every open req
+        # was visible to every authenticated user regardless of role, on
+        # this endpoint AND everywhere that reads it (the Pipeline board's
+        # job picker and the main Dashboard's "Open Requisitions" stat both
+        # already call this same GET /requisitions, so one filter here
+        # covers all three surfaces named in the request).
+        scope = await get_job_visibility_scope(conn, actor.tenant_id, actor.role)
+        if scope == "assigned_only" and actor.user_id:
+            params.append(actor.user_id)
+            conditions.append(
+                f"id IN (SELECT requisition_id FROM assignments "
+                f"WHERE recruiter_id = ${len(params)} AND status = 'active')"
+            )
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        limit_clause = f"LIMIT {int(limit)}" if limit and limit > 0 else ""
+        sql = f"SELECT {FIELDS} FROM requisitions {where} ORDER BY created_at DESC {limit_clause}"
         rows = await conn.fetch(sql, *params)
     return [dict(r) for r in rows]
 

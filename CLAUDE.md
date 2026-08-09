@@ -3050,3 +3050,122 @@ retention_bank rows, loyalty milestones, account_pl/collection records)
 cleaned up afterward on both real tenants checked. Full QA suite re-run
 clean: 157 passed / 2 skipped / 0 failed, no regressions from any of the
 above.
+
+## Recruiter Assignment: 6 build recommendations from the gap-analysis, all shipped, 2026-08-09
+Direct follow-up to the earlier research-only "Recruiter Assignment —
+Competitive Gap Analysis" report (same day) — user asked to build and
+complete every item on the ranked recommendation list. All 6 done,
+deployed, and verified against real production data (not code review).
+
+`sql/37_recruiter_assignment_upgrades.sql` — also backfills `CREATE TABLE
+IF NOT EXISTS` for `sla_tier_config`/`scoring_weight_config` (both were
+schema-drifted, live but never in a committed migration, same pattern
+documented repeatedly elsewhere in this file).
+
+1. **Wired `sla_tier_config` into `find_sla_breaches()` — and found a much
+   bigger bug than "the config is ignored" while doing it.** The old
+   function required `r.sla_hours IS NOT NULL` — but only 11 of this
+   tenant's 217 real requisitions had ever had `sla_hours` explicitly set
+   (it defaults to `NULL` and nothing ever back-filled it). **206 real open
+   requisitions were completely invisible to SLA breach detection,
+   unconditionally, regardless of how overdue they were — the tiered
+   config was never the primary problem.** Rewrote the function
+   (`CREATE OR REPLACE`, same return signature so no Python caller needed
+   to change) to compute effective hours as: explicit `r.sla_hours` if set
+   (always wins, a deliberate per-req override) → else the tenant's
+   `sla_tier_config` hours for that requisition's `priority`, adjusted by
+   the client's `priority_tier` (strategic ×0.8 tighter, low_touch ×1.2
+   looser) → else a flat 168h fallback if neither config exists.
+   `scheduler.py`'s tier-1→tier-2 grace period (`SLA_ESCALATION_GRACE_
+   HOURS`, previously one hardcoded `24` for every tenant/job) now scales
+   off that same effective value for `sla_breach`-type alerts (10% of the
+   target window, floored at 4h) via a new `_grace_hours_for()` helper —
+   `stalled_assignment`-type alerts (a different signal, "nobody touched
+   this" rather than a fill-time budget) keep the flat default on purpose.
+   **Verified for real**: `find_sla_breaches()` went from returning ~0 rows
+   to 18 genuine breaches the instant this deployed; built a real
+   throwaway strategic-tier client + medium-priority requisition with no
+   explicit `sla_hours`, backdated it 600h, and confirmed the function
+   computed exactly 720×0.8=576 effective hours (matching the hand
+   calculation exactly) and correctly flagged it breached at 600h open.
+   Directly invoked the real `process_sla_escalations()` job once inside
+   the backend container against live data — completed with zero errors,
+   and `sla_escalations` showed 18 real `sla_breach` + 28 real
+   `stalled_assignment` rows, all tier-1-fired for the first time ever for
+   most of those 18. Left these firing — they're genuine breaches that
+   should alert, not test pollution.
+2. **Per-role "assigned jobs only" visibility scope.** New
+   `role_definitions.job_visibility_scope` (`all` default / `assigned_
+   only`), a new `permissions.get_job_visibility_scope()` helper (same
+   exemption pattern as `require_permission`: admin/super_admin/anonymous
+   always `all`), applied as a real filter in `GET /requisitions` —
+   confirmed this single endpoint is what backs all three surfaces named
+   in the request (Requisitions list, the Pipeline board's job picker, and
+   the main Dashboard's "Open Requisitions" stat all call the same route),
+   so one filter covers all three. New `PUT /roles/{id}/visibility`
+   endpoint + a segmented "All jobs / Assigned jobs only" control on
+   Settings > Permissions, right above the existing feature/action matrix
+   for the selected role. **Verified for real** against the actual
+   production `recruiter` role (careful here — this setting affects every
+   real recruiter, not a throwaway): confirmed a real recruiter login saw
+   22 open requisitions unfiltered, flipped the role to `assigned_only`,
+   confirmed the same login+query now showed exactly 1 (the one real
+   assignment that recruiter held), then immediately restored the role to
+   `all` — production stays at the pre-existing default, this was a
+   verification, not a policy decision made unilaterally.
+3. **Unified/completed the priority system.** `requisitions.priority`
+   already supported `critical` in the scoring formula but the create/
+   edit form and the list-page filter only ever offered high/medium/low —
+   confirmed 3 real requisitions already had `priority='critical'` in the
+   DB (set via direct API calls, never reachable through the UI) before
+   this fix. Added Critical to all three UI spots (`PRIORITY_CONFIG`,
+   filter select, form select). Also fixed `applications.py`'s
+   auto-created `recruiter_tasks` — hardcoded `priority='medium'`
+   regardless of the parent requisition's real priority — to inherit it
+   for real, and fixed `recruiter_dashboard.py`'s `my-day` task ordering
+   (previously a boolean `priority='high'` tiebreak that couldn't
+   distinguish critical from high, or medium from low) to a real 4-level
+   CASE. **Verified for real**: moved a live application on a
+   `priority='critical'` requisition to `l1_interview` and confirmed the
+   auto-created task landed with `priority='critical'`, not the old
+   hardcoded `medium`.
+4. **Role-gated the initial manual assign.** `POST /assignments` had no
+   role check at all — any authenticated user (recruiters included) could
+   assign anyone to anything, unlike `/reassign` which was already admin/
+   manager-only. Added the same `require_role("admin","manager")` gate,
+   plus a genuinely separate gap found while reading the code: no
+   uniqueness check meant a second `POST /assignments` call on an already-
+   assigned requisition would silently create a second "active" row (the
+   table itself has no constraint preventing it) — now a clean 409
+   pointing at `/reassign` instead. **Verified for real**: a genuine
+   recruiter login got 403 on `/assignments`, admin got 200; a second
+   admin call on the same requisition correctly 409'd.
+5. **Filtered the assignee picker to `role=recruiter`.** Was fetching
+   every active user (admins, KAEs, everyone) via `/users?is_active=true`;
+   now `&role=recruiter` (the endpoint already supported the filter param,
+   just never used it here). **Verified for real**: confirmed the query
+   returns only `role='recruiter'` rows (9 of 9 in this tenant).
+6. **Wired `clients.priority_tier` into both scoring and SLA** — it
+   previously drove nothing but a colored badge. Folded into
+   `match_recruiters()`'s existing `urgency_bonus` term as an additional
+   multiplier (strategic ×1.3, low_touch ×0.8, standard ×1.0) rather than
+   a new weight column, since it's the same underlying "how urgently
+   should we reward available capacity" concept the term already existed
+   for. Also feeds the `find_sla_breaches()` effective-hours calculation
+   from item 1. **Verified for real, with exact arithmetic, not just "the
+   score changed"**: ran `match_recruiters()` against the same real
+   requisition+recruiter three times, switching only the client's tier
+   between calls — strategic 42.71, standard 42.53, low_touch 42.41. Hand-
+   computed deltas (0.02 weight × 1.0 capacity ratio × 0.3 medium-priority
+   multiplier × the difference between tier multipliers × 100) predicted
+   exactly 0.18 and 0.12 — matched to the second decimal both times.
+
+All throwaway test data (client, requisitions, candidate, application,
+recruiter user) cleaned up afterward — except one deliberately-named
+"QA SLA Test Client" row, left behind because its soft-deleted test
+requisition still FK-references it and this project's convention is
+soft-delete, not cascading hard-deletes, for exactly this reason. Full QA
+suite re-run clean after all 6: 157 passed / 2 skipped / 0 failed. Real
+headless-browser check confirmed the new Settings > Permissions job-
+visibility toggle and the Requisitions form's Critical option both render
+and work.

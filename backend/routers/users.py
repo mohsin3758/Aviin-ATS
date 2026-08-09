@@ -438,3 +438,26 @@ async def update_role_permissions(role_id: str, body: PermissionsUpdate,
         if not row:
             raise HTTPException(404, "Role not found")
     return _role_dict(row)
+
+
+class VisibilityUpdate(BaseModel):
+    job_visibility_scope: str
+
+
+@roles_router.put("/{role_id}/visibility", tags=["permissions"])
+async def update_role_visibility(role_id: str, body: VisibilityUpdate,
+                                   actor: Actor=Depends(require_role("admin", "super_admin"))):
+    """Recommendation 2 (recruiter-assignment gap analysis): per-role
+    'all jobs' vs 'assigned jobs only' scope, read by requisitions.py's
+    GET /requisitions (which also backs the Pipeline board's job picker
+    and the main Dashboard's Open Requisitions stat — same endpoint, one
+    filter). Same is_system-exempt pattern as /permissions above."""
+    if body.job_visibility_scope not in ("all", "assigned_only"):
+        raise HTTPException(400, "job_visibility_scope must be 'all' or 'assigned_only'")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE role_definitions SET job_visibility_scope=$1 WHERE id=$2 AND tenant_id=$3 RETURNING *",
+            body.job_visibility_scope, role_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "Role not found")
+    return _role_dict(row)

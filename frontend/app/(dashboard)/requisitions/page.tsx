@@ -37,9 +37,10 @@ const STATUS_BADGE: Record<string, string> = {
   open: 'badge-green', on_hold: 'badge-amber', filled: 'badge-blue', closed: 'badge-gray',
 };
 const PRIORITY_CONFIG: Record<string, { emoji: string; color: string; bg: string; border: string }> = {
-  high:   { emoji: '🔴', color: '#dc2626', bg: '#fef2f2', border: '#fecaca' },
-  medium: { emoji: '🟡', color: '#ca8a04', bg: '#fefce8', border: '#fde68a' },
-  low:    { emoji: '🟢', color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0' },
+  critical: { emoji: '🟣', color: '#7c3aed', bg: '#f5f3ff', border: '#ddd6fe' },
+  high:     { emoji: '🔴', color: '#dc2626', bg: '#fef2f2', border: '#fecaca' },
+  medium:   { emoji: '🟡', color: '#ca8a04', bg: '#fefce8', border: '#fde68a' },
+  low:      { emoji: '🟢', color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0' },
 };
 const WORK_MODE_CONFIG: Record<string, { color: string; bg: string }> = {
   onsite: { color: '#2563eb', bg: '#eff6ff' },
@@ -490,6 +491,7 @@ function RequisitionsPageInner() {
           </select>
           <select value={priorityFilter} onChange={e => setPriorityFilter(e.target.value)} style={{ ...inputStyle, width: '120px' }}>
             <option value="">All Priority</option>
+            <option value="critical">🟣 Critical</option>
             <option value="high">🔴 High</option>
             <option value="medium">🟡 Medium</option>
             <option value="low">🟢 Low</option>
@@ -594,6 +596,7 @@ function RequisitionsPageInner() {
           </FormField>
           <FormField label="Priority">
             <select style={inputStyle} value={form.priority} onChange={f('priority')}>
+              <option value="critical">🟣 Critical</option>
               <option value="high">🔴 High</option>
               <option value="medium">🟡 Medium</option>
               <option value="low">🟢 Low</option>

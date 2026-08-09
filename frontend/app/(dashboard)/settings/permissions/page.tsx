@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { KeyRound, Shield, ShieldAlert, Save, RotateCcw, Activity, Check, X } from 'lucide-react';
+import { KeyRound, Shield, ShieldAlert, Save, RotateCcw, Activity, Check, X, Eye } from 'lucide-react';
 
 interface Role {
   id: string;
@@ -12,6 +12,7 @@ interface Role {
   permissions: Record<string, string[]>;
   is_system: boolean;
   user_count: number;
+  job_visibility_scope: 'all' | 'assigned_only';
 }
 
 interface FeatureDef { key: string; label: string; }
@@ -26,6 +27,7 @@ export default function PermissionsSettings() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [togglingEnforcement, setTogglingEnforcement] = useState(false);
+  const [savingVisibility, setSavingVisibility] = useState(false);
 
   const sortedRoles = [...(roles || [])].sort((a, b) => a.department.localeCompare(b.department) || b.level - a.level);
   const selectedRole = sortedRoles.find(r => r.role_code === selectedRoleCode) || null;
@@ -77,6 +79,15 @@ export default function PermissionsSettings() {
 
   function resetDraft() {
     if (selectedRole) setDraft(JSON.parse(JSON.stringify(selectedRole.permissions || {})));
+  }
+
+  async function setVisibility(scope: 'all' | 'assigned_only') {
+    if (!selectedRole || scope === selectedRole.job_visibility_scope) return;
+    setSavingVisibility(true);
+    try {
+      await apiFetch(`/roles/${selectedRole.id}/visibility`, { method: 'PUT', body: JSON.stringify({ job_visibility_scope: scope }) });
+      refetchRoles();
+    } finally { setSavingVisibility(false); }
   }
 
   async function toggleEnforcement() {
@@ -181,6 +192,28 @@ export default function PermissionsSettings() {
                   <button onClick={save} disabled={saving} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 16px', border: 'none', borderRadius: 8, background: '#1e40af', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
                     <Save size={12} /> {saving ? 'Saving…' : 'Save'}
                   </button>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 18, padding: '12px 14px', borderRadius: 10, background: '#f8fafc', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: 12 }}>
+                <Eye size={16} style={{ color: '#64748b', flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>Job visibility</div>
+                  <div style={{ fontSize: 11, color: '#94a3b8' }}>Which requisitions this role sees on Requisitions, Pipeline, and the Dashboard.</div>
+                </div>
+                <div style={{ display: 'flex', border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden' }}>
+                  <button onClick={() => setVisibility('all')} disabled={savingVisibility}
+                    style={{
+                      padding: '6px 12px', border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 700,
+                      background: selectedRole.job_visibility_scope === 'all' ? '#1e40af' : '#fff',
+                      color: selectedRole.job_visibility_scope === 'all' ? '#fff' : '#64748b',
+                    }}>All jobs</button>
+                  <button onClick={() => setVisibility('assigned_only')} disabled={savingVisibility}
+                    style={{
+                      padding: '6px 12px', border: 'none', borderLeft: '1px solid #e2e8f0', cursor: 'pointer', fontSize: 11, fontWeight: 700,
+                      background: selectedRole.job_visibility_scope === 'assigned_only' ? '#1e40af' : '#fff',
+                      color: selectedRole.job_visibility_scope === 'assigned_only' ? '#fff' : '#64748b',
+                    }}>Assigned jobs only</button>
                 </div>
               </div>
 

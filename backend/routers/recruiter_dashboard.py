@@ -147,7 +147,9 @@ async def my_day(actor: Actor = Depends(get_actor)):
                FROM recruiter_tasks
                WHERE recruiter_id = $1 AND status IN ('pending','in_progress')
                  AND (due_at IS NULL OR due_at < $2)
-               ORDER BY (due_at IS NULL), due_at ASC, priority = 'high' DESC
+               ORDER BY (due_at IS NULL), due_at ASC,
+                        CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                                      WHEN 'medium' THEN 2 ELSE 3 END
                LIMIT 20""",
             uid, today_end,
         )

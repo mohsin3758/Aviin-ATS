@@ -60,6 +60,24 @@ async def get_role_permissions(conn, tenant_id: str, role_code: Optional[str]) -
     return row if isinstance(row, dict) else json.loads(row or "{}")
 
 
+async def get_job_visibility_scope(conn, tenant_id: str, role: Optional[str]) -> str:
+    """'all' (see every open requisition) or 'assigned_only' (see only
+    requisitions this user has an active assignment on) — a per-role
+    setting on role_definitions.job_visibility_scope, edited from the same
+    Settings > Permissions page as the feature/action matrix. Admin/super_
+    admin and anonymous trusted-internal callers (role=None) always see
+    'all', same exemption used throughout permissions.py/require_role().
+    Defaults to 'all' for a role with no row (or no override) — this is a
+    display filter, not a security boundary, so the safe default is the
+    pre-existing unfiltered behavior, not a lockout."""
+    if not role or role in ("admin", "super_admin"):
+        return "all"
+    scope = await conn.fetchval(
+        "SELECT job_visibility_scope FROM role_definitions WHERE tenant_id=$1 AND role_code=$2 AND is_active",
+        tenant_id, role)
+    return scope or "all"
+
+
 def check_permission(permissions: Optional[dict], feature: str, action: str) -> Optional[bool]:
     """True/False if determinable, None if the role has no row at all
     (see get_role_permissions) — callers treat None as "allow, but this

@@ -215,6 +215,7 @@ async def _process_tenant_sla_escalations(conn, tenant_id: str):
             assignment_id=assignment["id"] if assignment else None,
             title=f"{r['title']} — SLA breached ({round(r['hours_open'])}h open, limit {r['sla_hours']}h)",
             recruiter_id=assignment["recruiter_id"] if assignment else None,
+            sla_hours=r["sla_hours"],
         )
 
     await conn.execute(
@@ -224,7 +225,23 @@ async def _process_tenant_sla_escalations(conn, tenant_id: str):
     )
 
 
-async def _handle_escalation_alert(conn, tenant_id, alert_id, alert_type, requisition_id, assignment_id, title, recruiter_id):
+def _grace_hours_for(alert_type: str, sla_hours) -> float:
+    """Recommendation 1 (recruiter-assignment gap analysis): the tier-1 ->
+    tier-2 grace period used to be one flat SLA_ESCALATION_GRACE_HOURS for
+    every requisition regardless of priority. For sla_breach alerts,
+    find_sla_breaches() now returns the *effective* hours it used (already
+    priority-tier- and client-tier-adjusted via sql/37...sql), so scale the
+    grace period off that: 10% of the target window, floored at 4h — a
+    critical job's tighter target naturally yields a tighter grace period
+    too, without a second config surface. stalled_assignment alerts have no
+    such target (they're a "nobody touched this" signal, not a fill-time
+    budget) so they keep the flat default."""
+    if alert_type == "sla_breach" and sla_hours:
+        return max(4, round(sla_hours * 0.1))
+    return SLA_ESCALATION_GRACE_HOURS
+
+
+async def _handle_escalation_alert(conn, tenant_id, alert_id, alert_type, requisition_id, assignment_id, title, recruiter_id, sla_hours=None):
     row = await conn.fetchrow(
         """INSERT INTO sla_escalations (tenant_id, alert_id, alert_type, requisition_id, assignment_id)
            VALUES ($1,$2,$3,$4,$5)
@@ -276,12 +293,13 @@ async def _handle_escalation_alert(conn, tenant_id, alert_id, alert_type, requis
         logger.info(f"SLA escalation tier 1 fired: {alert_id}")
 
     elif row["tier2_fired_at"] is None and assignment_id:
+        grace_hours = _grace_hours_for(alert_type, sla_hours)
         hours_since_first = (datetime.now(timezone.utc) - row["first_detected_at"]).total_seconds() / 3600
-        if hours_since_first >= SLA_ESCALATION_GRACE_HOURS:
+        if hours_since_first >= grace_hours:
             try:
                 result = await conn.fetchrow(
                     "SELECT * FROM do_reassign($1, $2, NULL)",
-                    assignment_id, f"Auto-escalation: unresolved {SLA_ESCALATION_GRACE_HOURS}h+ after SLA alert",
+                    assignment_id, f"Auto-escalation: unresolved {grace_hours}h+ after SLA alert",
                 )
                 await conn.execute("UPDATE sla_escalations SET tier2_fired_at=now() WHERE id=$1", row["id"])
                 logger.info(f"SLA escalation tier 2 auto-reassigned {assignment_id} -> {result['new_recruiter_id']}")

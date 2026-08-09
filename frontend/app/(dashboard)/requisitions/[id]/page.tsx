@@ -870,7 +870,10 @@ function ActivityTab({ candidateId }: any) {
 // ── Assigned Recruiter card (HARD RULE #10: reassignment is HITL-gated) ───────
 function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   const { data: assignments, refetch } = useFetch<any[]>(`/assignments?requisition_id=${reqId}`);
-  const { data: users } = useFetch<any[]>(`/users?is_active=true`);
+  // Recommendation 5 (recruiter-assignment gap analysis): picker only ever
+  // needs to offer real recruiters, not every active user (admins/KAEs
+  // included) — was previously fetching the unfiltered user list.
+  const { data: users } = useFetch<any[]>(`/users?is_active=true&role=recruiter`);
   const [showForm, setShowForm] = useState(false);
   const [newRecruiterId, setNewRecruiterId] = useState('');
   const [reason, setReason] = useState('');
