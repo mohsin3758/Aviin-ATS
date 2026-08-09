@@ -45,6 +45,52 @@ class BGVCheckUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+@router.get("/stats")
+async def bgv_stats(actor: Actor = Depends(get_actor)):
+    """Tenant-wide overview for the BGV dashboard — was always all-zero
+    hardcoded on the frontend despite bgv_checks having real rows."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """SELECT
+                 COUNT(*) FILTER (WHERE status='completed' AND result='clear') AS verified,
+                 COUNT(*) FILTER (WHERE status='in_progress') AS in_progress,
+                 COUNT(*) FILTER (WHERE status='pending') AS pending,
+                 COUNT(*) FILTER (WHERE result='flagged') AS flagged,
+                 COUNT(*) AS total
+               FROM bgv_checks"""
+        )
+        by_type = await conn.fetch(
+            """SELECT check_type, COUNT(*) AS total,
+                      COUNT(*) FILTER (WHERE status='completed' AND result='clear') AS verified
+               FROM bgv_checks GROUP BY check_type"""
+        )
+    return {**dict(row), "by_type": [dict(r) for r in by_type]}
+
+
+@router.get("/checks")
+async def list_all_bgv_checks(
+    status: Optional[str] = None,
+    limit: int = 100,
+    actor: Actor = Depends(get_actor),
+):
+    """List across all candidates (candidates/{id} route below only ever
+    covered a single candidate — nothing surfaced a tenant-wide view for
+    the Checks tab)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            """SELECT bc.id, bc.check_type, bc.status, bc.result, bc.score_points,
+                      bc.initiated_at, bc.completed_at, bc.vendor, bc.reference_id, bc.notes,
+                      bc.candidate_id, c.full_name AS candidate_name
+               FROM bgv_checks bc
+               JOIN candidates c ON c.id = bc.candidate_id
+               WHERE ($1::text IS NULL OR bc.status = $1)
+               ORDER BY bc.created_at DESC
+               LIMIT $2""",
+            status, limit,
+        )
+    return [dict(r) for r in rows]
+
+
 @router.get("/checks/{candidate_id}")
 async def list_bgv_checks(candidate_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:

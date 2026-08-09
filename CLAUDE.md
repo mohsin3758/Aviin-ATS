@@ -2869,3 +2869,77 @@ user deactivated, throwaway candidates soft-deleted (confirmed invisible to
 real recruiters), and — deliberately, since this log is what the user will
 review to make real permission decisions — the 3 test-generated
 `permission_check_log` rows were deleted so they don't read as real usage.
+
+## Stale hardcoded stage-list bug fixed (Recruiter Ops), 2026-08-09
+Follow-up to the 4-area audit (Finance/ERP, Recruiter Ops, BGV, Analytics)
+run earlier the same day — user picked this finding to fix first since it
+was live and small. `applications.py`'s `_STAGE_AUTO_TASK` (auto-creates a
+`recruiter_tasks` row on 5 specific stage transitions) and `recruiter_
+dashboard.py`'s `my-stats` (`interviews_this_week`) both hardcoded stage
+keys (`l1_interview`/`l2_interview`) — but this same tenant has a real
+custom `l3_interview` round (added earlier this project), and pipeline
+stages can now be freely added/renamed/deleted (Settings > Pipeline
+Stages, built earlier the same day). Moving a candidate to `l3_interview`
+silently created no task and didn't count toward a recruiter's weekly
+interview stat — invisible, no error, exactly the audit's finding.
+
+Fixed both with the same `LIKE '%interview%'` / dynamic-match pattern
+already established elsewhere in this codebase (hiring-funnel, recruiter-
+performance, pipeline-intelligence) rather than hardcoding `l3_interview`
+too, which would just recreate the same bug the next time a tenant adds
+another round: `_auto_task_for_stage()` falls back to a generic
+"interview_coordination" task for any stage key containing "interview"
+not already in the static map (screened/offer/offer_accepted are still
+explicit — they're single-purpose, not the kind of stage a tenant adds
+multiple variants of); `my-stats`'s `interviews_this_week` switched from
+`stage IN (...)` to `stage LIKE '%interview%'`.
+
+Verified for real against production: created a throwaway application
+assigned to a real (never-logged-in, seed-data) recruiter, moved it to
+`l3_interview` via the real API, confirmed a `recruiter_tasks` row was
+created with `task_type='interview_coordination'` and title "Coordinate
+L3 Interview: ..." (previously would have created nothing), then confirmed
+that same recruiter's real `/recruiter/my-stats` endpoint counted it in
+`interviews_this_week` (previously would have stayed 0). Full QA suite
+re-run clean after: 157 passed / 2 skipped / 0 failed.
+
+## BGV page rebuilt for real, 2026-08-09
+Same day, same audit — user also picked this finding. `/bgv` was 100%
+static markup (`frontend/app/(dashboard)/bgv/page.tsx`) — three tabs, all
+hardcoded to zero, zero API calls anywhere in the file — despite a fully
+real backend (`backend/routers/bgv.py`: BGV checks CRUD, a trust-score
+view (`v_trust_scores`), trust graph, Aadhaar/DigiLocker demo-mode
+flows) that had simply never been wired to any UI. Confirmed real data
+already existed and was invisible: 5 real `bgv_checks` rows, 1735
+`v_trust_scores` rows, all silently inaccessible from the app.
+
+Added two missing backend endpoints (list-all was previously only
+per-candidate): `GET /bgv/stats` (tenant-wide verified/in_progress/
+pending/flagged counts + a by-check-type breakdown, for the Overview
+tab) and `GET /bgv/checks` (list across all candidates with an optional
+status filter, for the Checks tab — registered *before* the existing
+`/checks/{candidate_id}` route, learned from the same-day Permissions
+route-ordering bug not to repeat that mistake). Rebuilt the page with the
+same three tabs/data-testids the existing QA suite already asserts on
+(`data-tab`, `trust-overview`/`bgv-checks-panel`/`india-verify-panel`) so
+nothing broke: **Overview** — real stat cards + by-type breakdown + a
+candidate-search trust-score lookup (`GET /bgv/trust-score/{id}`).
+**Checks** — a real list with status-filter chips, a "New Check" form
+(candidate picker + check-type select → `POST /bgv/checks`), and inline
+Clear/Flag buttons on in-progress checks (`PATCH /bgv/checks/{id}`).
+**India Verify** — a candidate picker feeding both the Aadhaar OTP demo
+flow (initiate → enter OTP → verify) and the DigiLocker document-pull
+demo flow, both hitting the real (demo-mode) endpoints instead of being
+inert list items.
+
+Verified for real against production: `GET /bgv/stats` returned the real
+5 in_progress checks (not 0); `GET /bgv/checks` returned real candidate
+names (Vasudeva B, John Dev, etc.); a real headless-browser run confirmed
+the Overview cards show the real 5 (not the old hardcoded 0), the Checks
+tab lists real candidate names, the India Verify tab's Aadhaar flow
+genuinely calls the backend and shows a real transaction ID, and the
+trust-score lookup returns a real score for a real candidate. Separately
+verified the write path end-to-end via a throwaway candidate: created a
+check, resolved it completed/clear, confirmed `/bgv/stats`'s `verified`
+count incremented by exactly 1. All test data cleaned up after. Full QA
+suite re-run clean: 157 passed / 2 skipped / 0 failed.

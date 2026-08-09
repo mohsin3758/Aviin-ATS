@@ -66,11 +66,16 @@ async def my_stats(actor: Actor = Depends(get_actor)):
             uid, month_start,
         )
 
-        # 3. Interviews this week
+        # 3. Interviews this week — LIKE match, not a fixed IN() list, so a
+        # tenant's custom interview rounds (e.g. l3_interview) are counted
+        # too. A hardcoded ('l1_interview','l2_interview') here silently
+        # undercounted for any tenant with a custom round, the same bug
+        # class already found and fixed in recruiter-performance/hiring-
+        # funnel/pipeline endpoints elsewhere in this codebase.
         interviews_week = await conn.fetchval(
             """SELECT COUNT(*) FROM applications
                WHERE assigned_recruiter_id = $1::uuid
-                 AND stage IN ('l1_interview', 'l2_interview')
+                 AND stage LIKE '%interview%'
                  AND updated_at >= $2""",
             uid, week_start,
         )

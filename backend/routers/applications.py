@@ -74,6 +74,22 @@ _STAGE_AUTO_TASK = {
 }
 
 
+def _auto_task_for_stage(stage_key: str) -> Optional[dict]:
+    """Static map above only ever covered the 5 original built-in stages —
+    but stages can now be freely renamed/added/deleted per tenant (Settings
+    > Pipeline Stages), so a fixed dict silently stops auto-creating tasks
+    the moment a tenant adds a custom interview round (e.g. l3_interview,
+    already real on this tenant) instead of just using l1/l2. Falls back to
+    a generic interview-coordination task for any stage key containing
+    "interview" that isn't already in the static map above."""
+    if stage_key in _STAGE_AUTO_TASK:
+        return _STAGE_AUTO_TASK[stage_key]
+    if "interview" in stage_key:
+        label = stage_key.replace("_", " ").title()
+        return {"type": "interview_coordination", "title": f"Coordinate {label}: {{name}}"}
+    return None
+
+
 
 @router.get("")
 async def list_applications(
@@ -420,7 +436,7 @@ async def update_stage(
         # for stages where there's a genuinely distinct next action — not
         # every stage (sourced/contacted/hold etc. would just be task-list
         # noise with nothing concrete to do).
-        _auto_task = _STAGE_AUTO_TASK.get(body.stage)
+        _auto_task = _auto_task_for_stage(body.stage)
         if _auto_task and row["assigned_recruiter_id"]:
             _cand = await conn.fetchrow("SELECT full_name FROM candidates WHERE id=$1", row["candidate_id"])
             await conn.execute(
