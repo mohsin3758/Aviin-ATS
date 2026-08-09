@@ -260,29 +260,33 @@ async def run_pipeline_auto_move():
     """Daily: evaluate all tenant stage rules and auto-move candidates."""
     logger.info("Running scheduled pipeline auto-move")
     try:
-        async with db.system_conn() as conn:
-            tenants = await conn.fetch("SELECT DISTINCT tenant_id FROM stage_rules WHERE enabled=TRUE")
-            for t in tenants:
-                tid = str(t["tenant_id"])
-                try:
+        async with db.system_conn() as sconn:
+            # tenants has no ::uuid-cast FORCE RLS policy, safe to list via
+            # system_conn (app.tenant_id=''). stage_rules/pipeline_movements
+            # now DO (added alongside this fix — they had no RLS at all
+            # before, a real tenant-isolation gap found while wiring manual
+            # stage moves to write to pipeline_movements) — every read/write
+            # against either now goes through a real per-tenant tenant_conn()
+            # below instead, same fix class as send_weekly_kpi_summary.
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+
+        import json as _json
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
                     rules = await conn.fetch(
                         "SELECT id, name, stage_from, stage_to, conditions FROM stage_rules WHERE enabled=TRUE AND tenant_id=$1",
-                        t["tenant_id"]
+                        tid
                     )
                     if not rules:
                         continue
-                    import json as _json
-                    # pipeline_stage_config has FORCE ROW LEVEL SECURITY (the
-                    # outer system_conn's app.tenant_id='' would crash the
-                    # ::uuid cast in its policy, same class of bug found and
-                    # fixed in send_weekly_kpi_summary — needs a real per-
-                    # tenant connection). Stages are deletable (Settings >
-                    # Pipeline Stages); a rule pointing at a since-deleted
-                    # stage_to must not write it, or the candidate would
-                    # silently vanish from every Kanban board.
-                    async with db.tenant_conn(tid) as _sconn:
-                        configured = {r["stage_key"] for r in await _sconn.fetch(
-                            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1", tid)}
+
+                    # Stages are deletable (Settings > Pipeline Stages); a
+                    # rule pointing at a since-deleted stage_to must not
+                    # write it, or the candidate would silently vanish from
+                    # every Kanban board.
+                    configured = {r["stage_key"] for r in await conn.fetch(
+                        "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1", tid)}
                     valid_stages = configured if configured else {
                         "sourced","contacted","interested","nda","screened","submitted",
                         "l1_interview","l2_interview","offer","offer_accepted","placed","rejected","hold",
@@ -294,7 +298,7 @@ async def run_pipeline_auto_move():
                         conds = rule["conditions"] if isinstance(rule["conditions"], list) else _json.loads(rule["conditions"] or "[]")
                         apps = await conn.fetch(
                             "SELECT a.id, a.stage, a.candidate_id, a.fit_score, c.total_exp_mo, c.ai_match_score, c.expected_ctc, c.notice_period_days, c.full_name FROM applications a JOIN candidates c ON c.id=a.candidate_id WHERE a.stage=$1 AND a.tenant_id=$2",
-                            rule["stage_from"], t["tenant_id"]
+                            rule["stage_from"], tid
                         )
                         moved = 0
                         for app in apps:
@@ -302,13 +306,13 @@ async def run_pipeline_auto_move():
                                 await conn.execute("UPDATE applications SET stage=$1, updated_at=NOW() WHERE id=$2", rule["stage_to"], app["id"])
                                 await conn.execute(
                                     "INSERT INTO pipeline_movements (id,tenant_id,candidate_id,application_id,stage_from,stage_to,reason,triggered_by) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'scheduled_auto_move','scheduler')",
-                                    t["tenant_id"], app["candidate_id"], app["id"], rule["stage_from"], rule["stage_to"]
+                                    tid, app["candidate_id"], app["id"], rule["stage_from"], rule["stage_to"]
                                 )
                                 moved += 1
                         if moved:
                             logger.info(f"Auto-moved {moved} candidates via rule '{rule['name']}' for tenant {tid}")
-                except Exception as e:
-                    logger.error(f"Auto-move failed for tenant {tid}: {e}")
+            except Exception as e:
+                logger.error(f"Auto-move failed for tenant {tid}: {e}")
     except Exception as e:
         logger.error(f"Scheduled auto-move error: {e}")
 

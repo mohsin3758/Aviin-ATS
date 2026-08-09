@@ -620,11 +620,27 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
   );
 }
 
+// Captured via the structured rejection-reason taxonomy (S16 Tier-1) but
+// previously never shown anywhere again after the reject action itself —
+// GET /applications/{id}/rejection had no caller in the whole frontend.
+function RejectionReasonCard({ appId }: { appId: string }) {
+  const { data } = useFetch<any>(`/applications/${appId}/rejection`);
+  if (!data) return null;
+  return (
+    <InfoCard title="Rejection Reason">
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#DC2626', marginBottom: data.notes ? 6 : 0 }}>{data.reason_label}</div>
+      {data.notes && <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.5 }}>{data.notes}</div>}
+      {data.rejected_at && <div style={{ fontSize: 10, color: '#94A3B8', marginTop: 6 }}>{new Date(data.rejected_at).toLocaleDateString()}</div>}
+    </InfoCard>
+  );
+}
+
 // ── Profile Tab ───────────────────────────────────────────────────────────────
 function ProfileTab({ app, apiUrl }: any) {
   const skills: string[] = app.skills || [];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {app.stage === 'rejected' && <RejectionReasonCard appId={app.id} />}
       <InfoCard title="Contact Info">
         {app.email && <InfoRow icon={<Mail size={12} />} label={app.email} />}
         {app.phone && <InfoRow icon={<Phone size={12} />} label={app.phone} />}

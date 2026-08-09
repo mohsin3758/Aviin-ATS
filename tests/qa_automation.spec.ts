@@ -872,7 +872,14 @@ test.describe('S13 P15-P22 Frontend Pages', () => {
 // the 3-KAE-per-client limit; test data is left in place afterward, same
 // convention as the rest of this file (unique per-run names/emails instead
 // of hard deletes — there's no delete endpoint for candidates by design).
-test.describe('S14 KAE Candidate Submission', () => {
+// .serial() — same fix as S15/S16/S17 (root-caused 2026-08-09, see
+// CLAUDE.md): plain describe + this project's retries:1 means a failing
+// test retries in a fresh worker with no module state, and Playwright
+// continues the REST of the block in that fresh worker rather than
+// returning to the original one, cascading one transient failure into
+// many false ones ("undefined" candId/reqId). .serial() reruns the whole
+// block including setup on any retry instead.
+test.describe.serial('S14 KAE Candidate Submission', () => {
   const stamp = Date.now();
   let clientId: string;
   let reqId: string;

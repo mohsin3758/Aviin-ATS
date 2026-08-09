@@ -432,6 +432,31 @@ async def update_stage(application_id: str, body: StageUpdate, actor: Actor = De
             },
             f"application.stage_changed:{application_id}:{row['updated_at'].isoformat()}",
         )
+
+        # This is the endpoint every manual stage move goes through (drag-
+        # and-drop on the Kanban board, the drawer's stage buttons) — until
+        # now it never wrote pipeline_movements or candidate_activities,
+        # only the rule-engine auto-mover and the bulk-action endpoint did.
+        # Result: the Pipeline Audit Log / stage-conversion-rate analytics
+        # (both read pipeline_movements) were blind to the single most
+        # common recruiter action, and a candidate's own Activity Timeline
+        # never showed their real stage history. Skip on a same-stage no-op.
+        if old["stage"] != body.stage:
+            await conn.execute(
+                """INSERT INTO pipeline_movements
+                     (tenant_id, candidate_id, application_id, stage_from, stage_to, reason, triggered_by)
+                   VALUES ($1,$2,$3,$4,$5,'manual_move',$6)""",
+                actor.tenant_id, row["candidate_id"], application_id, old["stage"], body.stage,
+                str(actor.user_id) if actor.user_id else "system",
+            )
+            await conn.execute(
+                """INSERT INTO candidate_activities
+                     (tenant_id, candidate_id, user_id, activity_type, title, description)
+                   VALUES ($1,$2,$3,'status_change','Stage changed',$4)""",
+                actor.tenant_id, row["candidate_id"], actor.user_id,
+                f"{old['stage'].replace('_',' ').title()} → {body.stage.replace('_',' ').title()}",
+            )
+
         # Fetch candidate info INSIDE conn block (before connection is released)
         _notif_cand = await conn.fetchrow(
             "SELECT c.id as cid, c.email, c.full_name FROM applications a "

@@ -2418,3 +2418,93 @@ exactly one filled star (on Interested) on the settings page, and the Add
 Candidate modal defaulting to "interested" when opened from the All
 Stages tab. Full QA suite re-run clean: 157 passed / 2 skipped / 0 failed.
 All test data cleaned up after each check.
+
+## Pipeline/Candidates audit + both High-impact findings fixed, 2026-08-09
+User asked for a research-only audit ("suggest me first dont start the
+development") scoped to the Pipeline/Candidates area specifically (not a
+full product sweep — several of those already exist in this file). Used
+an Explore agent for the raw discovery pass, then personally verified the
+two most severe findings against real code/DB before reporting rather
+than trusting the agent's summary at face value. Reported 9 findings;
+user picked the top 2 to fix now.
+
+**#1 — manual stage moves were invisible to both the Pipeline Audit Log
+and a candidate's own Activity Timeline.** `PATCH /applications/{id}/
+stage` — the endpoint every drag-and-drop move and drawer stage-button
+click actually calls — never wrote to `pipeline_movements` or
+`candidate_activities`; only the rule-engine auto-mover and the separate
+bulk-action endpoint did. Since manual moves are the most common
+recruiter action by far, `GET /pipeline/audit` and the stage-conversion-
+rate analytics (both read `pipeline_movements`) were silently blind to
+most real activity, and a candidate's Activity Timeline never showed
+their actual stage history. Fixed by writing both rows in `update_stage()`
+right after the existing `event_outbox` write, skipped on a same-stage
+no-op PATCH.
+
+**Real, more serious gap found while implementing #1, not hypothetical**:
+`pipeline_movements` and `stage_rules` had **zero row-level security at
+all** (`relrowsecurity=false`) despite being tenant-scoped and owned by
+`postgres`, not `app_user` — every read/write relied entirely on the
+application always remembering a `WHERE tenant_id=...` clause, no DB-level
+backstop. Same class of gap found and fixed repeatedly elsewhere in this
+project (`saved_filters`, `agency_users`, `work_sessions`, round 2 audit).
+Also discovered while checking this: `stage_rules`, `pipeline_movements`,
+and `candidate_activities` have **no `CREATE TABLE` anywhere in
+`sql/*.sql`** — all three exist live in production but were never captured
+in a committed migration, confirmed via `git grep` finding zero matches
+across the whole repo. `sql/33_untracked_tables_and_rls.sql` backfills all
+three (`CREATE TABLE IF NOT EXISTS`, columns copied verbatim from
+`pg_dump --schema-only` against production, not reconstructed by hand —
+no-op everywhere they already exist) and adds FORCE RLS + a tenant
+isolation policy to the two that had none.
+
+Enabling FORCE RLS on `stage_rules`/`pipeline_movements` would have
+immediately broken `scheduler.py`'s `run_pipeline_auto_move()` (the real
+nightly cron job), which read/wrote both through `db.system_conn()`
+(`app.tenant_id=''`) — the exact `''::uuid` cast crash class already found
+and fixed today in `send_weekly_kpi_summary()` and this same function's
+`pipeline_stage_config` check. Fixed by restructuring the whole function
+around one real per-tenant `tenant_conn()` per tenant (listing tenant IDs
+from the `tenants` table via `system_conn()` first, which has no such
+cast-crash risk) instead of nesting a second connection inside the loop
+like the earlier same-day fix did.
+
+**#2 — rejection reasons were captured but never shown again anywhere.**
+`GET /applications/{id}/rejection` (built for the S16 Tier-1 rejection
+taxonomy) returns the structured reason/notes for a specific application,
+but had zero callers in the entire frontend — confirmed by grepping both
+drawer files, which only ever called `/rejection-reasons` (the taxonomy
+list, a different endpoint). Added a `RejectionReasonCard` to both
+`pipeline/page.tsx`'s and `requisitions/[id]/page.tsx`'s separate drawer
+Profile tabs (two independent implementations, same pattern as the earlier
+resume-download fix needing both) — shows only when `stage==='rejected'`,
+fetches and displays the reason label, notes, and rejection date.
+
+Verified for real against production, not code review: moved a real
+candidate (Abhishek.G, SAP ABAP Developer req) sourced→contacted via the
+real PATCH endpoint, confirmed both new rows via direct SQL (`manual_move`
+/ `Sourced → Contacted`), confirmed the Pipeline Audit Log endpoint now
+actually surfaces it (`candidate: "Abhishek.G", from: "sourced", to:
+"contacted", reason: "manual_move"`), confirmed a same-stage no-op PATCH
+does NOT create a duplicate row, and confirmed RLS is real (not just
+enabled) by querying both tables as `app_user` with a fake tenant_id set —
+0 rows despite real data existing. Then rejected the same candidate for
+real with a reason code, confirmed `GET .../rejection` returned it, and
+ran a real headless-browser click-through of both drawer implementations
+— the Rejection Reason card rendered with the correct label and notes in
+both. Restored the candidate's original stage and deleted every test-
+created movement/activity/rejection row afterward — zero residue.
+
+**One more real bug caught only because the full suite was re-run
+afterward, unrelated to any of the above**: `S14 KAE Candidate Submission`
+started intermittently failing at a different, unrelated step each time —
+recognized immediately as the same `describe`-cascade flakiness class
+root-caused earlier today for S15/S16/S17 (plain `describe` + this
+project's `retries:1` reruns a failing test in a fresh worker with no
+module state, cascading one transient failure into unrelated-looking
+ones), just not yet converted to `.serial()`. Confirmed by running the
+whole S14 block in isolation (passed clean) before concluding it wasn't a
+regression from today's actual changes. Converted to `.serial()`, same
+fix as the other three suites.
+
+Full QA suite, final clean run: 157 passed / 2 skipped / 0 failed.
