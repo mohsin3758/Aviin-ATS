@@ -77,7 +77,7 @@ DEFAULT_KEYS = {d[0] for d in DEFAULTS}
 # built-in stages can never be deleted (hide-only).
 PROTECTED_KEYS = {"sourced", "rejected", "placed"}
 
-FIELDS = "stage_key, label, color, display_order, is_visible, is_custom"
+FIELDS = "stage_key, label, color, display_order, is_visible, is_custom, is_default_add"
 
 
 async def is_valid_stage(conn, tenant_id: str, stage_key: str) -> bool:
@@ -117,10 +117,10 @@ async def get_stage_config(actor: Actor = Depends(get_actor)):
             for key, label, color, order in DEFAULTS:
                 await conn.execute(
                     """INSERT INTO pipeline_stage_config
-                         (tenant_id, stage_key, label, color, display_order, is_visible)
-                       VALUES ($1,$2,$3,$4,$5,TRUE)
+                         (tenant_id, stage_key, label, color, display_order, is_visible, is_default_add)
+                       VALUES ($1,$2,$3,$4,$5,TRUE,$6)
                        ON CONFLICT (tenant_id, stage_key) DO NOTHING""",
-                    actor.tenant_id, key, label, color, order,
+                    actor.tenant_id, key, label, color, order, key == "sourced",
                 )
             rows = await conn.fetch(
                 f"SELECT {FIELDS} FROM pipeline_stage_config WHERE tenant_id=$1 ORDER BY display_order",
@@ -151,6 +151,19 @@ async def save_stage_config(body: StageConfigUpdate, actor: Actor = Depends(get_
         if unknown:
             raise HTTPException(400, f"Unknown stage_key(s): {sorted(unknown)}. Add new stages via "
                                       f"POST /settings/pipeline-stages first, or check for a typo.")
+
+        # Hiding the current default-add stage would leave new candidates
+        # landing somewhere invisible (bulk_assign's fallback only checks
+        # existence, not visibility) — block it here instead, same
+        # "fail loud, not silent" choice as the stage-deletion guards above.
+        default_key = await conn.fetchval(
+            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add", actor.tenant_id)
+        if default_key:
+            hiding_default = next((s for s in body.stages if s.stage_key == default_key and not s.is_visible), None)
+            if hiding_default:
+                raise HTTPException(400, f"'{default_key}' is the default stage for new candidates — "
+                                          f"pick a different default first (Settings > Pipeline Stages) before hiding it")
+
         for s in body.stages:
             await conn.execute(
                 """INSERT INTO pipeline_stage_config
@@ -162,6 +175,39 @@ async def save_stage_config(body: StageConfigUpdate, actor: Actor = Depends(get_
                      updated_at=now()""",
                 actor.tenant_id, s.stage_key, s.label, s.color, s.display_order, s.is_visible,
             )
+        rows = await conn.fetch(
+            f"SELECT {FIELDS} FROM pipeline_stage_config WHERE tenant_id=$1 ORDER BY display_order",
+            actor.tenant_id,
+        )
+    return _out(rows)
+
+
+class DefaultAddStageRequest(BaseModel):
+    stage_key: str
+
+
+@router.put("/default-add-stage")
+async def set_default_add_stage(body: DefaultAddStageRequest, actor: Actor = Depends(get_actor)):
+    """Which stage a new candidate lands in via "Add Candidate to Pipeline"
+    (candidates.py's bulk-assign) when there's no more specific context — a
+    board tab already open takes precedence over this on the frontend, this
+    is the fallback tenants can set for everything else. Gated to admin/
+    manager, same bar as other tenant-wide policy settings on this page."""
+    if actor.role not in ("admin", "manager"):
+        raise HTTPException(403, "Only admin/manager can change the default add-stage")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT is_visible FROM pipeline_stage_config WHERE tenant_id=$1 AND stage_key=$2",
+            actor.tenant_id, body.stage_key)
+        if not row:
+            raise HTTPException(404, f"Stage '{body.stage_key}' not found")
+        if not row["is_visible"]:
+            raise HTTPException(400, f"'{body.stage_key}' is hidden — show it first before making it the default")
+        await conn.execute(
+            "UPDATE pipeline_stage_config SET is_default_add=FALSE WHERE tenant_id=$1", actor.tenant_id)
+        await conn.execute(
+            "UPDATE pipeline_stage_config SET is_default_add=TRUE, updated_at=now() WHERE tenant_id=$1 AND stage_key=$2",
+            actor.tenant_id, body.stage_key)
         rows = await conn.fetch(
             f"SELECT {FIELDS} FROM pipeline_stage_config WHERE tenant_id=$1 ORDER BY display_order",
             actor.tenant_id,

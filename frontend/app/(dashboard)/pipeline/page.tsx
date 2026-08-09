@@ -133,6 +133,10 @@ function PipelineInner() {
     const visibleKeys = new Set(stageConfig.filter((s: any) => s.is_visible).map((s: any) => s.stage_key));
     return ALL_STAGES.filter((s: any) => visibleKeys.has(s.key));
   }, [stageConfig, ALL_STAGES]);
+  // Tenant-configurable (Settings > Pipeline Stages > star icon) — used by
+  // Add Candidate when no specific stage tab is active. Falls back to
+  // 'sourced' only if the backend hasn't returned a default yet/at all.
+  const defaultAddStageKey = (stageConfig || []).find((s: any) => s.is_default_add)?.stage_key || 'sourced';
 
   const { data: reqs } = useFetch<any[]>('/requisitions?limit=200&status=open');
   const { data: rawBoard, refetch: refreshBoard } = useFetch<Record<string, any[]>>(
@@ -438,7 +442,7 @@ function PipelineInner() {
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
       {addCandidateOpen && selectedJobId && (
         <AddCandidateModal jobId={selectedJobId} board={board} stages={STAGES}
-          defaultStage={STAGES.some((s: any) => s.key === activeStage) ? activeStage : 'sourced'}
+          defaultStage={STAGES.some((s: any) => s.key === activeStage) ? activeStage : defaultAddStageKey}
           onClose={() => setAddCandidateOpen(false)}
           onAdded={(stageLabel: string) => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast(`Candidate(s) added to ${stageLabel}`); }} />
       )}

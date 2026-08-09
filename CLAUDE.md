@@ -2365,3 +2365,56 @@ the tenant's real `/settings/pipeline-stages` config and only asserts
 visibility for stages actually marked visible, so it stays correct across
 future legitimate visibility changes instead of assuming a fixed default
 set. Full suite re-run clean after: 157 passed / 2 skipped / 0 failed.
+
+## Configurable default add-stage policy, 2026-08-09
+Direct follow-up. User didn't want the active-tab-default fix above to be
+the only lever — asked for the underlying "which stage new candidates land
+in" fallback (previously hardcoded to `sourced`) to be a real, changeable
+setting, not just smarter about the active tab.
+
+`sql/32_default_add_stage.sql` adds `pipeline_stage_config.is_default_add`
+(one per tenant, enforced with a partial unique index rather than app-logic
+alone — `CREATE UNIQUE INDEX ... WHERE is_default_add`) and backfills every
+existing tenant to `sourced=true`, preserving today's real behavior as an
+explicit, now-changeable setting instead of a silent hardcoded literal.
+
+New `PUT /settings/pipeline-stages/default-add-stage` (admin/manager-gated,
+same bar as other tenant-wide policy settings on that page) — rejects
+hidden stages ("show it first"). `POST /candidates/bulk-assign`'s
+`stage` field is now optional; when omitted (the Candidates page's bulk-
+assign-to-requisition modal never sends one — this fix reaches that flow
+too, not just the pipeline board) it resolves the tenant's real configured
+default instead of a literal, still falling back to `'sourced'` if nothing
+is marked (shouldn't happen post-migration). Settings > Pipeline Stages
+gained a star button per visible row — filled star = current default,
+click any other visible row's star to switch it, with the policy
+explained inline. `pipeline/page.tsx`'s Add Candidate modal now falls back
+to this configured default instead of hardcoded `sourced` when no specific
+stage tab is active (an active tab still wins, matching the earlier fix).
+
+**A real inconsistency the migration surfaced immediately, not
+hypothetical**: this tenant's actual live config had `sourced` marked
+`is_visible=false` (confirmed intentional with the user earlier today) AND,
+after the migration's backfill, `is_default_add=true` on that same hidden
+row — exactly the "new candidates land somewhere invisible" bug this
+whole feature exists to prevent, sitting live in production the moment the
+migration ran. Added two guards rather than just fixing this one instance:
+`save_stage_config` now rejects hiding the current default stage (pick a
+new one first), and `bulk_assign`'s fallback query filters `AND is_visible`
+defensively on top of that, in case any state predates the guard. Then
+fixed the actual data for real, fulfilling the user's original ask in the
+same motion: set `interested` as the tenant's real default via the new
+endpoint.
+
+Verified for real, not code review: confirmed the pre-existing hidden-
+default inconsistency via a direct GET before touching anything; set
+`interested` as default via the real API; called `bulk-assign` with no
+`stage` field at all and confirmed via SQL the application landed in
+`interested`; called the new endpoint with a hidden stage (`contacted`)
+and confirmed a clean 400; attempted to hide `interested` (the current
+default) via the general save endpoint and confirmed a clean 400 with the
+config provably unchanged after. Real browser click-through confirmed
+exactly one filled star (on Interested) on the settings page, and the Add
+Candidate modal defaulting to "interested" when opened from the All
+Stages tab. Full QA suite re-run clean: 157 passed / 2 skipped / 0 failed.
+All test data cleaned up after each check.

@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2, Zap, ToggleLeft, ToggleRight, Lock } from 'lucide-react';
+import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2, Zap, ToggleLeft, ToggleRight, Lock, Star } from 'lucide-react';
 
 interface StageRow {
   stage_key: string;
@@ -11,6 +11,7 @@ interface StageRow {
   is_visible: boolean;
   is_custom?: boolean;
   deletable?: boolean;
+  is_default_add?: boolean;
 }
 
 const SWATCHES = ['#6366F1', '#06B6D4', '#3B82F6', '#F59E0B', '#0891B2', '#64748B', '#7C3AED', '#9333EA', '#CA8A04', '#059669', '#16A34A', '#94A3B8', '#DC2626', '#EC4899', '#14B8A6'];
@@ -90,6 +91,18 @@ export default function PipelineStagesSettings() {
     } finally { setDeletingKey(null); }
   }
 
+  const [settingDefault, setSettingDefault] = useState<string | null>(null);
+  async function setDefaultAddStage(key: string, label: string) {
+    setSettingDefault(key); setMsg(null);
+    try {
+      await apiFetch('/settings/pipeline-stages/default-add-stage', { method: 'PUT', body: JSON.stringify({ stage_key: key }) });
+      setMsg({ text: `New candidates now default to "${label}"`, ok: true });
+      refetch();
+    } catch (e: any) {
+      setMsg({ text: e?.message || 'Failed to set default', ok: false });
+    } finally { setSettingDefault(null); }
+  }
+
   return (
     <div style={{ maxWidth: 780 }} className="anim-fade-up">
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
@@ -109,6 +122,10 @@ export default function PipelineStagesSettings() {
         <a href="/settings/email" style={{ color: '#1e40af', fontWeight: 700, textDecoration: 'underline' }}>Email templates</a>
         <span>·</span>
         <a href="/whatsapp" style={{ color: '#1e40af', fontWeight: 700, textDecoration: 'underline' }}>WhatsApp templates</a>
+      </div>
+
+      <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 8, background: '#fffbeb', border: '1px solid #fde68a', fontSize: 12, color: '#92400e' }}>
+        <b>Default for new candidates</b> — click the star on any visible stage to make it the one "Add Candidate to Pipeline" uses when you're not already looking at a specific stage's column (opening it from a specific stage tab still adds there instead).
       </div>
 
       {msg && (
@@ -144,6 +161,13 @@ export default function PipelineStagesSettings() {
               style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '6px 10px', fontSize: 13, fontWeight: 600, color: '#1e293b', outline: 'none', minWidth: 0 }} />
 
             <code style={{ fontSize: 10, color: '#94a3b8', background: '#f8fafc', padding: '2px 6px', borderRadius: 4, flexShrink: 0 }}>{r.stage_key}</code>
+
+            <button onClick={() => !r.is_default_add && r.is_visible && setDefaultAddStage(r.stage_key, r.label)}
+              disabled={settingDefault === r.stage_key || r.is_default_add || !r.is_visible}
+              title={r.is_default_add ? 'Default for new candidates' : r.is_visible ? 'Click to make this the default for new candidates' : 'Hidden stages can\'t be the default — show it first'}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 8px', borderRadius: 6, border: '1px solid ' + (r.is_default_add ? '#fde68a' : '#e2e8f0'), background: r.is_default_add ? '#fffbeb' : '#fff', color: r.is_default_add ? '#b45309' : '#cbd5e1', fontSize: 11, fontWeight: 600, cursor: r.is_default_add || !r.is_visible ? 'default' : 'pointer', flexShrink: 0, opacity: !r.is_visible ? 0.4 : 1 }}>
+              <Star size={12} fill={r.is_default_add ? '#f59e0b' : 'none'} />
+            </button>
 
             <button onClick={() => updateRow(r.stage_key, { is_visible: !r.is_visible })}
               title={r.is_visible ? 'Visible on board — click to hide' : 'Hidden from board — click to show'}

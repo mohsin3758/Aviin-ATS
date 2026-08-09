@@ -281,7 +281,7 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
 class BulkAssignBody(BaseModel):
     candidate_ids: list
     requisition_id: str
-    stage: str = "sourced"
+    stage: Optional[str] = None
 
 @router.post("/bulk-assign")
 async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
@@ -291,7 +291,14 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
     a later stage — the Add Candidate modal gave no indication of this, so a
     candidate added while looking at e.g. the Interested column would land in
     Sourced instead and appear to have silently failed. Now takes an explicit
-    stage (still defaults to 'sourced' for any existing/other callers).
+    stage; when the caller doesn't send one (the Candidates page's bulk-
+    assign-to-requisition modal never has a "current stage" context to
+    default to), resolves the tenant's configured default add-stage
+    (Settings > Pipeline Stages > "Default for new candidates") instead of
+    a hardcoded literal, falling back to 'sourced' only if nothing is
+    explicitly marked default (shouldn't happen post-migration, but a
+    brand-new tenant's config could theoretically be lazy-seeded elsewhere
+    first without going through get_stage_config()'s seed path).
     """
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Validate requisition belongs to tenant
@@ -302,9 +309,18 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
             from fastapi import HTTPException
             raise HTTPException(404, "Requisition not found")
 
-        if not await is_valid_stage(conn, actor.tenant_id, body.stage):
+        stage = body.stage
+        if not stage:
+            # is_visible required defensively — save_stage_config blocks hiding
+            # the current default, but this covers any state predating that
+            # guard rather than trusting the invariant unconditionally.
+            stage = await conn.fetchval(
+                "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add AND is_visible",
+                actor.tenant_id) or "sourced"
+
+        if not await is_valid_stage(conn, actor.tenant_id, stage):
             from fastapi import HTTPException
-            raise HTTPException(400, f"Unknown stage '{body.stage}' — add it under Settings > Pipeline Stages first")
+            raise HTTPException(400, f"Unknown stage '{stage}' — add it under Settings > Pipeline Stages first")
 
         # Job-specific fit_score (same formula as match_candidates()/the Add
         # Candidate modal) so the score a recruiter picked from persists onto
@@ -330,17 +346,17 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
                   (tenant_id, candidate_id, requisition_id, stage, fit_score)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT DO NOTHING
-            """, actor.tenant_id, cid, body.requisition_id, body.stage, scores.get(cid))
+            """, actor.tenant_id, cid, body.requisition_id, stage, scores.get(cid))
             # Log activity
             await conn.execute("""
                 INSERT INTO candidate_activities
                   (tenant_id, candidate_id, user_id, activity_type, title, description)
                 VALUES ($1, $2, $3, 'status_change', 'Added to Pipeline', $4)
             """, actor.tenant_id, cid, str(actor.user_id),
-                 f"Added to pipeline: {req['title']}" + (f" (stage: {body.stage})" if body.stage != "sourced" else ""))
+                 f"Added to pipeline: {req['title']}" + (f" (stage: {stage})" if stage != "sourced" else ""))
             created += 1
 
-    return {"created": created, "skipped": skipped, "requisition_title": req["title"], "stage": body.stage}
+    return {"created": created, "skipped": skipped, "requisition_title": req["title"], "stage": stage}
 
 @router.get("/check-duplicate")
 async def check_duplicate(
