@@ -3169,3 +3169,81 @@ suite re-run clean after all 6: 157 passed / 2 skipped / 0 failed. Real
 headless-browser check confirmed the new Settings > Permissions job-
 visibility toggle and the Requisitions form's Critical option both render
 and work.
+
+## Last 3 flagged-but-unfixed items closed out, 2026-08-09
+User asked "what's next / pending" — checked CLAUDE.md's history for
+items previously flagged as real but explicitly left unfixed, found 3,
+user asked to build and complete all of them. `sql/38_pending_fixes_rls_
+and_schema_drift.sql`.
+
+1. **`candidate_messages` had zero row-level security** (`relrowsecurity=
+   false`), flagged while building email tracking, never fixed — real
+   candidate-facing email/WhatsApp content, tenant-isolated only by every
+   query individually remembering `WHERE tenant_id=...`. Added FORCE RLS
+   + a real tenant_isolation policy. The one caller that doesn't go
+   through `tenant_conn(actor.tenant_id)` — the anonymous email-open
+   tracking pixel (`GET /track/open/{token}.gif`, the recipient's own
+   email client fetches it, no tenant_id to set) — needed the same fix
+   already used for every other anonymous/token flow in this codebase
+   (NDA/offer e-sign, device enrollment): a new `record_email_open(text)`
+   SQL function, `SECURITY DEFINER` and owned by `postgres`, bypasses RLS
+   for that one specific, token-scoped write only. **Verified for real**:
+   confirmed real cross-tenant isolation (the real tenant sees 171 real
+   rows, the other real tenant sees 0 for the same unfiltered query);
+   hit the real tracking-pixel endpoint against a real message's real
+   `tracking_token` and confirmed `email_open_count` genuinely
+   incremented (0→1) and `email_opened_at` got set — then reverted that
+   one row back to 0/NULL immediately after, since the test call wasn't
+   a genuine open and would otherwise have left false analytics data on
+   a real message.
+2. **SSR/hydration bug in `recruiter-ops/page.tsx`'s `TargetsTab`**
+   (React error #418) — `getTokenPayload()` reads `localStorage`
+   synchronously during render, which doesn't exist server-side, so the
+   server's first paint (no "Set Target" button) differed from the
+   client's (real role, button present) the instant hydration ran. Same
+   bug class already fixed on this same page's top-level tab-switcher and
+   on `device-monitoring/page.tsx` — this one instance was explicitly
+   left as a known, reproducible, not-yet-fixed finding at the time.
+   Applied the identical `useState` + `useEffect` deferred-read pattern.
+   **Verified for real**: real headless-browser run with console-error
+   capture confirmed zero hydration-related errors and the "Set Target"
+   button correctly rendering for a real admin session.
+3. **Schema-drift backfill** — `v_sla_dashboard`, `v_pipeline_velocity`,
+   `v_monthly_billing` (views) and `recruiter_targets` (table) all existed
+   live in production with zero `CREATE TABLE`/`CREATE VIEW` in any
+   committed migration — a fresh environment built from git alone
+   wouldn't have them. Pulled every definition directly from the live
+   schema via `pg_get_viewdef()`/`\d` rather than reconstructing from
+   memory — a first draft that guessed plausible-looking definitions
+   instead was wrong on every single one once actually checked, which is
+   exactly why real capture matters here. While pulling `v_sla_dashboard`'s
+   real definition, found it depends on a `sla_tracking` table that was
+   **also** undocumented in git (a second schema-drift instance not on the
+   original flagged list) — backfilled that too.
+   **Found and fixed a real, live, previously-unknown bug in the process**:
+   `v_sla_dashboard`'s real definition filtered interviews/hires with
+   `a.stage = 'interview'` / `a.stage = 'hired'` — neither is a real stage
+   value in this system (real ones are `l1_interview`/`l2_interview`/
+   `l3_interview` and `placed`), the exact same hardcoded-stage-key bug
+   class already found and fixed in `recruiter-performance`,
+   `hiring-funnel`, and several other endpoints earlier in this project —
+   just never caught here because this view only ever lived in the
+   database, invisible to a `.py`-file grep. This view backs the real,
+   live SLA Dashboard page (`GET /sla`, `GET /sla/summary`), and its
+   `interviews`/`offers`/`hires` counts are genuinely displayed
+   (`PipelineDots`) and CSV-exported there — meaning **every requisition's
+   interview and hire counts on that real dashboard had silently always
+   shown 0**, regardless of actual pipeline activity, since the view was
+   created. Fixed to `stage LIKE '%interview%'` / `stage = 'placed'`,
+   matching the established fix pattern exactly. `sla_tracking` itself is
+   confirmed fully orphaned (zero writers, zero readers anywhere in the
+   backend besides this one view) — its columns still fall back to the
+   view's own `COALESCE` defaults, a separate, never-built feature, not
+   something invented as part of this backfill. **Verified for real**:
+   `GET /sla/summary` against live production went from what would have
+   been 0 real interview/hire signal across all 226 open requisitions to
+   33 rows now showing genuine, non-zero interview/offer/hire counts
+   matching real pipeline data.
+
+Full QA suite re-run clean after all 3: 157 passed / 2 skipped / 0
+failed. Zero-token audit confirmed clean.

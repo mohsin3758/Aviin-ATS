@@ -374,8 +374,18 @@ function TargetsTab() {
   const { data: targets, refetch } = useFetch<any[]>(`/recruiter-targets?period_year=${now.getFullYear()}`);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ recruiter_id: '', target_submissions: 10, target_interviews: 5, target_placements: 2, target_work_hours: 160 });
-  const role = getTokenPayload()?.role || '';
-  const canManage = ['admin', 'super_admin', 'manager'].includes(role);
+  // getTokenPayload() reads localStorage, which doesn't exist during SSR —
+  // reading it synchronously during render (as this used to) made the
+  // server's first paint (canManage=false, no Set Target button) differ
+  // from the client's (real role, button present), a hydration mismatch
+  // (React error #418) — same bug class already fixed on this same page's
+  // top-level component and on device-monitoring/page.tsx. Deferred to an
+  // effect so the first client render matches the server's exactly.
+  const [canManage, setCanManage] = useState(false);
+  useEffect(() => {
+    const role = getTokenPayload()?.role || '';
+    setCanManage(['admin', 'super_admin', 'manager'].includes(role));
+  }, []);
 
   const create = async () => {
     if (!form.recruiter_id) return;

@@ -24,13 +24,15 @@ _PIXEL_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
 
 @tracking_router.get("/track/open/{token}.gif")
 async def track_email_open(token: str):
+    # candidate_messages now has FORCE ROW LEVEL SECURITY (sql/38...sql) —
+    # this anonymous, tenant-unaware caller can no longer UPDATE it
+    # directly through system_conn() (app.tenant_id=''), same class of fix
+    # as the NDA/offer-signing/device-enrollment token flows: a
+    # SECURITY DEFINER function owned by postgres bypasses RLS for this
+    # one specific, token-scoped write.
     try:
         async with db.system_conn() as conn:
-            await conn.execute(
-                """UPDATE candidate_messages
-                   SET email_opened_at = COALESCE(email_opened_at, now()), email_open_count = email_open_count + 1
-                   WHERE tracking_token = $1""",
-                token)
+            await conn.execute("SELECT record_email_open($1)", token)
     except Exception as ex:
         print(f"Email open tracking error: {ex}")
     return Response(content=_PIXEL_GIF, media_type="image/gif",
