@@ -128,6 +128,7 @@ function PipelineInner() {
   const [candSearch, setCandSearch] = useState('');
   const [activeStage, setActiveStage] = useState('all');
   const [addCandidateOpen, setAddCandidateOpen] = useState(false);
+  const [booleanOpen, setBooleanOpen] = useState(false);
   const { toast, show: showToast } = useToast();
   const dragRef = useRef<{ id: string; fromStage: string } | null>(null);
   // Rejecting now requires a reason_code — shared across both ways a card
@@ -516,6 +517,10 @@ function PipelineInner() {
             <Printer size={13} /> Print / PDF
           </button>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <button onClick={() => setBooleanOpen(true)}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: '1px solid #FDE68A', borderRadius: 8, background: '#FFFBEB', fontSize: 12, fontWeight: 700, color: '#B45309', cursor: 'pointer' }}>
+              <Search size={13} /> Boolean Search
+            </button>
             <a href={`/resume-inbox?req=${selectedJobId}`}
               style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: '1px solid #DDD6FE', borderRadius: 8, background: '#FAF5FF', fontSize: 12, fontWeight: 700, color: '#7C3AED', textDecoration: 'none', cursor: 'pointer' }}>
               <Inbox size={13} /> Inbox Matches
@@ -632,6 +637,11 @@ function PipelineInner() {
           defaultStage={STAGES.some((s: any) => s.key === activeStage) ? activeStage : defaultAddStageKey}
           onClose={() => setAddCandidateOpen(false)}
           onAdded={(stageLabel: string) => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast(`Candidate(s) added to ${stageLabel}`); }} />
+      )}
+
+      {/* ── BOOLEAN SEARCH MODAL ─────────────────────────────────────────── */}
+      {booleanOpen && selectedJobId && (
+        <BooleanSearchModal jobId={selectedJobId} onClose={() => setBooleanOpen(false)} />
       )}
 
       {/* ── REJECT REASON MODAL ─────────────────────────────────────────── */}
@@ -1659,6 +1669,77 @@ function CompareModal({ apps, requiredSkills, stages, onClose }: any) {
               ))} />
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Boolean Search ────────────────────────────────────────────────────────────
+function BooleanSearchModal({ jobId, onClose }: any) {
+  const { data, loading } = useFetch<any>(`/requisitions/${jobId}/boolean-search`);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  function copy(text: string, which: string) {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(which);
+      setTimeout(() => setCopied(null), 1800);
+    });
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={onClose}>
+      <div style={{ width: 560, maxWidth: '94vw', maxHeight: '86vh', background: '#fff', borderRadius: 14, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '16px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Boolean Search String</div>
+            <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Zero-token — built from this role's required skills, with real synonym expansion. No AI involved.</div>
+          </div>
+          <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8' }}><X size={14} /></button>
+        </div>
+        <div style={{ padding: '16px 18px', overflowY: 'auto', flex: 1 }}>
+          {loading && <div style={{ textAlign: 'center', color: '#94A3B8', fontSize: 12, padding: 20 }}>Building search string…</div>}
+          {!loading && data && (
+            <>
+              {data.skills_used?.length === 0 ? (
+                <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>
+                  This role has no required skills set — add some under the requisition's skills field first.
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', marginBottom: 6 }}>SKILLS (paste into a LinkedIn/Naukri search box)</div>
+                  <textarea readOnly value={data.boolean_string} rows={4}
+                    style={{ width: '100%', border: '1px solid #E2E8F0', borderRadius: 8, padding: '10px 12px', fontSize: 12, fontFamily: 'monospace', color: '#1E293B', resize: 'vertical', background: '#F8FAFC', marginBottom: 8 }} />
+                  <button onClick={() => copy(data.boolean_string, 'skills')}
+                    style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 8, border: 'none', background: copied === 'skills' ? '#16A34A' : '#2563EB', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer', marginBottom: 16 }}>
+                    <Copy size={12} /> {copied === 'skills' ? 'Copied!' : 'Copy Skills String'}
+                  </button>
+
+                  {data.title_string && (
+                    <>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', marginBottom: 6 }}>TITLE</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                        <code style={{ flex: 1, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>{data.title_string}</code>
+                        <button onClick={() => copy(data.title_string, 'title')}
+                          style={{ padding: '7px 10px', borderRadius: 8, border: '1px solid #E2E8F0', background: copied === 'title' ? '#F0FDF4' : '#fff', color: copied === 'title' ? '#16A34A' : '#64748B', cursor: 'pointer' }}>
+                          <Copy size={12} />
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  <div style={{ display: 'flex', gap: 20, fontSize: 12, color: '#374151', marginBottom: 16 }}>
+                    {data.location && <div><b>Location:</b> {data.location}</div>}
+                    {data.experience_range && <div><b>Experience:</b> {data.experience_range}</div>}
+                  </div>
+
+                  <div style={{ fontSize: 11, color: '#94A3B8', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, padding: '8px 12px' }}>
+                    {data.note}
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>

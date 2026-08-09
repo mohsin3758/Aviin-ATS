@@ -331,6 +331,60 @@ async def match_candidates_for_requisition(
     return out
 
 
+@router.get("/{requisition_id}/boolean-search")
+async def generate_boolean_search(requisition_id: str, actor: Actor = Depends(get_actor)):
+    """Zero-token, rule-based Boolean search string for manual sourcing on
+    LinkedIn/Naukri/etc — built from this role's real required skills, with
+    genuine synonym/alias expansion from skills_taxonomy (the same table
+    the resume parser normalizes against), not a guessed/AI-generated
+    string. A skill with no known aliases still contributes a plain
+    single-term clause. Title/location/experience are returned separately,
+    not folded into the Boolean string — most job portals treat those as
+    their own search facets, not Boolean terms, so jamming them in would
+    just produce a string that doesn't actually work when pasted in."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        req = await conn.fetchrow(
+            "SELECT title, skills_required, location, experience_min, experience_max FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            requisition_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+        alias_rows = await conn.fetch(
+            "SELECT skill_name, aliases FROM skills_taxonomy WHERE (tenant_id IS NULL OR tenant_id=$1) AND is_active",
+            actor.tenant_id)
+
+    alias_map = {r["skill_name"].strip().lower(): (r["aliases"] or []) for r in alias_rows}
+
+    def q(term: str) -> str:
+        return f'"{term}"' if " " in term.strip() else term.strip()
+
+    groups = []
+    for sk in (req["skills_required"] or []):
+        if not sk or not sk.strip():
+            continue
+        aliases = alias_map.get(sk.strip().lower(), [])
+        terms, seen = [], set()
+        for t in [sk] + list(aliases):
+            key = t.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                terms.append(t.strip())
+        quoted = [q(t) for t in terms]
+        groups.append(f"({' OR '.join(quoted)})" if len(quoted) > 1 else quoted[0])
+
+    exp_range = None
+    if req["experience_min"] is not None:
+        exp_range = f"{req['experience_min']}-{req['experience_max'] if req['experience_max'] is not None else req['experience_min']} yrs"
+
+    return {
+        "boolean_string": " AND ".join(groups),
+        "title_string": q(req["title"]) if req["title"] else "",
+        "skills_used": [s for s in (req["skills_required"] or []) if s and s.strip()],
+        "location": req["location"],
+        "experience_range": exp_range,
+        "note": "Paste the skills string into a LinkedIn/Naukri/etc. search box. Set location and experience as that portal's own filters — most portals treat those as separate facets, not Boolean terms.",
+    }
+
+
 @router.get("/{requisition_id}/match-recruiters")
 async def match_recruiters_for_requisition(
     requisition_id: str, limit: int = 5, actor: Actor = Depends(get_actor)

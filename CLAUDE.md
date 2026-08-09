@@ -2595,3 +2595,102 @@ rows (movements, activities, rule) cleaned up afterward; `board_rank`
 reset to NULL on both real test candidates so their board position
 reverts to the pre-verification default. Full QA suite re-run clean:
 157 passed / 2 skipped / 0 failed, no regressions.
+
+## Boolean search generation + 4-area background audit, 2026-08-09
+User picked two things off the "what's next" list: build Boolean search
+generation (the one item never built from the earlier 20-item feature-
+completeness audit), and run the same kind of focused, research-only
+audit just done for Pipeline/Candidates on Finance/ERP, Recruiter Ops,
+BGV/Compliance, and Analytics/Reporting — all 4 at once. Ran the 4 audits
+as parallel background Explore agents while building Boolean search
+myself, so the build wasn't blocked waiting on research.
+
+**Boolean search generation** — `GET /requisitions/{id}/boolean-search`,
+zero-token/rule-based, no AI. Real synonym expansion via `skills_taxonomy`
+(the same table the resume parser already normalizes against for P23's
+71-skill taxonomy) — a skill with known aliases becomes an OR-group
+(`(Python OR py OR python3)`), one with none stays a single term, groups
+AND-joined. Title/location/experience returned separately, not folded
+into the Boolean string — most job portals treat those as their own
+search facets, not Boolean terms, so jamming them in would produce a
+string that doesn't actually work when pasted. New "Boolean Search"
+button on the pipeline board toolbar opens a modal with the string in a
+copy-able textarea + a real clipboard-copy button. Verified for real:
+confirmed a real requisition with skills lacking known aliases correctly
+falls back to plain AND (`SAP AND ABAP`); created a real throwaway
+requisition with Python/Java/SAP and confirmed genuine OR-expansion
+(`(Python OR py OR python3) AND (Java OR java8 OR java11 OR java17 OR
+spring) AND SAP`) before deleting it; real browser click-through
+confirmed the modal renders the correct string and the Copy button
+genuinely writes it to the clipboard (read back via
+`navigator.clipboard.readText()`, not just checking the UI said
+"Copied!"). Full QA suite clean after: 157 passed / 2 skipped / 0 failed.
+
+**4-area audit findings** (research only — no code changed for any of
+these; reported to the user for prioritization, same as the
+Pipeline/Candidates audit pattern). Two of the most serious/testable
+claims were independently verified against live production before being
+reported as fact, not just trusted from the agent output:
+
+- **BGV/Compliance — real DPDP 2023 gap**: 5 of 8 candidate-creation code
+  paths skip HARD RULE #12 (consent_records) entirely — email resume
+  intake, the **public/anonymous** job-board apply endpoint (stores
+  name/email/phone/employer with zero consent trail), bulk CSV/Excel
+  import, agency-portal submissions, and browser-extension captures. Only
+  manual add and NDA e-sign write consent correctly. The entire `/bgv`
+  page is static markup with zero real API calls — every BGV backend
+  route (Aadhaar/DigiLocker, trust score, trust graph) is orphaned.
+  Aadhaar/PAN encryption itself is clean (nothing's stored in plaintext
+  because the capture endpoint doesn't persist the value at all yet — a
+  demo scaffold, not a live leak). RLS clean across all BGV tables, GDPR
+  purge still wired correctly.
+- **Finance/ERP — most write workflows have no UI at all**: timesheets,
+  invoices, payroll runs, contractor PII capture, incentive scorecard
+  approval, retention-bank release/forfeit, loyalty payout, account P&L
+  entry, and collections entry all have real, working backend endpoints
+  with **zero frontend forms** — several pages' own empty-state text
+  literally instructs the user to call the API directly. Real double-
+  counting bug found: `retention_bank`'s INSERT uses `ON CONFLICT DO
+  NOTHING` with no target and no matching unique constraint, so
+  re-approving a scorecard (double-click, retry) silently inserts a
+  duplicate held-incentive row. `contribution_margins` is a fully dead
+  table (zero references anywhere — `account_pl` is what's actually
+  used). pgcrypto encryption on Aadhaar/PAN/PF/bank-account verified
+  genuinely correct. No RLS gaps found (checked against migration
+  source, not live DB).
+- **Recruiter Ops — real fallout from today's own earlier stage-deletion
+  work**: `applications.py`'s `_STAGE_AUTO_TASK` dict hardcodes 5 stage
+  keys for auto-creating recruiter tasks on stage transitions — every one
+  of those 5 keys is now deletable (per this same day's "true stage
+  deletion" feature) and the dict was never updated to match; deleting
+  one silently stops task auto-creation with no error, anywhere. Same
+  hardcoded-stage-list pattern in `recruiter_dashboard.py`'s My Day/My
+  Stats. Separately: the scoring-weight admin UI presents 10 sliders that
+  must sum to 1.0, but `match_recruiters()` only ever reads 8 of them —
+  `seniority_match`/`language_match` silently contribute nothing (already
+  documented as zero-weight placeholders, but the UI doesn't say so).
+  `recruiter_targets` has no `CREATE TABLE` anywhere in `sql/*.sql`
+  despite full CRUD against it — schema drift, same pattern found and
+  fixed for stage_rules/pipeline_movements/candidate_activities earlier
+  today. No orphaned routes found — genuinely clean on that front.
+- **Analytics/Reporting — the exact same bug class already found and
+  fixed once today, recurring in 5 more places, never fixed there**: the
+  Recruiter Performance report, the client portal's requisition view, the
+  requisitions CSV export, and two dormant `/pipeline/copilot`+
+  `/pipeline/intelligence` endpoints all filter on a literal `stage=
+  'interview'` or `stage='hired'` — **neither is a real stage value**
+  (real ones are `l1_interview`/`l2_interview`/`l3_interview` and
+  `placed`). Verified live, not just from the code: this tenant has 4
+  real placements, but `GET /reports/recruiter-performance` returns
+  `placements: 0, interviews: 0, conversion_rate: 0.0` for every single
+  recruiter. `hiring-funnel`'s FUNNEL list also omits this tenant's
+  custom `l3_interview` stage entirely. Separately, `v_sla_dashboard`,
+  `v_pipeline_velocity`, `v_monthly_billing` were flagged as having no
+  `CREATE VIEW` anywhere in `sql/*.sql` — checked live and confirmed all
+  3 genuinely exist in production (`SELECT viewname FROM pg_views`), so
+  this is schema-drift/version-control gap only, not a broken endpoint —
+  correcting the audit's own hedge ("either... or these endpoints would
+  fail") with a real check rather than repeating the uncertain claim.
+
+Deliberately did not fix any of the above — reported to the user the same
+way the Pipeline/Candidates audit was, for them to prioritize.
