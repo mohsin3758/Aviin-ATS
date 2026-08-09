@@ -2771,3 +2771,101 @@ confirmed a `bulk_import`-channel consent row is written. All test data
 (candidates, applications, consent_records) cleaned up afterward. Full
 QA suite re-run clean: 157 passed / 2 skipped / 0 failed, no
 regressions.
+
+## Permissions / RBAC: real per-role feature access, soft-launched, 2026-08-09
+User asked whether admin could give per-feature access by role (candidates,
+companies, jobs, pipeline, etc. for Employee/Team Lead/Manager/other roles).
+Checked before building: `role_definitions.permissions` (JSONB, 27 seeded
+staffing roles) already had genuinely detailed feature->action maps — but
+**nothing in the whole backend ever read it**. No enforcement, no admin UI.
+User picked "Both: admin UI + real enforcement." Before writing enforcement
+code, checked real user data first (established project discipline) and
+found `manager` role — used by a real active user, Neha Joshi — had **zero**
+`role_definitions` row; naive strict enforcement would have locked her out
+immediately. Flagged this to the user, who picked "Soft launch first": ship
+the check + admin UI in log-only mode (nothing blocked), let real usage
+accumulate in a log, review/adjust via the new UI, flip enforcement on later.
+
+**Built**: `sql/35_permission_enforcement.sql` — `tenants.permission_
+enforcement_enabled` (bool, default FALSE, per-tenant kill switch),
+`permission_check_log` (every would-be-denied check, regardless of
+enforcement state, FORCE RLS), seeded a real `manager` role_definitions row
+(closing the gap above) and added `companies:read` to `recruiter` (a real
+gap — recruiters use the Companies page today with no formal grant for it).
+`backend/permissions.py` — `require_permission(feature, action)` FastAPI
+dependency: admin/super_admin and `actor.role is None` (anonymous/n8n
+trusted-internal path, same exemption established elsewhere in this
+project) always pass; everyone else is checked against their role's real
+permissions, a denial is logged, and it only actually blocks (403) if
+BOTH `permission_enforcement_enabled=true` AND the role has a real
+(non-None) permissions row — a role with no row at all is a data gap for
+an admin to fix, never a reason to lock someone out with no way to
+self-correct. `FEATURES`/`ACTIONS` in that file are the taxonomy shown in
+the admin matrix. Applied to `candidates`/`clients`(companies)/
+`requisitions`/`pipeline`(board+bulk-move)/`applications`(create+stage
+update)/`analytics`(funnel+billing+recruiter-perf)/`pipeline`(velocity)/
+`assessments`/`incentives`/`kae`/`account_pl`/`collections`/`bu_tracker`
+list/write endpoints. New admin API on `users.py`'s existing `roles_router`:
+`GET /roles/features`, `GET`/`PUT /roles/enforcement`, `GET /roles/
+permission-log` (aggregated: role/feature/action/attempts/distinct_users/
+last_seen/would_block_if_enforced — an admin reviewing before enabling
+enforcement needs "recruiter tried X 47 times," not 47 raw timestamps),
+`PUT /roles/{id}/permissions` (deliberately NOT blocked by the general
+`update_role`'s `NOT is_system` guard — all 27 seeded roles are
+`is_system=true`, so that guard would have made permission-editing on
+exactly the roles that matter impossible). New Settings > Permissions page
+(admin/super_admin only, `KeyRound` sidebar icon) — role list grouped by
+department, a feature x action checkbox matrix for the selected role with
+Save/Reset, a prominent enforcement toggle (defaults visibly "OFF (log
+only)," confirm-dialog required before switching on), and the Activity Log
+table for reviewing real usage first.
+
+**Four real bugs found and fixed via genuine testing, not code review**:
+1. `json` was never imported in `users.py` despite `create_role`/
+   `update_role` already calling `json.dumps()` — both had been silently
+   throwing `NameError` on every real call since written, never
+   successfully exercised. One import fixes both plus the new endpoint.
+2. **Critical**: asyncpg has no jsonb codec registered in this app, so
+   `role_definitions.permissions` comes back from any query as a raw JSON
+   **string**, not a dict. `check_permission()` in `permissions.py` called
+   `.get()` on it — every single permission-gated request for any role
+   with a real `role_definitions` row would have 500'd, the first time
+   this feature was ever really exercised. Fixed with the same
+   `x if isinstance(x, dict) else json.loads(x or "{}")` pattern already
+   established elsewhere in this codebase for jsonb list columns
+   (`onboarding.py`, `scheduler.py`, `user_mail.py`) — applied in both
+   `permissions.py`'s `get_role_permissions()` and a new `_role_dict()`
+   helper in `users.py` used by every roles endpoint.
+3. **Route-ordering bug**: `PUT /roles/enforcement` was registered (in
+   file order) *after* `PUT /roles/{role_id}` — FastAPI matches routes in
+   registration order, so it matched the generic route first, treating
+   `"enforcement"` as a `role_id` and crashing with `asyncpg.exceptions.
+   DataError: invalid UUID 'enforcement'`. Confirmed live (500 on the very
+   first real toggle attempt). Fixed by moving all fixed-path routes
+   (`/features`, `/enforcement` GET+PUT, `/permission-log`) before the
+   `/{role_id}` routes — the general FastAPI rule that static paths must
+   precede dynamic ones on the same router, violated once already.
+4. Manually invoking `require_permission(...)(actor)` inline (an early
+   draft, caught before deploy) would have miscalled the dependency —
+   its real signature is `(request: Request, actor=Depends(get_actor))`,
+   so a lone positional `actor` arg would bind to `request`. Fixed by
+   using it as a proper second `Depends()` parameter on the route instead.
+
+**Verified for real end-to-end**, not code review: created a genuine
+throwaway recruiter user + throwaway candidates; confirmed a DELETE
+candidates attempt as that recruiter (who lacks `delete` on `candidates`)
+succeeded with enforcement OFF (soft-launch default) while a real row
+landed in `permission_check_log`; flipped enforcement ON, confirmed the
+identical DELETE now correctly 403'd while a `companies:read` call (a real
+grant) still succeeded; flipped enforcement back OFF immediately after
+(production stays in soft-launch per the user's explicit choice); confirmed
+admin remained fully unaffected throughout. Verified `PUT /roles/{id}/
+permissions` round-trips a real edit (added then restored recruiter's
+`companies` grants) and `GET /roles/permission-log` returns real aggregated
+rows. Real headless-browser click-through confirmed the Settings >
+Permissions page renders, the matrix loads real feature/role data, and the
+sidebar link is visible to admin. All test artifacts cleaned up: throwaway
+user deactivated, throwaway candidates soft-deleted (confirmed invisible to
+real recruiters), and — deliberately, since this log is what the user will
+review to make real permission decisions — the 3 test-generated
+`permission_check_log` rows were deleted so they don't read as real usage.

@@ -7,12 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Respons
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 # ── P36: Advanced Reports ─────────────────────────────────────
 reports_router = APIRouter(prefix="/reports", tags=["reports"])
 
 @reports_router.get("/monthly-billing")
-async def monthly_billing(year: Optional[int]=None, actor: Actor=Depends(get_actor)):
+async def monthly_billing(year: Optional[int]=None, actor: Actor=Depends(require_permission("analytics", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT month, year, placements, estimated_revenue,
@@ -24,7 +25,7 @@ async def monthly_billing(year: Optional[int]=None, actor: Actor=Depends(get_act
     return [dict(r) for r in rows]
 
 @reports_router.get("/pipeline-velocity")
-async def pipeline_velocity(actor: Actor=Depends(get_actor)):
+async def pipeline_velocity(actor: Actor=Depends(require_permission("pipeline", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT stage, count, avg_days_in_stage, stale_count
@@ -35,7 +36,7 @@ async def pipeline_velocity(actor: Actor=Depends(get_actor)):
 
 @reports_router.get("/recruiter-performance")
 async def recruiter_performance(month: Optional[int]=None, year: Optional[int]=None,
-                                  actor: Actor=Depends(get_actor)):
+                                  actor: Actor=Depends(require_permission("analytics", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT

@@ -10,6 +10,7 @@ import events
 from deps import Actor, get_actor
 from schemas import RequisitionCreate, RequisitionUpdate
 from routers.job_sharing import auto_distribute_on_open
+from permissions import require_permission
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 
@@ -71,7 +72,7 @@ async def list_requisitions(
     search: str | None = None,
     limit: int | None = None,
     include_inactive: bool = False,
-    actor: Actor = Depends(get_actor),
+    actor: Actor = Depends(require_permission("requisitions", "read")),
 ):
     conditions: list[str] = []
     params: list = []
@@ -107,7 +108,7 @@ async def list_requisitions(
 
 
 @router.post("")
-async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(get_actor)):
+async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(require_permission("requisitions", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             f"""INSERT INTO requisitions
@@ -184,7 +185,7 @@ async def get_requisition(requisition_id: str, actor: Actor = Depends(get_actor)
 
 
 @router.patch("/{requisition_id}")
-async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor: Actor = Depends(get_actor)):
+async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor: Actor = Depends(require_permission("requisitions", "update"))):
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -221,7 +222,11 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
 
 
 @router.delete("/{requisition_id}")
-async def delete_requisition(requisition_id: str, actor: Actor = Depends(get_actor)):
+async def delete_requisition(
+    requisition_id: str,
+    actor: Actor = Depends(get_actor),
+    _perm: Actor = Depends(require_permission("requisitions", "delete")),
+):
     """Soft-delete (is_active=false) — was entirely missing (the only way to
     remove a bad/duplicate/test requisition was a raw multi-table cascade
     DELETE by hand, see CLAUDE.md). Soft, not hard: applications/assignments/
@@ -256,7 +261,7 @@ async def submission_usage(requisition_id: str, actor: Actor = Depends(get_actor
 
 
 @router.get("/{requisition_id}/pipeline")
-async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_actor)):
+async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(require_permission("pipeline", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             """SELECT a.id, a.candidate_id, c.full_name AS candidate_name,

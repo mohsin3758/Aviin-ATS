@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 router = APIRouter(prefix="/incentives", tags=["incentives"])
 
@@ -73,7 +74,7 @@ class LoyaltyIn(BaseModel):
 async def list_scorecards(
     month: Optional[int] = None,
     year: Optional[int] = None,
-    actor: Actor = Depends(get_actor),
+    actor: Actor = Depends(require_permission("incentives", "read")),
 ):
     """Admin: all recruiters. Recruiter: own only (filtered by user_id claim)."""
     async with db.tenant_conn(actor.tenant_id) as conn:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 router = APIRouter(prefix="/kae", tags=["kae"])
 
@@ -246,7 +247,7 @@ async def upsert_kae_retention(body: KaeRetentionIn, actor: Actor=Depends(get_ac
 
 @router.get("/summary")
 async def kae_summary(month: Optional[int]=None, year: Optional[int]=None,
-                       actor: Actor=Depends(get_actor)):
+                       actor: Actor=Depends(require_permission("kae", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         stats = await conn.fetchrow("""
             SELECT COUNT(*) AS total_scorecards, ROUND(AVG(total_score),1) AS avg_score,

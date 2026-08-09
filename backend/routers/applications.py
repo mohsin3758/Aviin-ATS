@@ -7,6 +7,7 @@ import db
 import events, asyncio
 from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
+from permissions import require_permission
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 rejection_reasons_router = APIRouter(prefix="/rejection-reasons", tags=["applications"])
@@ -106,7 +107,7 @@ async def list_applications(
     return [dict(r) for r in rows]
 
 @router.post("")
-async def create_application(body: ApplicationCreate, actor: Actor = Depends(get_actor)):
+async def create_application(body: ApplicationCreate, actor: Actor = Depends(require_permission("applications", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         existing = await conn.fetchval(
             "SELECT id FROM applications WHERE requisition_id = $1 AND candidate_id = $2",
@@ -372,7 +373,12 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
             print(f"Stage email failed [{stage}] to {email}: {_ex}")
 
 @router.patch("/{application_id}/stage")
-async def update_stage(application_id: str, body: StageUpdate, actor: Actor = Depends(get_actor)):
+async def update_stage(
+    application_id: str,
+    body: StageUpdate,
+    actor: Actor = Depends(get_actor),
+    _perm: Actor = Depends(require_permission("pipeline", "update")),
+):
     # HARD RULE #10: rejecting a candidate is a HITL-gated, high-stakes action.
     if body.stage == "rejected" and actor.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="Rejecting a candidate requires manager/admin role (HITL)")

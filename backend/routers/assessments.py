@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 router = APIRouter(prefix="/assessments", tags=["assessments"])
 
@@ -62,7 +63,7 @@ def analyze_video_text(transcript: str, duration_secs: int) -> dict:
     }
 
 @router.get("")
-async def list_assessments(candidate_id: Optional[str]=None, actor: Actor=Depends(get_actor)):
+async def list_assessments(candidate_id: Optional[str]=None, actor: Actor=Depends(require_permission("assessments", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT ta.*, ca.full_name AS candidate_name

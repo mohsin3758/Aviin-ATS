@@ -1,10 +1,12 @@
 """User Management — staffing industry roles, user CRUD, permissions."""
 import bcrypt
+import json
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
+from permissions import FEATURES, ACTIONS
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -302,6 +304,15 @@ async def user_stats(actor: Actor = Depends(get_actor)):
 # ── ROLES management ──────────────────────────────────────────
 roles_router = APIRouter(prefix="/roles", tags=["roles"])
 
+def _role_dict(r):
+    """asyncpg has no jsonb codec registered in this app, so a jsonb
+    column comes back as a raw JSON string, not a dict — parse it here
+    rather than pushing that leak onto every caller."""
+    d = dict(r)
+    perms = d.get('permissions')
+    d['permissions'] = perms if isinstance(perms, dict) else json.loads(perms or "{}")
+    return d
+
 @roles_router.get("")
 async def list_roles(department: Optional[str]=None, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -315,7 +326,7 @@ async def list_roles(department: Optional[str]=None, actor: Actor=Depends(get_ac
             GROUP BY rd.id
             ORDER BY rd.department, rd.level DESC
         """, actor.tenant_id, department)
-    return [dict(r) for r in rows]
+    return [_role_dict(r) for r in rows]
 
 @roles_router.get("/departments")
 async def list_departments(actor: Actor=Depends(get_actor)):
@@ -334,7 +345,64 @@ async def create_role(body: dict, actor: Actor=Depends(get_actor)):
         """, actor.tenant_id, body.get('role_code'), body.get('role_name'),
              body.get('department','Delivery'), body.get('level',1),
              body.get('description'), json.dumps(body.get('permissions',{})))
-    return dict(row)
+    return _role_dict(row)
+
+# ── Permissions (Settings > Permissions — real per-feature RBAC) ─────
+# NOTE: these fixed-path routes (/features, /enforcement, /permission-log)
+# MUST be registered before the /{role_id} routes below — FastAPI matches
+# routes in registration order, so a /{role_id} route registered first
+# would swallow e.g. PUT /roles/enforcement as if "enforcement" were a
+# role_id (confirmed for real: this exact bug shipped once already and
+# threw asyncpg.exceptions.DataError: invalid input for query argument
+# $5: 'enforcement' (invalid UUID) before this block was moved here).
+class PermissionsUpdate(BaseModel):
+    permissions: dict
+
+
+@roles_router.get("/features", tags=["permissions"])
+async def list_permission_features(actor: Actor=Depends(get_actor)):
+    return {"features": [{"key": k, "label": lbl} for k, lbl in FEATURES], "actions": ACTIONS}
+
+
+class EnforcementUpdate(BaseModel):
+    enabled: bool
+
+
+@roles_router.get("/enforcement", tags=["permissions"])
+async def get_enforcement(actor: Actor=Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        enabled = await conn.fetchval(
+            "SELECT permission_enforcement_enabled FROM tenants WHERE id=$1", actor.tenant_id)
+    return {"enabled": bool(enabled)}
+
+
+@roles_router.put("/enforcement", tags=["permissions"])
+async def set_enforcement(body: EnforcementUpdate, actor: Actor=Depends(require_role("admin", "super_admin"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute(
+            "UPDATE tenants SET permission_enforcement_enabled=$1 WHERE id=$2", body.enabled, actor.tenant_id)
+    return {"enabled": body.enabled}
+
+
+@roles_router.get("/permission-log", tags=["permissions"])
+async def permission_log(days: int = 14, actor: Actor=Depends(require_role("admin", "super_admin"))):
+    """Aggregated, not raw rows — an admin reviewing before flipping
+    enforcement on needs "recruiter tried 'read' on 'companies' 47 times
+    this week", not 47 individual timestamps."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT role_code, feature, action,
+                   COUNT(*) AS attempts,
+                   COUNT(DISTINCT user_id) AS distinct_users,
+                   MAX(created_at) AS last_seen,
+                   bool_or(would_have_blocked) AS would_block_if_enforced
+            FROM permission_check_log
+            WHERE tenant_id=$1 AND created_at >= now() - ($2 || ' days')::interval
+            GROUP BY role_code, feature, action
+            ORDER BY attempts DESC
+        """, actor.tenant_id, str(days))
+    return [dict(r) for r in rows]
+
 
 @roles_router.put("/{role_id}")
 async def update_role(role_id: str, body: dict, actor: Actor=Depends(get_actor)):
@@ -352,4 +420,21 @@ async def update_role(role_id: str, body: dict, actor: Actor=Depends(get_actor))
              role_id, actor.tenant_id)
         if not row:
             raise HTTPException(404, "Role not found or is a system role")
-    return dict(row)
+    return _role_dict(row)
+
+
+@roles_router.put("/{role_id}/permissions", tags=["permissions"])
+async def update_role_permissions(role_id: str, body: PermissionsUpdate,
+                                    actor: Actor=Depends(require_role("admin", "super_admin"))):
+    """Permissions-only edit, deliberately allowed on system roles (all 27
+    seeded staffing roles have is_system=true) — the general PUT above
+    protects rename/delete of foundational roles, but blocking permission
+    edits on them too would make this whole feature unusable, since
+    editing exactly those roles' access is the point."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE role_definitions SET permissions=$1::jsonb WHERE id=$2 AND tenant_id=$3 RETURNING *",
+            json.dumps(body.permissions), role_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "Role not found")
+    return _role_dict(row)

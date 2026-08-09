@@ -7,6 +7,7 @@ import db, events
 from deps import Actor, get_actor
 from schemas import CandidateCreate, CandidateUpdate
 from routers.pipeline_stages import is_valid_stage
+from permissions import require_permission
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
@@ -32,7 +33,7 @@ async def list_candidates(
     offset:   int = Query(0, ge=0),
     sort_by:  str = Query('created_at'),
     sort_dir: str = Query('desc'),
-    actor: Actor = Depends(get_actor),
+    actor: Actor = Depends(require_permission("candidates", "read")),
 ):
     conditions = ["tenant_id = $1", "is_active IS NOT FALSE"]
     params = [actor.tenant_id]
@@ -382,7 +383,7 @@ async def check_duplicate(
 
 
 @router.post("")
-async def create_candidate(body: CandidateCreate, actor: Actor = Depends(get_actor)):
+async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require_permission("candidates", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Check for existing candidate with same email (per tenant)
         if body.email:
@@ -494,7 +495,7 @@ async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get
 
 @router.patch("/{candidate_id}")
 @router.put("/{candidate_id}")
-async def update_candidate(candidate_id: str, body: CandidateUpdate, actor: Actor = Depends(get_actor)):
+async def update_candidate(candidate_id: str, body: CandidateUpdate, actor: Actor = Depends(require_permission("candidates", "update"))):
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(400, "No fields to update")
@@ -511,7 +512,7 @@ async def update_candidate(candidate_id: str, body: CandidateUpdate, actor: Acto
 
 
 @router.delete("/{candidate_id}")
-async def delete_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
+async def delete_candidate(candidate_id: str, actor: Actor = Depends(require_permission("candidates", "delete"))):
     """Soft-delete (matches bulk_delete_candidates/merge_candidate below, and
     the frontend's own confirm copy: 'They will be hidden from the list').
     This used to be a real DELETE that tried to clean up 14 child tables but

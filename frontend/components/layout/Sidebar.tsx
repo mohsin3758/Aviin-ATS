@@ -16,7 +16,7 @@ import {
   ChevronDown, ChevronLeft, ChevronRight,
   FileSignature, Send, GitMerge, ExternalLink, Activity, Workflow,
   Users2, CalendarDays, Smile, Video, FileBarChart, UserPlus, Sliders,
-  Laptop,
+  Laptop, KeyRound,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -99,6 +99,7 @@ const NAV_GROUPS = [
   ]},
   { id:'settings', label:'SETTINGS', defaultOpen:false, items:[
     { icon:UserCog,         href:'/settings/users',       label:'Users & Roles' },
+    { icon:KeyRound,        href:'/settings/permissions', label:'Permissions', roles:['admin','super_admin'] },
     { icon:KanbanSquare,    href:'/settings/pipeline',    label:'Pipeline Stages' },
     { icon:Mail,            href:'/settings/email',           label:'Company Email (SMTP)' },
     { icon:MessageSquare,   href:'/settings/signatures',       label:'Email Signatures', roles:['admin','lead_recruiter','recruiter','delivery','kae','kae_manager'] },

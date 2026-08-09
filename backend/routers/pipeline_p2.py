@@ -37,6 +37,7 @@ from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
 from routers.pipeline_stages import is_valid_stage
+from permissions import require_permission
 
 log = logging.getLogger(__name__)
 
@@ -305,7 +306,7 @@ async def trigger_auto_move(bg: BackgroundTasks, actor: Actor = Depends(get_acto
 
 # ── Bulk Actions ──────────────────────────────────────────────────────────────
 @metrics_router.post("/bulk-action")
-async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = Depends(get_actor)):
+async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = Depends(require_permission("pipeline", "update"))):
     if not action.application_ids:
         raise HTTPException(400, "No application IDs provided")
 
@@ -380,7 +381,7 @@ class ReorderBody(BaseModel):
 
 
 @metrics_router.post("/reorder")
-async def reorder_stage_column(body: ReorderBody, actor: Actor = Depends(get_actor)):
+async def reorder_stage_column(body: ReorderBody, actor: Actor = Depends(require_permission("pipeline", "update"))):
     """Persist a manual drag-drop reorder within one Kanban column.
     Full-column resnapshot (not a single-card move) — simplest correct
     approach for a column that realistically never has more than a few

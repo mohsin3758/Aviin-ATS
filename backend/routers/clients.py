@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 import uuid
 from deps import get_actor, Actor
+from permissions import require_permission
 import db
 
 try:
@@ -31,7 +32,7 @@ class ClientIn(BaseModel):
 # ─── Basic CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("/clients")
-async def list_clients(actor: Actor = Depends(get_actor)):
+async def list_clients(actor: Actor = Depends(require_permission("companies", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT id, name, industry, priority_tier, created_at FROM clients ORDER BY name")
@@ -57,7 +58,7 @@ async def update_client_tier(client_id: str, body: ClientTierIn, actor: Actor = 
 
 
 @router.post("/clients", status_code=201)
-async def create_client(body: ClientIn, actor: Actor = Depends(get_actor)):
+async def create_client(body: ClientIn, actor: Actor = Depends(require_permission("companies", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             "INSERT INTO clients (id, tenant_id, name, industry) "
@@ -298,7 +299,7 @@ async def get_client(client_id: str, actor: Actor = Depends(get_actor)):
 
 
 @router.put("/clients/{client_id}")
-async def update_client(client_id: str, body: ClientIn, actor: Actor = Depends(get_actor)):
+async def update_client(client_id: str, body: ClientIn, actor: Actor = Depends(require_permission("companies", "update"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             "UPDATE clients SET name=$1, industry=$2 WHERE id=$3 RETURNING *",
@@ -309,7 +310,7 @@ async def update_client(client_id: str, body: ClientIn, actor: Actor = Depends(g
 
 
 @router.delete("/clients/{client_id}", status_code=204)
-async def delete_client(client_id: str, actor: Actor = Depends(get_actor)):
+async def delete_client(client_id: str, actor: Actor = Depends(require_permission("companies", "delete"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         result = await conn.execute("DELETE FROM clients WHERE id=$1", client_id)
         if result == "DELETE 0":

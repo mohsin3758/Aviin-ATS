@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 router = APIRouter(prefix="/account-pl", tags=["account-pl"])
 
@@ -58,7 +59,7 @@ class BuEligibilityIn(BaseModel):
 
 @router.get("")
 async def list_account_pl(month: Optional[int]=None, year: Optional[int]=None,
-                           actor: Actor=Depends(get_actor)):
+                           actor: Actor=Depends(require_permission("account_pl", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT * FROM v_account_pl
@@ -164,7 +165,7 @@ coll_router = APIRouter(prefix="/collections", tags=["collections"])
 
 @coll_router.get("")
 async def list_collections(status: Optional[str]=None, client_id: Optional[str]=None,
-                            actor: Actor=Depends(get_actor)):
+                            actor: Actor=Depends(require_permission("collections", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT * FROM v_collection_aging
@@ -236,7 +237,7 @@ async def collections_summary(actor: Actor=Depends(get_actor)):
 bu_router = APIRouter(prefix="/bu-tracker", tags=["bu-tracker"])
 
 @bu_router.get("")
-async def list_bu(actor: Actor=Depends(get_actor)):
+async def list_bu(actor: Actor=Depends(require_permission("bu_tracker", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT be.*, u.full_name AS bu_head_name

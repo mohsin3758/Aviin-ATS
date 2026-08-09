@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -58,7 +59,7 @@ async def active_placements(actor: Actor = Depends(get_actor)):
 
 # ─── Hiring Funnel ────────────────────────────────────────────────────────────
 @router.get("/hiring-funnel")
-async def hiring_funnel(actor: Actor = Depends(get_actor)):
+async def hiring_funnel(actor: Actor = Depends(require_permission("analytics", "read"))):
     """Count of applications per stage + stage-to-stage conversion rates."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT stage, COUNT(*) AS cnt FROM applications GROUP BY stage")
