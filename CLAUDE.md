@@ -2309,3 +2309,59 @@ original label/color/order/visibility afterward via a single-row PUT
 custom label/color/order too) and confirmed the full 14-row config
 matched the pre-test snapshot exactly. Full QA suite re-run clean after:
 157 passed / 2 skipped / 0 failed.
+
+## Add Candidate modal always used Sourced, real bug fixed, 2026-08-09
+User's screenshot: selected "Govind" in the pipeline board's "Add Candidate
+to Pipeline" modal, expected to see them land under "Interested" (the tab
+they had open), but the candidate never appeared there.
+
+**Root cause**: `POST /candidates/bulk-assign` (what the modal calls)
+hardcoded `stage='sourced'` in its INSERT with no way to override it, and
+the modal itself gave zero indication of this — no stage field anywhere in
+the UI, just an "Add to Pipeline" button. Reproduced directly: called the
+real endpoint against the real candidate + requisition from the screenshot,
+confirmed the application landed in `sourced`, not `interested` — working
+exactly as coded, just not as any reasonable user would expect.
+
+**Fix**: `BulkAssignBody` gained a `stage: str = "sourced"` field (default
+preserves the one other caller — Candidates page's bulk-assign-to-
+requisition modal — which never sends a stage and shouldn't need to), validated
+with the same `is_valid_stage()` helper built for the stage-deletion feature
+above (nice reuse — a bad/deleted stage now 400s here too, instead of ever
+silently writing one). Frontend: `AddCandidateModal` gained a "Add into
+stage:" dropdown built from the real, currently-visible `STAGES` list,
+defaulting to whichever stage tab was active when the button was clicked
+(falls back to Sourced if the user was on the "All Stages" tab, where there's
+no single obvious target). Submit button and success toast now say exactly
+which stage was used ("Add to Interested" / "Candidate(s) added to
+Interested") instead of a generic, uninformative message.
+
+Verified for real: reproduced the original bug via curl (landed in
+`sourced`), redeployed, reproduced again with `stage:"interested"` in the
+body (landed in `interested`, confirmed via direct SQL), confirmed an
+invalid stage 400s cleanly. Then a full real headless-browser run through
+the actual modal — clicked the Interested tab, opened Add Candidate,
+confirmed the dropdown had pre-selected "interested", confirmed the button
+read "Add to Interested", searched for and selected Govind, submitted, got
+the correctly-worded toast, and confirmed via SQL the application really
+landed in `interested`. All test-created applications/activity-log rows
+cleaned up afterward (including the real UI-driven one — verifying the fix
+works isn't the same as the user's actual intent to add Govind, so left
+that decision to them).
+
+**Separate finding while re-running the full suite afterward, NOT a code
+bug**: `all 7 stage labels visible` (aviin_ui.spec.ts) started failing —
+traced to `pipeline_stage_config` showing `sourced` and `contacted` as
+`is_visible=false` for this tenant, both updated in the same save
+(13:17 IST today). Confirmed this wasn't caused by any of this session's
+scripts (none ever click "Save Changes" on Settings > Pipeline Stages; the
+single-row PUTs used for the stage-deletion feature's verification/cleanup
+earlier don't match the all-14-rows-same-timestamp signature this Save
+button produces) — almost certainly a real change made through the actual
+UI, plausibly by someone on the team. Asked the user directly rather than
+guessing or silently reverting a real tenant's config: confirmed
+intentional, left as-is. Fixed the test instead of the data — it now reads
+the tenant's real `/settings/pipeline-stages` config and only asserts
+visibility for stages actually marked visible, so it stays correct across
+future legitimate visibility changes instead of assuming a fixed default
+set. Full suite re-run clean after: 157 passed / 2 skipped / 0 failed.

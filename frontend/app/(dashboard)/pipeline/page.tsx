@@ -437,9 +437,10 @@ function PipelineInner() {
 
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
       {addCandidateOpen && selectedJobId && (
-        <AddCandidateModal jobId={selectedJobId} board={board}
+        <AddCandidateModal jobId={selectedJobId} board={board} stages={STAGES}
+          defaultStage={STAGES.some((s: any) => s.key === activeStage) ? activeStage : 'sourced'}
           onClose={() => setAddCandidateOpen(false)}
-          onAdded={() => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast('Candidate(s) added to pipeline'); }} />
+          onAdded={(stageLabel: string) => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast(`Candidate(s) added to ${stageLabel}`); }} />
       )}
 
       {/* ── REJECT REASON MODAL ─────────────────────────────────────────── */}
@@ -1337,10 +1338,11 @@ function RejectReasonModal({ onCancel, onConfirm }: any) {
   );
 }
 
-function AddCandidateModal({ jobId, board, onClose, onAdded }: any) {
+function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdded }: any) {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  const [targetStage, setTargetStage] = useState(defaultStage || 'sourced');
   const { data: matches, loading } = useFetch<any[]>(`/requisitions/${jobId}/match-candidates?limit=50`);
 
   const alreadyIn = new Set<string>(
@@ -1370,9 +1372,10 @@ function AddCandidateModal({ jobId, board, onClose, onAdded }: any) {
     try {
       await apiFetch('/candidates/bulk-assign', {
         method: 'POST',
-        body: JSON.stringify({ candidate_ids: Array.from(selected), requisition_id: jobId }),
+        body: JSON.stringify({ candidate_ids: Array.from(selected), requisition_id: jobId, stage: targetStage }),
       });
-      onAdded();
+      const label = stages?.find((s: any) => s.key === targetStage)?.label || targetStage;
+      onAdded(label);
     } catch (e: any) {
       alert(String(e?.message || 'Failed to add candidates'));
     } finally {
@@ -1395,6 +1398,13 @@ function AddCandidateModal({ jobId, board, onClose, onAdded }: any) {
             <Search size={13} color="#94A3B8" />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter by name, skill, employer…" autoFocus
               style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', flex: 1 }} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#64748B', flexShrink: 0 }}>Add into stage:</span>
+            <select value={targetStage} onChange={e => setTargetStage(e.target.value)}
+              style={{ flex: 1, border: '1px solid #E2E8F0', borderRadius: 6, padding: '5px 8px', fontSize: 12, fontWeight: 600, color: '#1E293B', background: '#fff' }}>
+              {(stages || []).map((s: any) => <option key={s.key} value={s.key}>{s.label}</option>)}
+            </select>
           </div>
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '10px 18px' }}>
@@ -1438,7 +1448,7 @@ function AddCandidateModal({ jobId, board, onClose, onAdded }: any) {
           <span style={{ fontSize: 11, color: '#94A3B8' }}>{selected.size} selected</span>
           <button onClick={submit} disabled={selected.size === 0 || saving}
             style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || saving ? '#94A3B8' : '#2563EB', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || saving ? 'not-allowed' : 'pointer' }}>
-            {saving ? 'Adding…' : `Add to Pipeline`}
+            {saving ? 'Adding…' : `Add to ${stages?.find((s: any) => s.key === targetStage)?.label || 'Pipeline'}`}
           </button>
         </div>
       </div>

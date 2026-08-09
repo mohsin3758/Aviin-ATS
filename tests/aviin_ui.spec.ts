@@ -225,19 +225,29 @@ test.describe('S3: Candidates Page', () => {
 test.describe('S4: Pipeline Page', () => {
   test.use({ storageState: AUTH_FILE });
 
-  test('all 7 stage labels visible', async ({ page, request }) => {
+  test('visible stage labels render on the board', async ({ page, request }) => {
     const reqs = await (await request.get(`${API}/requisitions`, { headers: { 'x-tenant-id': TID } })).json();
     const openReq = (Array.isArray(reqs) ? reqs : reqs.items || []).find((r: any) => r.status === 'open');
     test.skip(!openReq, 'no open requisition available to test against');
+
+    // Which stages actually show is tenant-configurable (Settings > Pipeline
+    // Stages) and can legitimately change — this tenant currently has
+    // Sourced/Contacted hidden on purpose, confirmed with the user 2026-08-09
+    // (not a bug). Asserting a hardcoded default list here was already stale
+    // the moment that real config decision was made; read the real config
+    // instead so the test stays correct across future visibility changes too.
+    const stageConfig = await (await request.get(`${API}/settings/pipeline-stages`, { headers: { 'x-tenant-id': TID } })).json();
+    const visibleLabels = (Array.isArray(stageConfig) ? stageConfig : [])
+      .filter((s: any) => s.is_visible)
+      .map((s: any) => s.label as string);
+    test.skip(visibleLabels.length === 0, 'no visible stages configured for this tenant');
+
     await page.goto(`http://localhost:3001/pipeline?job=${openReq.id}`);
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(3000);
-    // Stage labels are Title Case today (e.g. "Sourced") — text= matches
-    // case-insensitively by default, so the all-caps search terms still work.
-    for (const stage of ['SOURCED', 'SCREENED', 'SUBMITTED', 'OFFER', 'PLACED', 'REJECTED']) {
-      await expect(page.locator('text=' + stage).first()).toBeVisible({ timeout: 12000 });
+    for (const label of visibleLabels) {
+      await expect(page.locator('text=' + label).first()).toBeVisible({ timeout: 12000 });
     }
-    await expect(page.locator('text=INTERVIEW').first()).toBeVisible({ timeout: 12000 });
   });
 
   test('job picker has at least one selectable job', async ({ page }) => {

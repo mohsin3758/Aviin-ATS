@@ -6,6 +6,7 @@ import json
 import db, events
 from deps import Actor, get_actor
 from schemas import CandidateCreate, CandidateUpdate
+from routers.pipeline_stages import is_valid_stage
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
@@ -280,10 +281,18 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
 class BulkAssignBody(BaseModel):
     candidate_ids: list
     requisition_id: str
+    stage: str = "sourced"
 
 @router.post("/bulk-assign")
 async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
-    """Create applications for multiple candidates against a single requisition."""
+    """Create applications for multiple candidates against a single requisition.
+
+    Used to always hardcode stage='sourced' with no way to add directly into
+    a later stage — the Add Candidate modal gave no indication of this, so a
+    candidate added while looking at e.g. the Interested column would land in
+    Sourced instead and appear to have silently failed. Now takes an explicit
+    stage (still defaults to 'sourced' for any existing/other callers).
+    """
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Validate requisition belongs to tenant
         req = await conn.fetchrow(
@@ -292,6 +301,10 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
         if not req:
             from fastapi import HTTPException
             raise HTTPException(404, "Requisition not found")
+
+        if not await is_valid_stage(conn, actor.tenant_id, body.stage):
+            from fastapi import HTTPException
+            raise HTTPException(400, f"Unknown stage '{body.stage}' — add it under Settings > Pipeline Stages first")
 
         # Job-specific fit_score (same formula as match_candidates()/the Add
         # Candidate modal) so the score a recruiter picked from persists onto
@@ -315,19 +328,19 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
             await conn.execute("""
                 INSERT INTO applications
                   (tenant_id, candidate_id, requisition_id, stage, fit_score)
-                VALUES ($1, $2, $3, 'sourced', $4)
+                VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT DO NOTHING
-            """, actor.tenant_id, cid, body.requisition_id, scores.get(cid))
+            """, actor.tenant_id, cid, body.requisition_id, body.stage, scores.get(cid))
             # Log activity
             await conn.execute("""
                 INSERT INTO candidate_activities
                   (tenant_id, candidate_id, user_id, activity_type, title, description)
                 VALUES ($1, $2, $3, 'status_change', 'Added to Pipeline', $4)
             """, actor.tenant_id, cid, str(actor.user_id),
-                 f"Added to pipeline: {req['title']}")
+                 f"Added to pipeline: {req['title']}" + (f" (stage: {body.stage})" if body.stage != "sourced" else ""))
             created += 1
 
-    return {"created": created, "skipped": skipped, "requisition_title": req["title"]}
+    return {"created": created, "skipped": skipped, "requisition_title": req["title"], "stage": body.stage}
 
 @router.get("/check-duplicate")
 async def check_duplicate(
