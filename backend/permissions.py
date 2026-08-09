@@ -34,7 +34,6 @@ FEATURES: list[tuple[str, str]] = [
     ("pipeline", "Pipeline (Kanban)"),
     ("applications", "Applications"),
     ("analytics", "Analytics & Reporting"),
-    ("assessments", "Assessments"),
     ("incentives", "Incentives"),
     ("kae", "KAE / Account Ownership"),
     ("collections", "Collections"),

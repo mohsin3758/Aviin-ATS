@@ -6,6 +6,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import db
+import events
 from deps import Actor, get_actor
 from routers.p23_p27 import _suggest_interviewer
 from routers.pipeline_stages import is_valid_stage
@@ -325,7 +326,16 @@ We look forward to welcoming you to the {company} family!
 Warm regards,
 HR Team, {company}"""
 
-        # Create offer record
+        # Create offer record. HITL fix (2026-08-10 audit — confirmed HARD
+        # RULE #10 violation with real production evidence): this used to
+        # insert directly as status='issued', skipping approval entirely —
+        # the only offer-creation path either frontend entry point calls,
+        # so in practice "offer issued" was materially autonomous despite
+        # offers.py's correctly-gated approve/issue state machine existing
+        # right next to it. Now creates a 'draft' like offers.py's own
+        # create_offer() does, so the same submit-for-approval -> approve
+        # -> issue chain (admin/manager-only, logs to assignment_event +
+        # audit_log) is the only way this offer can ever reach 'issued'.
         offer_id = str(uuid.uuid4())
         from datetime import date as _date
         joining_date_obj = _date.fromisoformat(body.joining_date) if body.joining_date else None
@@ -334,9 +344,15 @@ HR Team, {company}"""
                            body.application_id, actor.tenant_id)
         await conn.execute("""
             INSERT INTO offers (id,tenant_id,application_id,status,ctc_offered,currency,joining_date,offer_letter_text)
-            VALUES ($1,$2,$3,'issued',$4,$5,$6,$7)
+            VALUES ($1,$2,$3,'draft',$4,$5,$6,$7)
         """, offer_id, actor.tenant_id, body.application_id,
              body.ctc_offered, body.currency, joining_date_obj, offer_text)
+
+        await events.write_outbox(
+            conn, actor.tenant_id, "offer.created",
+            {"offer_id": offer_id, "application_id": body.application_id},
+            f"offer.created:{offer_id}",
+        )
 
         # Move to offer stage — 'offer' is a deletable stage (Settings >
         # Pipeline Stages); if this tenant removed it, the offer record
@@ -352,6 +368,8 @@ HR Team, {company}"""
             "offer_letter": offer_text,
             "generated_by": "ollama_qwen2.5" if offer_text and body.generate_letter else "template",
             "stage_moved": True,
+            "status": "draft",
+            "message": "Draft created — submit for approval, then an admin/manager must approve and issue it before it can be sent to the candidate.",
         }
 
 @auto_offer_router.get("/list")

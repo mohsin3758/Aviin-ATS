@@ -1,6 +1,6 @@
 import json
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
 import db
@@ -8,6 +8,7 @@ import events, asyncio
 from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
 from permissions import require_permission
+from routers.p30_p35 import fire_webhook
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 rejection_reasons_router = APIRouter(prefix="/rejection-reasons", tags=["applications"])
@@ -123,7 +124,8 @@ async def list_applications(
     return [dict(r) for r in rows]
 
 @router.post("")
-async def create_application(body: ApplicationCreate, actor: Actor = Depends(require_permission("applications", "create"))):
+async def create_application(body: ApplicationCreate, background_tasks: BackgroundTasks,
+                              actor: Actor = Depends(require_permission("applications", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         existing = await conn.fetchval(
             "SELECT id FROM applications WHERE requisition_id = $1 AND candidate_id = $2",
@@ -172,6 +174,16 @@ async def create_application(body: ApplicationCreate, actor: Actor = Depends(req
             },
             f"application.created:{row['id']}",
         )
+
+    # Closes another of the 8 dead automation_workflows rows found in the
+    # 2026-08-10 audit — a brand-new application is a real, single,
+    # unambiguous trigger point, and this is the one function every
+    # application-creation path in the app already funnels through.
+    background_tasks.add_task(fire_webhook, "new-application", {
+        "application_id": str(row["id"]),
+        "requisition_id": body.requisition_id,
+        "candidate_id": body.candidate_id,
+    }, actor.tenant_id)
 
     return dict(row)
 

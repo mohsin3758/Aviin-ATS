@@ -13,14 +13,33 @@ N8N_BASE = "http://n8n:5678"
 automation_router = APIRouter(prefix="/automations", tags=["automations"])
 
 async def fire_webhook(path: str, payload: dict, tenant_id: str):
-    """Fire n8n webhook and log execution."""
+    """Fire n8n webhook and log execution.
+
+    Two real bugs fixed here (2026-08-10 audit): `success` was computed
+    and then never read — the UPDATE ran unconditionally regardless of
+    whether n8n actually accepted the webhook, so fire_count measured
+    attempts, not real executions. Separately, this used system_conn()
+    (app.tenant_id='') against automation_workflows, which has FORCE ROW
+    LEVEL SECURITY casting app.tenant_id to ::uuid — '' cast to ::uuid is a
+    hard Postgres error, the same crash class documented and fixed
+    repeatedly elsewhere in this project. Since tenant_id is already a real
+    parameter here (this isn't a genuinely cross-tenant/anonymous call),
+    the fix is simply to use tenant_conn(tenant_id) like every other
+    tenant-scoped write in this codebase — no anonymous-token machinery
+    needed. This function runs as a FastAPI BackgroundTask, so an
+    exception here was silently swallowed after the response already sent
+    (never surfaced to whoever clicked "Test") — worth knowing this path
+    had likely never been genuinely exercised successfully before.
+    """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(f"{N8N_BASE}/webhook/{path}", json=payload)
         success = r.status_code < 400
-    except Exception as e:
+    except Exception:
         success = False
-    async with db.system_conn() as conn:
+    if not success:
+        return
+    async with db.tenant_conn(tenant_id) as conn:
         await conn.execute("""
             UPDATE automation_workflows
                SET last_fired_at=now(), fire_count=fire_count+1

@@ -270,16 +270,14 @@ test.describe('S7 Candidate 360 View', () => {
     await page.waitForSelector('[data-testid="applications-panel"]', { state: 'visible', timeout: 10000 });
   });
 
-  // There is no per-candidate "assessment" tab on the 360 view anymore —
-  // candidates/[id]/page.tsx's TABS only has profile/applications/interviews/
-  // offers/notes/parse-history, no assessment key at all. Technical
-  // assessments (P20) are their own dedicated module now, not embedded per
-  // candidate — checking the real thing instead of a tab that doesn't exist.
-  test('assessments page loads with real data', async ({ page }) => {
-    await page.goto(`${BASE}/assessments`);
-    await page.waitForSelector('[data-testid="assessments-page"]', { state: 'visible', timeout: 10000 });
-    await expect(page.locator('[data-testid="assessment-kpis"]')).toBeVisible();
-  });
+  // The Assessments module (P20) was retired 2026-08-10 — a fresh audit
+  // found it had zero organic production usage ever (the only 2 rows were
+  // confirmed seed/smoke-test data), 4 of its 5 backend endpoints had no
+  // authorization check at all, and there was no candidate-facing way to
+  // ever take an assessment in the first place. Router, frontend page, and
+  // sidebar link all removed rather than left as unreachable, unprotected
+  // surface area — same judgment call as bgv-api/job-distribution/
+  // sse_router earlier in this project.
 });
 
 // Suite 8: Analytics BI Dashboard (P8)
@@ -772,23 +770,8 @@ test.describe('S9 P18+P19 Candidate Intelligence', () => {
   });
 });
 
-// ─── S10: P20 Assessments ────────────────────────────────
-test.describe('S10 P20 Assessments', () => {
-  test('GET /assessments/stats returns keys', async ({ request }) => {
-    if (!TID) return test.skip();
-    const r = await request.get(`${API}/assessments/stats`, { headers: { 'x-tenant-id': TID } });
-    expect(r.status()).toBe(200);
-    const d = await r.json();
-    expect(d).toHaveProperty('total');
-    expect(d).toHaveProperty('flagged');
-  });
-  test('GET /assessments returns array', async ({ request }) => {
-    if (!TID) return test.skip();
-    const r = await request.get(`${API}/assessments`, { headers: { 'x-tenant-id': TID } });
-    expect(r.status()).toBe(200);
-    expect(Array.isArray(await r.json())).toBe(true);
-  });
-});
+// S10 P20 Assessments — module retired 2026-08-10, see the note where the
+// old per-candidate/dedicated-page test used to live for why.
 
 // ─── S11: P21 Predictions ────────────────────────────────
 test.describe('S11 P21 Predictive Hiring', () => {
@@ -848,7 +831,6 @@ test.describe('S13 P15-P22 Frontend Pages', () => {
     ['collections', 'collections-page'],
     ['bu-tracker', 'bu-tracker-page'],
     ['intelligence', 'intelligence-page'],
-    ['assessments', 'assessments-page'],
     ['predictions', 'predictions-page'],
     ['vendor-analytics', 'vendor-analytics-page'],
     ['ceo-dashboard', 'ceo-dashboard-page'],

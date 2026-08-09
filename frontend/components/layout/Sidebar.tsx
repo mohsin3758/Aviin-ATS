@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import {
   Inbox, LayoutDashboard, Users, Building2, Briefcase, KanbanSquare,
-  Brain, Sparkles, TrendingUp, ClipboardCheck,
+  Brain, Sparkles, TrendingUp,
   Calendar, FileText, BookOpen, Globe, Share2, ClipboardList,
   BarChart3, PieChart, AlertTriangle, Heart, Target,
   DollarSign, Wallet, Building, Crown, FileCheck, Gauge,
@@ -35,7 +35,6 @@ const NAV_GROUPS = [
     { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },
     { icon:Sparkles,        href:'/ai-tools',     label:'AI Tools' },
     { icon:TrendingUp,      href:'/predictions',  label:'Predictive Hiring' },
-    { icon:ClipboardCheck,  href:'/assessments',  label:'Assessments' },
   ]},
   { id:'recruitment', label:'RECRUITMENT', defaultOpen:true, items:[
     { icon:Inbox,           href:'/resume-inbox',  label:'Resume Inbox' },

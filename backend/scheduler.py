@@ -15,13 +15,24 @@ N8N_BASE = "http://n8n:5678"
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
 
-async def _notify_n8n(path: str, payload: dict):
-    """Fire-and-forget n8n webhook."""
+async def _notify_n8n(path: str, payload: dict) -> bool:
+    """Fire-and-forget n8n webhook. Returns whether it actually reached a
+    real, matching n8n workflow — previously returned nothing, and every
+    caller's fire_count/last_fired_at update ran unconditionally regardless
+    of the response, so a 404 (no workflow registered for that path — a
+    genuine, confirmed state for 8 of the 10 automation_workflows rows per
+    the 2026-08-10 audit) looked identical to success. httpx doesn't raise
+    on a 4xx/5xx by itself, so this checks status explicitly."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(f"{N8N_BASE}/webhook/{path}", json=payload)
+            resp = await client.post(f"{N8N_BASE}/webhook/{path}", json=payload)
+        if resp.status_code >= 400:
+            logger.warning(f"n8n webhook '{path}' returned {resp.status_code} — not counting as fired")
+            return False
+        return True
     except Exception as e:
         logger.warning(f"n8n notify failed ({path}): {e}")
+        return False
 
 
 async def process_retention_bank_releases():
@@ -259,11 +270,18 @@ async def _handle_escalation_alert(conn, tenant_id, alert_id, alert_type, requis
 
     if row["tier1_fired_at"] is None:
         webhook_path = "sla-breach-warning" if alert_type == "sla_breach" else "stale-requisitions"
-        await _notify_n8n(webhook_path, {"alert_id": alert_id, "title": title, "tenant_id": tenant_id})
-        await conn.execute(
-            "UPDATE automation_workflows SET last_fired_at=now(), fire_count=fire_count+1 WHERE tenant_id=$1 AND webhook_path=$2",
-            tenant_id, webhook_path,
-        )
+        n8n_ok = await _notify_n8n(webhook_path, {"alert_id": alert_id, "title": title, "tenant_id": tenant_id})
+        # Only counts as a real fire if n8n actually accepted it — this used
+        # to run unconditionally, so fire_count measured "how many times we
+        # attempted a POST" (160 real attempts, both these paths, before
+        # this fix) rather than "how many times n8n actually executed a
+        # workflow" (0, since neither had a matching workflow imported —
+        # confirmed directly from n8n's own internal state, 2026-08-10 audit).
+        if n8n_ok:
+            await conn.execute(
+                "UPDATE automation_workflows SET last_fired_at=now(), fire_count=fire_count+1 WHERE tenant_id=$1 AND webhook_path=$2",
+                tenant_id, webhook_path,
+            )
         # Push the same alert to any configured Slack/Teams/Discord webhook
         # (routers/final_features.py) - these alerts previously only ever
         # produced a dashboard card someone had to go check; this makes
@@ -430,9 +448,11 @@ async def send_interview_reminders():
                     rows = await conn.fetch("""
                         SELECT i.id, i.interview_type, i.scheduled_at, i.duration_mins,
                                i.mode, i.meeting_link, i.location, i.notes,
-                               c.full_name AS candidate_name, c.email AS candidate_email
+                               c.full_name AS candidate_name, c.email AS candidate_email,
+                               u.full_name AS interviewer_name, u.email AS interviewer_email
                         FROM interview_schedules i
                         JOIN candidates c ON c.id=i.candidate_id
+                        LEFT JOIN users u ON u.id=i.interviewer_id
                         WHERE i.tenant_id=$1
                           AND i.status='scheduled'
                           AND i.reminder_sent_at IS NULL
@@ -440,6 +460,40 @@ async def send_interview_reminders():
                     """, tid)
                     if not rows:
                         continue
+                    # Two more dead automation_workflows rows closed here
+                    # (2026-08-10 audit item 4) — this cron is the one real,
+                    # existing "interview reminder" trigger point in the
+                    # codebase, so both the candidate-facing and recruiter-
+                    # facing n8n reminders fire from here rather than
+                    # inventing a second job. Fired independent of whether
+                    # SMTP is configured for this tenant (the email below can
+                    # legitimately be skipped; the n8n reminder shouldn't be
+                    # held hostage to that). Bounded, tolerated risk of one
+                    # duplicate fire if this tenant has no SMTP configured —
+                    # reminder_sent_at (the real dedup guard) is only set
+                    # once the email step below succeeds, and this is a
+                    # low-stakes notification, not a HARD RULE #10 action.
+                    for iv in rows:
+                        payload_base = {
+                            "interview_id": str(iv["id"]), "interview_type": iv["interview_type"],
+                            "scheduled_at": iv["scheduled_at"].isoformat(), "mode": iv["mode"],
+                            "candidate_name": iv["candidate_name"],
+                        }
+                        if iv["candidate_email"]:
+                            ok = await _notify_n8n("interview-reminder-candidate",
+                                {**payload_base, "candidate_email": iv["candidate_email"]})
+                            if ok:
+                                await conn.execute(
+                                    "UPDATE automation_workflows SET last_fired_at=now(), fire_count=fire_count+1 "
+                                    "WHERE tenant_id=$1 AND webhook_path='interview-reminder-candidate'", tid)
+                        if iv["interviewer_email"]:
+                            ok = await _notify_n8n("interview-reminder-recruiter",
+                                {**payload_base, "interviewer_name": iv["interviewer_name"],
+                                 "interviewer_email": iv["interviewer_email"]})
+                            if ok:
+                                await conn.execute(
+                                    "UPDATE automation_workflows SET last_fired_at=now(), fire_count=fire_count+1 "
+                                    "WHERE tenant_id=$1 AND webhook_path='interview-reminder-recruiter'", tid)
                     # Get SMTP config
                     _db_url = _os.environ.get("DATABASE_URL", "postgresql://app_user:apppw@db:5432/ats")
                     _conn = await asyncpg.connect(_db_url)
@@ -643,6 +697,20 @@ async def send_weekly_kpi_summary():
                 await notify_event(tid, "weekly_kpi", message)
             except Exception as e:
                 logger.warning(f"Weekly KPI webhook send failed for tenant {tid}: {e}")
+            # Separate, distinct system from the Slack/Teams/Discord webhook
+            # above (webhook_integrations) — this is the n8n automation_
+            # workflows row of the same name, dead since it was seeded
+            # (2026-08-10 audit item 4). Same trigger point, different
+            # subscriber.
+            try:
+                ok = await _notify_n8n("weekly-kpi", {"tenant_id": tid, "week_of": str(date.today())})
+                if ok:
+                    async with db.tenant_conn(tid) as conn2:
+                        await conn2.execute(
+                            "UPDATE automation_workflows SET last_fired_at=now(), fire_count=fire_count+1 "
+                            "WHERE tenant_id=$1 AND webhook_path='weekly-kpi'", tid)
+            except Exception as e:
+                logger.warning(f"Weekly KPI n8n webhook failed for tenant {tid}: {e}")
     except Exception as e:
         logger.error(f"Weekly KPI error: {e}")
 

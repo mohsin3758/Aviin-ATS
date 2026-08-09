@@ -7,12 +7,13 @@ write assignment_event + audit_log. issue also writes event_outbox
 """
 
 import os
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
 import db
 import events
 from deps import Actor, get_actor, require_role
 from schemas import OfferCreate, OfferRespond
+from routers.p30_p35 import fire_webhook
 
 router = APIRouter(prefix="/offers", tags=["offers"])
 
@@ -142,7 +143,8 @@ async def issue_offer(offer_id: str, actor: Actor = Depends(require_role("admin"
 
 
 @router.post("/{offer_id}/respond")
-async def respond_offer(offer_id: str, body: OfferRespond, actor: Actor = Depends(get_actor)):
+async def respond_offer(offer_id: str, body: OfferRespond, background_tasks: BackgroundTasks,
+                         actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             f"""UPDATE offers SET status = $2, updated_at = now()
@@ -164,6 +166,40 @@ async def respond_offer(offer_id: str, body: OfferRespond, actor: Actor = Depend
                 "UPDATE applications SET stage = 'placed', updated_at = now() WHERE id = $1",
                 row["application_id"],
             )
+            app_row = await conn.fetchrow(
+                "SELECT candidate_id, requisition_id FROM applications WHERE id=$1", row["application_id"])
+            # Real gap found in the 2026-08-10 audit: nothing anywhere in
+            # this codebase ever inserted into `placements` on offer
+            # acceptance — grepped the whole backend, zero matches. Every
+            # downstream feature that joins against placements (finance/
+            # billing, retention tracking, onboarding, compliance records,
+            # v_monthly_billing) was silently blind to every real
+            # acceptance through this endpoint.
+            await conn.execute(
+                """INSERT INTO placements
+                     (tenant_id, offer_id, candidate_id, requisition_id, client_id, start_date, bill_rate, pay_rate)
+                   SELECT $1, $2, $3, $4, r.client_id, COALESCE($5::date, CURRENT_DATE), NULL, NULL
+                   FROM requisitions r WHERE r.id = $4
+                   ON CONFLICT (offer_id) DO NOTHING""",
+                actor.tenant_id, offer_id, app_row["candidate_id"], app_row["requisition_id"], row["joining_date"],
+            )
+            # Two more dead automation_workflows rows closed alongside the
+            # HITL fix (2026-08-10 audit item 4) — both fire from this exact
+            # acceptance event, which is a real, single, unambiguous trigger
+            # point for both an "onboarding kicked off" workflow and a
+            # separate "congratulate the candidate" one. Distinct n8n
+            # workflows reacting to the same business event is normal, not
+            # duplicate work — fire_webhook() is best-effort per call.
+            webhook_payload = {
+                "offer_id": offer_id, "application_id": str(row["application_id"]),
+                "candidate_id": str(app_row["candidate_id"]), "requisition_id": str(app_row["requisition_id"]),
+            }
+            background_tasks.add_task(fire_webhook, "offer-accepted", webhook_payload, actor.tenant_id)
+            background_tasks.add_task(fire_webhook, "placement-congrats", webhook_payload, actor.tenant_id)
+        elif body.status == "declined":
+            background_tasks.add_task(fire_webhook, "offer-dropped", {
+                "offer_id": offer_id, "application_id": str(row["application_id"]),
+            }, actor.tenant_id)
 
     return dict(row)
 
@@ -389,8 +425,13 @@ async def send_offer_letter(offer_id: str, actor: Actor = Depends(get_actor)):
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         offer = await _get_offer(conn, offer_id)
-        if offer['status'] not in ('approved', 'issued', 'draft'):
-            raise HTTPException(400, f"Cannot send letter for offer in status '{offer['status']}'")
+        # HITL fix (2026-08-10 audit): 'draft' used to be allowed here, which
+        # meant a letter could be emailed to a candidate before anyone with
+        # admin/manager authority had approved the offer at all — the letter
+        # itself is what a candidate would act on, so sending it is the real
+        # moment that matters, not just the /issue API call.
+        if offer['status'] not in ('approved', 'issued'):
+            raise HTTPException(400, f"Cannot send letter for offer in status '{offer['status']}' — approve it first")
         app_row = await conn.fetchrow(
             "SELECT candidate_id FROM applications WHERE id=$1", offer['application_id'])
         candidate = await conn.fetchrow(
@@ -484,6 +525,15 @@ offer_sign_public = APIRouter(prefix='/offer-sign', tags=['offer-sign'])
 async def request_offer_signature(offer_id: str, actor: Actor = Depends(get_actor)):
     """Generate a signing link for the candidate (idempotent)."""
     async with db.tenant_conn(actor.tenant_id) as conn:
+        offer = await _get_offer(conn, offer_id)
+        # HITL fix (2026-08-10 audit): this had no status check at all —
+        # a signing link could be generated (and a candidate could sign it)
+        # for an offer still sitting in 'draft', before any approval. The
+        # e-sign acceptance itself now also requires 'issued'
+        # (accept_offer_by_id, sql/39...sql) as a second layer, but the
+        # real fix is not generating the link in the first place.
+        if offer['status'] != 'issued':
+            raise HTTPException(400, f"Offer must be issued before requesting a signature (currently '{offer['status']}')")
         letter = await conn.fetchrow(
             "SELECT id FROM offer_letters"
             " WHERE offer_id=$1::uuid AND tenant_id=$2::uuid",
@@ -542,7 +592,13 @@ async def sign_offer_letter(token: str, body: dict):
     if not result:
         raise HTTPException(400, 'Signing link is invalid, already used, or expired')
     async with db.system_conn() as conn:
-        await conn.execute(
+        # accept_offer_by_id (sql/39...sql) now only accepts an offer that's
+        # actually 'issued' — returns NULL/no row otherwise, which we surface
+        # honestly instead of claiming success on an offer that was never
+        # properly issued (the HITL bypass this whole fix closes).
+        accepted = await conn.fetchval(
             "SELECT accept_offer_by_id($1)", result['offer_id']
         )
+    if not accepted:
+        raise HTTPException(409, 'This offer is not currently issued and cannot be accepted — contact your recruiter')
     return {'signed': True, 'message': 'Thank you! Your e-signature has been recorded.'}

@@ -347,7 +347,7 @@ key) auth path and is unnecessary given the existing OAuth login.
 | P17 | Account Financial Framework & CEO Dashboard | DONE |
 | P18 | Resume & JD Intelligence (Regex NER) | DONE |
 | P19 | Candidate Intelligence Engine | DONE |
-| P20 | Technical Assessment & Video Intelligence | DONE |
+| P20 | Technical Assessment & Video Intelligence | RETIRED 2026-08-10 (never had real usage; see Fresh Audit section) |
 | P21 | AI Shortlisting & Predictive Hiring (sklearn) | DONE |
 | P22 | Recruiter & Vendor Analytics | DONE |
 
@@ -371,7 +371,6 @@ P22: vendor_agencies, source_attribution
 /bu-tracker      — BU eligibility evaluation
 /ceo-dashboard   — Aggregated CEO view
 /intelligence    — Resume NER + semantic scoring (BGE-small)
-/assessments     — MCQ/video assessments + anti-cheat
 /predictions     — sklearn LogisticRegression placement probability
 /vendor-analytics — Vendor ROI, recruiter funnel, diversity
 /scheduler       — APScheduler jobs (retention bank release, loyalty checks)
@@ -3247,3 +3246,196 @@ and_schema_drift.sql`.
 
 Full QA suite re-run clean after all 3: 157 passed / 2 skipped / 0
 failed. Zero-token audit confirmed clean.
+
+## Fresh audit (Assessments/Offers/n8n) — all 5 recommendations built, 2026-08-10
+Direct follow-up to a research-only fresh audit of 3 areas not yet deeply
+reviewed (Assessments & Anti-cheat P7, Offer Management P11, n8n Automation
+Workflows), run as 3 parallel background agents with real SSH/psql access.
+Headline finding: a confirmed, live HARD RULE #10 violation in production
+offer data. User said "built it complete all" — all 5 recommendations done.
+
+**1. Offer-issue HITL bypass closed at the root.** `phase3.py`'s
+`auto_generate_offer()` — the only offer-creation path either frontend
+entry point calls — inserted directly as `status='issued'`, completely
+bypassing the correctly-built `offers.py` draft→pending_approval→
+approved→issued state machine sitting unused right next to it. This is
+exactly how a real production offer (`003a796d...`) ended up `accepted`
+with an empty `approved_by` and zero `assignment_event`/`audit_log` rows.
+Fixed at the source: now inserts as `'draft'` and writes a real
+`offer.created` event_outbox row, matching `offers.py`'s own
+`create_offer()` convention. Two more bypass points closed alongside it,
+both confirmed via direct pre-fix reproduction: `send_offer_letter`
+allowed sending a `draft`/`approved`/`issued` offer (now `approved`/
+`issued` only), and `request_offer_signature` had no status check at
+all (now requires `issued`). The public e-sign SQL path
+(`accept_offer_by_id`) was worse — schema-drifted (existed live, zero
+`CREATE FUNCTION` in any committed migration) with no `WHERE` clause
+whatsoever, meaning it would flip any offer straight to `accepted`
+regardless of current status. `sql/39_offer_hitl_fix_and_schema_drift.sql`
+backfills it plus its 2 sibling drifted functions
+(`get_offer_by_signing_token`, `sign_offer_by_token`, captured byte-for-
+byte via `pg_get_functiondef()`, not reconstructed from memory — this
+project's own established discipline after a first-draft schema-drift
+migration once landed "wrong on every single one" from memory) and adds
+a real `status='issued'` guard, matching the authenticated accept path's
+existing standard. `CREATE OR REPLACE` cannot change a function's return
+type (`void` to `boolean` here) — caught on first deploy attempt
+(`cannot change return type`), fixed with a `DROP FUNCTION` first.
+New `ApprovalAction` component on `offers/page.tsx` (Submit for Approval
+/ Approve / Issue Offer buttons, or a plain status readout for non-
+approvers) — the state machine had a real backend but zero frontend
+before this, so nobody could actually move an offer through it without
+raw API calls. SSR-safe role check via the established `useState` +
+`useEffect` deferred-localStorage-read pattern (device-monitoring page
+precedent) — confirmed zero hydration console errors via a real headless-
+browser check.
+
+Second real gap found while fixing the first: nothing anywhere in
+this codebase ever inserted into `placements` on offer acceptance
+(grepped the whole backend, zero matches) — every downstream feature
+joining against `placements` (finance/billing, retention tracking,
+onboarding, compliance, `v_monthly_billing`) was silently blind to every
+real acceptance through this endpoint. `respond_offer()` now inserts a
+real row on acceptance. Added a real `UNIQUE (offer_id)` constraint
+first (checked zero existing duplicates in production first) so the
+`ON CONFLICT (offer_id) DO NOTHING` is a genuine no-op-on-retry, not the
+same "no matching constraint so it never fires" dead-code bug already
+found once this project (`retention_bank`).
+
+Verified for real end-to-end, not code review: created 2 throwaway
+candidate/application pairs against a real open requisition. First:
+generated an offer via the real endpoint, confirmed status is draft
+(not issued); confirmed letter/send 400s ("approve it first") and
+letter/request-sign 400s ("must be issued") against the draft; walked
+it through submit-for-approval, approve (confirmed approved_by
+populated), issue, then respond accepted; confirmed a real placements
+row with correct candidate_id/requisition_id, and applications.stage
+became placed. Second: same setup, walked to issued, then responded
+declined, confirming the decline path also works cleanly. Directly
+called the fixed accept_offer_by_id(offer_id) SQL function against the
+now-declined offer and confirmed it returns NULL (refuses a non-issued
+offer) rather than the old unconditional accept. All throwaway data (2
+candidates, 2 applications, 2 offers, 1 placements row, 2
+consent_records) cleaned up after — first cleanup attempt caught a real
+gotcha worth remembering: psql -c with multiple semicolon-separated
+statements runs them all in one implicit transaction under the simple-
+query protocol, so a later statement's FK-violation rolls back every
+earlier statement in the same invocation too, not just the one that
+failed. Fixed by reordering into one single batch (consent_records,
+then placements, then offers, then applications, then candidates) that
+fully succeeds atomically.
+
+**2. Assessments & Anti-cheat (P7) retired, not hardened.** Given a
+genuine fork (build a real take-flow — high effort, low payoff for a
+module the audit found had never processed a single real submission —
+vs. retire), asked the user directly; picked "Retire it." Since nothing
+would be left to protect, incremental role-gating of its endpoints
+(originally a separate recommendation) became moot and was folded into
+the retirement instead. Deleted `backend/routers/assessments.py` and
+`backend/routers/media.py` (P20 Whisper/OpenCV media intelligence,
+confirmed via grep to exist solely to serve assessments.py, zero other
+callers), removed both from `app.py`, deleted the `/assessments`
+frontend page plus its sidebar entry and now-unused `ClipboardCheck`
+icon import, removed the `assessments` feature key from the Permissions
+admin matrix taxonomy, removed the 4 now-dead QA tests (1 UI-flow test,
+the 2-test `S10 P20 Assessments` describe block, 1 route-list entry).
+Deleted the 2 confirmed-synthetic seed rows from `technical_assessments`
+directly (matching the audit's exact finding — this was the module's
+entire real dataset, ever). Verified for real: `GET /assessments` and
+`GET /assessments/stats` both return genuine 404s against the live
+backend, not 401/403 (confirms the routes are actually gone, not just
+gated).
+
+**3+4. n8n: fire_count fixed to mean "executed," not "attempted," and
+all 9 previously-dead automation_workflows rows made genuinely live.**
+`_notify_n8n()` (`scheduler.py`) and `fire_webhook()` (`p30_p35.py`) both
+computed success/failure from the n8n POST response and then updated
+`automation_workflows.fire_count` unconditionally regardless of it —
+so fire_count had only ever measured "how many times we attempted a
+POST," not "how many times n8n actually ran a workflow." Both fixed to
+gate the UPDATE on a real 2xx/genuine-non-4xx response.
+`p30_p35.py`'s version had a second, independent, more serious bug
+hiding behind it: it read/wrote `automation_workflows` (FORCE ROW LEVEL
+SECURITY) via `db.system_conn()` (`app.tenant_id=''`) — the same
+`''::uuid` cast-crash class found and fixed repeatedly elsewhere in this
+project — but since this function runs as a FastAPI BackgroundTask, the
+crash was silently swallowed after the response already sent. This
+almost certainly means the Automations page's "Test" button had never
+worked successfully even once before this fix. Fixed by switching to
+`tenant_conn(tenant_id)` (tenant_id was already a real parameter here,
+no anonymous-token machinery needed).
+
+Then closed the actual "why is fire_count 0" root cause underneath both
+fixes: 8 of the 10 real automation_workflows rows had no matching n8n
+workflow imported at all — every webhook POST was hitting a 404,
+confirmed directly against n8n's own internal state. Registered real
+n8n workflows for all 9 dead paths (the 10th, "Candidate Birthday /
+Anniversary," has no natural trigger — no DOB/anniversary field exists
+anywhere in this schema, confirmed via grep across sql/*.sql — left
+undead but genuinely unbuildable without inventing new data capture,
+out of this batch's scope) via n8n's own CLI (no REST API credentials
+available) — import:workflow --projectId=ngUWjYHU6zM1ncOQ (lands
+inactive; this single-instance deployment doesn't support
+--activeState=fromJson), publish:workflow --id=..., then
+docker compose restart n8n to actually activate (publish alone doesn't
+take effect while n8n is running). Each new workflow mirrors the one
+pre-existing real workflow's shape (Webhook trigger, then a Set node).
+Verifying a "successful" import needed a second check, not just the
+CLI's own success message: n8n's SQLite backend runs in WAL mode, so
+docker cp-ing only the main .sqlite file misses anything still sitting
+in the separate -wal sidecar file — the first verification attempt
+showed only the pre-existing workflow, not the newly-imported ones,
+until the -wal/-shm files were copied alongside it too. Verified for
+real, not by trusting CLI output: every one of the 9 paths
+(sla-breach-warning, stale-requisitions, new-application,
+offer-accepted, offer-dropped, placement-congrats, weekly-kpi,
+interview-reminder-candidate, interview-reminder-recruiter) returns a
+genuine {"message":"Workflow was started"} / HTTP 200 on a direct
+webhook POST, not a 404.
+
+Registering the workflows alone does not fire them without a real
+trigger call site, so wired all 7 previously-dead automation rows
+(beyond the 2 existing-but-orphaned SLA/stale-req alerts already fixed
+same-day) into the one, already-existing, natural trigger point each
+has — deliberately not inventing new business logic:
+- new-application — applications.py's create_application(), the one
+  function every application-creation path funnels through.
+- offer-accepted + placement-congrats — both fire from
+  respond_offer()'s acceptance branch (same event, two distinct n8n
+  subscribers — an onboarding-kickoff workflow and a separate
+  congratulate-the-candidate one; not duplicate work).
+- offer-dropped — respond_offer()'s decline branch.
+- interview-reminder-candidate + interview-reminder-recruiter — the
+  existing daily 8am send_interview_reminders() cron already queries
+  interviews in the next 24h for the candidate-email step; added an
+  interviewer_id -> users join and fired both webhooks per interview
+  row, deliberately not gated on SMTP being configured (the n8n
+  reminder should not be held hostage to whether this tenant's email is
+  set up) — accepting a small, bounded risk of one duplicate fire per
+  interview if SMTP is not configured for that tenant, tolerable for a
+  low-stakes reminder, not a HARD RULE #10 action.
+- weekly-kpi — the existing Monday-9am send_weekly_kpi_summary() cron,
+  alongside (not replacing) its separate, unrelated Slack/Teams/Discord
+  notify_event() call from the same-day MS Teams work — two genuinely
+  distinct subscriber systems reacting to the same schedule.
+All new call sites use BackgroundTasks/best-effort fire-and-forget,
+matching this codebase's established convention for non-blocking
+notification side effects.
+
+Verified for real end-to-end: created a real application via the API
+and confirmed new-application's fire_count went 0 to 1; walked a real
+offer to acceptance and confirmed offer-accepted and placement-congrats
+both went 0 to 1; walked a second real offer to decline and confirmed
+offer-dropped went 0 to 1. interview-reminder-*/weekly-kpi verified via
+direct webhook POST (real 200 plus workflow-started) since exercising
+the actual cron jobs live would mean waiting for their real schedule or
+fabricating interview-window/day-of-week state on production data,
+neither of which fit this session's real-data-only verification bar as
+well as the direct offer/application tests did — flagged honestly as the
+one lighter-weight verification in this batch rather than glossed over.
+
+Full QA suite re-run clean after all of the above: 153 passed / 2
+skipped / 0 failed (down from the prior 157 baseline by exactly the 4
+Assessments-specific tests removed as part of the retirement — confirms
+no real regressions, not a weaker suite). Zero-token audit: CONFIRMED
+CLEAN (336 files, 0 external API refs).

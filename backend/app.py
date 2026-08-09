@@ -28,11 +28,9 @@ from routers import (
     kae,
     account_pl,
     intelligence,
-    assessments,
     predictions,
     vendor_analytics,
     scheduler_router,
-    media,
     users,
     p23_p27,
     p28_p32,
@@ -207,11 +205,9 @@ app.include_router(account_pl.coll_router)
 app.include_router(account_pl.bu_router)
 app.include_router(account_pl.ceo_router)
 app.include_router(intelligence.router)
-app.include_router(assessments.router)
 app.include_router(predictions.router)
 app.include_router(vendor_analytics.router)
 app.include_router(scheduler_router.router)
-app.include_router(media.router)
 app.include_router(users.router)
 from routers import email_settings
 app.include_router(email_settings.router)

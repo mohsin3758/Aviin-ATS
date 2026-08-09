@@ -1,8 +1,9 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { getTokenPayload } from '@/lib/auth';
 import { FileText, CheckCircle, XCircle, Clock, Plus, Copy, ExternalLink,
-         Send, Sparkles, Download, Edit3, Mail } from 'lucide-react';
+         Send, Sparkles, Download, Edit3, Mail, ShieldCheck } from 'lucide-react';
 
 const STATUS_BADGE:Record<string,{color:string,bg:string,label:string}> = {
   issued:           {color:'#2563eb',bg:'#eff6ff',  label:'Issued'},
@@ -253,6 +254,54 @@ function OfferModal({ onClose, onCreated }:any) {
   );
 }
 
+// ─── Approval-flow action button (HITL fix, 2026-08-10 audit) ────────────────
+// Every offer — whether AI-drafted or created via the Formal tab — now
+// starts as 'draft' and must genuinely pass through submit-for-approval ->
+// approve -> issue (offers.py, admin/manager-gated) before it can be sent
+// or e-signed. This button was previously nowhere in the UI at all, which
+// is exactly how offers were reaching 'issued' with zero approval.
+function ApprovalAction({ offer, canApprove, onDone }: { offer: any; canApprove: boolean; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  async function act(path: string) {
+    setBusy(true);
+    try {
+      await apiFetch(`/offers/${offer.id}/${path}`, { method: 'POST' });
+      onDone();
+    } catch (e: any) {
+      alert(e?.message || 'Action failed');
+    } finally { setBusy(false); }
+  }
+
+  if (offer.status === 'draft') {
+    return (
+      <button onClick={() => act('submit-for-approval')} disabled={busy}
+        style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: 'white', cursor: 'pointer', fontSize: 11, color: '#64748b', fontWeight: 600 }}>
+        <Send size={11} /> {busy ? '…' : 'Submit for Approval'}
+      </button>
+    );
+  }
+  if (offer.status === 'pending_approval') {
+    if (!canApprove) return <span style={{ fontSize: 11, color: '#d97706', fontWeight: 600 }}>Awaiting manager approval</span>;
+    return (
+      <button onClick={() => act('approve')} disabled={busy}
+        style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 6, border: 'none', background: '#0891b2', color: 'white', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>
+        <ShieldCheck size={11} /> {busy ? '…' : 'Approve'}
+      </button>
+    );
+  }
+  if (offer.status === 'approved') {
+    if (!canApprove) return <span style={{ fontSize: 11, color: '#0891b2', fontWeight: 600 }}>Approved — awaiting issue</span>;
+    return (
+      <button onClick={() => act('issue')} disabled={busy}
+        style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 6, border: 'none', background: '#16a34a', color: 'white', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>
+        <Send size={11} /> {busy ? '…' : 'Issue Offer'}
+      </button>
+    );
+  }
+  return null;
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function OffersPage() {
   const { data: aiOffers, loading: aiLoading, refetch: aiMutate } = useFetch<any[]>('/auto-offer/list');
@@ -262,6 +311,13 @@ export default function OffersPage() {
   const [letterOffer, setLetterOffer] = useState<any>(null);
   const [genLink, setGenLink] = useState<Record<string,string>>({});
   const [toast, setToast] = useState('');
+  // getTokenPayload() reads localStorage, unavailable during SSR — deferred
+  // to an effect so the server/client first-render match (same pattern used
+  // elsewhere in this codebase, e.g. recruiter-ops/device-monitoring pages).
+  const [canApprove, setCanApprove] = useState(false);
+  useEffect(() => {
+    setCanApprove(['admin', 'super_admin', 'manager'].includes(getTokenPayload()?.role || ''));
+  }, []);
 
   const showT = (m:string) => { setToast(m); setTimeout(()=>setToast(''),3000); };
 
@@ -363,10 +419,13 @@ export default function OffersPage() {
                         <span style={{padding:'3px 9px',borderRadius:'20px',fontSize:'11px',fontWeight:'600',background:badge.bg,color:badge.color}}>{badge.label}</span>
                       </td>
                       <td style={{padding:'12px 14px'}}>
-                        <button onClick={()=>generateLink(offer.application_id)} title="Generate self-scheduling link"
-                          style={{display:'flex',alignItems:'center',gap:'4px',padding:'4px 8px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'11px',color:'#8b5cf6',fontWeight:'600'}}>
-                          <ExternalLink size={11}/> {link?'Copied!':'Schedule Link'}
-                        </button>
+                        <div style={{display:'flex',flexDirection:'column',gap:'6px',alignItems:'flex-start'}}>
+                          <ApprovalAction offer={offer} canApprove={canApprove} onDone={aiMutate} />
+                          <button onClick={()=>generateLink(offer.application_id)} title="Generate self-scheduling link"
+                            style={{display:'flex',alignItems:'center',gap:'4px',padding:'4px 8px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'11px',color:'#8b5cf6',fontWeight:'600'}}>
+                            <ExternalLink size={11}/> {link?'Copied!':'Schedule Link'}
+                          </button>
+                        </div>
                       </td>
                     </tr>);
                 })}
@@ -412,11 +471,14 @@ export default function OffersPage() {
                         <span style={{padding:'3px 9px',borderRadius:'20px',fontSize:'11px',fontWeight:'600',background:badge.bg,color:badge.color}}>{badge.label}</span>
                       </td>
                       <td style={{padding:'12px 14px'}}>
-                        <button
-                          onClick={()=>setLetterOffer(offer)}
-                          style={{display:'flex',alignItems:'center',gap:'5px',padding:'6px 12px',borderRadius:'7px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px',color:'#1e40af',fontWeight:'600'}}>
-                          <Edit3 size={12}/> Manage Letter
-                        </button>
+                        <div style={{display:'flex',flexDirection:'column',gap:'6px',alignItems:'flex-start'}}>
+                          <ApprovalAction offer={offer} canApprove={canApprove} onDone={formalMutate} />
+                          <button
+                            onClick={()=>setLetterOffer(offer)}
+                            style={{display:'flex',alignItems:'center',gap:'5px',padding:'6px 12px',borderRadius:'7px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px',color:'#1e40af',fontWeight:'600'}}>
+                            <Edit3 size={12}/> Manage Letter
+                          </button>
+                        </div>
                       </td>
                     </tr>);
                 })}
