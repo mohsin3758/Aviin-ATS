@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2, Zap, ToggleLeft, ToggleRight, Lock, Star } from 'lucide-react';
+import { KanbanSquare, ArrowUp, ArrowDown, Eye, EyeOff, Save, RotateCcw, GripVertical, Plus, Trash2, Zap, ToggleLeft, ToggleRight, Lock, Star, X } from 'lucide-react';
 
 interface StageRow {
   stage_key: string;
@@ -265,8 +265,22 @@ function AutomationRulesSection({ stages }: { stages: StageRow[] }) {
     setSaving(true); setErr('');
     try {
       await apiFetch('/pipeline-rules', { method: 'POST', body: JSON.stringify(form) });
-      setAdding(false); setForm({ ...EMPTY_RULE }); refetch();
+      setAdding(false); setForm({ ...EMPTY_RULE, conditions: [{ field: 'total_exp_mo', op: '>=', value: 0 }] }); refetch();
     } catch (e: any) { setErr(e?.message || 'Failed to create rule'); } finally { setSaving(false); }
+  }
+
+  // The backend engine (pipeline_p2.py) has always AND-chained every
+  // condition in the array — this form just only ever sent one. Same
+  // shape the read-side rule list already renders (see the `.join(' AND
+  // ')` a few lines up), just never had an editor for it.
+  function updateCondition(idx: number, patch: Partial<{ field: string; op: string; value: number }>) {
+    setForm((f: any) => ({ ...f, conditions: f.conditions.map((c: any, i: number) => i === idx ? { ...c, ...patch } : c) }));
+  }
+  function addCondition() {
+    setForm((f: any) => ({ ...f, conditions: [...f.conditions, { field: 'total_exp_mo', op: '>=', value: 0 }] }));
+  }
+  function removeCondition(idx: number) {
+    setForm((f: any) => ({ ...f, conditions: f.conditions.filter((_: any, i: number) => i !== idx) }));
   }
 
   async function toggleEnabled(rule: any) {
@@ -336,17 +350,27 @@ function AutomationRulesSection({ stages }: { stages: StageRow[] }) {
               {stages.map(s => <option key={s.stage_key} value={s.stage_key}>{s.label}</option>)}
             </select>
           </div>
-          <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 6 }}>CONDITION (all must match)</div>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-            <select value={form.conditions[0].field} onChange={e => setForm({ ...form, conditions: [{ ...form.conditions[0], field: e.target.value }] })} style={{ flex: 2, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
-              {COND_FIELDS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
-            </select>
-            <select value={form.conditions[0].op} onChange={e => setForm({ ...form, conditions: [{ ...form.conditions[0], op: e.target.value }] })} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
-              {COND_OPS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
-            <input type="number" value={form.conditions[0].value} onChange={e => setForm({ ...form, conditions: [{ ...form.conditions[0], value: Number(e.target.value) }] })}
-              style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }} />
-          </div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 6 }}>CONDITIONS (all must match)</div>
+          {form.conditions.map((cond: any, idx: number) => (
+            <div key={idx} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+              <select value={cond.field} onChange={e => updateCondition(idx, { field: e.target.value })} style={{ flex: 2, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
+                {COND_FIELDS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+              </select>
+              <select value={cond.op} onChange={e => updateCondition(idx, { op: e.target.value })} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }}>
+                {COND_OPS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+              </select>
+              <input type="number" value={cond.value} onChange={e => updateCondition(idx, { value: Number(e.target.value) })}
+                style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '7px 8px', fontSize: 12 }} />
+              <button onClick={() => removeCondition(idx)} disabled={form.conditions.length === 1}
+                title={form.conditions.length === 1 ? 'A rule needs at least one condition' : 'Remove this condition'}
+                style={{ width: 26, height: 26, borderRadius: 6, border: '1px solid #e2e8f0', background: form.conditions.length === 1 ? '#f8fafc' : '#fef2f2', color: form.conditions.length === 1 ? '#cbd5e1' : '#dc2626', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: form.conditions.length === 1 ? 'not-allowed' : 'pointer', flexShrink: 0 }}>
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          <button onClick={addCondition} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', background: 'none', border: '1px dashed #cbd5e1', borderRadius: 6, color: '#7c3aed', fontSize: 11, fontWeight: 700, cursor: 'pointer', marginBottom: 10 }}>
+            <Plus size={11} /> Add condition (AND)
+          </button>
           {err && <div style={{ fontSize: 11, color: '#dc2626', marginBottom: 8 }}>{err}</div>}
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={createRule} disabled={saving} style={{ padding: '8px 16px', background: '#7c3aed', color: 'white', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{saving ? 'Saving…' : 'Create Rule'}</button>

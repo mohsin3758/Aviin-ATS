@@ -266,7 +266,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
                       c.jd_match_score, c.ai_match_score,
                       rf.id AS resume_file_id, rf.file_name AS resume_file_name,
                       a.stage, a.fit_score, a.app_notes, a.app_tags,
-                      a.rejected_reason, a.assigned_recruiter_id,
+                      a.rejected_reason, a.assigned_recruiter_id, a.board_rank,
                       a.created_at, a.updated_at,
                       (SELECT COUNT(*) FROM interview_scorecards s
                        WHERE s.application_id = a.id AND s.tenant_id = a.tenant_id
@@ -279,7 +279,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(get_a
                    ORDER BY rf.created_at DESC LIMIT 1
                ) rf ON true
                WHERE a.requisition_id = $1
-               ORDER BY a.updated_at DESC""",
+               ORDER BY a.board_rank ASC NULLS LAST, a.updated_at DESC""",
             requisition_id,
         )
 

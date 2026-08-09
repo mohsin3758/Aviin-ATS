@@ -8,7 +8,8 @@ import {
   Clock, CheckCircle, AlertTriangle, Send, Star, MessageSquare,
   Activity, Download, ExternalLink, ArrowRight, Inbox, LayoutGrid,
   KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
-  FileSignature, Upload, ShieldCheck, Copy,
+  FileSignature, Upload, ShieldCheck, Copy, CheckSquare, Printer,
+  Columns3, GripVertical,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -47,6 +48,19 @@ function ago(ts: string) {
   if (d < 7) return `${d}d ago`;
   if (d < 30) return `${Math.floor(d / 7)}w ago`;
   return `${Math.floor(d / 30)}mo ago`;
+}
+function daysSince(ts: string) {
+  if (!ts) return 0;
+  return Math.floor((Date.now() - new Date(ts).getTime()) / 86400000);
+}
+// Staleness thresholds match this app's existing SLA_DAYS convention
+// (pipeline_p2.py) loosely — not tied to it exactly since that's per-stage
+// and configurable server-side, this is just a simple visual "stuck too
+// long" cue on the card itself, not a policy.
+function stalenessBadge(days: number): { label: string; color: string; bg: string } | null {
+  if (days >= 14) return { label: `${days}d stuck`, color: '#DC2626', bg: '#FEF2F2' };
+  if (days >= 7) return { label: `${days}d stuck`, color: '#B45309', bg: '#FFFBEB' };
+  return null;
 }
 function scoreColor(s: number | null) {
   if (!s) return '#94A3B8';
@@ -120,6 +134,21 @@ function PipelineInner() {
   // can be rejected (drag-drop into the Rejected column, or the drawer's
   // Reject button), so there's one modal, not two divergent flows.
   const [pendingReject, setPendingReject] = useState<{ appId: string; fromStage: string } | null>(null);
+
+  // Bulk multi-select — checkboxes on cards, a floating action bar for
+  // bulk stage-move (via the existing /pipeline/bulk-action endpoint,
+  // previously only reachable outside the board itself) and comparison.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkMoving, setBulkMoving] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  function toggleSelected(id: string) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
 
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
   const ALL_STAGES = useMemo(() => {
@@ -199,6 +228,119 @@ function PipelineInner() {
       a.skills?.some((s: string) => s.toLowerCase().includes(q))
     );
   }, [candSearch]);
+
+  // Within-column drag reorder — full-column resnapshot (matches the
+  // backend's own approach) rather than midpoint-rank math, since a
+  // column realistically never has more than a few dozen visible cards.
+  const reorderColumn = useCallback(async (stageKey: string, targetAppId: string) => {
+    if (!dragRef.current) return;
+    const { id: draggedId, fromStage } = dragRef.current;
+    dragRef.current = null;
+    if (fromStage !== stageKey || draggedId === targetAppId) return;
+    const stageApps = board[stageKey] || [];
+    const ids = stageApps.map((a: any) => a.id);
+    if (!ids.includes(draggedId) || !ids.includes(targetAppId)) return;
+    const reordered = ids.filter((id: string) => id !== draggedId);
+    reordered.splice(reordered.indexOf(targetAppId), 0, draggedId);
+    const byId = new Map(stageApps.map((a: any) => [a.id, a]));
+    setBoard(prev => ({ ...prev, [stageKey]: reordered.map((id: string) => byId.get(id)) }));
+    try {
+      await apiFetch('/pipeline/reorder', {
+        method: 'POST',
+        body: JSON.stringify({ requisition_id: selectedJobId, stage: stageKey, ordered_application_ids: reordered }),
+      });
+    } catch (e: any) {
+      showToast('Reorder failed', false);
+      if (rawBoard) setBoard(rawBoard);
+    }
+  }, [board, selectedJobId, rawBoard, showToast]);
+
+  // Reuses the same real endpoint the requisition-detail page's manual
+  // Reject button already goes through for a single candidate — bulk
+  // reject still needs a reason_code (HITL-adjacent structured feedback,
+  // not a free-for-all), so it's deliberately NOT part of this bulk-move
+  // action; only move_stage is exposed from the board's multi-select.
+  async function bulkMoveSelected(targetStage: string) {
+    if (selectedIds.size === 0) return;
+    setBulkMoving(true);
+    try {
+      const res: any = await apiFetch('/pipeline/bulk-action', {
+        method: 'POST',
+        body: JSON.stringify({ application_ids: Array.from(selectedIds), action: 'move_stage', target_stage: targetStage }),
+      });
+      const label = ALL_STAGES.find((s: any) => s.key === targetStage)?.label || targetStage;
+      showToast(`${res.success} moved to ${label}${res.failed ? `, ${res.failed} failed` : ''}`, res.failed === 0);
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      refreshBoard();
+      refreshStats();
+    } catch (e: any) {
+      showToast(String(e?.message || 'Bulk move failed'), false);
+    } finally {
+      setBulkMoving(false);
+    }
+  }
+
+  function exportBoardCsv() {
+    const cols = ['Candidate', 'Stage', 'Score', 'Designation', 'Employer', 'Location', 'Experience', 'Notice Period (days)', 'Expected CTC', 'Email', 'Phone', 'Days in Stage'];
+    const rows: string[][] = [];
+    for (const stage of STAGES) {
+      for (const app of (board[stage.key] || [])) {
+        rows.push([
+          app.candidate_name || '', stage.label, app.fit_score != null ? String(Math.round(app.fit_score)) : '',
+          app.current_designation || '', app.current_employer || '', app.location || '',
+          app.total_exp_mo ? gx(app.total_exp_mo) : '', app.notice_period_days != null ? String(app.notice_period_days) : '',
+          app.expected_ctc != null ? String(app.expected_ctc) : '', app.email || '', app.phone || '',
+          String(daysSince(app.updated_at)),
+        ]);
+      }
+    }
+    const esc = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+    const csv = [cols, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${selectedJob?.title || 'pipeline'}-board.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  function printBoard() {
+    const win = window.open('', '_blank');
+    if (!win) { showToast('Pop-up blocked — allow pop-ups to print', false); return; }
+    const rowsHtml = STAGES.map(stage => {
+      const apps = board[stage.key] || [];
+      if (apps.length === 0) return '';
+      const body = apps.map((a: any) => `<tr>
+        <td>${a.candidate_name || ''}</td>
+        <td>${[a.current_designation, a.current_employer].filter(Boolean).join(' @ ')}</td>
+        <td>${a.fit_score != null ? Math.round(a.fit_score) + '%' : '—'}</td>
+        <td>${a.total_exp_mo ? gx(a.total_exp_mo) : '—'}</td>
+        <td>${a.location || '—'}</td>
+        <td>${daysSince(a.updated_at)}d</td>
+      </tr>`).join('');
+      return `<h3 style="color:${stage.color}">${stage.label} (${apps.length})</h3>
+        <table><thead><tr><th>Candidate</th><th>Role @ Employer</th><th>Score</th><th>Experience</th><th>Location</th><th>Days in Stage</th></tr></thead>
+        <tbody>${body}</tbody></table>`;
+    }).join('');
+    win.document.write(`<!doctype html><html><head><title>${selectedJob?.title || 'Pipeline'} — Pipeline Board</title>
+      <style>
+        body{font-family:Arial,sans-serif;color:#1e293b;padding:24px;}
+        h1{font-size:20px;margin-bottom:2px;} .meta{color:#64748b;font-size:12px;margin-bottom:20px;}
+        h3{font-size:14px;margin:20px 0 6px;}
+        table{width:100%;border-collapse:collapse;margin-bottom:8px;}
+        th,td{border:1px solid #e2e8f0;padding:6px 8px;font-size:11px;text-align:left;}
+        th{background:#f8fafc;}
+        @media print { body{padding:0;} }
+      </style></head><body>
+      <h1>${selectedJob?.title || 'Pipeline Board'}</h1>
+      <div class="meta">${selectedJob?.client_name || ''} · Exported ${new Date().toLocaleDateString()} · ${totalCandidates} candidates</div>
+      ${rowsHtml}
+      </body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 300);
+  }
 
   const totalCandidates = Object.values(board).reduce((sum, arr) => sum + (arr?.length || 0), 0);
 
@@ -360,6 +502,19 @@ function PipelineInner() {
           <button onClick={refreshBoard} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
             <RotateCcw size={13} /> Refresh
           </button>
+          <button onClick={() => { setSelectMode(v => !v); setSelectedIds(new Set()); }}
+            title="Select multiple candidates for a bulk stage move or comparison"
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: `1px solid ${selectMode ? '#93C5FD' : '#E2E8F0'}`, borderRadius: 8, background: selectMode ? '#EFF6FF' : '#fff', fontSize: 12, fontWeight: 600, color: selectMode ? '#1D4ED8' : '#64748B', cursor: 'pointer' }}>
+            <CheckSquare size={13} /> {selectMode ? 'Cancel Select' : 'Select'}
+          </button>
+          <button onClick={exportBoardCsv} title="Export this board's candidates to CSV"
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
+            <Download size={13} /> CSV
+          </button>
+          <button onClick={printBoard} title="Print or save as PDF — opens a clean printable view"
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
+            <Printer size={13} /> Print / PDF
+          </button>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
             <a href={`/resume-inbox?req=${selectedJobId}`}
               style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', border: '1px solid #DDD6FE', borderRadius: 8, background: '#FAF5FF', fontSize: 12, fontWeight: 700, color: '#7C3AED', textDecoration: 'none', cursor: 'pointer' }}>
@@ -369,6 +524,27 @@ function PipelineInner() {
               <Plus size={13} /> Add Candidate
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ── BULK SELECTION ACTION BAR ──────────────────────────────────── */}
+      {selectMode && selectedIds.size > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 16px', background: '#1E293B', flexShrink: 0 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#fff' }}>{selectedIds.size} selected</span>
+          <select disabled={bulkMoving} defaultValue="" onChange={e => { if (e.target.value) bulkMoveSelected(e.target.value); e.target.value = ''; }}
+            style={{ fontSize: 12, fontWeight: 600, padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.08)', color: '#fff' }}>
+            <option value="" disabled>{bulkMoving ? 'Moving…' : 'Move to stage…'}</option>
+            {STAGES.map((s: any) => <option key={s.key} value={s.key} style={{ color: '#1E293B' }}>{s.label}</option>)}
+          </select>
+          {selectedIds.size >= 2 && (
+            <button onClick={() => setCompareOpen(true)}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 6, border: 'none', background: '#7C3AED', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+              <Columns3 size={13} /> Compare
+            </button>
+          )}
+          <button onClick={() => setSelectedIds(new Set())} style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', background: 'none', border: 'none', cursor: 'pointer', marginLeft: 'auto' }}>
+            Clear selection
+          </button>
         </div>
       )}
 
@@ -400,9 +576,20 @@ function PipelineInner() {
                   <div style={{ flex: 1, overflowY: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 8, minHeight: 90, maxHeight: 'calc(100vh - 262px)' }}>
                     {apps.map(app => (
                       <KanbanCard key={app.id} app={app} stageColor={stage.color}
-                        onClick={() => { setSelected(app); setDrawerTab('profile'); }}
+                        onClick={() => { if (selectMode) { toggleSelected(app.id); return; } setSelected(app); setDrawerTab('profile'); }}
                         onNotesClick={() => { setSelected(app); setDrawerTab('notes'); }}
-                        onDragStart={(e: React.DragEvent) => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }} />
+                        selectMode={selectMode} isSelected={selectedIds.has(app.id)} onToggleSelect={() => toggleSelected(app.id)}
+                        onDragStart={(e: React.DragEvent) => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }}
+                        onCardDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); }}
+                        onCardDrop={(e: React.DragEvent) => {
+                          e.preventDefault(); e.stopPropagation();
+                          if (!dragRef.current) return;
+                          const { id, fromStage } = dragRef.current;
+                          if (fromStage === stage.key) { reorderColumn(stage.key, app.id); return; }
+                          dragRef.current = null;
+                          if (stage.key === 'rejected') { setPendingReject({ appId: id, fromStage }); return; }
+                          moveStage(id, fromStage, stage.key);
+                        }} />
                     ))}
                     {apps.length === 0 && (
                       <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 11, padding: '24px 8px', fontStyle: 'italic' }}>Drop candidates here</div>
@@ -457,6 +644,15 @@ function PipelineInner() {
           }} />
       )}
 
+      {/* ── CANDIDATE COMPARISON MODAL ─────────────────────────────────── */}
+      {compareOpen && (
+        <CompareModal
+          apps={Object.values(board).flat().filter((a: any) => selectedIds.has(a.id))}
+          requiredSkills={selectedJob?.skills_required || []}
+          stages={ALL_STAGES}
+          onClose={() => setCompareOpen(false)} />
+      )}
+
       {/* ── TOAST ───────────────────────────────────────────────────────── */}
       {toast && (
         <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', background: toast.ok ? '#1E293B' : '#DC2626', color: '#fff', padding: '10px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 16px rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -468,17 +664,23 @@ function PipelineInner() {
 }
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
-function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart }: any) {
+function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart, selectMode, isSelected, onToggleSelect, onCardDragOver, onCardDrop }: any) {
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const skills: string[] = app.skills || [];
   const notesCount = Array.isArray(app.app_notes) ? app.app_notes.length : 0;
   const [hovered, setHovered] = useState(false);
+  const stale = stalenessBadge(daysSince(app.updated_at));
   return (
-    <div draggable onDragStart={onDragStart} onClick={onClick}
-      style={{ background: '#fff', border: '1px solid #EDF0F4', borderRadius: 10, padding: '11px 12px 9px', cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s', position: 'relative', userSelect: 'none' }}
+    <div draggable onDragStart={onDragStart} onClick={onClick} onDragOver={onCardDragOver} onDrop={onCardDrop}
+      style={{ background: '#fff', border: `1px solid ${isSelected ? '#93C5FD' : '#EDF0F4'}`, borderRadius: 10, padding: '11px 12px 9px', cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s', position: 'relative', userSelect: 'none', boxShadow: isSelected ? '0 0 0 2px #93C5FD' : 'none' }}
       onMouseEnter={e => { setHovered(true); (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 20px rgba(15,23,42,0.09)'; }}
-      onMouseLeave={e => { setHovered(false); (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
+      onMouseLeave={e => { setHovered(false); (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = isSelected ? '0 0 0 2px #93C5FD' : 'none'; }}>
       <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: stageColor, borderRadius: '10px 0 0 10px' }} />
+      {selectMode && (
+        <input type="checkbox" checked={!!isSelected} onClick={e => { e.stopPropagation(); onToggleSelect?.(); }} onChange={() => {}}
+          style={{ position: 'absolute', top: 8, right: 8, width: 15, height: 15, cursor: 'pointer', zIndex: 1 }} />
+      )}
+      {!selectMode && <GripVertical size={11} style={{ position: 'absolute', top: 10, right: 6, color: '#E2E8F0' }} />}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 7 }}>
         <div style={{ width: 32, height: 32, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(app.candidate_name)},${avatarColor(app.candidate_name)}aa)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
           {initials(app.candidate_name)}
@@ -489,7 +691,7 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart }: any
             {[app.current_designation, app.current_employer].filter(Boolean).join(' @ ')}
           </div>
         </div>
-        {score != null && (
+        {!selectMode && score != null && (
           <div style={{ width: 34, height: 34, borderRadius: '50%', border: `2px solid ${scoreColor(score)}`, background: scoreBg(score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 900, color: scoreColor(score), flexShrink: 0 }}>
             {Math.round(score)}%
           </div>
@@ -501,6 +703,11 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart }: any
             <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>
           ))}
           {skills.length > 3 && <span style={{ fontSize: 9, color: '#94A3B8', padding: '2px 4px' }}>+{skills.length - 3}</span>}
+        </div>
+      )}
+      {stale && (
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: stale.bg, color: stale.color, marginBottom: 7 }}>
+          <AlertTriangle size={9} /> {stale.label}
         </div>
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1352,6 +1559,106 @@ function RejectReasonModal({ onCancel, onConfirm }: any) {
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button onClick={onCancel} style={{ padding: '8px 16px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
           <button onClick={confirm} style={{ padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Reject Candidate</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Candidate Comparison ─────────────────────────────────────────────────────
+function CompareRow({ label, cells }: { label: string; cells: any[] }) {
+  return (
+    <tr style={{ borderBottom: '1px solid #F1F5F9' }}>
+      <td style={{ position: 'sticky', left: 0, background: '#F8FAFC', padding: '10px 14px', fontSize: 11, fontWeight: 700, color: '#64748B', whiteSpace: 'nowrap', borderRight: '1px solid #F1F5F9' }}>{label}</td>
+      {cells.map((c, i) => (
+        <td key={i} style={{ padding: '10px 14px', fontSize: 12, color: '#1E293B', verticalAlign: 'top', minWidth: 200 }}>{c}</td>
+      ))}
+    </tr>
+  );
+}
+
+function CompareModal({ apps, requiredSkills, stages, onClose }: any) {
+  const reqSkillsLower = new Set((requiredSkills || []).map((s: string) => s.toLowerCase()));
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={onClose}>
+      <div style={{ background: '#fff', borderRadius: 14, maxWidth: '96vw', maxHeight: '90vh', width: Math.min(260 + apps.length * 220, 1400), display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Compare Candidates ({apps.length})</div>
+          <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8' }}><X size={14} /></button>
+        </div>
+        <div style={{ overflow: 'auto', flex: 1 }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+            <thead>
+              <tr style={{ borderBottom: '2px solid #E2E8F0' }}>
+                <th style={{ position: 'sticky', left: 0, top: 0, background: '#fff', zIndex: 2, borderRight: '1px solid #F1F5F9' }} />
+                {apps.map((a: any) => (
+                  <th key={a.id} style={{ padding: '12px 14px', textAlign: 'left', minWidth: 200, background: '#fff', position: 'sticky', top: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ width: 34, height: 34, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(a.candidate_name)},${avatarColor(a.candidate_name)}aa)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
+                        {initials(a.candidate_name)}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.candidate_name}</div>
+                        <div style={{ fontSize: 10, color: '#64748B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[a.current_designation, a.current_employer].filter(Boolean).join(' @ ')}</div>
+                      </div>
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <CompareRow label="Score" cells={apps.map((a: any) => {
+                const s = a.fit_score ?? a.jd_match_score ?? a.ai_match_score;
+                return s != null ? <span style={{ color: scoreColor(s), fontWeight: 800 }}>{Math.round(s)}%</span> : '—';
+              })} />
+              <CompareRow label="Stage" cells={apps.map((a: any) => stages.find((s: any) => s.key === a.stage)?.label || a.stage)} />
+              <CompareRow label="Days in Stage" cells={apps.map((a: any) => {
+                const d = daysSince(a.updated_at);
+                const badge = stalenessBadge(d);
+                return badge ? <span style={{ color: badge.color, fontWeight: 700 }}>{d}d</span> : `${d}d`;
+              })} />
+              <CompareRow label="Experience" cells={apps.map((a: any) => a.total_exp_mo ? gx(a.total_exp_mo) : '—')} />
+              <CompareRow label="Notice Period" cells={apps.map((a: any) => a.notice_period_days != null ? `${a.notice_period_days}d` : '—')} />
+              <CompareRow label="Expected CTC" cells={apps.map((a: any) => a.expected_ctc ? `₹${(a.expected_ctc / 100000).toFixed(1)}L` : '—')} />
+              <CompareRow label="Location" cells={apps.map((a: any) => a.location || '—')} />
+              <CompareRow label="Matched Skills" cells={apps.map((a: any) => {
+                const matched = (a.skills || []).filter((sk: string) => reqSkillsLower.has(sk.toLowerCase()));
+                return matched.length > 0
+                  ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>{matched.map((sk: string) => <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', border: '1px solid #BBF7D0' }}>{sk}</span>)}</div>
+                  : '—';
+              })} />
+              {requiredSkills.length > 0 && (
+                <CompareRow label="Missing Skills" cells={apps.map((a: any) => {
+                  const have = new Set((a.skills || []).map((sk: string) => sk.toLowerCase()));
+                  const missing = requiredSkills.filter((sk: string) => !have.has(sk.toLowerCase()));
+                  return missing.length > 0
+                    ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>{missing.map((sk: string) => <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}>{sk}</span>)}</div>
+                    : <span style={{ color: '#16A34A', fontWeight: 700 }}>None</span>;
+                })} />
+              )}
+              <CompareRow label="Contact" cells={apps.map((a: any) => (
+                <div style={{ fontSize: 11 }}>
+                  {a.email && <div style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.email}</div>}
+                  {a.phone && <div>{a.phone}</div>}
+                  {!a.email && !a.phone && '—'}
+                </div>
+              ))} />
+              <CompareRow label="Resume" cells={apps.map((a: any) => (
+                a.resume_file_id
+                  ? <button onClick={() => downloadResume(a.resume_file_id, a.resume_file_name)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 6, border: '1px solid #BBF7D0', background: '#F0FDF4', color: '#15803D', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                      <Download size={11} /> Download
+                    </button>
+                  : '—'
+              ))} />
+              <CompareRow label="" cells={apps.map((a: any) => (
+                <a href={`/candidates/${a.candidate_id}`} target="_blank" rel="noreferrer"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 700, color: '#2563EB', textDecoration: 'none' }}>
+                  Full Profile <ExternalLink size={10} />
+                </a>
+              ))} />
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

@@ -324,12 +324,28 @@ async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = De
                         results["details"].append({"name": app["full_name"], "status": f"unknown stage '{action.target_stage}'"})
                         continue
                     old_stage = app["stage"]
-                    await conn.execute("UPDATE applications SET stage=$1, updated_at=NOW() WHERE id=$2",
+                    # board_rank is per-column position (drag-reorder) — a
+                    # stage move always lands at the top of the destination
+                    # column, same as a manual drag-drop move does, so clear
+                    # any old rank rather than carrying a meaningless value
+                    # from the previous column into the new one.
+                    await conn.execute("UPDATE applications SET stage=$1, board_rank=NULL, updated_at=NOW() WHERE id=$2",
                                        action.target_stage, app_id)
                     await conn.execute("""
                         INSERT INTO pipeline_movements (id,tenant_id,candidate_id,application_id,stage_from,stage_to,reason,triggered_by)
                         VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'bulk_action','user')""",
                         actor.tenant_id, app["candidate_id"], app_id, old_stage, action.target_stage)
+                    # Same consistency fix as the single-candidate PATCH
+                    # .../stage path (2026-08-09) — bulk moves are still a
+                    # stage change and belong in the candidate's own
+                    # Activity Timeline, not just the Pipeline Audit Log.
+                    await conn.execute("""
+                        INSERT INTO candidate_activities
+                             (tenant_id, candidate_id, user_id, activity_type, title, description)
+                           VALUES ($1,$2,$3,'status_change','Stage changed',$4)""",
+                        actor.tenant_id, app["candidate_id"], actor.user_id,
+                        f"{old_stage.replace('_',' ').title()} → {action.target_stage.replace('_',' ').title()} (bulk)",
+                    )
                     payload = {"candidate_name":app["full_name"],"email":app["email"],"phone":app["phone"],
                                "stage_from":old_stage,"stage_to":action.target_stage,
                                "rule_name":"bulk_action","timestamp":datetime.utcnow().isoformat()}
@@ -350,6 +366,31 @@ async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = De
                 results["details"].append({"id": app_id, "error": str(e)})
 
     return results
+
+
+# ── Within-column reorder (drag-drop priority ranking) ─────────────────────────
+class ReorderBody(BaseModel):
+    requisition_id: str
+    stage: str
+    ordered_application_ids: List[str]
+
+
+@metrics_router.post("/reorder")
+async def reorder_stage_column(body: ReorderBody, actor: Actor = Depends(get_actor)):
+    """Persist a manual drag-drop reorder within one Kanban column.
+    Full-column resnapshot (not a single-card move) — simplest correct
+    approach for a column that realistically never has more than a few
+    dozen visible cards, and avoids any midpoint-rank math. Scoped by
+    tenant+requisition+stage in the WHERE clause so a stale client can
+    never touch a card that has since moved to a different stage/req."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        for idx, app_id in enumerate(body.ordered_application_ids):
+            await conn.execute(
+                """UPDATE applications SET board_rank=$1
+                   WHERE id=$2 AND tenant_id=$3 AND requisition_id=$4 AND stage=$5""",
+                idx, app_id, actor.tenant_id, body.requisition_id, body.stage,
+            )
+    return {"ok": True}
 
 # ── Filters: available skills and sources ────────────────────────────────────
 @intel_router.get("/filter-options")

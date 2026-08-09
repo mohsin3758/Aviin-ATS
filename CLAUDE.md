@@ -2508,3 +2508,90 @@ regression from today's actual changes. Converted to `.serial()`, same
 fix as the other three suites.
 
 Full QA suite, final clean run: 157 passed / 2 skipped / 0 failed.
+
+## Six pipeline board feature gaps built, 2026-08-09
+Direct follow-up to the same audit — user picked all 6 remaining findings
+to build (candidate comparison, bulk multi-select move, days-in-stage
+indicator, CSV/print export, within-column reorder, multi-condition
+automation rules UI). #9 (missing `CREATE TABLE`s) was already fixed in
+the High-impact-findings pass earlier the same day. Scoped to
+`pipeline/page.tsx` (the primary, full-featured Kanban board) — did not
+duplicate into `requisitions/[id]/page.tsx`'s smaller embedded board,
+which is a secondary, more space-constrained view.
+
+- **`applications.board_rank`** (`sql/34_board_rank.sql`, nullable int) —
+  within-column drag-reorder position. NULL sorts last (`ORDER BY
+  board_rank ASC NULLS LAST, updated_at DESC`, `/pipeline` GET query),
+  so this is fully backward compatible until a recruiter actually drags a
+  card to reorder. New `POST /pipeline/reorder` (full-column resnapshot,
+  not midpoint-rank math — a column realistically never has more than a
+  few dozen visible cards) persists it, scoped by tenant+requisition+
+  stage so a stale client can't touch a card that's since moved. Both
+  stage-move paths (`update_stage()`, `bulk_action`) now clear
+  `board_rank` on a stage change — it always lands at the top of the
+  destination column, same as a manual drag-drop cross-column move
+  already did, so an old rank from the previous column would be
+  meaningless there.
+- **Bulk multi-select + move** — a "Select" toggle puts checkboxes on
+  every card; a floating action bar (N selected · move-to-stage dropdown
+  · Compare when 2+) calls the existing `/pipeline/bulk-action` endpoint,
+  previously only reachable outside the board itself. Found and fixed a
+  real consistency gap while touching this code: `bulk_action`'s
+  `move_stage` branch wrote `pipeline_movements` but never
+  `candidate_activities` — the exact same blind spot fixed for the
+  single-move path earlier the same day, just a second, separate
+  instance of it. Deliberately did NOT add bulk-reject to this UI —
+  rejection needs a structured `reason_code` (same bar as the single-
+  candidate Reject button), and stuffing that into a bulk flow felt like
+  a different, bigger feature than "bulk stage-move" asked for.
+- **Days-in-stage indicator** — a `stalenessBadge()` helper (≥7d amber,
+  ≥14d red) renders next to the existing plain "3d ago" text, which had
+  no visual urgency signal at all despite `updated_at` always having the
+  data.
+- **CSV export + print/PDF** — both fully client-side from data already
+  in the board's React state, no new backend endpoint needed. CSV via a
+  Blob download (UTF-8 BOM so Excel doesn't mangle it); Print opens a
+  clean, dedicated tab (deliberately not `@media print` CSS fighting the
+  main dashboard's sidebar/header chrome) and calls `window.print()` —
+  covers "export/print/PDF" since every browser's print dialog offers
+  "Save as PDF"; didn't build a bespoke reportlab PDF generator for a
+  whole board view, which felt like solving a problem the browser
+  already solves. Scoped "client-shareable" down to this same print view
+  rather than a new public-link system — the client portal already
+  covers authenticated client-facing sharing, and a second, different
+  sharing mechanism for the same audience would be new surface area, not
+  a fix.
+- **Candidate comparison** — 2+ selected candidates → a modal with one
+  column per candidate, one row per metric (score, stage, days in stage,
+  experience, notice period, CTC, location, matched/missing skills vs
+  the requisition's `skills_required`, contact info, resume download,
+  full-profile link). Entirely client-side from data already on the
+  board plus the already-fetched requisition object — no new backend
+  endpoint.
+- **Multi-condition automation rules** — the create-rule form only ever
+  edited `conditions[0]`; the backend engine (`pipeline_p2.py`) has
+  always AND-chained the full array, and the *read-side* rule list
+  already correctly rendered multi-condition rules via `.join(' AND
+  ')` — confirming this was purely a missing form control, not a
+  backend gap. Added add/remove-condition buttons; removing is disabled
+  at exactly 1 remaining condition (a rule needs at least one).
+
+Verified for real against production, not code review: reordered a real
+2-candidate Screened column via direct API call (confirmed `board_rank`
+0/1), then via an actual browser drag-and-drop interaction (confirmed the
+same ranks landed in the DB from the real UI, not just the endpoint);
+bulk-moved a real application and confirmed both `pipeline_movements` AND
+`candidate_activities` rows this time (unlike before this fix); created a
+real 2-condition rule via the API and confirmed the settings page renders
+it with "AND" between both conditions via a direct text-content dump (not
+a flaky `isVisible()` locator check, which gave a false negative first
+and was caught by cross-checking against the real rendered text); real
+headless-browser click-through of the board confirmed staleness badges on
+real stale candidates, select-mode checkboxes, the "2 selected" bulk bar,
+the Compare button/modal showing a real Matched Skills row, a real CSV
+download (931 bytes, correct header + 7 data rows), and a real print-tab
+open with the correct title and real candidate data. All test-created
+rows (movements, activities, rule) cleaned up afterward; `board_rank`
+reset to NULL on both real test candidates so their board position
+reverts to the pre-verification default. Full QA suite re-run clean:
+157 passed / 2 skipped / 0 failed, no regressions.

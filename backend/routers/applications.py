@@ -397,8 +397,12 @@ async def update_stage(application_id: str, body: StageUpdate, actor: Actor = De
             if has_any_config or body.stage not in _DEFAULT_STAGE_KEYS:
                 raise HTTPException(status_code=400, detail=f"Unknown stage '{body.stage}' — add it under Settings > Pipeline Stages first")
 
+        # board_rank is a per-column drag-reorder position — moving to a
+        # different stage always lands at the top of that column (matches
+        # the frontend's optimistic prepend), so any old rank from the
+        # previous column would be meaningless here and is cleared.
         row = await conn.fetchrow(
-            f"""UPDATE applications SET stage = $1, updated_at = now()
+            f"""UPDATE applications SET stage = $1, board_rank = NULL, updated_at = now()
                 WHERE id = $2 RETURNING {FIELDS}""",
             body.stage, application_id,
         )
