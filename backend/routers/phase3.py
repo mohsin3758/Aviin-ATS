@@ -12,6 +12,7 @@ from deps import Actor, get_actor, require_role
 from routers.p23_p27 import _suggest_interviewer, _has_conflict
 from routers.pipeline_stages import is_valid_stage
 from routers.whatsapp import _ensure_consent
+from services import activity_events
 
 log = logging.getLogger(__name__)
 
@@ -189,6 +190,24 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
 
         # Update invite_sent_at
         await conn.execute("UPDATE interview_schedules SET invite_sent_at=NOW() WHERE id=$1", sched_id)
+
+        # This path never wrote candidate_activities at all (found during
+        # the 2026-08-11 Workforce Intelligence exploration — contrast with
+        # p23_p27.py's older POST /interviews, which does). Backfilled here
+        # alongside the new activity-event log, same transaction.
+        await conn.execute(
+            """INSERT INTO candidate_activities
+                 (tenant_id, candidate_id, user_id, activity_type, title, description)
+               VALUES ($1,$2,$3,'interview_scheduled','Interview scheduled',$4)""",
+            actor.tenant_id, app["candidate_id"], actor.user_id,
+            f"Scheduled for {scheduled_dt.strftime('%d %b %Y at %I:%M %p')} ({body.mode})",
+        )
+        if actor.user_id:
+            await activity_events.log_recruiter_activity(
+                conn, actor.tenant_id, str(actor.user_id), "l1_interview_scheduled",
+                candidate_id=str(app["candidate_id"]), application_id=body.application_id,
+                requisition_id=str(app["requisition_id"]) if app["requisition_id"] else None,
+            )
 
         # WhatsApp message (background task). HARD RULE #7/#12 fix
         # (2026-08-10 audit): this was one of the UI-reachable send paths
@@ -383,6 +402,11 @@ HR Team, {company}"""
             f"Offer drafted for {app['job_title'] or 'the role'}",
             f"CTC {body.currency} {body.ctc_offered:,.0f}" + (f", joining {body.joining_date}" if body.joining_date else ""),
         )
+        if actor.user_id:
+            await activity_events.log_recruiter_activity(
+                conn, actor.tenant_id, str(actor.user_id), "offer_generated",
+                candidate_id=str(app["candidate_id"]), application_id=body.application_id,
+            )
 
         # Move to offer stage — 'offer' is a deletable stage (Settings >
         # Pipeline Stages); if this tenant removed it, the offer record

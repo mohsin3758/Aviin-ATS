@@ -1,11 +1,12 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Star, Pencil } from 'lucide-react';
+import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Star, Pencil, Trophy } from 'lucide-react';
 
 const TABS = [
   { key: 'scoring', label: 'Matching Weights', icon: Sliders },
   { key: 'sla', label: 'SLA Tiers', icon: AlertTriangle },
+  { key: 'performance', label: 'Performance Weights', icon: Trophy },
   { key: 'blocks', label: 'Recruiter-Client Blocks', icon: Ban },
   { key: 'templates', label: 'Tracking Sheet Templates', icon: FileSpreadsheet },
   { key: 'gdpr', label: 'Data Retention (GDPR)', icon: ShieldOff },
@@ -101,6 +102,74 @@ function SlaTab() {
         ))}
       </div>
       <button onClick={save} disabled={saving} style={btn}>{saving ? 'Saving…' : 'Save Thresholds'}</button>
+    </div>
+  );
+}
+
+const PERF_WEIGHT_KEYS = ['output_weight', 'quality_weight', 'velocity_weight', 'productivity_weight', 'sla_weight', 'interview_conv_weight'];
+const PERF_WEIGHT_LABELS: Record<string, string> = {
+  output_weight: 'Output (volume)', quality_weight: 'Quality (interview conversion)',
+  velocity_weight: 'Velocity (response time)', productivity_weight: 'Productivity',
+  sla_weight: 'SLA compliance', interview_conv_weight: 'Interview → Offer conversion',
+};
+const PERF_GRADE_KEYS = ['grade_a_plus_threshold', 'grade_a_threshold', 'grade_b_threshold', 'grade_c_threshold'];
+const PERF_GRADE_LABELS: Record<string, string> = {
+  grade_a_plus_threshold: 'A+ at or above', grade_a_threshold: 'A at or above',
+  grade_b_threshold: 'B at or above', grade_c_threshold: 'C at or above (below = D)',
+};
+
+// Weights + grade thresholds for the new daily recruiter_performance_scores
+// (Workforce Intelligence, 2026-08-11) — a separate, purely informational
+// score from the monthly compensation-linked recruiter_kpi_scores; this
+// tab's weights never touch payouts.
+function PerformanceWeightsTab() {
+  const { data, refetch } = useFetch<any>('/manager/score-weights');
+  const [form, setForm] = useState<any>(null);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => { if (data) setForm(data); }, [data]);
+  if (!form) return null;
+
+  const total = PERF_WEIGHT_KEYS.reduce((s, k) => s + (Number(form[k]) || 0), 0);
+
+  const save = async () => {
+    setSaving(true); setErr('');
+    try {
+      const body: any = {};
+      [...PERF_WEIGHT_KEYS, ...PERF_GRADE_KEYS].forEach(k => body[k] = Number(form[k]));
+      await apiFetch('/manager/score-weights', { method: 'PUT', body: JSON.stringify(body) });
+      refetch();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <div style={card}>
+      <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>
+        Weights for the daily recruiter activity/performance score shown on Recruiter Ops &gt; Activity and the Team
+        Leaderboard — informational only, not linked to compensation. Must sum to ~1.0.
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 10 }}>
+        {PERF_WEIGHT_KEYS.map(k => (
+          <div key={k}>
+            <label style={label}>{PERF_WEIGHT_LABELS[k].toUpperCase()}</label>
+            <input type="number" step="0.01" min={0} max={1} value={form[k]} onChange={e => setForm({ ...form, [k]: e.target.value })} style={input} />
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: Math.abs(total - 1) < 0.02 ? '#16A34A' : '#DC2626', margin: '10px 0' }}>
+        Total: {total.toFixed(2)} {Math.abs(total - 1) < 0.02 ? '✓' : '(should be ~1.00)'}
+      </div>
+      <p style={{ fontSize: 11, color: '#64748B', margin: '14px 0 8px', fontWeight: 700 }}>GRADE THRESHOLDS</p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(180px,1fr))', gap: 10 }}>
+        {PERF_GRADE_KEYS.map(k => (
+          <div key={k}>
+            <label style={label}>{PERF_GRADE_LABELS[k].toUpperCase()}</label>
+            <input type="number" value={form[k]} onChange={e => setForm({ ...form, [k]: e.target.value })} style={input} />
+          </div>
+        ))}
+      </div>
+      {err && <div style={{ color: '#DC2626', fontSize: 12, margin: '8px 0' }}>{err}</div>}
+      <button onClick={save} disabled={saving} style={{ ...btn, marginTop: 10 }}>{saving ? 'Saving…' : 'Save Weights'}</button>
     </div>
   );
 }
@@ -349,6 +418,7 @@ export default function OpsSettingsPage() {
       </div>
       {tab === 'scoring' && <ScoringTab />}
       {tab === 'sla' && <SlaTab />}
+      {tab === 'performance' && <PerformanceWeightsTab />}
       {tab === 'blocks' && <BlocksTab />}
       {tab === 'templates' && <TemplatesTab />}
       {tab === 'gdpr' && <GdprTab />}

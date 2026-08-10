@@ -2,11 +2,13 @@
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
-import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff, Sun, AlertCircle, Video } from 'lucide-react';
+import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff, Sun, AlertCircle, Video, Activity, Trophy } from 'lucide-react';
 
 const TABS = [
   { key: 'myday', label: 'My Day', icon: Sun },
+  { key: 'activity', label: 'Activity', icon: Activity },
   { key: 'autoassign', label: 'Auto-Assign', icon: Sparkles },
+  { key: 'leaderboard', label: 'Team Leaderboard', icon: Trophy },
   { key: 'presence', label: 'Presence', icon: Circle },
   { key: 'sessions', label: 'Work Sessions', icon: Clock },
   { key: 'tasks', label: 'Tasks', icon: ListChecks },
@@ -14,6 +16,152 @@ const TABS = [
   { key: 'hotlist', label: 'Hotlist', icon: Flame },
   { key: 'leave', label: 'Leave', icon: CalendarOff },
 ];
+
+// Same hand-rolled CSS-bar chart already used on reports/page.tsx — kept
+// as a local copy rather than a shared import, matching that file's own
+// self-contained convention (no shared /components/charts module exists
+// in this codebase yet).
+function BarChart({ rows, keyX, keyY, color = '#2563EB' }: any) {
+  if (!rows?.length) return <p style={{ color: '#94A3B8', fontSize: 13, textAlign: 'center', padding: 20 }}>No data yet</p>;
+  const max = Math.max(...rows.map((r: any) => Number(r[keyY]) || 0), 1);
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 100, padding: '0 4px', overflowX: 'auto' }}>
+      {rows.map((r: any, i: number) => {
+        const v = Number(r[keyY]) || 0;
+        const h = Math.round((v / max) * 100);
+        return (
+          <div key={i} style={{ flex: '0 0 auto', minWidth: 24, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+            <span style={{ fontSize: 10, color: '#64748B', fontWeight: 600 }}>{v}</span>
+            <div style={{ width: 20, background: color, borderRadius: '4px 4px 0 0', height: `${h}%`, minHeight: 4, transition: 'height 0.3s' }} />
+            <span style={{ fontSize: 9, color: '#94A3B8' }}>{String(r[keyX]).slice(5, 10)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const GRADE_CFG: Record<string, { bg: string; color: string }> = {
+  'A+': { bg: '#d1fae5', color: '#059669' },
+  'A': { bg: '#d1fae5', color: '#10b981' },
+  'B': { bg: '#dbeafe', color: '#3b82f6' },
+  'C': { bg: '#fef3c7', color: '#f59e0b' },
+  'D': { bg: '#fee2e2', color: '#ef4444' },
+};
+
+function GradeBadge({ grade }: { grade: string | null | undefined }) {
+  if (!grade) return <span style={{ color: '#94A3B8', fontSize: 11 }}>—</span>;
+  const cfg = GRADE_CFG[grade] || { bg: '#F1F5F9', color: '#64748B' };
+  return <span style={{ background: cfg.bg, color: cfg.color, fontSize: 11, fontWeight: 800, padding: '2px 8px', borderRadius: 6 }}>{grade}</span>;
+}
+
+// Today's real productivity counts + a 30-day trend, for the logged-in
+// recruiter — reuses GET /recruiter/activity/today and /activity/trends
+// (Workforce Intelligence, 2026-08-11). The daily rollup job runs at
+// 02:30 IST for the *previous* day, so "today" itself is served live
+// from recruiter_activity_events directly, not the aggregate table.
+function ActivityTab() {
+  const { data: today } = useFetch<any>('/recruiter/activity/today');
+  const { data: trendData } = useFetch<any>('/recruiter/activity/trends?days=14');
+  const t = today?.today || {};
+  const score = today?.score;
+  const trends = (trendData?.trends || []).map((r: any) => ({ ...r, period_start: r.period_start?.slice(0, 10) }));
+
+  const stat = (label: string, value: any) => (
+    <div style={{ ...card, textAlign: 'center' }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color: '#0F172A' }}>{value ?? 0}</div>
+      <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>{label}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 10 }}>
+        {stat('Sourced', t.candidates_sourced)}
+        {stat('Screened', t.candidates_screened)}
+        {stat('Submitted', t.candidates_submitted)}
+        {stat('Interviews', t.interviews_completed)}
+        {stat('Offers', t.offers_generated)}
+        {stat('Placed', t.placements)}
+      </div>
+
+      <div style={card}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Today's performance score</div>
+          <GradeBadge grade={score?.grade} />
+        </div>
+        {score ? (
+          <div style={{ fontSize: 12, color: '#64748B' }}>
+            Overall {Number(score.overall_score).toFixed(1)} / 100 — for {score.score_date}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: '#94A3B8' }}>No score computed yet — the daily job runs at 02:45 IST.</div>
+        )}
+      </div>
+
+      <div style={card}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Candidates sourced — last 14 days</div>
+        <BarChart rows={trends} keyX="period_start" keyY="candidates_sourced" />
+      </div>
+      <div style={card}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Submissions — last 14 days</div>
+        <BarChart rows={trends} keyX="period_start" keyY="candidates_submitted" color="#10B981" />
+      </div>
+    </div>
+  );
+}
+
+// Admin/manager only — same deferred-role-read pattern as TargetsTab's
+// canManage, to avoid the SSR/hydration mismatch documented there.
+function LeaderboardTab() {
+  const [canView, setCanView] = useState(false);
+  useEffect(() => {
+    const role = getTokenPayload()?.role || '';
+    setCanView(['admin', 'super_admin', 'manager'].includes(role));
+  }, []);
+  const { data: rows, loading } = useFetch<any[]>(canView ? '/manager/activity-leaderboard' : null);
+
+  if (!canView) {
+    return <div style={{ ...card, textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>Team Leaderboard is visible to managers and admins.</div>;
+  }
+  return (
+    <div style={card}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Team activity leaderboard (today / this week)</div>
+      {loading && <p style={{ fontSize: 12, color: '#94A3B8' }}>Loading…</p>}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ textAlign: 'left', color: '#64748B', fontSize: 10, textTransform: 'uppercase' }}>
+              <th style={{ padding: '6px 8px' }}>Recruiter</th>
+              <th style={{ padding: '6px 8px' }}>Grade</th>
+              <th style={{ padding: '6px 8px' }}>Score</th>
+              <th style={{ padding: '6px 8px' }}>Sourced today</th>
+              <th style={{ padding: '6px 8px' }}>Submitted today</th>
+              <th style={{ padding: '6px 8px' }}>Sourced this week</th>
+              <th style={{ padding: '6px 8px' }}>Placed this week</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(rows || []).map((r: any) => (
+              <tr key={r.recruiter_id} style={{ borderTop: '1px solid #F1F5F9' }}>
+                <td style={{ padding: '8px' }}>{r.full_name}</td>
+                <td style={{ padding: '8px' }}><GradeBadge grade={r.grade} /></td>
+                <td style={{ padding: '8px' }}>{r.overall_score != null ? Number(r.overall_score).toFixed(1) : '—'}</td>
+                <td style={{ padding: '8px' }}>{r.today_sourced}</td>
+                <td style={{ padding: '8px' }}>{r.today_submitted}</td>
+                <td style={{ padding: '8px' }}>{r.week_sourced}</td>
+                <td style={{ padding: '8px' }}>{r.week_placements}</td>
+              </tr>
+            ))}
+            {!loading && !(rows || []).length && (
+              <tr><td colSpan={7} style={{ padding: 16, textAlign: 'center', color: '#94A3B8' }}>No recruiters found.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 const card: React.CSSProperties = { background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: 18 };
 const label: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 };
@@ -514,7 +662,9 @@ export default function RecruiterOpsPage() {
         ))}
       </div>
       {tab === 'myday' && <MyDayTab />}
+      {tab === 'activity' && <ActivityTab />}
       {tab === 'autoassign' && <AutoAssignTab />}
+      {tab === 'leaderboard' && <LeaderboardTab />}
       {tab === 'presence' && <PresenceTab />}
       {tab === 'sessions' && <WorkSessionsTab />}
       {tab === 'tasks' && <TasksTab />}

@@ -493,6 +493,10 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
         await _ownership.claim_ownership(
             conn, tenant_id, str(new_id), str(received_by["user_id"]), received_by["email"], "personal_mailbox",
         )
+        from services import activity_events as _activity_events
+        await _activity_events.log_recruiter_activity(
+            conn, tenant_id, str(received_by["user_id"]), _activity_events.SOURCED, candidate_id=str(new_id),
+        )
     return str(new_id)
 
 

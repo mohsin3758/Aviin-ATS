@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Respons
 import db
 from deps import Actor, get_actor
 from services import candidate_ownership as ownership
+from services import activity_events
 
 import_router = APIRouter(prefix="/import", tags=["import"])
 
@@ -58,6 +59,9 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                     if actor.user_id and actor.email:
                         await ownership.claim_ownership(
                             conn, actor.tenant_id, str(new_id), str(actor.user_id), actor.email, "bulk_upload",
+                        )
+                        await activity_events.log_recruiter_activity(
+                            conn, actor.tenant_id, str(actor.user_id), activity_events.SOURCED, candidate_id=str(new_id),
                         )
                     created += 1
             except Exception as e:
@@ -126,6 +130,9 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                     if actor.user_id and actor.email:
                         await ownership.claim_ownership(
                             conn, actor.tenant_id, str(new_id), str(actor.user_id), actor.email, "bulk_upload",
+                        )
+                        await activity_events.log_recruiter_activity(
+                            conn, actor.tenant_id, str(actor.user_id), activity_events.SOURCED, candidate_id=str(new_id),
                         )
                     created += 1
             except Exception as e:

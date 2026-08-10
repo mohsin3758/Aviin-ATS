@@ -366,6 +366,17 @@ async def update_interview_status(interview_id: str, body: dict,
         """, body.get('status'), body.get('feedback'), body.get('rating'),
              interview_id, actor.tenant_id)
         if not row: raise HTTPException(404,"Not found")
+        if body.get('status') == 'completed':
+            from services import activity_events
+            _recruiter_id = row["interviewer_id"] or actor.user_id
+            if _recruiter_id:
+                await activity_events.log_recruiter_activity(
+                    conn, actor.tenant_id, str(_recruiter_id),
+                    f"{row['interview_type'] or 'interview'}_completed",
+                    candidate_id=str(row["candidate_id"]) if row["candidate_id"] else None,
+                    application_id=str(row["application_id"]) if row["application_id"] else None,
+                    requisition_id=str(row["requisition_id"]) if row["requisition_id"] else None,
+                )
     return dict(row)
 
 # GET /interviews/upcoming removed (2026-08-10 audit) — zero frontend/test

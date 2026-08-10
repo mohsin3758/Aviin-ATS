@@ -14,6 +14,7 @@ import events
 from deps import Actor, get_actor, require_role
 from schemas import OfferCreate, OfferRespond
 from routers.p30_p35 import fire_webhook
+from services import activity_events
 
 router = APIRouter(prefix="/offers", tags=["offers"])
 
@@ -75,6 +76,12 @@ async def create_offer(body: OfferCreate, actor: Actor = Depends(get_actor)):
                 f"Offer drafted for {role or 'the role'}",
                 f"CTC {body.currency} {body.ctc_offered:,.0f}" + (f", joining {body.joining_date}" if body.joining_date else ""),
             )
+            if actor.user_id:
+                await activity_events.log_recruiter_activity(
+                    conn, actor.tenant_id, str(actor.user_id), "offer_generated",
+                    candidate_id=str(app["candidate_id"]), application_id=body.application_id,
+                    requisition_id=str(app["requisition_id"]) if app["requisition_id"] else None,
+                )
 
     return dict(row)
 
@@ -185,7 +192,7 @@ async def respond_offer(offer_id: str, body: OfferRespond, background_tasks: Bac
                 row["application_id"],
             )
             app_row = await conn.fetchrow(
-                "SELECT candidate_id, requisition_id FROM applications WHERE id=$1", row["application_id"])
+                "SELECT candidate_id, requisition_id, assigned_recruiter_id FROM applications WHERE id=$1", row["application_id"])
             # Real gap found in the 2026-08-10 audit: nothing anywhere in
             # this codebase ever inserted into `placements` on offer
             # acceptance — grepped the whole backend, zero matches. Every
@@ -214,10 +221,29 @@ async def respond_offer(offer_id: str, body: OfferRespond, background_tasks: Bac
             }
             background_tasks.add_task(fire_webhook, "offer-accepted", webhook_payload, actor.tenant_id)
             background_tasks.add_task(fire_webhook, "placement-congrats", webhook_payload, actor.tenant_id)
+            if app_row["assigned_recruiter_id"]:
+                await activity_events.log_recruiter_activity(
+                    conn, actor.tenant_id, str(app_row["assigned_recruiter_id"]), "offer_accepted",
+                    candidate_id=str(app_row["candidate_id"]), application_id=str(row["application_id"]),
+                    requisition_id=str(app_row["requisition_id"]) if app_row["requisition_id"] else None,
+                )
+                await activity_events.log_recruiter_activity(
+                    conn, actor.tenant_id, str(app_row["assigned_recruiter_id"]), "placed",
+                    candidate_id=str(app_row["candidate_id"]), application_id=str(row["application_id"]),
+                    requisition_id=str(app_row["requisition_id"]) if app_row["requisition_id"] else None,
+                )
         elif body.status == "declined":
             background_tasks.add_task(fire_webhook, "offer-dropped", {
                 "offer_id": offer_id, "application_id": str(row["application_id"]),
             }, actor.tenant_id)
+            decl_app_row = await conn.fetchrow(
+                "SELECT candidate_id, requisition_id, assigned_recruiter_id FROM applications WHERE id=$1", row["application_id"])
+            if decl_app_row and decl_app_row["assigned_recruiter_id"]:
+                await activity_events.log_recruiter_activity(
+                    conn, actor.tenant_id, str(decl_app_row["assigned_recruiter_id"]), "offer_declined",
+                    candidate_id=str(decl_app_row["candidate_id"]), application_id=str(row["application_id"]),
+                    requisition_id=str(decl_app_row["requisition_id"]) if decl_app_row["requisition_id"] else None,
+                )
 
     return dict(row)
 

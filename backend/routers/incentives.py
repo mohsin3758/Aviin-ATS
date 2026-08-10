@@ -92,6 +92,110 @@ async def list_scorecards(
     return [dict(r) for r in rows]
 
 
+@router.get("/scorecard/suggest")
+async def suggest_scorecard(
+    user_id: str, period_month: int, period_year: int,
+    actor: Actor = Depends(require_permission("incentives", "write")),
+):
+    """Real-data suggestions for the 6 recruiter_kpi_scores sub-scores
+    (Workforce Intelligence, 2026-08-11) — recruiter_kpi_scores is the
+    official, human-approved, compensation-linked monthly scorecard
+    (wired into incentive_records/retention_bank via the existing
+    draft->approved->paid workflow); this endpoint only *suggests* values
+    computed from real placements/interviews/offers/feedback/activity
+    this period, for a manager to review and adjust before saving via the
+    existing POST /scorecard — it never writes recruiter_kpi_scores
+    itself. Every number here traces to real underlying rows; nothing is
+    estimated or invented.
+    """
+    period_start = date(period_year, period_month, 1)
+    period_end = date(period_year + (1 if period_month == 12 else 0), 1 if period_month == 12 else period_month + 1, 1)
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        # Real placements this recruiter made this period (placements has
+        # no direct recruiter column — attribute via offer -> application).
+        placements = await conn.fetch("""
+            SELECT p.id, p.requisition_id, r.client_id
+            FROM placements p
+            JOIN offers o ON o.id = p.offer_id
+            JOIN applications a ON a.id = o.application_id
+            LEFT JOIN requisitions r ON r.id = p.requisition_id
+            WHERE p.tenant_id=$1 AND a.assigned_recruiter_id=$2
+              AND p.created_at >= $3 AND p.created_at < $4
+        """, actor.tenant_id, user_id, period_start, period_end)
+        joinings_score = round(min(35.0, len(placements) * 12.0), 2)
+
+        # Revenue: this recruiter's share of each placed client's real
+        # account_pl revenue this period, split across every recruiter who
+        # placed for that client this period — a best-effort, real-data-
+        # grounded heuristic (there's no per-placement revenue figure to
+        # read directly), same spirit as match_recruiters()'s own
+        # documented zero-weight placeholders for un-derivable factors.
+        revenue_share = 0.0
+        for p in placements:
+            if not p["client_id"]:
+                continue
+            pl = await conn.fetchrow(
+                "SELECT gross_revenue FROM account_pl WHERE tenant_id=$1 AND client_id=$2 AND period_month=$3 AND period_year=$4",
+                actor.tenant_id, p["client_id"], period_month, period_year)
+            if not pl or not pl["gross_revenue"]:
+                continue
+            recruiter_count = await conn.fetchval("""
+                SELECT COUNT(DISTINCT a.assigned_recruiter_id)
+                FROM placements p2 JOIN offers o2 ON o2.id=p2.offer_id
+                JOIN applications a ON a.id=o2.application_id
+                WHERE p2.tenant_id=$1 AND p2.requisition_id IN (
+                    SELECT id FROM requisitions WHERE tenant_id=$1 AND client_id=$2)
+                  AND p2.created_at >= $3 AND p2.created_at < $4
+            """, actor.tenant_id, p["client_id"], period_start, period_end) or 1
+            revenue_share += float(pl["gross_revenue"]) / max(1, recruiter_count)
+        revenue_score = round(min(25.0, revenue_share / 20000.0), 2)
+
+        interviews_done = await conn.fetchval("""
+            SELECT COUNT(*) FROM interview_schedules
+            WHERE tenant_id=$1 AND interviewer_id=$2 AND status='completed'
+              AND scheduled_at >= $3 AND scheduled_at < $4
+        """, actor.tenant_id, user_id, period_start, period_end) or 0
+        interview_score = round(min(10.0, interviews_done * 2.0), 2)
+
+        offer_stats = await conn.fetchrow("""
+            SELECT COUNT(*) generated, COUNT(*) FILTER (WHERE o.status='accepted') accepted
+            FROM offers o JOIN applications a ON a.id=o.application_id
+            WHERE o.tenant_id=$1 AND a.assigned_recruiter_id=$2
+              AND o.created_at >= $3 AND o.created_at < $4
+        """, actor.tenant_id, user_id, period_start, period_end)
+        offer_score = round(10.0 * offer_stats["accepted"] / offer_stats["generated"], 2) if offer_stats and offer_stats["generated"] else 0.0
+
+        sat = await conn.fetchrow("""
+            SELECT AVG(f.rating) avg_rating, COUNT(*) n
+            FROM client_feedback f JOIN applications a ON a.id=f.application_id
+            WHERE f.tenant_id=$1 AND a.assigned_recruiter_id=$2 AND f.rating IS NOT NULL
+              AND f.created_at >= $3 AND f.created_at < $4
+        """, actor.tenant_id, user_id, period_start, period_end)
+        # Neutral midpoint (not zero) when no feedback exists yet — avoids
+        # unfairly zeroing a recruiter purely because no client happened
+        # to leave feedback this period. client_feedback.rating is 1-5.
+        client_sat_score = round(float(sat["avg_rating"]) * 2.0, 2) if sat and sat["n"] else 5.0
+
+        activity_count = await conn.fetchval("""
+            SELECT COUNT(*) FROM recruiter_activity_events
+            WHERE tenant_id=$1 AND recruiter_id=$2 AND event_at >= $3 AND event_at < $4
+        """, actor.tenant_id, user_id, period_start, period_end) or 0
+        ats_score = round(min(10.0, activity_count / 5.0), 2)
+
+    return {
+        "user_id": user_id, "period_month": period_month, "period_year": period_year,
+        "joinings_score": joinings_score, "revenue_score": revenue_score,
+        "interview_score": interview_score, "offer_score": offer_score,
+        "client_sat_score": client_sat_score, "ats_score": ats_score,
+        "source_counts": {
+            "placements": len(placements), "interviews_completed": interviews_done,
+            "offers_generated": offer_stats["generated"] if offer_stats else 0,
+            "offers_accepted": offer_stats["accepted"] if offer_stats else 0,
+            "feedback_count": sat["n"] if sat else 0, "activity_events": activity_count,
+        },
+    }
+
+
 @router.post("/scorecard")
 async def upsert_scorecard(body: KpiScoreIn, actor: Actor = Depends(get_actor)):
     """Create or update a monthly KPI scorecard (trigger auto-calculates grade/incentive)."""

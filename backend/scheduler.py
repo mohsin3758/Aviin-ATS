@@ -694,6 +694,281 @@ async def process_ownership_expiry():
         logger.error(f"process_ownership_expiry error: {e}")
 
 
+_PRODUCTIVITY_COUNT_COLUMNS = {
+    "sourced": "candidates_sourced",
+    "screened": "candidates_screened",
+    "submitted": "candidates_submitted",
+    "offer_generated": "offers_generated",
+    "offer_accepted": "offers_accepted",
+    "placed": "placements",
+}
+
+
+def _productivity_count_sql(alias: str = "e") -> str:
+    """Build the FILTER-based count expressions shared by all 3 aggregation
+    granularities. interview completion events are named dynamically
+    (f"{interview_type}_completed") to handle custom tenant interview
+    rounds, so they're matched by suffix here rather than an exact key —
+    same reasoning as the LIKE '%interview%' pattern already used
+    elsewhere in this codebase (recruiter_dashboard.my-stats,
+    recruiter-performance, v_sla_dashboard) for the same custom-stage
+    problem."""
+    parts = [
+        f"COUNT(*) FILTER (WHERE {alias}.event_type = '{ev}') AS {col}"
+        for ev, col in _PRODUCTIVITY_COUNT_COLUMNS.items()
+    ]
+    parts.append(f"COUNT(*) FILTER (WHERE {alias}.event_type LIKE '%_completed') AS interviews_completed")
+    return ",\n          ".join(parts)
+
+
+async def aggregate_hourly_productivity(compute_hour: datetime | None = None):
+    """Roll up the just-completed hour's recruiter_activity_events into
+    recruiter_productivity_hourly, plus real device_activity_log active/
+    idle minutes for that window when any exist (NULL otherwise — this
+    tenant's device monitoring has zero enrolled devices today, so these
+    columns are expected to stay NULL until real adoption happens; never
+    fabricated to look non-empty)."""
+    logger.info("scheduler: aggregating hourly recruiter productivity")
+    if compute_hour is None:
+        now = datetime.now(timezone.utc)
+        compute_hour = (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    hour_end = compute_hour + timedelta(hours=1)
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    rows = await conn.fetch(f"""
+                        SELECT e.recruiter_id,
+                          {_productivity_count_sql()}
+                        FROM recruiter_activity_events e
+                        WHERE e.tenant_id=$1 AND e.event_at >= $2 AND e.event_at < $3
+                        GROUP BY e.recruiter_id
+                    """, tid, compute_hour, hour_end)
+                    for r in rows:
+                        device = await conn.fetchrow("""
+                            SELECT
+                              SUM(EXTRACT(EPOCH FROM (ended_at - started_at)) / 60) FILTER (WHERE NOT is_idle) AS active_mins,
+                              SUM(EXTRACT(EPOCH FROM (ended_at - started_at)) / 60) FILTER (WHERE is_idle) AS idle_mins
+                            FROM device_activity_log
+                            WHERE tenant_id=$1 AND user_id=$2 AND started_at >= $3 AND started_at < $4
+                        """, tid, r["recruiter_id"], compute_hour, hour_end)
+                        active = device["active_mins"] if device else None
+                        idle = device["idle_mins"] if device else None
+                        prod_pct = None
+                        if active is not None and (active + (idle or 0)) > 0:
+                            prod_pct = round(100 * float(active) / (float(active) + float(idle or 0)), 2)
+                        await conn.execute("""
+                            INSERT INTO recruiter_productivity_hourly
+                              (tenant_id, recruiter_id, period_start, candidates_sourced, candidates_screened,
+                               candidates_submitted, interviews_completed, offers_generated, offers_accepted,
+                               placements, active_mins, idle_mins, productivity_pct)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                            ON CONFLICT (tenant_id, recruiter_id, period_start) DO UPDATE SET
+                              candidates_sourced=$4, candidates_screened=$5, candidates_submitted=$6,
+                              interviews_completed=$7, offers_generated=$8, offers_accepted=$9, placements=$10,
+                              active_mins=$11, idle_mins=$12, productivity_pct=$13, updated_at=now()
+                        """, tid, r["recruiter_id"], compute_hour, r["candidates_sourced"], r["candidates_screened"],
+                             r["candidates_submitted"], r["interviews_completed"], r["offers_generated"],
+                             r["offers_accepted"], r["placements"], active, idle, prod_pct)
+            except Exception as e:
+                logger.error(f"Hourly productivity aggregation failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"aggregate_hourly_productivity error: {e}")
+
+
+async def aggregate_daily_from_hourly(compute_date: date | None = None):
+    """Sum the day's hourly rows into recruiter_productivity_daily."""
+    logger.info("scheduler: aggregating daily recruiter productivity")
+    if compute_date is None:
+        compute_date = date.today() - timedelta(days=1)
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    rows = await conn.fetch("""
+                        SELECT recruiter_id,
+                          SUM(candidates_sourced) candidates_sourced, SUM(candidates_screened) candidates_screened,
+                          SUM(candidates_submitted) candidates_submitted, SUM(interviews_completed) interviews_completed,
+                          SUM(offers_generated) offers_generated, SUM(offers_accepted) offers_accepted,
+                          SUM(placements) placements, SUM(active_mins) active_mins, SUM(idle_mins) idle_mins
+                        FROM recruiter_productivity_hourly
+                        WHERE tenant_id=$1 AND period_start::date = $2
+                        GROUP BY recruiter_id
+                    """, tid, compute_date)
+                    for r in rows:
+                        active, idle = r["active_mins"], r["idle_mins"]
+                        prod_pct = None
+                        if active is not None and (float(active) + float(idle or 0)) > 0:
+                            prod_pct = round(100 * float(active) / (float(active) + float(idle or 0)), 2)
+                        await conn.execute("""
+                            INSERT INTO recruiter_productivity_daily
+                              (tenant_id, recruiter_id, period_start, candidates_sourced, candidates_screened,
+                               candidates_submitted, interviews_completed, offers_generated, offers_accepted,
+                               placements, active_mins, idle_mins, productivity_pct)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                            ON CONFLICT (tenant_id, recruiter_id, period_start) DO UPDATE SET
+                              candidates_sourced=$4, candidates_screened=$5, candidates_submitted=$6,
+                              interviews_completed=$7, offers_generated=$8, offers_accepted=$9, placements=$10,
+                              active_mins=$11, idle_mins=$12, productivity_pct=$13, updated_at=now()
+                        """, tid, r["recruiter_id"], compute_date, r["candidates_sourced"], r["candidates_screened"],
+                             r["candidates_submitted"], r["interviews_completed"], r["offers_generated"],
+                             r["offers_accepted"], r["placements"], active, idle, prod_pct)
+            except Exception as e:
+                logger.error(f"Daily productivity aggregation failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"aggregate_daily_from_hourly error: {e}")
+
+
+async def aggregate_weekly_from_daily(week_start: date | None = None):
+    """Sum the week's daily rows into recruiter_productivity_weekly."""
+    logger.info("scheduler: aggregating weekly recruiter productivity")
+    if week_start is None:
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday() + 7)  # previous ISO week's Monday
+    week_end = week_start + timedelta(days=7)
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    rows = await conn.fetch("""
+                        SELECT recruiter_id,
+                          SUM(candidates_sourced) candidates_sourced, SUM(candidates_screened) candidates_screened,
+                          SUM(candidates_submitted) candidates_submitted, SUM(interviews_completed) interviews_completed,
+                          SUM(offers_generated) offers_generated, SUM(offers_accepted) offers_accepted,
+                          SUM(placements) placements, SUM(active_mins) active_mins, SUM(idle_mins) idle_mins
+                        FROM recruiter_productivity_daily
+                        WHERE tenant_id=$1 AND period_start >= $2 AND period_start < $3
+                        GROUP BY recruiter_id
+                    """, tid, week_start, week_end)
+                    for r in rows:
+                        active, idle = r["active_mins"], r["idle_mins"]
+                        prod_pct = None
+                        if active is not None and (float(active) + float(idle or 0)) > 0:
+                            prod_pct = round(100 * float(active) / (float(active) + float(idle or 0)), 2)
+                        await conn.execute("""
+                            INSERT INTO recruiter_productivity_weekly
+                              (tenant_id, recruiter_id, period_start, candidates_sourced, candidates_screened,
+                               candidates_submitted, interviews_completed, offers_generated, offers_accepted,
+                               placements, active_mins, idle_mins, productivity_pct)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                            ON CONFLICT (tenant_id, recruiter_id, period_start) DO UPDATE SET
+                              candidates_sourced=$4, candidates_screened=$5, candidates_submitted=$6,
+                              interviews_completed=$7, offers_generated=$8, offers_accepted=$9, placements=$10,
+                              active_mins=$11, idle_mins=$12, productivity_pct=$13, updated_at=now()
+                        """, tid, r["recruiter_id"], week_start, r["candidates_sourced"], r["candidates_screened"],
+                             r["candidates_submitted"], r["interviews_completed"], r["offers_generated"],
+                             r["offers_accepted"], r["placements"], active, idle, prod_pct)
+            except Exception as e:
+                logger.error(f"Weekly productivity aggregation failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"aggregate_weekly_from_daily error: {e}")
+
+
+async def compute_recruiter_performance_scores(score_date: date | None = None):
+    """Daily, informational activity/performance score (recruiter_performance_
+    scores) — deliberately separate from the existing monthly, compensation-
+    linked recruiter_kpi_scores. No money is attached to this score; it only
+    feeds dashboards/leaderboards. Reads score_weight_config for real,
+    tenant-adjustable weights and grade thresholds rather than hardcoding
+    either."""
+    logger.info("scheduler: computing daily recruiter performance scores")
+    if score_date is None:
+        score_date = date.today() - timedelta(days=1)
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    weights = await conn.fetchrow(
+                        "SELECT * FROM score_weight_config WHERE tenant_id=$1", tid)
+                    if not weights:
+                        continue
+                    daily_rows = await conn.fetch(
+                        "SELECT * FROM recruiter_productivity_daily WHERE tenant_id=$1 AND period_start=$2",
+                        tid, score_date)
+                    for d in daily_rows:
+                        rid = d["recruiter_id"]
+                        # Output: raw funnel-milestone volume this day, capped at 100
+                        # via a simple diminishing scale (10 combined milestones = 100).
+                        volume = (d["candidates_sourced"] + d["candidates_submitted"]
+                                  + d["interviews_completed"] + d["placements"])
+                        output_score = min(100.0, volume * 10.0)
+                        # Quality: submission -> interview conversion this day.
+                        quality_score = (100.0 * d["interviews_completed"] / d["candidates_submitted"]
+                                          if d["candidates_submitted"] else None)
+                        # Velocity: real avg hours from sourced to first response
+                        # today, via recruiter_sla_tracking — faster is better,
+                        # scaled against the tenant's own default SLA target.
+                        vel = await conn.fetchrow("""
+                            SELECT AVG(EXTRACT(EPOCH FROM (first_response_at - sourced_at)) / 3600.0) avg_hours,
+                                   AVG(sla_target_hours) avg_target
+                            FROM recruiter_sla_tracking
+                            WHERE tenant_id=$1 AND recruiter_id=$2 AND sourced_at::date=$3
+                              AND first_response_at IS NOT NULL
+                        """, tid, rid, score_date)
+                        velocity_score = None
+                        if vel and vel["avg_hours"] is not None and vel["avg_target"]:
+                            velocity_score = max(0.0, min(100.0, 100.0 * (1 - float(vel["avg_hours"]) / (2 * float(vel["avg_target"])))))
+                        # Productivity: real device active-time pct when known,
+                        # else an activity-volume proxy (never fabricated).
+                        productivity_score = float(d["productivity_pct"]) if d["productivity_pct"] is not None else min(100.0, volume * 8.0)
+                        # SLA: % of today's sourced candidates whose first
+                        # response met the target.
+                        sla = await conn.fetchrow("""
+                            SELECT COUNT(*) total, COUNT(*) FILTER (WHERE breached IS FALSE) met
+                            FROM recruiter_sla_tracking
+                            WHERE tenant_id=$1 AND recruiter_id=$2 AND sourced_at::date=$3
+                              AND breached IS NOT NULL
+                        """, tid, rid, score_date)
+                        sla_score = (100.0 * sla["met"] / sla["total"]) if sla and sla["total"] else None
+                        # Interview -> offer conversion.
+                        interview_conv_score = (100.0 * d["offers_generated"] / d["interviews_completed"]
+                                                 if d["interviews_completed"] else None)
+
+                        def _w(val, weight, fallback=50.0):
+                            return (val if val is not None else fallback) * float(weight)
+
+                        overall = (
+                            _w(output_score, weights["output_weight"])
+                            + _w(quality_score, weights["quality_weight"])
+                            + _w(velocity_score, weights["velocity_weight"])
+                            + _w(productivity_score, weights["productivity_weight"])
+                            + _w(sla_score, weights["sla_weight"])
+                            + _w(interview_conv_score, weights["interview_conv_weight"])
+                        )
+                        if overall >= float(weights["grade_a_plus_threshold"]):
+                            grade = "A+"
+                        elif overall >= float(weights["grade_a_threshold"]):
+                            grade = "A"
+                        elif overall >= float(weights["grade_b_threshold"]):
+                            grade = "B"
+                        elif overall >= float(weights["grade_c_threshold"]):
+                            grade = "C"
+                        else:
+                            grade = "D"
+                        await conn.execute("""
+                            INSERT INTO recruiter_performance_scores
+                              (tenant_id, recruiter_id, score_date, output_score, quality_score, velocity_score,
+                               productivity_score, sla_score, interview_conv_score, overall_score, grade)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                            ON CONFLICT (tenant_id, recruiter_id, score_date) DO UPDATE SET
+                              output_score=$4, quality_score=$5, velocity_score=$6, productivity_score=$7,
+                              sla_score=$8, interview_conv_score=$9, overall_score=$10, grade=$11
+                        """, tid, rid, score_date, output_score, quality_score, velocity_score,
+                             productivity_score, sla_score, interview_conv_score, round(overall, 2), grade)
+            except Exception as e:
+                logger.error(f"Performance score computation failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"compute_recruiter_performance_scores error: {e}")
+
+
 def start_scheduler():
     """Register and start all jobs.
 
@@ -756,6 +1031,18 @@ def start_scheduler():
     # (2026-08-11 individual recruiter ownership).
     scheduler.add_job(process_ownership_expiry, "cron", hour=4, minute=0,
                       id="ownership_expiry", replace_existing=True)
+    # Workforce Intelligence (2026-08-11): hourly/daily/weekly recruiter
+    # activity rollups + daily performance scoring, feeding the Activity
+    # tab / Team Leaderboard — deliberately separate from the monthly,
+    # compensation-linked recruiter_kpi_scores.
+    scheduler.add_job(aggregate_hourly_productivity, "cron", minute=5,
+                      id="wi_hourly_productivity", replace_existing=True)
+    scheduler.add_job(aggregate_daily_from_hourly, "cron", hour=2, minute=30,
+                      id="wi_daily_productivity", replace_existing=True)
+    scheduler.add_job(aggregate_weekly_from_daily, "cron", day_of_week="mon", hour=3, minute=15,
+                      id="wi_weekly_productivity", replace_existing=True)
+    scheduler.add_job(compute_recruiter_performance_scores, "cron", hour=2, minute=45,
+                      id="wi_performance_scores", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

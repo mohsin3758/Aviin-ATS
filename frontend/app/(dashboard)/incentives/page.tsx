@@ -124,7 +124,25 @@ function NewScorecardForm({ users, month, year, onCreated }: { users: any[]; mon
   const [ats, setAts] = useState('0');
   const [cm, setCm] = useState('0');
   const [busy, setBusy] = useState(false);
+  const [suggesting, setSuggesting] = useState(false);
   const [err, setErr] = useState('');
+
+  // Workforce Intelligence (2026-08-11): pre-fills the 6 fields below
+  // from real placements/interviews/offers/feedback/activity this period
+  // — recruiter_kpi_scores itself stays untouched until the manager
+  // reviews these and hits "New Scorecard" below, same draft->approved
+  // workflow as a fully manual entry.
+  async function suggest() {
+    if (!userId) return;
+    setSuggesting(true); setErr('');
+    try {
+      const s = await apiFetch(`/incentives/scorecard/suggest?user_id=${userId}&period_month=${month}&period_year=${year}`);
+      setJoinings(String(s.joinings_score)); setRevenue(String(s.revenue_score));
+      setInterview(String(s.interview_score)); setOffer(String(s.offer_score));
+      setSat(String(s.client_sat_score)); setAts(String(s.ats_score));
+    } catch (e: any) { setErr(e.message || 'Failed to compute suggestion'); }
+    finally { setSuggesting(false); }
+  }
 
   async function submit() {
     if (!userId) return;
@@ -163,6 +181,9 @@ function NewScorecardForm({ users, month, year, onCreated }: { users: any[]; mon
         <NumField label="Client Sat /10" value={sat} onChange={setSat} />
         <NumField label="ATS /10" value={ats} onChange={setAts} />
         <NumField label="Contribution Margin" value={cm} onChange={setCm} />
+        <button onClick={suggest} disabled={!userId || suggesting} className={`${smallBtn} bg-gray-500`} style={{ padding: '7px 14px' }} title="Pre-fill the 6 fields above from real placements/interviews/offers/feedback/activity this period">
+          {suggesting ? 'Computing…' : 'Suggest from real data'}
+        </button>
         <button onClick={submit} disabled={!userId || busy} className={`${smallBtn} bg-[--color-primary]`} style={{ padding: '7px 14px' }}>
           <Plus className="h-3 w-3 inline mr-1" /> {busy ? 'Saving…' : 'New Scorecard'}
         </button>

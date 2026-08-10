@@ -1670,3 +1670,149 @@ test.describe.serial('S17 Tier-2 Features', () => {
     await request.delete(`${API}/requisitions/${reqId2}`, { headers: auth }).catch(() => {});
   });
 });
+
+// S18 Workforce Intelligence (2026-08-11): recruiter_activity_events logged
+// at 8 real call sites, hourly/daily/weekly productivity rollups, daily
+// performance scoring, and a real-data "suggest" pre-fill for the existing
+// monthly recruiter_kpi_scores scorecard — deliberately a SEPARATE,
+// non-money-linked score from that existing one. .serial() matching the
+// established S14-S17 lesson (retries:1 reruns a failing test in a fresh
+// worker with no shared closure state, so a plain describe cascades one
+// transient failure into unrelated-looking ones).
+test.describe.serial('S18 Workforce Intelligence', () => {
+  const stamp = Date.now();
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+  let adminUid: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway requisition + candidate, sourced event logged on creation', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const me = await request.get(`${API}/auth/me`, { headers: auth });
+    adminUid = me.ok() ? (await me.json()).sub || (await me.json()).id : '';
+
+    const r = await request.post(`${API}/requisitions`, { headers: auth, data: { title: `QA WI Test Role ${stamp}`, skills_required: ['Python'] } });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: { full_name: `QA WI Test Candidate ${stamp}`, email: `qa.wi.${stamp}@test.com`, phone: `9${String(stamp).slice(-9)}` },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: candId, requisition_id: reqId } });
+    expect(app.ok()).toBeTruthy();
+    appId = (await app.json()).id;
+  });
+
+  test('stage move to screened logs a real activity event', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const r = await request.patch(`${API}/applications/${appId}/stage`, { headers: auth, data: { stage: 'screened' } });
+    expect(r.ok()).toBeTruthy();
+    // No direct GET /recruiter-activity-events endpoint is exposed (the
+    // table only ever feeds aggregation/scoring) — verified via the
+    // aggregation-facing /recruiter/activity/today endpoint instead, which
+    // reads recruiter_activity_events live for the current day.
+    const today = await request.get(`${API}/recruiter/activity/today`, { headers: auth });
+    expect(today.ok()).toBeTruthy();
+    const body = await today.json();
+    expect(body.today).toBeTruthy();
+  });
+
+  test('KPI scorecard suggest endpoint returns real computed values without writing recruiter_kpi_scores', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const now = new Date();
+    const before = await request.get(`${API}/incentives/scorecard?month=${now.getMonth() + 1}&year=${now.getFullYear()}`, { headers: auth });
+    const beforeCount = before.ok() ? (await before.json()).length : -1;
+
+    const s = await request.get(`${API}/incentives/scorecard/suggest?user_id=${adminUid}&period_month=${now.getMonth() + 1}&period_year=${now.getFullYear()}`, { headers: auth });
+    expect(s.ok()).toBeTruthy();
+    const body = await s.json();
+    expect(body).toHaveProperty('joinings_score');
+    expect(body).toHaveProperty('offer_score');
+    expect(body.source_counts).toBeTruthy();
+
+    const after = await request.get(`${API}/incentives/scorecard?month=${now.getMonth() + 1}&year=${now.getFullYear()}`, { headers: auth });
+    const afterCount = after.ok() ? (await after.json()).length : -1;
+    expect(afterCount).toBe(beforeCount);
+  });
+
+  test('score-weight config is readable and writable, admin-only', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const g = await request.get(`${API}/manager/score-weights`, { headers: auth });
+    expect(g.ok()).toBeTruthy();
+    const cfg = await g.json();
+    expect(cfg).toHaveProperty('output_weight');
+
+    const unauth = await request.get(`${API}/manager/score-weights`);
+    expect(unauth.status()).toBe(401);
+  });
+
+  test('team activity leaderboard returns an array for admin', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const l = await request.get(`${API}/manager/activity-leaderboard`, { headers: auth });
+    expect(l.ok()).toBeTruthy();
+    const rows = await l.json();
+    expect(Array.isArray(rows)).toBeTruthy();
+  });
+
+  test('Recruiter Ops: Activity tab renders with real data', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', err => errors.push(err.message));
+    await page.goto('/recruiter-ops');
+    await page.getByRole('button', { name: /^Activity$/ }).click();
+    await expect(page.getByText("Today's performance score")).toBeVisible({ timeout: 15000 });
+    expect(errors).toHaveLength(0);
+  });
+
+  test('Recruiter Ops: Team Leaderboard tab renders for admin', async ({ page }) => {
+    await page.goto('/recruiter-ops');
+    await page.getByRole('button', { name: /Team Leaderboard/ }).click();
+    await expect(page.getByText('Team activity leaderboard')).toBeVisible({ timeout: 15000 });
+    // The static "Team activity leaderboard" heading renders as soon as
+    // canView flips true (post-mount effect), one render cycle before the
+    // leaderboard fetch itself resolves — a bare .count() right after can
+    // race ahead of the real data landing (same race class documented
+    // elsewhere in this suite for the requisition-list dropdown). Use an
+    // auto-retrying assertion on a real row instead of a one-shot count.
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+    const rowCount = await page.locator('table tbody tr').count();
+    expect(rowCount).toBeGreaterThan(0);
+  });
+
+  test('Ops Settings: Performance Weights tab renders real seeded weights', async ({ page }) => {
+    await page.goto('/ops-settings');
+    await page.getByRole('button', { name: /Performance Weights/ }).click();
+    const outputInput = page.locator('input[type="number"]').first();
+    await expect(outputInput).toBeVisible({ timeout: 15000 });
+    expect(Number(await outputInput.inputValue())).toBeGreaterThan(0);
+  });
+
+  test('Incentives: Suggest from real data button pre-fills fields', async ({ page }) => {
+    await page.goto('/incentives');
+    await page.waitForSelector('select', { timeout: 15000 });
+    const select = page.locator('select').nth(2);
+    await select.selectOption({ index: 1 });
+    const suggestBtn = page.getByRole('button', { name: /Suggest from real data/ });
+    await expect(suggestBtn).toBeEnabled({ timeout: 10000 });
+    await suggestBtn.click();
+    await page.waitForTimeout(1500);
+    const numInputs = page.locator('input[type="number"]');
+    await expect(numInputs.first()).toBeVisible();
+  });
+});

@@ -11,6 +11,27 @@ from schemas import ApplicationCreate, StageUpdate
 from permissions import require_permission
 from routers.p30_p35 import fire_webhook
 from services import candidate_ownership as ownership
+from services import activity_events
+
+
+def _stage_to_activity_event(stage: str) -> str | None:
+    """Map a pipeline stage transition to a recruiter_activity_events type.
+
+    Only meaningful funnel milestones are logged — not every stage
+    (sourced/contacted/hold/custom non-interview stages would just be
+    noise). Custom tenant interview rounds (l3_interview, etc.) are
+    handled by substring match, not a hardcoded list, matching the
+    LIKE '%interview%' pattern already established in this file's own
+    my-stats/recruiter-performance endpoints for the same reason.
+    'offer' is deliberately excluded here — offer generation already logs
+    its own 'offer_generated' event at the point offers.py/phase3.py
+    actually create the offer, so mapping it here too would double-count.
+    """
+    if stage in ("screened", "submitted", "rejected", "placed"):
+        return stage
+    if "interview" in stage:
+        return stage
+    return None
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 rejection_reasons_router = APIRouter(prefix="/rejection-reasons", tags=["applications"])
@@ -521,6 +542,13 @@ async def update_stage(
                 actor.tenant_id, row["candidate_id"], actor.user_id,
                 f"{old['stage'].replace('_',' ').title()} → {body.stage.replace('_',' ').title()}",
             )
+            _event_type = _stage_to_activity_event(body.stage)
+            if _event_type and row["assigned_recruiter_id"]:
+                await activity_events.log_recruiter_activity(
+                    conn, actor.tenant_id, str(row["assigned_recruiter_id"]), _event_type,
+                    candidate_id=str(row["candidate_id"]), application_id=application_id,
+                    requisition_id=str(row["requisition_id"]) if row["requisition_id"] else None,
+                )
 
         # Fetch candidate info INSIDE conn block (before connection is released)
         _notif_cand = await conn.fetchrow(

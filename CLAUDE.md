@@ -4287,3 +4287,134 @@ ownership everywhere it matters, but does not lock down every other
 in-app action (messaging, tagging, pipeline moves) for non-owners — the
 reference doc's broader "prevent from processing" would be a materially
 larger, separate change if wanted later.
+
+## Workforce Intelligence: real recruiter activity tracking + automated KPI suggestions, 2026-08-11
+User provided a third reference doc ("AVIIN ATS Workforce Intelligence
+Integration Package") proposing a full recruiter-activity/productivity/
+performance-scoring system, with the same "check first, don't build"
+instruction as the ownership feature. Research-only audit against real
+code/DB found the core premise correct (recruiter_kpi_scores, the P15
+monthly compensation scorecard, is 100% manual data entry — `POST
+/incentives/scorecard` takes all 6 sub-scores straight from the request
+body, zero server-side computation) but the doc itself overstated the
+gap and its code was generic/hallucinated (wrong routes/columns, and a
+hard dependency on `device_activity_log`, which has **zero rows in
+production** — device monitoring exists but nobody has enrolled a
+device). Real partial coverage already existed too:
+`candidate_activities`/`pipeline_movements` (113/490 real rows) and
+`/recruiter/my-stats`/`/recruiter/my-day`. Reported back; user's
+decision: build all three — a full real activity-tracking system with
+dashboards, automate the existing monthly KPI scorecard, and the doc's
+proposed tables adapted to this codebase's real schema.
+
+**Key reconciliation decision**: the new system does not replace or
+merge into `recruiter_kpi_scores` — that table stays the official,
+human-approved, money-linked monthly scorecard (already wired into
+`incentive_records`/`retention_bank` via draft→approved→paid).
+`recruiter_performance_scores` (new) is a **daily, purely informational**
+score — dashboards/leaderboard only, no money attached, its own
+`score_weight_config` (distinct from the AI-matching `scoring_weight_config`
+and the requisition-level `sla_tier_config`).
+
+Built via `sql/49_workforce_intelligence.sql` (`recruiter_activity_events`
+— typed event log, `event_type` free text not a rigid enum so custom
+tenant interview rounds like `l3_interview` don't hit the hardcoded-
+stage-key bug class fixed repeatedly elsewhere in this project;
+`recruiter_productivity_hourly/daily/weekly` — identical-shape rollups;
+`recruiter_sla_tracking` — per-candidate first-response timer, distinct
+from the existing requisition-level fill-time SLA; `score_weight_config`
++ `recruiter_performance_scores`; `v_recruiter_activity_summary` view for
+the leaderboard, same "`SELECT * FROM v_*_summary ORDER BY metric DESC`"
+template as `v_kae_summary`). New `backend/services/activity_events.py`
+(`log_recruiter_activity()` — written synchronously inside the caller's
+own transaction, same reliability treatment as `pipeline_movements`/
+`candidate_activities`, idempotent via a real `dedup_key` unique
+constraint) wired into the 8 real call sites that represent a recruiter
+action: `candidates.py::create_candidate()`, `resume_intake_service.py::
+upsert_candidate()` (personal mailbox), `import_router.py` (CSV+Excel),
+`applications.py::update_stage()` (screened/submitted/rejected/any
+`*interview*` stage), `phase3.py::auto_schedule_interview()` (also
+backfilled a missing `candidate_activities` write found here — this path
+never logged to the timeline at all), `p23_p27.py::update_interview_status()`
+(on completion), `phase3.py::auto_generate_offer()`/`offers.py::create_offer()`,
+and `offers.py::respond_offer()` (accept fires `offer_accepted`+`placed`,
+decline fires `offer_declined`).
+
+4 new scheduler jobs (hourly at :05, daily at 02:30, weekly Monday 03:15,
+performance scoring at 02:45 — all IST, same `add_job(...,id=...,
+replace_existing=True)` convention) follow the established correct
+tenant-loop pattern (list tenant ids via `system_conn()`, real work via
+per-tenant `tenant_conn()` — never query a FORCE-RLS table through
+`system_conn()` directly, the exact bug class fixed repeatedly elsewhere
+in this project). `compute_recruiter_performance_scores()` computes 6
+real sub-scores (output=funnel volume, quality=submission→interview
+conversion, velocity=real SLA-tracking response time, productivity=device
+time when known else an activity-volume proxy, sla=% first-response
+within target, interview_conv=interview→offer rate) against the tenant's
+own `score_weight_config`.
+
+New `GET /incentives/scorecard/suggest` (`incentives.py`) computes real
+suggested values for the 6 existing `recruiter_kpi_scores` fields from
+actual placements/interviews/offers/`client_feedback`/activity this
+period — **never writes `recruiter_kpi_scores` itself**, only returns
+suggestions for the existing form to pre-fill, preserving the
+draft→approved→paid human-review workflow. Revenue attribution splits a
+placed client's real `account_pl.revenue` across recruiters who placed
+there that period — documented in-code as a best-effort heuristic, same
+spirit as `match_recruiters()`'s own documented zero-weight placeholders.
+Client-satisfaction falls back to a neutral midpoint (not zero) when no
+feedback exists yet, so a recruiter isn't unfairly zeroed just because no
+client happened to leave feedback.
+
+New `GET /recruiter/activity/today`+`/activity/trends` and a `/manager`-
+prefixed router (`GET /manager/activity-leaderboard`, `GET`/`PUT
+/manager/score-weights`, admin/manager-gated via `require_role`) added to
+`recruiter_dashboard.py` (registered as a second router in the same file,
+same multi-router-per-file convention as `phase3.py`). Frontend: a new
+"Activity" tab and admin/manager-only "Team Leaderboard" tab on
+`/recruiter-ops` (reusing the hand-rolled CSS-bar `BarChart` component
+from `reports/page.tsx` — recharts is declared in `package.json` but
+genuinely unused anywhere in this frontend, confirmed via repo-wide
+grep, so no existing convention to match there), a "Suggest from real
+data" button on the Incentives scorecard form, and a "Performance
+Weights" tab on Ops Settings.
+
+**A real bug caught by the very first live test, not code review**:
+asyncpg has no jsonb codec registered in this app (the same class of gap
+documented repeatedly elsewhere in this project for `role_definitions.
+permissions`) — `log_recruiter_activity()`'s first version passed a
+Python dict straight to the `metadata` jsonb column parameter, and the
+very first real candidate-creation call after deploy 500'd
+(`DataError: invalid input for query argument $10: {} (expected str, got
+dict)`). Fixed with `json.dumps(metadata or {})`, verified with a real
+follow-up candidate creation succeeding and a real `sourced` event +
+`recruiter_sla_tracking` row landing correctly.
+
+**Verified for real end-to-end, not code review**: ran a genuine
+candidate through the entire funnel via real API calls — create →
+screened → submitted → l1_interview → schedule interview → complete
+interview → generate offer → approve → issue → accept — and confirmed
+all 9 expected `recruiter_activity_events` rows landed with the correct
+types (`sourced`, `screened`, `submitted`, `l1_interview`,
+`l1_interview_scheduled`, `technical_completed`, `offer_generated`,
+`offer_accepted`, `placed`). Ran the aggregation + scoring jobs directly
+against that real data and hand-verified every number: daily rollup
+matched the exact 1/1/1/1/1/1/1 funnel counts, and the performance
+score's `overall_score` (71.80, grade C) matched a hand-computed formula
+to the decimal (output 40×0.30=12, quality 100×0.20=20, velocity
+100×0.15=15, productivity 32×0.15=4.8, sla 100×0.10=10, interview_conv
+100×0.10=10 → 71.8). Separately verified the KPI-suggest endpoint against
+a real recruiter with a real June placement — `joinings_score=12.0`
+(1 placement × 12) and `offer_score=10.0` (2/2 offers accepted × 10) both
+matched the formula exactly, and confirmed `recruiter_kpi_scores` itself
+was untouched by the call. RLS proven with a real cross-tenant read
+attempt on `score_weight_config` as `app_user` (0 rows visible despite
+the row genuinely existing for the other tenant). Real headless-browser
+checks confirmed the Activity tab, Team Leaderboard, Ops Settings
+Performance Weights tab, and the Incentives Suggest button all render
+and work against real data. New permanent "S18 Workforce Intelligence"
+suite added to `qa_automation.spec.ts` (`.serial()`, matching the
+established S14-S17 convention). All throwaway test data (candidates,
+applications, requisitions, interviews, offers, placements, activity
+events, SLA tracking rows, productivity/score aggregates) cleaned up
+after every check in FK-safe order, confirmed zero residue.

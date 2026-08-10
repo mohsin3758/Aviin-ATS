@@ -9,6 +9,7 @@ from schemas import CandidateCreate, CandidateUpdate
 from routers.pipeline_stages import is_valid_stage
 from permissions import require_permission
 from services import candidate_ownership as ownership
+from services import activity_events
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
@@ -482,6 +483,10 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
         if actor.user_id and actor.email:
             await ownership.claim_ownership(
                 conn, actor.tenant_id, str(cid), str(actor.user_id), actor.email, "manual_add",
+            )
+        if actor.user_id:
+            await activity_events.log_recruiter_activity(
+                conn, actor.tenant_id, str(actor.user_id), activity_events.SOURCED, candidate_id=str(cid),
             )
         await events.write_outbox(conn, actor.tenant_id, "candidate.created",
             {"candidate_id": str(cid), "full_name": body.full_name}, f"candidate.created:{cid}")

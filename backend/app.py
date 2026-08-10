@@ -261,6 +261,7 @@ app.include_router(final_features.notif_router)
 app.include_router(p36_p42.health_router)
 app.include_router(p36_p42.forecast_router)
 app.include_router(recruiter_dashboard.router)
+app.include_router(recruiter_dashboard.manager_router)
 app.include_router(recruiter_tracking.router)
 # app.include_router(p36_p42.rules_router)  # disabled: conflicts with pipeline_p2.rules_router
 
