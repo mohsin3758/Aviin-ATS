@@ -3544,3 +3544,64 @@ executions), still isn't a row in `automation_workflows` - the Automations
 dashboard has zero visibility into the one integration that actually works
 at scale. A real gap, deliberately left for a future pass rather than
 folded into this one silently.
+
+## The last remaining audit item closed: aviin-stage-change wired into automation_workflows, 2026-08-10
+Direct follow-up, same day, to the one item explicitly flagged as still
+open after the previous two fix rounds: "AVIIN Stage Notifier" (webhook
+path `aviin-stage-change`) is the single most-used real n8n integration
+in the system, but was never a row in `automation_workflows`, so Settings
+> Automations had zero visibility into the one thing that actually runs
+at scale, and it had no `fire_count`/`last_fired_at` tracking at all.
+
+Re-verified the audit's own claim before building anything, per this
+project's established discipline of checking rather than trusting prior
+notes: the report said "fed by 4 real call sites in applications.py/
+pipeline_p2.py" - grepped both files directly and found this overstated.
+`pipeline_p2.py` has a `notify_n8n()` function + `N8N_WEBHOOK` constant
+that were **fully dead code** - defined, zero callers anywhere in that
+file or any other backend file (confirmed via a whole-backend grep).
+There is exactly **one** real call site: `applications.py`'s
+`_notify_stage_change_bg()`, itself called from exactly one place
+(`update_stage()`, the real funnel every stage-change UI action - drag-
+and-drop, stage buttons, bulk moves - already goes through). Removed the
+dead `notify_n8n()`/`N8N_WEBHOOK` from `pipeline_p2.py` as a small bonus
+cleanup while investigating, rather than leaving a second, unused,
+confusing "notify n8n" function sitting next to the real one.
+
+`sql/41_stage_notifier_automation_row.sql` seeds one `automation_workflows`
+row per tenant (`ON CONFLICT (tenant_id, name) DO NOTHING`, run as the
+`postgres` superuser which bypasses RLS entirely, not just FORCE ROW
+LEVEL SECURITY - no per-tenant `tenant_conn()` loop needed for a plain
+cross-tenant INSERT here). `fire_count` starts at 0, deliberately not
+backfilled with an invented historical number - the app itself never
+tracked this webhook's call count before today (only n8n's own internal
+execution log did, which this table has no access to), so 0 and
+"counting starts today" is the honest number, same principle already
+applied to the offer HITL audit-trail backfill earlier today.
+`applications.py`'s real call site switched from a raw, untracked
+`httpx.AsyncClient().post()` to `fire_webhook()` - the same tenant-aware,
+success-gated helper every other automation trigger fixed today already
+uses - so this one is now genuinely visible and tracked, not just working
+silently in the background.
+
+Verified for real, not code review: confirmed the new row appears in
+`GET /automations` (10 rows now, `fire_count:0`, `last_fired_at:null`)
+immediately after deploy; created a real throwaway candidate+application
+and moved it `sourced`→`contacted` via the real `PATCH /applications/{id}/
+stage` endpoint; confirmed `fire_count` went 0→1 with a real
+`last_fired_at` timestamp. All throwaway data (candidate, application,
+consent_records, candidate_activities, pipeline_movements rows) cleaned
+up after - the cleanup itself needed the correct FK-safe delete order in
+one atomic batch (same `psql -c` simple-query-protocol gotcha documented
+earlier today: a later statement's FK violation rolls back every earlier
+statement in the same invocation).
+
+Full QA suite re-run clean after: 153 passed / 2 skipped / 0 failed -
+identical to every other run today, confirming no regressions across all
+three rounds of fixes combined. Zero-token audit: `CONFIRMED CLEAN`
+(335 files, 0 external API refs).
+
+With this, every finding in the "Assessments/Offers/n8n Fresh Audit"
+report (2026-08-09/10) is closed - the 5 ranked recommendations, the 6
+secondary items found on re-check, and this last one. Nothing outstanding
+from that report remains.

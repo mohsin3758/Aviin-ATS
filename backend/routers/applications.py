@@ -306,12 +306,18 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
     except Exception as _ex:
         print(f"Stage WhatsApp failed [{stage}]: {_ex}")
 
-    # n8n webhook
+    # n8n webhook — real, working, by far the most-used integration in the
+    # whole system (500+ real executions per the 2026-08-10 audit) but was
+    # never a row in automation_workflows, so Settings > Automations had
+    # zero visibility into it and it had no fire_count/last_fired_at
+    # tracking at all. Switched to fire_webhook() (the same tenant-aware,
+    # success-gated helper every other automation trigger now uses) so
+    # this one is finally visible on the dashboard too, not just working
+    # silently in the background.
     try:
-        async with httpx.AsyncClient(timeout=5.0) as cli:
-            await cli.post("http://n8n:5678/webhook/aviin-stage-change",
-                json={"candidate_name": name, "stage_to": stage, "candidate_id": str(candidate_id)},
-                timeout=3.0)
+        await fire_webhook("aviin-stage-change",
+            {"candidate_name": name, "stage_to": stage, "candidate_id": str(candidate_id)},
+            tenant_id)
     except Exception:
         pass
 

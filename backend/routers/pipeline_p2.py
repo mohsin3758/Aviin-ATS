@@ -46,7 +46,6 @@ rules_router    = APIRouter(prefix="/pipeline-rules", tags=["pipeline-p2"])
 intel_router    = APIRouter(prefix="/pipeline", tags=["pipeline-p2"])
 
 STAGES = ["sourced","contacted","interested","nda","screened","submitted","l1_interview","l2_interview","offer","offer_accepted","placed","rejected","hold"]
-N8N_WEBHOOK = "http://n8n:5678/webhook/aviin-stage-change"
 
 # ── Models ────────────────────────────────────────────────────────────────────
 class RuleCondition(BaseModel):
@@ -67,15 +66,11 @@ class BulkAction(BaseModel):
     action: str              # "move_stage" | "reject" | "move_placed"
     target_stage: Optional[str] = None
 
-# ── Background: n8n notify ────────────────────────────────────────────────────
-async def notify_n8n(payload: dict):
-    """Fire-and-forget webhook to n8n — never crashes the main flow."""
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(N8N_WEBHOOK, json=payload)
-    except Exception as e:
-        log.warning(f"n8n notify failed (non-fatal): {e}")
+# notify_n8n()/N8N_WEBHOOK removed here (2026-08-10) - confirmed zero
+# callers anywhere in the codebase (grepped both this file and every
+# other backend file for notify_n8n( and this file's own N8N_WEBHOOK
+# constant). The real, only-ever-called aviin-stage-change webhook fires
+# from applications.py's _notify_stage_change_bg() instead.
 
 # ── KPI Metrics ───────────────────────────────────────────────────────────────
 @metrics_router.get("/metrics")
