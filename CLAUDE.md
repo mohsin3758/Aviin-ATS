@@ -3605,3 +3605,87 @@ With this, every finding in the "Assessments/Offers/n8n Fresh Audit"
 report (2026-08-09/10) is closed - the 5 ranked recommendations, the 6
 secondary items found on re-check, and this last one. Nothing outstanding
 from that report remains.
+
+## Re-check against the Recruiter Assignment Gap Analysis: a real, live, self-amplifying data-corruption bug found and fixed, 2026-08-10
+User asked to check a different, earlier report ("Recruiter Assignment —
+Competitive Gap Analysis," 2026-08-09) against current state. That report's
+own 6 numbered recommendations were already fully built and shipped the
+same day it was published (see "Recruiter Assignment: 6 build
+recommendations..." above) - re-verified every one of the 6 directly
+against live code/data (role gate on POST /assignments, assignee picker
+filtered to role=recruiter, sla_tier_config wired into find_sla_breaches(),
+job_visibility_scope toggle, unified priority fields with critical
+reachable, clients.priority_tier wired into scoring/SLA, schema-drift
+backfills) - all still genuinely in place, nothing had regressed.
+
+One item from the report's body text (not one of the 6 recommendations,
+just a passing observation in section 1: "no DB constraint stopping two
+simultaneous active rows") turned out to be a live, ongoing, self-
+amplifying production bug once actually checked against real data instead
+of taken as a minor theoretical gap.
+
+**What was actually happening**: 4 real requisitions had 2-6 simultaneous
+`assignments` rows with `status='active'` each (one had 21 total rows,
+7 of them active at once). Root-caused by reading `do_reassign()`'s real
+definition and the actual `sla_escalations` audit trail for one affected
+requisition, not by guessing: `find_stalled_assignments()` returns every
+`active` assignment row independently - "one active row per requisition"
+was never an enforced invariant, just an assumption every write path
+individually tried to honor. Once ANY requisition ended up with 2+ active
+rows (from the exact race the report named), the SLA escalation job
+(`scheduler.py`, runs every 30 min) gave EACH duplicate its own
+independent `stale_<assignment_id>` alert with its own tier1->tier2 clock.
+When each one's tier 2 fired (~24h grace period), `do_reassign()` correctly
+reassigned that ONE row - but with zero awareness of its siblings, so N
+duplicates became N *new* duplicates every ~24h cycle instead of shrinking.
+This had been silently reassigning real requisitions to recruiters at
+random, roughly daily, since at least 2026-07-27, with zero visibility
+anywhere in the product - not caught by any earlier audit because nobody
+had directly counted active assignments per requisition before.
+
+**Fix, `sql/42_assignments_uniqueness_and_cleanup.sql`**:
+1. Consolidated each of the 4 corrupted requisitions down to one active
+   row (most recently created = canonical), marking every sibling
+   `reassigned` with an honest, non-fabricated `assignment_event` note
+   explaining this was a retroactive data-integrity cleanup, not a real
+   reassignment - same "document what actually happened, don't fabricate
+   history" principle applied to the offer HITL audit-trail backfill
+   earlier today. Used `UPDATE ... RETURNING` captured directly into the
+   event insert so this only ever wrote a cleanup note for rows the
+   migration itself touched, never for rows that were already
+   legitimately `reassigned` from real, older reassignment events.
+2. Resolved any still-open `sla_escalations` rows pointing at the
+   now-cleaned-up assignment IDs.
+3. **The actual fix**: `CREATE UNIQUE INDEX assignments_one_active_per_requisition
+   ON assignments (requisition_id) WHERE status='active'` - makes a second
+   simultaneous active row structurally impossible for every current and
+   future write path (manual assign, `do_reassign()`,
+   `assign_with_explanation()`, seed data) at once, rather than relying on
+   each path's own check-then-act logic staying correct forever.
+
+**A second, real risk found and fixed while building the first**:
+`scheduler.py`'s tier-2 escalation handler runs inside one long-lived
+transaction opened by `db.tenant_conn()` (the whole tenant's alert batch
+shares one connection/transaction for the tick). Its existing bare
+`try/except` around the `do_reassign()` call does not protect against a
+real Postgres-level error the way it protects against a Python exception -
+once any statement inside raises (which the new unique constraint can now
+legitimately do, rejecting a `do_reassign()` call whose target already had
+a duplicate active sibling from before this fix), the whole transaction
+is marked aborted and every later statement on that connection fails too,
+silently truncating that tenant's entire escalation run for the tick.
+Fixed by wrapping the `do_reassign()` call + its `tier2_fired_at` update in
+a nested `async with conn.transaction():` - a real SAVEPOINT in asyncpg
+when a transaction is already open - so a failure now rolls back only that
+one alert, not the tenant's whole batch.
+
+**Verified for real, not code review**: confirmed zero duplicate-active
+requisitions remain after cleanup; confirmed the new unique index genuinely
+rejects a real INSERT attempt (`BEGIN; INSERT ...; ROLLBACK;` against a
+real requisition that already has an active assignment - real Postgres
+`duplicate key value violates unique constraint` error, not assumed);
+directly invoked the real `process_sla_escalations()` function inside the
+backend container end-to-end against live production data and confirmed
+it completes with no unhandled exception and creates zero new duplicates.
+Full QA suite re-run clean: 153 passed / 2 skipped / 0 failed. Zero-token
+audit: `CONFIRMED CLEAN` (336 files, 0 external API refs).

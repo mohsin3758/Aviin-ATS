@@ -314,12 +314,29 @@ async def _handle_escalation_alert(conn, tenant_id, alert_id, alert_type, requis
         grace_hours = _grace_hours_for(alert_type, sla_hours)
         hours_since_first = (datetime.now(timezone.utc) - row["first_detected_at"]).total_seconds() / 3600
         if hours_since_first >= grace_hours:
+            # 2026-08-10: this whole function runs inside one long-lived
+            # transaction opened by db.tenant_conn() (_process_tenant_
+            # sla_escalations processes every alert for a tenant on one
+            # connection). A bare try/except here does NOT protect against
+            # that - once any statement inside raises a real Postgres
+            # error (not just a Python exception), the whole transaction
+            # is marked aborted and every later statement on this
+            # connection fails too, silently truncating this tenant's
+            # entire escalation run for the tick. Concretely hit by the
+            # real bug fixed alongside this (sql/42...sql's new unique
+            # index on assignments can now legitimately reject a
+            # do_reassign() call whose target already has a duplicate
+            # active sibling from before the fix). A nested
+            # conn.transaction() is a real SAVEPOINT in asyncpg when a
+            # transaction is already open, so a failure here rolls back
+            # only this one alert, not the tenant's whole batch.
             try:
-                result = await conn.fetchrow(
-                    "SELECT * FROM do_reassign($1, $2, NULL)",
-                    assignment_id, f"Auto-escalation: unresolved {grace_hours}h+ after SLA alert",
-                )
-                await conn.execute("UPDATE sla_escalations SET tier2_fired_at=now() WHERE id=$1", row["id"])
+                async with conn.transaction():
+                    result = await conn.fetchrow(
+                        "SELECT * FROM do_reassign($1, $2, NULL)",
+                        assignment_id, f"Auto-escalation: unresolved {grace_hours}h+ after SLA alert",
+                    )
+                    await conn.execute("UPDATE sla_escalations SET tier2_fired_at=now() WHERE id=$1", row["id"])
                 logger.info(f"SLA escalation tier 2 auto-reassigned {assignment_id} -> {result['new_recruiter_id']}")
             except Exception as e:
                 logger.warning(f"SLA escalation tier 2 reassign failed for {assignment_id}: {e}")
