@@ -79,7 +79,7 @@ export default function AnalyticsPage() {
               fetch(API + '/export/candidates', { headers: { Authorization: 'Bearer ' + token } })
                 .then(r => r.blob()).then(b => {
                   const a = document.createElement('a'); a.href = URL.createObjectURL(b);
-                  a.download = 'candidates_export.xlsx'; a.click();
+                  a.download = 'candidates_export.csv'; a.click();
                 });
             }}
             className="btn btn-outline btn-sm" style={{cursor:'pointer'}}><Download size={13} /> Export Candidates</button>

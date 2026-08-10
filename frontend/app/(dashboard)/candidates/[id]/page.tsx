@@ -756,13 +756,32 @@ function WhatsAppModal({ candidate, onClose }: { candidate: any; onClose: () => 
 function InterviewsPanel({ candidateId, candidateName }: { candidateId: string; candidateName: string }) {
   const { data: interviews, loading, refetch } = useFetch<any[]>(`/interviews?candidate_id=${candidateId}`);
   const { data: reqs } = useFetch<any>('/requisitions?limit=100');
+  const { data: usersData } = useFetch<any[]>('/users?is_active=true');
   const [schedOpen, setSchedOpen] = useState(false);
   const [form, setForm] = useState({
     interview_type: 'technical', mode: 'video', scheduled_at: '', duration_mins: 45,
-    meeting_link: '', notes: '', requisition_id: '',
+    meeting_link: '', notes: '', requisition_id: '', interviewer_id: '',
   });
   const [saving, setSaving] = useState(false);
   const [reminding, setReminding] = useState<string|null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestNote, setSuggestNote] = useState('');
+  const [completingId, setCompletingId] = useState<string|null>(null);
+  const [completeForm, setCompleteForm] = useState({ feedback: '', rating: 0 });
+  const users: any[] = usersData || [];
+
+  async function suggestInterviewer() {
+    if (!form.scheduled_at) { setSuggestNote('Pick a date/time first'); return; }
+    setSuggesting(true); setSuggestNote('');
+    try {
+      const iso = new Date(form.scheduled_at).toISOString();
+      const r = await apiFetch(`/interviews/suggest-interviewer?scheduled_at=${encodeURIComponent(iso)}&duration_mins=${form.duration_mins}`);
+      setForm(f => ({ ...f, interviewer_id: r.id }));
+      setSuggestNote(`Suggested: ${r.full_name} (${r.nearby_load} nearby)`);
+    } catch (e: any) {
+      setSuggestNote(e?.message || 'No one available at that time');
+    } finally { setSuggesting(false); }
+  }
 
   async function sendReminder(interviewId: string) {
     setReminding(interviewId);
@@ -779,12 +798,17 @@ function InterviewsPanel({ candidateId, candidateName }: { candidateId: string; 
     if (!form.scheduled_at) { alert('Please select date & time'); return; }
     setSaving(true);
     try {
+      // BUG FIX (2026-08-10 audit): raw datetime-local string sent
+      // unconverted was interpreted as UTC by the backend, a 5.5h shift —
+      // same fix as the main Interview Scheduler page.
+      const scheduled_at = new Date(form.scheduled_at).toISOString();
       await apiFetch('/interviews', {
         method: 'POST',
-        body: JSON.stringify({ ...form, candidate_id: candidateId }),
+        body: JSON.stringify({ ...form, scheduled_at, candidate_id: candidateId }),
       });
       setSchedOpen(false);
-      setForm({ interview_type:'technical', mode:'video', scheduled_at:'', duration_mins:45, meeting_link:'', notes:'', requisition_id:'' });
+      setForm({ interview_type:'technical', mode:'video', scheduled_at:'', duration_mins:45, meeting_link:'', notes:'', requisition_id:'', interviewer_id:'' });
+      setSuggestNote('');
       refetch();
     } catch (e: any) {
       alert(e?.message || 'Failed to schedule');
@@ -797,6 +821,12 @@ function InterviewsPanel({ candidateId, candidateName }: { candidateId: string; 
       body: JSON.stringify({ status, feedback, rating }),
     });
     refetch();
+  }
+
+  async function completeWithFeedback(id: string) {
+    await updateStatus(id, 'completed', completeForm.feedback || undefined, completeForm.rating || undefined);
+    setCompletingId(null);
+    setCompleteForm({ feedback: '', rating: 0 });
   }
 
   function fmtDt(iso: string) {
@@ -877,7 +907,7 @@ function InterviewsPanel({ candidateId, candidateName }: { candidateId: string; 
                       color:'#1d4ed8',cursor:reminding===iv.id?'not-allowed':'pointer',fontSize:'12px',fontWeight:'600'}}>
                     {reminding===iv.id ? '...' : '🔔 Remind'}
                   </button>
-                  <button onClick={() => updateStatus(iv.id,'completed')}
+                  <button onClick={() => { setCompletingId(iv.id); setCompleteForm({ feedback:'', rating:0 }); }}
                     style={{padding:'6px 12px',borderRadius:'6px',border:'none',background:'#16a34a',
                       color:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600'}}>Done</button>
                   <button onClick={() => updateStatus(iv.id,'cancelled')}
@@ -886,6 +916,34 @@ function InterviewsPanel({ candidateId, candidateName }: { candidateId: string; 
                 </div>
               )}
             </div>
+            {/* BUG FIX (2026-08-10 audit): marking Completed previously wiped
+                any existing feedback/rating (unconditional UPDATE, no input
+                to enter a replacement) — now captures both before completing. */}
+            {completingId === iv.id && (
+              <div style={{marginTop:'10px',padding:'12px',background:'#f8fafc',borderRadius:'8px',border:'1px solid #e2e8f0'}}>
+                <label style={{fontSize:'11px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'4px'}}>Feedback</label>
+                <textarea value={completeForm.feedback} onChange={e => setCompleteForm(f => ({...f, feedback: e.target.value}))}
+                  rows={2} placeholder="How did the interview go?"
+                  style={{width:'100%',padding:'8px',borderRadius:'6px',border:'1px solid #e2e8f0',fontSize:'12px',marginBottom:'8px',boxSizing:'border-box'}}/>
+                <label style={{fontSize:'11px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'4px'}}>Rating</label>
+                <div style={{display:'flex',gap:'4px',marginBottom:'10px'}}>
+                  {[1,2,3,4,5].map(n => (
+                    <button key={n} type="button" onClick={() => setCompleteForm(f => ({...f, rating: n}))}
+                      style={{background:'none',border:'none',cursor:'pointer',fontSize:'18px',color: n<=completeForm.rating ? '#f59e0b' : '#e2e8f0'}}>★</button>
+                  ))}
+                </div>
+                <div style={{display:'flex',gap:'8px'}}>
+                  <button onClick={() => completeWithFeedback(iv.id)}
+                    style={{padding:'6px 14px',borderRadius:'6px',border:'none',background:'#16a34a',color:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600'}}>
+                    Save & Complete
+                  </button>
+                  <button onClick={() => setCompletingId(null)}
+                    style={{padding:'6px 14px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'12px'}}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
             {iv.feedback && (
               <div style={{fontSize:'13px',color:'#374151',background:'#f8fafc',padding:'10px 12px',
                 borderRadius:'8px',lineHeight:'1.5'}}>{iv.feedback}</div>
@@ -936,6 +994,28 @@ function InterviewsPanel({ candidateId, candidateName }: { candidateId: string; 
                 )}
               </div>
             ))}
+            {/* BUG FIX (2026-08-10 audit): this form had no interviewer
+                field at all — every interview created here landed with
+                interviewer_id NULL, which is why conflict detection and
+                load-balancing had never applied to any real interview. */}
+            <div style={{marginBottom:'14px'}}>
+              <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'5px'}}>
+                Interviewer (optional — auto-picked by load if left blank)
+              </label>
+              <div style={{display:'flex',gap:'6px'}}>
+                <select value={form.interviewer_id} onChange={e => setForm(f => ({...f, interviewer_id: e.target.value}))}
+                  style={{flex:1,padding:'9px 10px',borderRadius:'8px',border:'1px solid #e2e8f0',fontSize:'13px',outline:'none'}}>
+                  <option value="">Auto-assign (least loaded)</option>
+                  {users.map((u: any) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                </select>
+                <button type="button" onClick={suggestInterviewer} disabled={suggesting}
+                  style={{padding:'8px 12px',background:'#EEF2FF',color:'#4338CA',border:'1px solid #C7D2FE',
+                    borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontWeight:700,whiteSpace:'nowrap'}}>
+                  {suggesting ? '...' : 'Suggest'}
+                </button>
+              </div>
+              {suggestNote && <div style={{fontSize:'11px',color:'#64748b',marginTop:'4px'}}>{suggestNote}</div>}
+            </div>
             {reqList.length > 0 && (
               <div style={{marginBottom:'14px'}}>
                 <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'5px'}}>Link to Requisition (optional)</label>

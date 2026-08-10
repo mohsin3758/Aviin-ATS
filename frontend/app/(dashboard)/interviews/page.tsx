@@ -37,7 +37,17 @@ function ScheduleModal({ onClose, onScheduled }:any) {
     if (!form.application_id || !form.scheduled_at) return;
     setSaving(true);
     try {
-      const r = await apiFetch('/auto-interview/schedule', { method:'POST', body: JSON.stringify(form) });
+      // BUG FIX (2026-08-10 audit): the <input type="datetime-local">
+      // value is a raw local wall-clock string with no timezone marker
+      // (e.g. "2026-09-20T10:00") — sending it as-is made the backend
+      // treat 10:00 AM IST as 10:00 UTC, a 5.5h shift. new Date(...).
+      // toISOString() converts using the browser's local timezone (this
+      // product is India-first with no per-user timezone setting, so IST
+      // is the intended interpretation) — the same conversion
+      // suggestInterviewer() above already applied correctly, just never
+      // used for the actual save.
+      const payload = { ...form, scheduled_at: new Date(form.scheduled_at).toISOString() };
+      const r = await apiFetch('/auto-interview/schedule', { method:'POST', body: JSON.stringify(payload) });
       setResult(r);
       onScheduled?.();
     } catch(e:any) {

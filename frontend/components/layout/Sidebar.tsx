@@ -44,6 +44,7 @@ const NAV_GROUPS = [
     { icon:FileText,       href:'/offers',       label:'Offer Engine' },
     { icon:FileSignature,   href:'/nda-documents', label:'NDA Documents' },
     { icon:FileText,        href:'/jd-templates', label:'JD Templates' },
+    { icon:Mail,            href:'/email-templates', label:'Email Templates' },
     { icon:BookOpen,        href:'/question-bank',label:'Question Bank' },
     { icon:FileCheck,       href:'/reference-checks', label:'Reference Checks' },
     { icon:FileBarChart,    href:'/submittals',   label:'Submittals' },

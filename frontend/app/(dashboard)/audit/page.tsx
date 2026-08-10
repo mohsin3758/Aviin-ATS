@@ -2,12 +2,35 @@
 import { useFetch } from '@/lib/useFetch';
 export default function AuditPage() {
   const {data:logs,loading}=useFetch<any[]>('/audit?limit=50');
+  // BUG FIX (2026-08-10 audit): these two buttons were plain <a href> tags
+  // with no Authorization header, pointed at a hardcoded raw IP over plain
+  // HTTP — both downloaded a JSON 401 body, not a CSV. Same authenticated
+  // fetch->blob->download pattern already used correctly on Analytics/
+  // Reports; also added Requisitions (was fully orphaned — zero UI caller
+  // anywhere) and switched .xlsx to .csv (the payload was always CSV).
+  const downloadCsv = (path: string, filename: string) => {
+    const token = localStorage.getItem('ats_token') || '';
+    const API = process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviinjobs.com/api';
+    fetch(API + path, { headers: { Authorization: 'Bearer ' + token } })
+      .then(r => r.blob()).then(b => {
+        const a = document.createElement('a'); a.href = URL.createObjectURL(b);
+        a.download = filename; a.click();
+      });
+  };
+  const exports = [
+    { path: '/export/candidates', label: 'Candidates', file: 'candidates_export.csv' },
+    { path: '/export/requisitions', label: 'Requisitions', file: 'requisitions_export.csv' },
+    { path: '/export/placements', label: 'Placements', file: 'placements_export.csv' },
+  ];
   return(
     <div className="anim-fade-up space-y-6">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:'12px'}}>
         <div><h1 style={{fontSize:'20px',fontWeight:'700',color:'#0f172a'}}>Audit Trail</h1><p style={{fontSize:'13px',color:'#64748b',marginTop:'2px'}}>Complete activity log — who did what and when</p></div>
-        <div style={{display:'flex',gap:'8px'}}>{['/export/candidates','/export/placements'].map(p=>(
-          <a key={p} href={`http://187.127.179.128:8080${p}`} style={{padding:'7px 14px',background:'#eff6ff',color:'#1e40af',border:'1px solid #bfdbfe',borderRadius:'7px',fontSize:'12px',fontWeight:'600',textDecoration:'none'}}>⬇️ {p.split('/').pop()}</a>
+        <div style={{display:'flex',gap:'8px'}}>{exports.map(e=>(
+          <button key={e.path} data-testid={`export-${e.label.toLowerCase()}`} onClick={()=>downloadCsv(e.path,e.file)}
+            style={{padding:'7px 14px',background:'#eff6ff',color:'#1e40af',border:'1px solid #bfdbfe',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>
+            ⬇️ {e.label}
+          </button>
         ))}</div>
       </div>
       <div style={{background:'white',borderRadius:'12px',border:'1px solid #e2e8f0',overflow:'hidden'}}>

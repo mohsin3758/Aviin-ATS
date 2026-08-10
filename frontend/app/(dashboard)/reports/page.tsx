@@ -103,10 +103,10 @@ export default function ReportsPage() {
             fetch(url, { headers: { Authorization: 'Bearer ' + token } })
               .then(r => r.blob()).then(b => {
                 const a = document.createElement('a'); a.href = URL.createObjectURL(b);
-                a.download = 'candidates_export.xlsx'; a.click();
+                a.download = 'candidates_export.csv'; a.click();
               });
           }} style={{display:'flex',alignItems:'center',gap:'5px',padding:'8px 14px',background:'#0f172a',color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:'pointer',whiteSpace:'nowrap'}}>
-            ⬇ Export Excel
+            ⬇ Export CSV
           </button>
           <button onClick={() => {
             const token = localStorage.getItem('ats_token') || '';
@@ -114,7 +114,7 @@ export default function ReportsPage() {
             fetch(url, { headers: { Authorization: 'Bearer ' + token } })
               .then(r => r.blob()).then(b => {
                 const a = document.createElement('a'); a.href = URL.createObjectURL(b);
-                a.download = 'kpi_report.xlsx'; a.click();
+                a.download = 'kpi_report.csv'; a.click();
               });
           }} style={{display:'flex',alignItems:'center',gap:'5px',padding:'8px 14px',background:'#1e40af',color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:'pointer',whiteSpace:'nowrap'}}>
             📊 KPI Report

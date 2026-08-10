@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import {
   DollarSign, Users, TrendingUp, Clock, AlertTriangle,
-  FileText, CreditCard, Wallet, Plus, ShieldCheck,
+  FileText, CreditCard, Wallet, Plus, ShieldCheck, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
@@ -367,29 +367,16 @@ export default function FinancePage() {
               <Table>
                 <Thead>
                   <tr>
-                    <Th>Pay Period</Th><Th>Gross</Th><Th>TDS</Th><Th>PF</Th><Th>Net</Th><Th>Status</Th>
+                    <Th></Th><Th>Pay Period</Th><Th>Gross</Th><Th>TDS</Th><Th>PF</Th><Th>Net</Th><Th>Status</Th>
                   </tr>
                 </Thead>
                 <Tbody>
                   {(!payrollRuns || payrollRuns.length === 0) ? (
-                    <Tr><Td colSpan={6} className="text-center text-gray-400 py-10 text-sm">
+                    <Tr><Td colSpan={7} className="text-center text-gray-400 py-10 text-sm">
                       No payroll runs yet — generate one above from approved timesheets.
                     </Td></Tr>
                   ) : payrollRuns.map(pr => (
-                    <Tr key={pr.id}>
-                      <Td className="text-xs text-gray-700">{pr.pay_period_start} – {pr.pay_period_end}</Td>
-                      <Td>{fmt(pr.total_gross)}</Td>
-                      <Td className="text-red-600 text-sm">-{fmt(pr.total_tds)}</Td>
-                      <Td className="text-blue-600 text-sm">-{fmt(pr.total_pf)}</Td>
-                      <Td className="font-semibold text-green-700">{fmt(pr.total_net)}</Td>
-                      <Td>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                          pr.status === 'paid' ? 'bg-green-100 text-green-700' :
-                          pr.status === 'approved' ? 'bg-blue-100 text-blue-700' :
-                          'bg-gray-100 text-gray-500'
-                        }`}>{pr.status}</span>
-                      </Td>
-                    </Tr>
+                    <PayrollRunRow key={pr.id} pr={pr} />
                   ))}
                 </Tbody>
               </Table>
@@ -398,6 +385,74 @@ export default function FinancePage() {
         </Card>
       )}
     </div>
+  );
+}
+
+interface Payslip {
+  id: string; candidate_id: string; candidate_name: string;
+  gross_pay: number; tds_amount: number; pf_amount: number; net_pay: number;
+  hours_worked: number; pay_rate: number;
+}
+
+function PayrollRunRow({ pr }: { pr: PayrollRun }) {
+  const [open, setOpen] = useState(false);
+  const { data: payslips, loading } = useFetch<Payslip[]>(open ? `/erp/payroll-runs/${pr.id}/payslips` : null);
+  return (
+    <>
+      <Tr className="cursor-pointer" onClick={() => setOpen(o => !o)}>
+        <Td className="w-6">{open ? <ChevronDown className="h-3.5 w-3.5 text-gray-400" /> : <ChevronRight className="h-3.5 w-3.5 text-gray-400" />}</Td>
+        <Td className="text-xs text-gray-700">{pr.pay_period_start} – {pr.pay_period_end}</Td>
+        <Td>{fmt(pr.total_gross)}</Td>
+        <Td className="text-red-600 text-sm">-{fmt(pr.total_tds)}</Td>
+        <Td className="text-blue-600 text-sm">-{fmt(pr.total_pf)}</Td>
+        <Td className="font-semibold text-green-700">{fmt(pr.total_net)}</Td>
+        <Td>
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+            pr.status === 'paid' ? 'bg-green-100 text-green-700' :
+            pr.status === 'approved' ? 'bg-blue-100 text-blue-700' :
+            'bg-gray-100 text-gray-500'
+          }`}>{pr.status}</span>
+        </Td>
+      </Tr>
+      {open && (
+        <Tr data-testid="payslip-drilldown">
+          <Td colSpan={7} className="bg-gray-50 p-0">
+            {loading ? (
+              <div className="flex justify-center py-6"><Spinner size="sm" /></div>
+            ) : !payslips || payslips.length === 0 ? (
+              <div className="text-center text-gray-400 py-6 text-xs">No payslips in this run.</div>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-400 border-b border-gray-200">
+                    <th className="text-left font-medium py-2 pl-10">Candidate</th>
+                    <th className="text-right font-medium py-2">Hours</th>
+                    <th className="text-right font-medium py-2">Rate</th>
+                    <th className="text-right font-medium py-2">Gross</th>
+                    <th className="text-right font-medium py-2">TDS</th>
+                    <th className="text-right font-medium py-2">PF</th>
+                    <th className="text-right font-medium py-2 pr-10">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payslips.map(ps => (
+                    <tr key={ps.id} className="border-b border-gray-100 last:border-0">
+                      <td className="py-2 pl-10 text-gray-700">{ps.candidate_name}</td>
+                      <td className="py-2 text-right">{ps.hours_worked}</td>
+                      <td className="py-2 text-right">{fmt(ps.pay_rate)}</td>
+                      <td className="py-2 text-right">{fmt(ps.gross_pay)}</td>
+                      <td className="py-2 text-right text-red-600">-{fmt(ps.tds_amount)}</td>
+                      <td className="py-2 text-right text-blue-600">-{fmt(ps.pf_amount)}</td>
+                      <td className="py-2 text-right pr-10 font-semibold text-green-700">{fmt(ps.net_pay)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Td>
+        </Tr>
+      )}
+    </>
   );
 }
 

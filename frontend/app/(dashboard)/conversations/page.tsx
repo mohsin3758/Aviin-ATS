@@ -107,6 +107,13 @@ function ComposePane({
   const [showCc, setShowCc] = useState(false);
   const [showBcc, setShowBcc] = useState(false);
   const [subject, setSubject] = useState(initial.subject||'');
+  // BUG FIX (2026-08-10 audit): picking a template only ever copied its raw
+  // text into the editor and discarded the template id — POST /communications/
+  // send accepts template_id but this composer never sent one, so no send
+  // was ever attributed to a template (sent_count stayed 0 forever) and
+  // real personalization (server-side, now fixed) never had a template to
+  // key off. Tracked here and threaded through every send call below.
+  const [templateId, setTemplateId] = useState<string>('');
   const [channel, setChannel] = useState<'email'|'whatsapp'>((initial.channel as any)||'email');
   const [sending, setSending] = useState(false);
   const [autoSaved, setAutoSaved] = useState('');
@@ -239,11 +246,12 @@ function ComposePane({
         // Also log to candidate_messages if candidate
         if (to.id) {
           await apiFetch('/communications/send',{method:'POST',body:JSON.stringify({
-            candidate_id:to.id, channel:'email', subject, message:body, cc:cc||undefined
+            candidate_id:to.id, channel:'email', subject, message:body, cc:cc||undefined,
+            template_id: templateId||undefined,
           })}).catch(()=>{});
         }
       } else {
-        await onSend({candidate_id:to.id||undefined,to_email:!to.id?to.email:undefined,channel,subject,message:body,cc:cc||undefined,bcc:bcc||undefined});
+        await onSend({candidate_id:to.id||undefined,to_email:!to.id?to.email:undefined,channel,subject,message:body,cc:cc||undefined,bcc:bcc||undefined,template_id:templateId||undefined});
       }
       if (draftId) await apiFetch('/communications/drafts/'+draftId,{method:'DELETE'}).catch(()=>{});
       onDiscard(); // close compose pane after successful send
@@ -419,7 +427,7 @@ function ComposePane({
               <>
                 <select onChange={e=>{
                   const t=templates.find((x:any)=>x.id===e.target.value);
-                  if(t){setSubject(p=>t.subject||p);if(bodyRef.current)bodyRef.current.innerHTML=t.body_html||'';}
+                  if(t){setSubject(p=>t.subject||p);if(bodyRef.current)bodyRef.current.innerHTML=t.body_html||'';setTemplateId(t.id);}
                   e.target.value='';
                 }} style={{fontSize:'11px',border:'1px solid #e2e8f0',borderRadius:'5px',padding:'3px 6px',color:'#374151',cursor:'pointer',maxWidth:'120px'}}>
                   <option value="">Templates...</option>

@@ -341,6 +341,22 @@ function RequisitionsPageInner() {
   const [workModeFilter, setWorkModeFilter] = useState('');
   const [skillInput, setSkillInput] = useState('');
   const [error, setError] = useState('');
+  // BUG FIX (2026-08-10 audit): JD Templates had zero integration into
+  // requisition creation — 0 of 26 real requisitions ever used template
+  // content, and there was no picker on this form at all. Fetches the
+  // real jd_text via the detail endpoint (also increments usage_count,
+  // matching the same fix applied to the JD Templates page's own preview).
+  const { data: jdTemplates } = useFetch<any[]>('/jd-templates');
+  const [applyingTemplate, setApplyingTemplate] = useState(false);
+  async function applyJdTemplate(templateId: string) {
+    if (!templateId) return;
+    setApplyingTemplate(true);
+    try {
+      const full = await apiFetch(`/jd-templates/${templateId}`);
+      setForm(f => ({ ...f, description: full.jd_text || f.description }));
+    } catch { /* best-effort — leave existing description untouched */ }
+    finally { setApplyingTemplate(false); }
+  }
 
   const { data: rawReqs, loading, refetch } = useFetch<any>('/requisitions');
   const { data: stageCounts } = useFetch<any>('/pipeline/req-stage-counts');
@@ -757,6 +773,23 @@ function RequisitionsPageInner() {
 
         {/* ── Section 7: Job Description / Notes ─────────────────────────── */}
         <SectionDivider label="Job Description / Notes" />
+        {jdTemplates && jdTemplates.length > 0 && (
+          <FormField label="">
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+              <select
+                data-testid="jd-template-picker"
+                disabled={applyingTemplate}
+                defaultValue=""
+                onChange={e => { if (e.target.value) applyJdTemplate(e.target.value); e.target.value = ''; }}
+                style={{ ...inputStyle, maxWidth: '260px' }}
+              >
+                <option value="">{applyingTemplate ? 'Loading...' : 'Start from JD Template...'}</option>
+                {jdTemplates.map((t: any) => <option key={t.id} value={t.id}>{t.title}</option>)}
+              </select>
+              <span style={{ fontSize: '12px', color: '#94a3b8' }}>Fills the description below — you can still edit it.</span>
+            </div>
+          </FormField>
+        )}
         <FormField label="">
           <textarea
             style={{ ...inputStyle, minHeight: '120px', resize: 'vertical', lineHeight: '1.6' }}

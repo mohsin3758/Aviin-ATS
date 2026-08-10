@@ -3,6 +3,7 @@ Background scheduler — replaces pg_cron (not available).
 Runs inside the FastAPI process via APScheduler.
 Jobs: retention bank release, loyalty milestones, KAE months, n8n triggers.
 """
+import fcntl
 import httpx
 import logging
 from datetime import date, datetime, timedelta, timezone
@@ -13,6 +14,30 @@ logger = logging.getLogger(__name__)
 
 N8N_BASE = "http://n8n:5678"
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+
+# The backend runs `uvicorn --workers 2` (Dockerfile), so start_scheduler()
+# is called once per worker process at FastAPI lifespan startup — with no
+# guard, every cron job (retention bank, SLA escalations, interview
+# reminders, etc.) would fire twice, once per worker, at every trigger.
+# A plain flock on a fixed path is enough since both workers share one
+# container filesystem: whichever worker wins the non-blocking lock owns
+# the scheduler for the container's lifetime; the file handle is kept open
+# in a module global deliberately, never closed, so the lock is held for
+# as long as that worker process runs. The losing worker still serves HTTP
+# requests normally — it just never registers any cron job.
+_SCHEDULER_LOCK_PATH = "/tmp/aviin_scheduler.lock"
+_scheduler_lock_fh = None
+
+
+def _acquire_scheduler_lock() -> bool:
+    global _scheduler_lock_fh
+    try:
+        fh = open(_SCHEDULER_LOCK_PATH, "w")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _scheduler_lock_fh = fh  # keep open for process lifetime
+        return True
+    except (IOError, OSError):
+        return False
 
 
 async def _notify_n8n(path: str, payload: dict) -> bool:
@@ -457,7 +482,16 @@ async def send_interview_reminders():
     from email.mime.multipart import MIMEMultipart
     try:
         async with db.system_conn() as conn:
-            tenants = await conn.fetch("SELECT id FROM tenants WHERE is_active=TRUE")
+            # BUG FIX (2026-08-10 audit): `tenants` has no `is_active` column
+            # at all (confirmed: id, name, slug, created_at,
+            # permission_enforcement_enabled) — this WHERE clause raised
+            # `column "is_active" does not exist` on every single run since
+            # this job was written, caught by the outer try/except below and
+            # silently logged, meaning this cron has never once reached the
+            # per-tenant loop. Every other scheduler job queries tenants with
+            # a bare `SELECT id FROM tenants` (see process_retention_bank_
+            # releases, check_loyalty_milestones, etc.) — matched here.
+            tenants = await conn.fetch("SELECT id FROM tenants")
         for tenant in tenants:
             tid = str(tenant["id"])
             try:
@@ -572,8 +606,62 @@ async def send_interview_reminders():
         logger.error(f"send_interview_reminders error: {e}")
 
 
+async def process_duplicate_scan():
+    """Daily 03:30 IST: run the P35 duplicate-candidate scan for every
+    tenant. BUG FIX (2026-08-10 audit) — the scan was manual-button-only
+    (POST /duplicates/scan), so the list only ever reflected whoever last
+    remembered to click it. Same email/phone matching logic as the manual
+    endpoint, just run on a schedule instead of requiring a human trigger.
+    """
+    logger.info("scheduler: running duplicate-candidate scan")
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    email_dups = await conn.fetch("""
+                        SELECT c1.id AS id1, c2.id AS id2, 'email' AS field
+                        FROM candidates c1
+                        JOIN candidates c2 ON c1.email=c2.email
+                          AND c1.id < c2.id AND c2.tenant_id=c1.tenant_id
+                        WHERE c1.tenant_id=$1 AND c1.email IS NOT NULL
+                          AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
+                    """, tid)
+                    phone_dups = await conn.fetch("""
+                        SELECT c1.id AS id1, c2.id AS id2, 'phone' AS field
+                        FROM candidates c1
+                        JOIN candidates c2 ON c1.phone=c2.phone
+                          AND c1.id < c2.id AND c2.tenant_id=c1.tenant_id
+                        WHERE c1.tenant_id=$1 AND c1.phone IS NOT NULL AND c1.phone != ''
+                          AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
+                    """, tid)
+                    inserted = 0
+                    for row in list(email_dups) + list(phone_dups):
+                        result = await conn.execute("""
+                            INSERT INTO duplicate_candidates
+                              (tenant_id,candidate_id_1,candidate_id_2,match_field)
+                            VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING
+                        """, tid, row["id1"], row["id2"], row["field"])
+                        if result and result.endswith(" 1"):
+                            inserted += 1
+                    if inserted:
+                        logger.info(f"Duplicate scan: {inserted} new pairs for tenant {tid}")
+            except Exception as e:
+                logger.error(f"Duplicate scan failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_duplicate_scan error: {e}")
+
+
 def start_scheduler():
-    """Register and start all jobs."""
+    """Register and start all jobs.
+
+    Cross-worker guard: only the worker that wins _acquire_scheduler_lock()
+    actually registers/runs any job — see the module-level comment above.
+    """
+    if not _acquire_scheduler_lock():
+        logger.info("APScheduler: another worker already owns the scheduler lock — skipping registration in this worker")
+        return
     # Daily at 02:00 IST
     scheduler.add_job(process_retention_bank_releases, "cron", hour=2, minute=0,
 
@@ -618,6 +706,11 @@ def start_scheduler():
     # the granular activity data ages out.
     scheduler.add_job(purge_old_device_monitoring_data, "cron", hour=3, minute=0,
                       id="device_monitoring_purge", replace_existing=True)
+    # Daily at 03:30 IST — P35 duplicate-candidate scan (2026-08-10 audit
+    # fix: was manual-button-only, so the list went stale the moment
+    # nobody remembered to click it).
+    scheduler.add_job(process_duplicate_scan, "cron", hour=3, minute=30,
+                      id="duplicate_scan", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

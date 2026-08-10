@@ -930,6 +930,24 @@ async def process_email_for_resume(
         except Exception as _cpd_err:
             print(f'[Phase G] cpd write failed: {_cpd_err}')
 
+        # BUG FIX (2026-08-10 audit): document_uploaded is a defined
+        # candidate_activities type nothing ever wrote — every real resume
+        # intake (the highest-volume real path in the app) left zero trace
+        # on the candidate's own Activity Timeline. Best-effort, same
+        # try/except shape as the parsed_data write right above — must
+        # never be able to take the resume/candidate insert down with it.
+        try:
+            await conn.execute(
+                """INSERT INTO candidate_activities
+                   (tenant_id,candidate_id,activity_type,title,description)
+                   VALUES ($1,$2,'document_uploaded',$3,$4)""",
+                tenant_id, candidate_id,
+                f"Resume received via {job_board or 'email'}",
+                file_name or '',
+            )
+        except Exception as _act_err:
+            print(f'[Phase G] activity write failed: {_act_err}')
+
     await conn.execute("""
         UPDATE imap_messages SET auto_processed=TRUE,process_status='done',candidate_id=$1
         WHERE id=$2""", candidate_id, msg_id)

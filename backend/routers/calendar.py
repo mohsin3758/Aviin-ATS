@@ -100,6 +100,17 @@ async def from_interview(interview_id: str, actor: Actor = Depends(get_actor)):
             ON CONFLICT DO NOTHING RETURNING *
         """, actor.tenant_id, interview_id, actor.user_id, uid, title, desc,
              start, end, iv["location"], iv["meeting_link"], att, ics)
+        if not row:
+            # BUG FIX (2026-08-10 audit): the deterministic event_uid means
+            # a second call for the same interview always hit ON CONFLICT
+            # DO NOTHING with no fallback read — download_url came back
+            # null with no error shown, so the Download .ics button
+            # silently did nothing on the second click. Fetch the existing
+            # row instead of leaving the caller with nothing.
+            row = await conn.fetchrow(
+                "SELECT * FROM calendar_events WHERE tenant_id=$1 AND event_uid=$2",
+                actor.tenant_id, uid,
+            )
     return {"ics": ics, "attendees": att,
             "download_url": f"/calendar/{str(row['id'])}/download" if row else None}
 

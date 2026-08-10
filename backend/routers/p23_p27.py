@@ -201,9 +201,12 @@ async def preview_template(tmpl_id: str, variables: dict, actor: Actor=Depends(g
         if not row: raise HTTPException(404,"Not found")
     subject = row['subject']
     body = row['body_html']
+    # BUG FIX (2026-08-10 audit): substituted {{double_brace}} while every
+    # real template row uses {single_brace} — preview always returned the
+    # template byte-for-byte unsubstituted, regardless of what was passed.
     for k,v in variables.items():
-        subject = subject.replace(f'{{{{{k}}}}}', str(v))
-        body    = body.replace(f'{{{{{k}}}}}', str(v))
+        subject = subject.replace(f'{{{k}}}', str(v))
+        body    = body.replace(f'{{{k}}}', str(v))
     return {"subject": subject, "body_html": body}
 
 # ── P24: Interview Schedules ──────────────────────────────────
@@ -279,6 +282,33 @@ async def _suggest_interviewer(conn, tenant_id: str, scheduled_at, duration_mins
     return dict(rows[0]) if rows else None
 
 
+async def _has_conflict(conn, tenant_id: str, interviewer_id: str, scheduled_at, duration_mins: int,
+                         exclude_interview_id: Optional[str] = None) -> bool:
+    """Real overlap check for a SPECIFIC interviewer — used to hard-block a
+    double-booking regardless of whether interviewer_id was auto-picked
+    (which already avoids conflicts by construction, so this is a cheap
+    no-op there) or supplied explicitly by the caller (2026-08-10 audit:
+    this path had no conflict check at all — reproduced two identical
+    double-bookings for the same interviewer, same slot, both returning
+    200). exclude_interview_id lets a reschedule of interview X ignore X's
+    own existing row.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT bool_or(
+                 tstzrange(i.scheduled_at, i.scheduled_at + make_interval(mins => i.duration_mins))
+                 && tstzrange($3::timestamptz, $3::timestamptz + make_interval(mins => $4::int))
+               ) AS has_conflict
+        FROM interview_schedules i
+        WHERE i.tenant_id = $1 AND i.interviewer_id = $2
+          AND i.status NOT IN ('cancelled','completed')
+          AND ($5::uuid IS NULL OR i.id <> $5::uuid)
+        """,
+        tenant_id, interviewer_id, scheduled_at, duration_mins, exclude_interview_id,
+    )
+    return bool(row and row["has_conflict"])
+
+
 @interview_router.get("/suggest-interviewer")
 async def suggest_interviewer(scheduled_at: str, duration_mins: int = 45, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -292,10 +322,13 @@ async def suggest_interviewer(scheduled_at: str, duration_mins: int = 45, actor:
 async def schedule_interview(body: InterviewIn, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         interviewer_id = body.interviewer_id
+        scheduled_dt = _to_dt(body.scheduled_at)
         if not interviewer_id:
-            auto = await _suggest_interviewer(conn, actor.tenant_id, _to_dt(body.scheduled_at), body.duration_mins)
+            auto = await _suggest_interviewer(conn, actor.tenant_id, scheduled_dt, body.duration_mins)
             if auto:
                 interviewer_id = auto["id"]
+        elif await _has_conflict(conn, actor.tenant_id, interviewer_id, scheduled_dt, body.duration_mins):
+            raise HTTPException(409, "This interviewer already has an overlapping interview at that time")
         row = await conn.fetchrow("""
             INSERT INTO interview_schedules
               (tenant_id,application_id,candidate_id,requisition_id,interviewer_id,
@@ -304,7 +337,7 @@ async def schedule_interview(body: InterviewIn, actor: Actor=Depends(get_actor))
             RETURNING *
         """, actor.tenant_id, body.application_id, body.candidate_id,
              body.requisition_id, interviewer_id, body.interview_type,
-             _to_dt(body.scheduled_at), body.duration_mins, body.mode,
+             scheduled_dt, body.duration_mins, body.mode,
              body.meeting_link, body.location, body.notes)
         # Log activity
         await conn.execute("""
@@ -319,31 +352,26 @@ async def schedule_interview(body: InterviewIn, actor: Actor=Depends(get_actor))
 @interview_router.patch("/{interview_id}/status")
 async def update_interview_status(interview_id: str, body: dict,
                                    actor: Actor=Depends(get_actor)):
+    # BUG FIX (2026-08-10 audit): unconditional SET wiped feedback/rating to
+    # NULL on every call, including a bare status-only update (e.g. marking
+    # Completed with no feedback field in the request body) — COALESCE
+    # preserves whatever was already on file when the caller doesn't send a
+    # replacement value. status has no such guard: a genuine status change
+    # (e.g. correcting Completed -> Cancelled) should always take effect.
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE interview_schedules SET
-              status=$1, feedback=$2, rating=$3
+              status=COALESCE($1,status), feedback=COALESCE($2,feedback), rating=COALESCE($3,rating)
             WHERE id=$4 AND tenant_id=$5 RETURNING *
         """, body.get('status'), body.get('feedback'), body.get('rating'),
              interview_id, actor.tenant_id)
         if not row: raise HTTPException(404,"Not found")
     return dict(row)
 
-@interview_router.get("/upcoming")
-async def upcoming_interviews(actor: Actor=Depends(get_actor)):
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
-            SELECT i.*, c.full_name AS candidate_name,
-                   u.full_name AS interviewer_name, r.title AS role_title
-            FROM interview_schedules i
-            JOIN candidates c ON c.id=i.candidate_id
-            LEFT JOIN users u ON u.id=i.interviewer_id
-            LEFT JOIN requisitions r ON r.id=i.requisition_id
-            WHERE i.tenant_id=$1 AND i.status='scheduled'
-              AND i.scheduled_at >= now()
-            ORDER BY i.scheduled_at ASC LIMIT 20
-        """, actor.tenant_id)
-    return [dict(r) for r in rows]
+# GET /interviews/upcoming removed (2026-08-10 audit) — zero frontend/test
+# callers ever existed; the real "upcoming interviews" surface is
+# GET /auto-interview/list (phase3.py), which every UI actually uses.
+
 @interview_router.post("/{interview_id}/send-reminder")
 async def send_interview_reminder(interview_id: str, actor: Actor=Depends(get_actor)):
     """Send an email reminder for a scheduled interview."""
@@ -364,8 +392,8 @@ async def send_interview_reminder(interview_id: str, actor: Actor=Depends(get_ac
         if row['status'] != 'scheduled':
             raise HTTPException(400, "Interview is not in scheduled state")
         # Update reminder_sent_at
-        await conn.execute(
-            "UPDATE interview_schedules SET reminder_sent_at=now() WHERE id=$1 AND tenant_id=$2",
+        sent_row = await conn.fetchrow(
+            "UPDATE interview_schedules SET reminder_sent_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING reminder_sent_at",
             interview_id, actor.tenant_id)
     # Send email via tenant SMTP
     sent = False
@@ -417,7 +445,9 @@ async def send_interview_reminder(interview_id: str, actor: Actor=Depends(get_ac
                 await _conn.close()
         except Exception as exc:
             print(f"Reminder email error: {exc}")
-    return {"sent": sent, "reminder_sent_at": str(row['scheduled_at']), "channel": "email" if sent else "none"}
+    # BUG FIX (2026-08-10 audit): this used to return the interview's own
+    # scheduled_at (start time), mislabeled as when the reminder was sent.
+    return {"sent": sent, "reminder_sent_at": str(sent_row['reminder_sent_at']), "channel": "email" if sent else "none"}
 
 # ── P25: Client Portal ────────────────────────────────────────
 client_portal_router = APIRouter(prefix="/client-portal", tags=["client-portal"])

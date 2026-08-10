@@ -6,6 +6,7 @@ from pydantic import BaseModel
 import httpx
 import db
 from deps import Actor, get_actor
+from services.dedup_service import merge_duplicate_candidates as _dedup_merge
 
 N8N_BASE = "http://n8n:5678"
 
@@ -89,11 +90,15 @@ tags_router = APIRouter(prefix="/candidate-tags", tags=["candidate-tags"])
 
 @tags_router.get("")
 async def list_tags(actor: Actor=Depends(get_actor)):
+    # BUG FIX (2026-08-10 audit): usage_count counted soft-deleted
+    # candidates forever, so it permanently over-reported vs. the real
+    # filtered result (3 vs 2 in a live check) and never shrank.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
-            SELECT ct.*, COUNT(ctm.candidate_id) AS usage_count
+            SELECT ct.*, COUNT(ctm.candidate_id) FILTER (WHERE c.is_active IS NOT FALSE) AS usage_count
             FROM candidate_tags ct
             LEFT JOIN candidate_tag_map ctm ON ctm.tag_id=ct.id
+            LEFT JOIN candidates c ON c.id=ctm.candidate_id
             WHERE ct.tenant_id=$1
             GROUP BY ct.id ORDER BY ct.name
         """, actor.tenant_id)
@@ -119,19 +124,35 @@ async def assign_tags(candidate_id: str, tag_ids: List[str] = Body(...),
     # frontend has always sent it as a JSON array body, so every "add tag"
     # call 422'd silently (empty catch{}) since this endpoint was built.
     async with db.tenant_conn(actor.tenant_id) as conn:
-        for tag_id in tag_ids:
+        # BUG FIX (2026-08-10 audit): candidate_tag_map had zero RLS and
+        # neither endpoint verified candidate_id/tag_id belonged to the
+        # actor's own tenant — now enforced at the DB level (RLS, see
+        # sql/47) and explicitly here too, for a clean 404 instead of a
+        # silent no-op if a cross-tenant id is ever passed.
+        cand_ok = await conn.fetchval(
+            "SELECT 1 FROM candidates WHERE id=$1 AND tenant_id=$2", candidate_id, actor.tenant_id)
+        if not cand_ok:
+            raise HTTPException(404, "Candidate not found")
+        real_tag_ids = await conn.fetch(
+            "SELECT id FROM candidate_tags WHERE id=ANY($1::uuid[]) AND tenant_id=$2",
+            tag_ids, actor.tenant_id)
+        real_ids = [str(r["id"]) for r in real_tag_ids]
+        for tag_id in real_ids:
             await conn.execute("""
                 INSERT INTO candidate_tag_map (candidate_id,tag_id,tagged_by)
                 VALUES ($1,$2,$3) ON CONFLICT DO NOTHING
             """, candidate_id, tag_id, actor.user_id)
-    return {"assigned": len(tag_ids)}
+    return {"assigned": len(real_ids)}
 
 @tags_router.delete("/remove")
 async def remove_tag(candidate_id: str, tag_id: str, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        await conn.execute(
-            "DELETE FROM candidate_tag_map WHERE candidate_id=$1 AND tag_id=$2",
-            candidate_id, tag_id)
+        await conn.execute("""
+            DELETE FROM candidate_tag_map ctm
+            USING candidates c
+            WHERE ctm.candidate_id=$1 AND ctm.tag_id=$2
+              AND c.id=ctm.candidate_id AND c.tenant_id=$3
+        """, candidate_id, tag_id, actor.tenant_id)
     return {"removed": True}
 
 @tags_router.get("/candidate/{candidate_id}")
@@ -280,10 +301,15 @@ async def scan_duplicates(background_tasks: BackgroundTasks,
 
 @dup_router.get("")
 async def list_duplicates(status: Optional[str]='pending', actor: Actor=Depends(get_actor)):
+    # BUG FIX (2026-08-10 audit): the list never returned phone, even
+    # though 100% of real pairs are phone matches — the UI could only show
+    # two different emails plus a "phone" badge with no way to actually
+    # see the shared value before merging. Now returns both phones so the
+    # UI can render whichever field actually matched (dc.match_field).
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
-            SELECT dc.*, c1.full_name AS name1, c1.email AS email1,
-                   c2.full_name AS name2, c2.email AS email2
+            SELECT dc.*, c1.full_name AS name1, c1.email AS email1, c1.phone AS phone1,
+                   c2.full_name AS name2, c2.email AS email2, c2.phone AS phone2
             FROM duplicate_candidates dc
             JOIN candidates c1 ON c1.id=dc.candidate_id_1
             JOIN candidates c2 ON c2.id=dc.candidate_id_2
@@ -304,24 +330,26 @@ async def dismiss_duplicate(dup_id: str, actor: Actor=Depends(get_actor)):
 
 @dup_router.patch("/{dup_id}/merge")
 async def merge_duplicate(dup_id: str, actor: Actor=Depends(get_actor)):
-    """Keep candidate_id_1, transfer candidate_id_2's applications, deactivate it."""
+    """Keep candidate_id_1, transfer candidate_id_2's data into it, deactivate it.
+
+    BUG FIX (2026-08-10 audit): this used to hand-roll only an applications
+    re-link, which silently orphaned the discarded candidate's resume_files
+    and candidate_parsed_data on a now-hidden (is_active=false) record —
+    unreachable from the kept candidate afterward. Now reuses the fuller
+    dedup_service.merge_duplicate_candidates() (resume_files, applications,
+    candidate_parsed_data re-link + missing-field/skills backfill), the
+    same function the resume-intake duplicate-merge flow already uses —
+    one merge implementation instead of two divergent ones.
+    """
     async with db.tenant_conn(actor.tenant_id) as conn:
         dup = await conn.fetchrow(
             "SELECT candidate_id_1, candidate_id_2 FROM duplicate_candidates WHERE id=$1 AND tenant_id=$2",
             dup_id, actor.tenant_id)
         if not dup: raise HTTPException(404, "Not found")
-        keep_id, discard_id = dup["candidate_id_1"], dup["candidate_id_2"]
-        await conn.execute("""
-            UPDATE applications SET candidate_id=$1
-            WHERE candidate_id=$2 AND tenant_id=$3
-              AND requisition_id NOT IN (
-                  SELECT requisition_id FROM applications WHERE candidate_id=$1)
-        """, keep_id, discard_id, actor.tenant_id)
-        await conn.execute(
-            "UPDATE candidates SET is_active=false WHERE id=$1 AND tenant_id=$2",
-            discard_id, actor.tenant_id)
+        keep_id, discard_id = str(dup["candidate_id_1"]), str(dup["candidate_id_2"])
+        merge_result = await _dedup_merge(conn, actor.tenant_id, keep_id, discard_id)
         row = await conn.fetchrow("""
             UPDATE duplicate_candidates SET status='merged', resolved_at=now(),
               resolved_by=$1 WHERE id=$2 AND tenant_id=$3 RETURNING *
         """, actor.user_id, dup_id, actor.tenant_id)
-    return dict(row)
+    return {**dict(row), "merge_detail": merge_result}

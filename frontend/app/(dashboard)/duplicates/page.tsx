@@ -99,10 +99,16 @@ export default function DuplicatesPage() {
                   <td style={{ padding: '12px 14px' }}>
                     <div style={{ fontSize: '13px', fontWeight: '700', color: '#0f172a' }}>{r.name1}</div>
                     <div style={{ fontSize: '11px', color: '#64748b' }}>{r.email1 || 'no email'}</div>
+                    {/* BUG FIX (2026-08-10 audit): 100% of real pairs are
+                        phone matches, but the row never showed phone at
+                        all — a recruiter had no way to sanity-check what
+                        actually matched before an irreversible merge. */}
+                    {r.phone1 && <div style={{ fontSize: '11px', color: r.match_field === 'phone' ? '#166534' : '#94a3b8', fontWeight: r.match_field === 'phone' ? 700 : 400 }}>{r.phone1}</div>}
                   </td>
                   <td style={{ padding: '12px 14px' }}>
                     <div style={{ fontSize: '13px', fontWeight: '700', color: '#0f172a' }}>{r.name2}</div>
                     <div style={{ fontSize: '11px', color: '#64748b' }}>{r.email2 || 'no email'}</div>
+                    {r.phone2 && <div style={{ fontSize: '11px', color: r.match_field === 'phone' ? '#166534' : '#94a3b8', fontWeight: r.match_field === 'phone' ? 700 : 400 }}>{r.phone2}</div>}
                   </td>
                   <td style={{ padding: '12px 14px' }}>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: '600', padding: '3px 8px', borderRadius: '6px', background: r.match_field === 'email' ? '#eff6ff' : '#f0fdf4', color: r.match_field === 'email' ? '#1e40af' : '#166534' }}>

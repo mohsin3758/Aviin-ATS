@@ -9,7 +9,7 @@ import db
 import events
 import ai_router
 from deps import Actor, get_actor, require_role
-from routers.p23_p27 import _suggest_interviewer
+from routers.p23_p27 import _suggest_interviewer, _has_conflict
 from routers.pipeline_stages import is_valid_stage
 from routers.whatsapp import _ensure_consent
 
@@ -133,6 +133,12 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
             auto = await _suggest_interviewer(conn, actor.tenant_id, scheduled_dt, body.duration_mins)
             if auto:
                 interviewer_id = auto["id"]
+        elif await _has_conflict(conn, actor.tenant_id, interviewer_id, scheduled_dt, body.duration_mins):
+            # BUG FIX (2026-08-10 audit): an explicitly-chosen interviewer
+            # was never checked for a real conflict on this, the actual
+            # scheduling path the Interview Scheduler UI calls — reproduced
+            # a live double-booking pre-fix.
+            raise HTTPException(409, "This interviewer already has an overlapping interview at that time")
 
         # Generate ICS
         attendees = [app["email"]] if app["email"] else []
@@ -364,6 +370,18 @@ HR Team, {company}"""
             conn, actor.tenant_id, "offer.created",
             {"offer_id": offer_id, "application_id": body.application_id},
             f"offer.created:{offer_id}",
+        )
+        # BUG FIX (2026-08-10 audit): offer creation wrote event_outbox +
+        # audit_log but never a candidate_activities row — 'offer_made' was
+        # a defined activity type nothing ever wrote, so the Candidate 360
+        # timeline never showed this real, high-signal event.
+        await conn.execute(
+            """INSERT INTO candidate_activities
+               (tenant_id,candidate_id,user_id,activity_type,title,description)
+               VALUES ($1,$2,$3,'offer_made',$4,$5)""",
+            actor.tenant_id, app["candidate_id"], actor.user_id,
+            f"Offer drafted for {app['job_title'] or 'the role'}",
+            f"CTC {body.currency} {body.ctc_offered:,.0f}" + (f", joining {body.joining_date}" if body.joining_date else ""),
         )
 
         # Move to offer stage — 'offer' is a deletable stage (Settings >

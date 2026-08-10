@@ -57,6 +57,24 @@ async def create_offer(body: OfferCreate, actor: Actor = Depends(get_actor)):
             {"offer_id": str(row["id"]), "application_id": body.application_id},
             f"offer.created:{row['id']}",
         )
+        # BUG FIX (2026-08-10 audit): same candidate_activities gap as
+        # phase3.py's auto_generate_offer() — this is the second, separate
+        # offer-creation code path, and it had the identical omission.
+        app = await conn.fetchrow(
+            "SELECT candidate_id, requisition_id FROM applications WHERE id=$1", body.application_id
+        )
+        if app:
+            role = await conn.fetchval(
+                "SELECT title FROM requisitions WHERE id=$1", app["requisition_id"]
+            ) if app["requisition_id"] else None
+            await conn.execute(
+                """INSERT INTO candidate_activities
+                   (tenant_id,candidate_id,user_id,activity_type,title,description)
+                   VALUES ($1,$2,$3,'offer_made',$4,$5)""",
+                actor.tenant_id, app["candidate_id"], actor.user_id,
+                f"Offer drafted for {role or 'the role'}",
+                f"CTC {body.currency} {body.ctc_offered:,.0f}" + (f", joining {body.joining_date}" if body.joining_date else ""),
+            )
 
     return dict(row)
 

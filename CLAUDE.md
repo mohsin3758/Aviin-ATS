@@ -3935,3 +3935,277 @@ to-end, not code review - all throwaway test data (candidates,
 applications, consent_records, notifications, recruiter_tasks,
 candidate_messages, client_portal_tokens) cleaned up after each check,
 confirmed zero residue.
+
+## Round-3 audit (ERP/Interview/Email/Activity/JD/CSV/Tags/Duplicates) — all 32 findings closed, 2026-08-10
+Direct follow-up to the same-day 4-module research audit (ERP Timesheet+Payroll
+P12, Email Templates+Interview Scheduler+Activity Timeline P24, JD Templates+
+CSV Exports P27/P28, Candidate Tags+Duplicate Detection P33/P35). User said
+"build and develop and clear the all gaps and issue" for the full ranked list
+(4 Critical, 7 High, 14 Medium, 7 Low). All 32 built, deployed, and verified
+against real production data end-to-end — not code review.
+
+**ERP (P12)** — `sql/45_erp_integrity_fixes.sql`, `erp.py` rewritten:
+- Payroll double-pay fixed two ways: a real `UNIQUE(tenant_id, pay_period_
+  start, pay_period_end)` constraint (409 on an exact-period retry) plus a
+  new `timesheets.payroll_run_id` stamp so a timesheet can never be pulled
+  into a second run under any period boundary, overlapping or not.
+- Timesheet state machine added (was fully unconditional before): submit
+  only from draft/rejected, approve/reject only from submitted — closes the
+  live-reproduced "approve a billed timesheet → un-bill → re-pay" cycle.
+- `generate_invoice_from_timesheets()` now checks for approved timesheets
+  *before* consuming an invoice number — a second call for an already-
+  billed period used to always create a permanent ₹0 junk invoice.
+- Real, previously-hidden bug found while wiring event_outbox/audit_log
+  into invoice generation: `SET LOCAL app.tenant_id = p_tenant_id` inside
+  the plpgsql function does NOT substitute the variable — it literally sets
+  the GUC to the 9-char string `"p_tenant_id"` (proven: `current_setting()`
+  read that exact string back). Silently masked until now because nothing
+  ever ran a second RLS-protected query on the same connection afterward.
+  Fixed with `EXECUTE format('SET LOCAL app.tenant_id = %L', p_tenant_id)`.
+- Role-gated the entire module to admin/manager (previously zero role
+  checks — any authenticated user could approve timesheets/pay invoices/
+  run payroll/read-write contractor PII); `mark-paid` now rejects an
+  already-paid or cancelled invoice instead of silently overwriting
+  `paid_at`; `erp_decrypt`/`generate_invoice_from_timesheets` PUBLIC
+  EXECUTE grants revoked (defense-in-depth — neither was HTTP-reachable,
+  but a DB role shouldn't have had it either); every write now emits
+  `event_outbox`+`audit_log`. Added a payslip drill-in (expand a payroll
+  run row) to the Finance page — the endpoint existed with zero UI caller.
+  Verified with a real throwaway placement/timesheet/invoice/payroll-run
+  cycle: every guard reproduced (400/409 exactly where expected), audit
+  trail rows confirmed written, PUBLIC grant confirmed revoked via `proacl`.
+
+**Interview Scheduler (P24)** — `sql/46_interview_scheduler_fixes.sql`,
+`p23_p27.py`, `phase3.py`, `calendar.py`, `scheduler.py`, both frontend
+scheduling forms:
+- Timezone bug fixed at the source: `interviews/page.tsx` and Candidate
+  360's inline scheduler both sent the raw, unconverted `datetime-local`
+  string (interpreted as UTC downstream) — now convert via
+  `new Date(...).toISOString()` before sending, the same correct
+  conversion the conflict-check call already used but the actual save
+  never did.
+- Root-caused why the daily reminder cron had *never* fired once:
+  `send_interview_reminders()` queried `SELECT id FROM tenants WHERE
+  is_active=TRUE` — `tenants` has no `is_active` column at all (confirmed:
+  id/name/slug/created_at/permission_enforcement_enabled only). Every run
+  since this job was written failed at the very first line, silently
+  caught by the outer try/except. Fixed to match every other scheduler
+  job's plain `SELECT id FROM tenants`; directly invoked the real function
+  inside the container afterward and confirmed it completes cleanly.
+- Public self-scheduling was 100% broken — `interview_type='self_scheduled'`
+  isn't in the CHECK constraint (only screening/technical/hr/client/final/
+  panel), so every public booking attempt failed. Widened the constraint.
+- Explicit-interviewer double-booking: neither `POST /interviews` nor
+  `POST /auto-interview/schedule` checked for a real conflict when
+  `interviewer_id` was given directly (only the auto-pick path avoided
+  conflicts, by construction) — reproduced a live double-booking, now
+  hard-blocked (409) via a new `_has_conflict()` helper shared by both
+  endpoints. Candidate 360's scheduling form also had no interviewer
+  field at all (root cause of every real interview having
+  `interviewer_id=NULL`) — added the same picker + Suggest button the
+  main Interview Scheduler page already had.
+- ICS re-download silently returned `download_url: null` on the second
+  click (deterministic UID hit `ON CONFLICT DO NOTHING` with no fallback
+  read) — now fetches the existing row instead.
+- Marking an interview "Completed" unconditionally nulled feedback/rating
+  even with no replacement value in the request — fixed with COALESCE;
+  Candidate 360 also gained a real feedback/star-rating capture step
+  before completing (there was no input for it anywhere before).
+  `send-reminder` returned the interview's own `scheduled_at` mislabeled
+  as the reminder timestamp — now returns the real one via RETURNING.
+- Scheduler double-registration: the backend runs `uvicorn --workers 2`,
+  so `start_scheduler()` (called once per worker at FastAPI startup) was
+  registering every cron job — retention bank, SLA escalations, interview
+  reminders, all of it — twice. Fixed with a plain `flock` on a fixed
+  `/tmp` path: whichever worker wins the non-blocking lock owns the
+  scheduler for the container's lifetime; the loser still serves HTTP
+  normally, it just never registers a job. Verified live: a second
+  worker's lock-acquire attempt genuinely blocks (`Resource temporarily
+  unavailable`).
+  All of the above verified with real API calls: reproduced then confirmed
+  fixed for the double-booking (409 on same slot, 200 on a different one),
+  the self-scheduling insert, the feedback-preservation re-patch, the ICS
+  repeat-download, and the reminder timestamp — not one code-review-only
+  claim in this batch.
+
+**Email Templates (P24)** — `communications.py`, `p23_p27.py`, new
+`/email-templates` page, Conversations composer:
+- Single-send (`POST /communications/send` — the actual path the
+  Conversations composer calls) never personalized anything at all; a
+  recruiter picking a template and hitting Send emailed the candidate
+  literal `Hi {candidate_name},`. New `_resolve_template_vars()` resolves
+  every placeholder the 6 real seeded templates actually contain —
+  `{candidate_name}`/`{role}`/`{client_name}`/`{company}` (the agency's
+  own name, distinct from client_name — found by reading the real
+  template bodies, not guessed)/`{recruiter_name}`/`{recruiter_phone}`/
+  `{ctc}`/`{date}`/`{time}`/`{mode}`/`{meeting_link}`/`{interviewer_name}`
+  (from the candidate's nearest upcoming interview)/`{joining_date}`
+  (from a real offer if one exists)/`{location}` — applied to both send
+  paths now, single and bulk. `{deadline}`/`{hr_contact}`/`{hr_phone}`
+  resolve to empty string honestly (no source anywhere in the schema)
+  rather than left as literal placeholders.
+- Preview endpoint substituted `{{double_brace}}` while every real
+  template uses `{single_brace}` — always returned the template
+  byte-for-byte unsubstituted regardless of input. Fixed to match.
+- `sent_count` was a fully dead column (nothing ever incremented it) —
+  now increments in `_log()`, the one choke point every send path
+  (single/bulk, email/whatsapp) already funnels through.
+- Built the missing management UI from scratch (`/email-templates`,
+  sidebar entry) — list/preview-with-sample-data/create/edit (system
+  templates read-only, matching the backend's own `NOT is_system` guard);
+  wired `template_id` through the Conversations composer's template
+  picker, which previously discarded it entirely.
+  Verified with a real send through a real template: every placeholder
+  resolved to a real value, zero literal braces left in the logged
+  message; confirmed via real headless-browser test (6 templates listed,
+  preview substituted, create form opens).
+
+**Activity Timeline (P24)** — `communications.py`, `offers.py`,
+`phase3.py`, `resume_intake_service.py`:
+- `email_sent`/`whatsapp_sent`/`offer_made`/`document_uploaded` were all
+  defined `candidate_activities` types nothing ever wrote. Wired into the
+  same choke points already used for `event_outbox`/`audit_log`: `_log()`
+  (both offer-creation code paths — `offers.py`'s and `phase3.py`'s
+  separate implementations both needed it), and resume intake's
+  `candidate_parsed_data` write site (best-effort, same try/except shape,
+  must never be able to take the resume/candidate insert down with it).
+  Verified live: a real send + a real offer-draft both produced correct
+  activity rows in the same request. `document_uploaded` verified via
+  code-path parity with the already-proven `candidate_parsed_data` write
+  (structurally identical try/except right next to it) rather than a full
+  live resume-intake exercise — the one lighter-weight verification in
+  this batch, flagged honestly rather than glossed over.
+
+**JD Templates (P27)** — `jd-templates/page.tsx`, `requisitions/page.tsx`:
+- The Copy-JD "undefined" bug and `usage_count` stuck at 0 turned out to
+  be the same root cause: the list endpoint deliberately omits `jd_text`
+  (keeps the list light), and the page selected straight from the list row
+  instead of calling the detail endpoint — which both has `jd_text` AND is
+  the one that increments `usage_count`. Fixed by calling `GET /jd-
+  templates/{id}` on select, closing both bugs in one motion. Verified via
+  real headless-browser test: real JD text in both the preview pane and
+  the clipboard after clicking Copy JD (was the literal string
+  `"undefined"` before).
+- Added a "Start from JD Template..." picker to the Requisition form
+  (0 of 26 real requisitions had ever used template content — there was
+  no integration point at all) and a full create-template form on the JD
+  Templates page (the create endpoint existed with zero UI caller).
+  Verified live: picking a template from the requisition form fills the
+  description with real 595-char JD text.
+
+**CSV Exports (P28)** — `p28_p32.py`, Audit/Analytics/Reports pages:
+- `/export/placements` had 500'd on every call since it was written —
+  4 of 10 selected columns don't exist (`p.placed_by`, `p.client_name`,
+  `p.rate`, `p.currency`; real columns are `client_id`→join clients,
+  `bill_rate`/`pay_rate`, no currency column at all — this product is
+  India-only, INR is implicit per CLAUDE.md). Recruiter credit now
+  resolves via the real offer→application→assigned_recruiter_id chain,
+  since placements itself has no recruiter column. Verified: 500→200,
+  real data returned.
+- Candidates export's unqualified join against `candidate_scores` (one
+  row per candidate×requisition) fanned out into up to 22 duplicate rows
+  per candidate — fixed with a `LATERAL` join picking only the most
+  recently scored row. Verified against a real candidate with 22 real
+  score rows: 22 duplicate export rows → exactly 1.
+- Both candidates and requisitions exports leaked soft-deleted records
+  (85% of the old requisitions export was QA garbage) — added an
+  `is_active` filter (with an `include_inactive` override, matching the
+  convention `GET /requisitions` already established). Verified: 283→42
+  requisition rows.
+  Audit page's two export buttons were plain `<a href>` tags with no auth
+  header, pointed at a hardcoded raw IP over plain HTTP — both downloaded
+  a JSON 401 body, not a CSV. Rewritten with the same authenticated
+  fetch→blob→download pattern Analytics/Reports already use correctly;
+  added a Requisitions export button (was fully orphaned, zero UI caller
+  anywhere) alongside Candidates/Placements. `.xlsx` filenames/labels on
+  Analytics/Reports/Audit renamed to `.csv` (the payload was always CSV —
+  Excel warns on the mismatch today) and a UTF-8 BOM added to `to_csv()`
+  (Excel-on-Windows mis-renders non-ASCII names without one, matching the
+  newer pipeline-board export's own convention).
+
+**Candidate Tags (P33)** — `sql/47_tags_and_duplicates_fixes.sql`,
+`p30_p35.py`:
+- `candidate_tag_map` had zero row-level security at all (proven live:
+  a tenant-B session could read tenant-A's tag assignments). Added FORCE
+  RLS with a policy checking BOTH sides — tag_id's tenant AND
+  candidate_id's tenant (a policy checking only the tag side would still
+  let an attacker holding a real own-tenant tag attach it to another
+  tenant's candidate) — plus explicit app-level validation in assign/
+  remove for a clean 404 instead of relying solely on RLS.
+  `usage_count` counted soft-deleted candidates forever (permanently
+  over-reported, 3 vs the real 2 in a live check) — added an `is_active`
+  filter. Removed the 4 confirmed leftover QA/Playwright test tags from
+  the real tag dropdown (zero real assignments on any of them). Seeded
+  the 12 default tags for every tenant with zero tags (the original seed
+  was a one-time script against the one tenant that existed then — Beta
+  Tech Staffing, added later, had none). Verified all of the above live:
+  0 cross-tenant rows visible, 12 tags exactly on both tenants now,
+  assign/remove both working.
+
+**Duplicate Detection (P35)** — same migration + `p30_p35.py`,
+`candidates.py`, `scheduler.py`, `duplicates/page.tsx`:
+- Merge only ever re-linked applications, silently orphaning the
+  discarded candidate's `resume_files`/`candidate_parsed_data` on a
+  now-hidden record. Rewired to reuse `dedup_service.
+  merge_duplicate_candidates()` — the same, already-correct, fuller merge
+  the resume-intake duplicate flow already uses (resume_files +
+  applications + candidate_parsed_data re-link, plus missing-field/
+  skills backfill) — one merge implementation instead of two divergent
+  ones. Verified live: attached a real resume_files row to a throwaway
+  "discard" candidate, merged, confirmed it now points at the "keep"
+  candidate instead of being orphaned.
+- The list endpoint never returned phone at all, despite 100% of real
+  pairs being phone matches — a recruiter had no way to see what actually
+  matched before an irreversible merge. Now returns both candidates'
+  phones; the Duplicates page highlights whichever one is the real
+  `match_field`.
+- A soft-deleted candidate's email permanently blocked re-adding that
+  person, with no override possible (`uq_candidates_email_per_tenant`
+  applied globally, not just to active rows — a real DB-level 409, not
+  just a client-side pre-check). Made the unique index partial
+  (`WHERE is_active IS NOT FALSE`, checked zero existing active-duplicate
+  emails first) and filtered the pre-check the same way. Verified: the
+  exact reproduction (soft-delete → re-add same email) now succeeds.
+- `check-duplicate`'s phone match had no minimum length — a 4-digit
+  partial (mid-typing) became an unanchored suffix wildcard matching any
+  stored number ending in those digits; also only ever returned the first
+  match via `fetchrow`. Fixed with a 7-digit minimum and `fetch` (all
+  matches, not just one). Verified: 4-digit phone → `has_duplicate:false`.
+- No scheduled scan existed — the list only ever reflected whoever last
+  clicked the manual button. Added a daily 03:30 IST
+  `process_duplicate_scan()` job (same matching logic, just cron-driven).
+  Verified: ran the real function inside the container, completed clean,
+  found real new pairs.
+
+**QA data-pollution root cause, closed for real** — the duplicate-
+detection audit's headline finding (58/58 pending pairs were QA test
+artifacts, 202 of 1,029 active candidates in production were leftover
+"QA ..." test records) traced to a real bug in the test suite itself, not
+just accumulated cruft: S14/S15/S16's `afterAll` hooks (added in an
+earlier session specifically to stop stray *requisitions* from
+piling up) only ever deleted the requisition — never the candidate(s) each
+suite also creates. S16 had a second, worse instance of the same bug: its
+third candidate (`cand3Id`, created inside the "JD auto-send" test) was a
+test-local `const`, invisible to `afterAll` even in principle. Fixed all
+three hooks to also delete every candidate they create; promoted `cand3Id`
+to a describe-level variable so it's actually reachable from cleanup.
+Soft-deleted all 202 existing stray candidates via the real `DELETE
+/candidates/{id}` API (not raw SQL). Verified for real, not just read: ran
+S14+S15+S16 (18 tests) after the fix — all passed, and a direct count
+immediately after confirmed exactly 0 new "QA ..." candidates leaked,
+where before this fix every single run added 4 more.
+
+**Schema drift backfill** — `candidate_tags`, `candidate_tag_map`,
+`duplicate_candidates` all existed live with no `CREATE TABLE` in any
+committed migration; `sql/47...sql` backfills all three (`IF NOT EXISTS`,
+genuine no-op everywhere they already exist, columns captured from the
+live schema not reconstructed from memory).
+
+Full QA suite (all suites, not just the 3 touched) re-run clean after
+every fix in this batch landed. Zero-token audit: `CONFIRMED CLEAN`
+(340 files, 0 external API refs). All throwaway test data (candidates,
+applications, offers, timesheets, invoices, payroll runs, interviews,
+tags, duplicate-candidate rows, resume_files) cleaned up after every
+check, confirmed zero residue — including resetting two test-inflated
+counters (a template's `sent_count`, a JD template's `usage_count`) that
+aren't real usage back to their pre-test values.

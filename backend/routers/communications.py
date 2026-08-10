@@ -114,10 +114,108 @@ async def _log(conn, tenant_id, cand_id, app_id, channel, subject, body, status,
                RETURNING id, tracking_token""",
             tenant_id, cand_id, app_id, channel, subject, body, status,
             sent_by, tmpl_id, stage, to_email, cc)
+        if tmpl_id and status == "sent":
+            # sent_count was a fully dead column (2026-08-10 audit) — no
+            # code anywhere incremented it, so every template showed 0 uses
+            # regardless of real traffic. This is the single choke point
+            # every send path (email/whatsapp, single/bulk) already
+            # funnels through.
+            await conn.execute(
+                "UPDATE email_templates SET sent_count = sent_count + 1 WHERE id=$1 AND tenant_id=$2",
+                tmpl_id, tenant_id,
+            )
+        # BUG FIX (2026-08-10 audit): email_sent/whatsapp_sent are defined
+        # candidate_activities types that nothing ever wrote — a candidate
+        # could receive real messages with zero trace on their own Activity
+        # Timeline. This is the single choke point every send path
+        # (single/bulk, email/whatsapp) already funnels through.
+        if cand_id and status == "sent" and channel in ("email", "whatsapp"):
+            await conn.execute(
+                """INSERT INTO candidate_activities
+                   (tenant_id,candidate_id,user_id,activity_type,title,description)
+                   VALUES ($1,$2,$3,$4,$5,$6)""",
+                tenant_id, cand_id, sent_by, f"{channel}_sent",
+                subject or (f"{channel.title()} message sent"),
+                (body or "")[:280],
+            )
         return dict(row) if row else None
     except Exception as ex:
         print(f"Log error: {ex}")
         return None
+
+
+async def _resolve_template_vars(conn, tenant_id: str, candidate_id: Optional[str] = None,
+                                  application_id: Optional[str] = None) -> dict:
+    """Resolves real values for every placeholder the 6 real email_templates
+    rows actually contain (checked directly against production, 2026-08-10
+    audit): {candidate_name}/{name}/{first_name}, {role}, {client_name},
+    {company} (the agency's own name — distinct from client_name, appears
+    in template footers), {recruiter_name}, {recruiter_phone}, {ctc},
+    {date}/{time}/{mode}/{meeting_link}/{interviewer_name} (from the
+    candidate's nearest upcoming interview), {joining_date} (from a real
+    offer if one exists), {location} (the requisition's). Best-effort:
+    any field with no real source (e.g. no linked requisition, no offer
+    yet) resolves to an empty string rather than leaving the literal
+    placeholder in a message a candidate actually receives — this
+    includes {deadline}/{hr_contact}/{hr_phone}, which have no source
+    anywhere in the schema at all.
+    """
+    tenant = await conn.fetchrow("SELECT name FROM tenants WHERE id=$1", tenant_id)
+    company = (tenant["name"] if tenant else None) or "AVIIN Jobs Services"
+
+    row = None
+    if application_id:
+        row = await conn.fetchrow(
+            """SELECT c.full_name, c.expected_ctc,
+                      r.title AS role, r.location, cl.name AS client_name,
+                      u.full_name AS recruiter_name, u.phone AS recruiter_phone,
+                      i.scheduled_at AS interview_at, i.mode, i.meeting_link,
+                      iu.full_name AS interviewer_name,
+                      o.joining_date
+               FROM applications a
+               JOIN candidates c ON c.id = a.candidate_id
+               LEFT JOIN requisitions r ON r.id = a.requisition_id
+               LEFT JOIN clients cl ON cl.id = r.client_id
+               LEFT JOIN users u ON u.id = a.assigned_recruiter_id
+               LEFT JOIN interview_schedules i ON i.application_id = a.id
+                 AND i.status = 'scheduled' AND i.scheduled_at >= now()
+               LEFT JOIN users iu ON iu.id = i.interviewer_id
+               LEFT JOIN offers o ON o.application_id = a.id
+               WHERE a.id = $1 AND a.tenant_id = $2
+               ORDER BY i.scheduled_at ASC, o.created_at DESC LIMIT 1""",
+            application_id, tenant_id,
+        )
+    if not row and candidate_id:
+        row = await conn.fetchrow(
+            """SELECT c.full_name, c.expected_ctc, NULL AS role, c.location,
+                      NULL AS client_name, NULL AS recruiter_name, NULL AS recruiter_phone,
+                      NULL AS interview_at, NULL AS mode, NULL AS meeting_link,
+                      NULL AS interviewer_name, NULL AS joining_date
+               FROM candidates c WHERE c.id = $1 AND c.tenant_id = $2""",
+            candidate_id, tenant_id,
+        )
+    full_name = (row["full_name"] if row else None) or "there"
+    first_name = full_name.split(" ")[0] if full_name else "there"
+    interview_at = row["interview_at"] if row else None
+    joining_date = row["joining_date"] if row else None
+    ctc = row["expected_ctc"] if row else None
+    return {
+        "name": full_name, "first_name": first_name, "candidate_name": full_name,
+        "company": company,
+        "role": (row["role"] if row else None) or "",
+        "client_name": (row["client_name"] if row else None) or "",
+        "location": (row["location"] if row else None) or "",
+        "recruiter_name": (row["recruiter_name"] if row else None) or "",
+        "recruiter_phone": (row["recruiter_phone"] if row else None) or "",
+        "interviewer_name": (row["interviewer_name"] if row else None) or "",
+        "mode": ((row["mode"] if row else None) or "").replace("_", " ").title(),
+        "meeting_link": (row["meeting_link"] if row else None) or "",
+        "ctc": (f"{float(ctc):,.0f}" if ctc else ""),
+        "date": interview_at.strftime("%d %b %Y") if interview_at else "",
+        "time": interview_at.strftime("%I:%M %p") if interview_at else "",
+        "joining_date": joining_date.strftime("%d %b %Y") if joining_date else "",
+        "deadline": "", "hr_contact": "", "hr_phone": "",
+    }
 
 
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://ats.aviinjobs.com")
@@ -520,15 +618,27 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
         else:
             raise HTTPException(400, "Provide candidate_id or to_email")
 
+        # BUG FIX (2026-08-10 audit): this, the single-send path the actual
+        # Conversations composer calls, never personalized anything — a
+        # recruiter picking a template and hitting Send emailed the
+        # candidate literal text like "Hi {candidate_name},". bulk-send
+        # already personalized on name; this now uses the same resolver
+        # (richer: also covers {role}/{client_name}/{recruiter_name}/{ctc}/
+        # {date}/{time}, the placeholders the real templates contain).
+        tvars = await _resolve_template_vars(conn, actor.tenant_id, body.candidate_id, body.application_id) \
+            if (body.candidate_id or body.application_id) else {"name": to_name, "first_name": (to_name or "there").split(" ")[0]}
+        subj_p = _personalize(body.subject, tvars)
+        msg_p = _personalize(body.message, tvars)
+
         if body.channel in ("email", "both"):
             if not to_email: results["email"] = "no_email"
             elif not smtp: results["email"] = "smtp_not_configured"
             else:
-                subj = body.subject or "AVIIN Jobs Services"
+                subj = subj_p or "AVIIN Jobs Services"
                 logged = await _log(conn, actor.tenant_id, body.candidate_id, body.application_id,
-                           "email", subj, body.message, "sent", str(actor.user_id),
+                           "email", subj, msg_p, "sent", str(actor.user_id),
                            body.template_id, body.stage, to_email, body.cc)
-                tracked = _with_tracking_pixel(body.message, logged["tracking_token"] if logged else None)
+                tracked = _with_tracking_pixel(msg_p, logged["tracking_token"] if logged else None)
                 _send_email_bg(smtp, to_email, subj, tracked, body.cc, body.bcc)
                 results["email"] = "sent"
 
@@ -542,24 +652,27 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
             elif body.candidate_id and not await _ensure_consent(conn, actor.tenant_id, body.candidate_id):
                 results["whatsapp"] = "no_consent"
             else:
-                ok = await _send_wa(phone, body.message)
+                ok = await _send_wa(phone, msg_p)
                 st = "sent" if ok else "failed"
                 await _log(conn, actor.tenant_id, body.candidate_id, body.application_id,
-                           "whatsapp", None, body.message, st, str(actor.user_id),
+                           "whatsapp", None, msg_p, st, str(actor.user_id),
                            body.template_id, body.stage, to_email, None)
                 results["whatsapp"] = st
 
         return {"success": True, "results": results, "to": to_name}
 
 
-def _personalize(text: Optional[str], name: Optional[str]) -> Optional[str]:
-    """{name}/{first_name} substitution — matches the {name} placeholder
-    convention _notify_stage_change_bg already uses for WhatsApp templates."""
+def _personalize(text: Optional[str], vars: dict) -> Optional[str]:
+    """Substitutes every {key} placeholder found in `vars` — the single-
+    brace convention every real email_templates row actually uses. Extended
+    (2026-08-10 audit) from the original {name}/{first_name}-only version
+    to also cover {candidate_name}/{role}/{client_name}/{recruiter_name}/
+    {ctc}/{date}/{time}, matching what the real seeded templates contain."""
     if not text:
         return text
-    full = name or "there"
-    first = full.split(" ")[0] if full else "there"
-    return text.replace("{name}", full).replace("{first_name}", first)
+    for k, v in vars.items():
+        text = text.replace(f"{{{k}}}", str(v))
+    return text
 
 
 @router.post("/bulk-send")
@@ -583,11 +696,12 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
         smtp = await _get_smtp(conn, actor.tenant_id)
         sent = failed = skipped = 0
         for cand in cands:
-            msg = _personalize(body.message, cand["full_name"])
+            cvars = await _resolve_template_vars(conn, actor.tenant_id, str(cand["id"]))
+            msg = _personalize(body.message, cvars)
             if body.channel in ("email","both"):
                 if not cand["email"] or not smtp: skipped += 1
                 else:
-                    subj = _personalize(body.subject, cand["full_name"]) or "AVIIN Jobs - Update"
+                    subj = _personalize(body.subject, cvars) or "AVIIN Jobs - Update"
                     # Log first so the send can embed a pixel keyed to this
                     # exact message row; candidate_messages.body stays the
                     # clean original text, the pixel only rides on the SMTP copy.

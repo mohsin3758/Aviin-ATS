@@ -365,30 +365,48 @@ async def check_duplicate(
     phone: str = None,
     actor: Actor = Depends(get_actor),
 ):
+    # BUG FIXES (2026-08-10 audit):
+    # 1. Neither query filtered is_active — a soft-deleted candidate's
+    #    email/phone falsely flagged as a duplicate against a genuinely
+    #    new person.
+    # 2. Short phone input (e.g. a 4-digit partial while typing) became an
+    #    unanchored suffix wildcard matching any stored number ending in
+    #    those digits — now requires at least 7 real digits before
+    #    attempting a match, same as a real Indian local-number length.
+    # 3. fetchrow only ever returned the FIRST match — a candidate
+    #    duplicated three ways looked like one. Now returns every match.
     async with db.tenant_conn(actor.tenant_id) as conn:
         results = []
         if email:
-            row = await conn.fetchrow(
-                f"SELECT {FIELDS} FROM candidates WHERE email ILIKE $1", email.strip())
-            if row:
+            rows = await conn.fetch(
+                f"SELECT {FIELDS} FROM candidates WHERE email ILIKE $1 AND is_active IS NOT FALSE",
+                email.strip())
+            for row in rows:
                 results.append({"match_type": "email", "candidate": dict(row)})
         if phone:
             clean = phone.strip().replace(" ","").replace("-","").replace("+91","").replace("+","")
-            row = await conn.fetchrow(
-                f"SELECT {FIELDS} FROM candidates WHERE REPLACE(REPLACE(REPLACE(phone,'+91',''),'-',''),' ','') ILIKE $1",
-                "%" + clean[-10:])
-            if row:
-                results.append({"match_type": "phone", "candidate": dict(row)})
+            if len(clean) >= 7:
+                rows = await conn.fetch(
+                    f"SELECT {FIELDS} FROM candidates WHERE REPLACE(REPLACE(REPLACE(phone,'+91',''),'-',''),' ','') ILIKE $1"
+                    f" AND is_active IS NOT FALSE",
+                    "%" + clean[-10:])
+                for row in rows:
+                    results.append({"match_type": "phone", "candidate": dict(row)})
         return {"duplicates": results, "has_duplicate": len(results) > 0}
 
 
 @router.post("")
 async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require_permission("candidates", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        # Check for existing candidate with same email (per tenant)
+        # Check for existing ACTIVE candidate with same email (per tenant).
+        # BUG FIX (2026-08-10 audit): previously ignored is_active, so a
+        # soft-deleted candidate's email permanently blocked re-adding that
+        # person with no override possible — sql/47 also made the unique
+        # index itself partial (active rows only) so the INSERT below no
+        # longer hard-409s at the DB level for a soft-deleted match either.
         if body.email:
             existing = await conn.fetchrow(
-                f"SELECT {FIELDS} FROM candidates WHERE email=$1 LIMIT 1",
+                f"SELECT {FIELDS} FROM candidates WHERE email=$1 AND is_active IS NOT FALSE LIMIT 1",
                 body.email.strip().lower())
             if existing:
                 raise HTTPException(409, {
@@ -410,7 +428,7 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
         except Exception as exc:
             if "uq_candidates_email_per_tenant" in str(exc):
                 existing2 = await conn.fetchrow(
-                    f"SELECT {FIELDS} FROM candidates WHERE email=$1 LIMIT 1",
+                    f"SELECT {FIELDS} FROM candidates WHERE email=$1 AND is_active IS NOT FALSE LIMIT 1",
                     body.email.strip().lower())
                 raise HTTPException(409, {
                     "detail": "A candidate with this email already exists",

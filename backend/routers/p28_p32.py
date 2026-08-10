@@ -46,10 +46,13 @@ async def to_csv(rows: list, fields: list) -> str:
     writer.writeheader()
     for row in rows:
         writer.writerow({k: (str(v) if v is not None else '') for k,v in row.items() if k in fields})
-    return output.getvalue()
+    # UTF-8 BOM (2026-08-10 audit, minor caveat) — without it Excel on
+    # Windows mis-renders non-ASCII names; the newer pipeline-board CSV
+    # export already does this, these four were the inconsistent ones.
+    return "﻿" + output.getvalue()
 
 @export_router.get("/candidates")
-async def export_candidates(actor: Actor=Depends(get_actor)):
+async def export_candidates(include_inactive: bool = False, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT c.full_name, c.email, c.phone, c.location,
@@ -60,9 +63,19 @@ async def export_candidates(actor: Actor=Depends(get_actor)):
                    c.created_at::date AS added_date
             FROM candidates c
             LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id=c.id AND cpd.tenant_id=c.tenant_id
-            LEFT JOIN candidate_scores cs ON cs.candidate_id=c.id AND cs.tenant_id=c.tenant_id
-            WHERE c.tenant_id=$1 ORDER BY c.created_at DESC
-        """, actor.tenant_id)
+            -- BUG FIX (2026-08-10 audit): the old unqualified join against
+            -- candidate_scores (one row per candidate x requisition) fanned
+            -- out into up to 22 identical duplicate rows per candidate.
+            -- LATERAL picks only the single most-recently-scored row.
+            LEFT JOIN LATERAL (
+                SELECT readiness_index, readiness_grade
+                FROM candidate_scores s
+                WHERE s.candidate_id = c.id AND s.tenant_id = c.tenant_id
+                ORDER BY s.scored_at DESC NULLS LAST LIMIT 1
+            ) cs ON true
+            WHERE c.tenant_id=$1 AND ($2::boolean OR c.is_active IS NOT FALSE)
+            ORDER BY c.created_at DESC
+        """, actor.tenant_id, include_inactive)
     fields = ['full_name','email','phone','location','total_exp_mo','current_employer',
               'skills','education_level','readiness_index','readiness_grade','added_date','source']
     csv_data = await to_csv([dict(r) for r in rows], fields)
@@ -70,7 +83,7 @@ async def export_candidates(actor: Actor=Depends(get_actor)):
                     headers={"Content-Disposition":"attachment; filename=candidates.csv"})
 
 @export_router.get("/requisitions")
-async def export_requisitions(actor: Actor=Depends(get_actor)):
+async def export_requisitions(include_inactive: bool = False, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT r.title, r.status, r.employment_type, r.location,
@@ -79,9 +92,12 @@ async def export_requisitions(actor: Actor=Depends(get_actor)):
                    COUNT(a.id) FILTER (WHERE a.stage='placed') AS hires
             FROM requisitions r
             LEFT JOIN applications a ON a.requisition_id=r.id AND a.tenant_id=r.tenant_id
-            WHERE r.tenant_id=$1
+            -- BUG FIX (2026-08-10 audit): no is_active filter meant 240 of
+            -- 283 exported rows (85%) were soft-deleted (mostly QA test
+            -- garbage), dominating the real 43 live requisitions.
+            WHERE r.tenant_id=$1 AND ($2::boolean OR r.is_active IS NOT FALSE)
             GROUP BY r.id ORDER BY r.created_at DESC
-        """, actor.tenant_id)
+        """, actor.tenant_id, include_inactive)
     fields = ['title','status','employment_type','location','positions_count',
               'opened_date','submissions','hires']
     csv_data = await to_csv([dict(r) for r in rows], fields)
@@ -90,19 +106,30 @@ async def export_requisitions(actor: Actor=Depends(get_actor)):
 
 @export_router.get("/placements")
 async def export_placements(actor: Actor=Depends(get_actor)):
+    # BUG FIX (2026-08-10 audit): this endpoint has returned HTTP 500 on
+    # every call since it was written — 4 of the 10 selected columns don't
+    # exist on `placements` at all (p.placed_by, p.client_name, p.rate,
+    # p.currency; real columns are client_id, bill_rate, pay_rate, and
+    # there is no currency column — this product is India-only, INR
+    # hardcoded per CLAUDE.md). Recruiter credit resolves via the real
+    # offer -> application -> assigned_recruiter_id chain, since placements
+    # itself has no recruiter column.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT c.full_name AS candidate_name, c.email, c.phone,
-                   r.title AS role, p.client_name, p.start_date, p.end_date,
-                   p.rate, p.currency, u.full_name AS recruiter
+                   r.title AS role, cl.name AS client_name, p.start_date, p.end_date,
+                   p.bill_rate, p.pay_rate, u.full_name AS recruiter
             FROM placements p
             JOIN candidates c ON c.id=p.candidate_id
             JOIN requisitions r ON r.id=p.requisition_id
-            LEFT JOIN users u ON u.id=p.placed_by
+            LEFT JOIN clients cl ON cl.id=p.client_id
+            LEFT JOIN offers o ON o.id=p.offer_id
+            LEFT JOIN applications a ON a.id=o.application_id
+            LEFT JOIN users u ON u.id=a.assigned_recruiter_id
             WHERE p.tenant_id=$1 ORDER BY p.start_date DESC
         """, actor.tenant_id)
     fields = ['candidate_name','email','phone','role','client_name',
-              'start_date','end_date','rate','currency','recruiter']
+              'start_date','end_date','bill_rate','pay_rate','recruiter']
     csv_data = await to_csv([dict(r) for r in rows], fields)
     return Response(content=csv_data, media_type='text/csv',
                     headers={"Content-Disposition":"attachment; filename=placements.csv"})

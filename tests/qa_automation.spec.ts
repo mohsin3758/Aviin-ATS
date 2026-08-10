@@ -879,10 +879,17 @@ test.describe.serial('S14 KAE Candidate Submission', () => {
   // up across sessions, visible clutter in real job pickers/lists — see
   // CLAUDE.md). Now soft-deleted via the real DELETE /requisitions endpoint
   // instead of reaching for raw SQL from a Playwright test.
+  // BUG FIX (2026-08-10 audit): this hook only ever deleted the
+  // requisition, never the candidate — 202 real "QA ..." candidates had
+  // accumulated across every S14/S15/S16 run since these suites existed,
+  // polluting real duplicate-detection output (100% of live pending pairs
+  // were this exact leak) and the real Candidates list. Same convention
+  // S17 already got right below.
   test.afterAll(async ({ request }) => {
-    if (!reqId) return;
     const token = await getApiToken(request);
-    await request.delete(`${API}/requisitions/${reqId}`, { headers: { 'Authorization': `Bearer ${token}` } }).catch(() => {});
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
   });
 
   test('setup: throwaway client + requisition + candidate + application', async ({ request }) => {
@@ -1035,10 +1042,13 @@ test.describe.serial('S15 Tier-0 Quick Wins', () => {
   let reqId: string;
   let appId: string;
 
+  // BUG FIX (2026-08-10 audit): only deleted the requisition, never the
+  // candidate — see the identical fix + full explanation on S14 above.
   test.afterAll(async ({ request }) => {
-    if (!reqId) return;
     const token = await getApiToken(request);
-    await request.delete(`${API}/requisitions/${reqId}`, { headers: { 'Authorization': `Bearer ${token}` } }).catch(() => {});
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
   });
 
   test('setup: throwaway candidate (real skill gap) + requisition', async ({ request }) => {
@@ -1176,13 +1186,21 @@ test.describe.serial('S16 Tier-1 Features', () => {
   const stamp = Date.now();
   let candId: string;
   let cand2Id: string;
+  let cand3Id: string; // created inside the JD-auto-send test below, cleaned up here same as the other two
   let reqId: string;
   let reqId2: string; // unlimited — keeps JD-send/AM-view/tracking/delete tests independent of the submission-limit test's usage
   let appId: string;
 
+  // BUG FIX (2026-08-10 audit): only ever deleted the two requisitions —
+  // all three real candidates this suite creates (candId, cand2Id, and
+  // cand3Id, which used to be a test-local const invisible to this hook
+  // entirely) leaked on every run. See the identical fix on S14 above.
   test.afterAll(async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (cand2Id) await request.delete(`${API}/candidates/${cand2Id}`, { headers: auth }).catch(() => {});
+    if (cand3Id) await request.delete(`${API}/candidates/${cand3Id}`, { headers: auth }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
     if (reqId2) await request.delete(`${API}/requisitions/${reqId2}`, { headers: auth }).catch(() => {});
   });
@@ -1284,7 +1302,7 @@ test.describe.serial('S16 Tier-1 Features', () => {
       data: { full_name: `QA Tier1 Test Three ${stamp}`, email: `qa.tier1c.${stamp}@test.com`, phone: `7${String(stamp).slice(-9)}`, skills: ['Python'], total_exp_mo: 36 },
     });
     expect(cand3.ok()).toBeTruthy();
-    const cand3Id = (await cand3.json()).id;
+    cand3Id = (await cand3.json()).id;
 
     const app = await request.post(`${API}/applications`, { headers: auth, data: { requisition_id: reqId2, candidate_id: cand3Id } });
     if (!app.ok()) console.log('APP CREATE FAILED', app.status(), await app.text());
