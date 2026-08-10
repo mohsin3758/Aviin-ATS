@@ -64,13 +64,22 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
   const [hover, setHover] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  function shareShortlist(e: React.MouseEvent) {
+  async function shareShortlist(e: React.MouseEvent) {
     e.stopPropagation();
-    // token = base64url(tenantId:reqId) — decoded by /client-portal/view/:token
-    const tenantId = req.tenant_id || '';
-    const token = btoa(tenantId + ':' + req.id).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
-    const url = window.location.origin + '/client-portal/' + token;
-    navigator.clipboard.writeText(url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2500); });
+    // SECURITY FIX (2026-08-10 audit): the token used to be constructed
+    // client-side as base64(tenantId:reqId) — unsigned and trivially
+    // forgeable by anyone, since both halves are derivable from public
+    // data. The backend now mints a real random token and remembers it
+    // (client_portal_tokens); this just asks for one instead of building
+    // it locally. Same URL shape, so no dashboard-side migration needed.
+    try {
+      const res = await apiFetch(`/client-portal/generate-link?requisition_id=${req.id}`, { method: 'POST' });
+      const url = window.location.origin + '/client-portal/' + res.token;
+      await navigator.clipboard.writeText(url);
+      setCopied(true); setTimeout(() => setCopied(false), 2500);
+    } catch (err) {
+      alert('Could not generate a share link: ' + (err as Error).message);
+    }
   }
   const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
   const wm = WORK_MODE_CONFIG[req.work_mode] || WORK_MODE_CONFIG.onsite;

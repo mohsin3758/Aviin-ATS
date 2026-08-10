@@ -1,20 +1,20 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { RefreshCw, CheckCircle, AlertCircle, Smartphone, ExternalLink } from 'lucide-react';
+import { apiFetch } from '@/lib/useFetch';
 
-// Use NEXT_PUBLIC_API_URL which is already set to https://ats.aviinjobs.com/api
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '/api';
-
+// SECURITY FIX (2026-08-10 audit): these two helpers used a raw, unauthenticated
+// fetch() with no Authorization header at all - the /waha/* backend routes had
+// no auth check either, so this page silently worked despite calling endpoints
+// that were also unauthenticated and reachable by anyone on the public internet.
+// Both sides are fixed together: the backend now requires admin/manager, and
+// this page now sends a real Bearer token via the app's standard apiFetch().
 async function wahaGet(path: string) {
-  const r = await fetch(API_BASE + path);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  return apiFetch(path);
 }
 
 async function wahaPost(path: string) {
-  const r = await fetch(API_BASE + path, { method: 'POST', headers: {'Content-Type':'application/json'} });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  return apiFetch(path, { method: 'POST' });
 }
 
 const STAGE_MSGS = [

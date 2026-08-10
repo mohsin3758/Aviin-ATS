@@ -8,7 +8,7 @@ from pydantic import BaseModel
 import db
 import events
 import ai_router
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 from routers.p23_p27 import _suggest_interviewer
 from routers.pipeline_stages import is_valid_stage
 
@@ -515,12 +515,20 @@ async def book_slot(token: str, slot_datetime: str, mode: str = "video"):
 
 
 # ── WAHA Proxy Endpoints (for frontend WhatsApp Setup page) ──────────────────
+# CRITICAL FIX (2026-08-10 audit): all 4 routes below had no Depends(get_actor)
+# at all - every other route in this file does. Confirmed live and exploitable:
+# POST /api/waha/send was reachable with zero credentials over the public
+# internet and would send a real WhatsApp message from the company's actual
+# linked business number, with no auth, no consent check, no rate limit, no
+# audit trail. Gated to admin/manager - these control the company's WhatsApp
+# business session (start/QR-scan/send), the same bar as other tenant-wide
+# integration controls (e.g. offers.py's approve/issue).
 waha_router = APIRouter(prefix="/waha", tags=["waha"])
 WAHA_BASE = "http://waha:3000"
 WAHA_KEY  = os.getenv("WAHA_API_KEY", "aviinATS2026secure")
 
 @waha_router.get("/status")
-async def waha_status():
+async def waha_status(actor: Actor = Depends(require_role("admin", "manager"))):
     """Get WAHA session status."""
     try:
         import httpx
@@ -537,7 +545,7 @@ async def waha_status():
         return {"connected": False, "status": "OFFLINE", "error": str(e)}
 
 @waha_router.post("/start")
-async def waha_start():
+async def waha_start(actor: Actor = Depends(require_role("admin", "manager"))):
     """Start WAHA session."""
     try:
         import httpx
@@ -561,7 +569,7 @@ async def waha_start():
         return {"started": False, "error": str(e)}
 
 @waha_router.get("/qr")
-async def waha_qr():
+async def waha_qr(actor: Actor = Depends(require_role("admin", "manager"))):
     """Get WAHA QR code for scanning.
 
     WAHA WEBJS uses /api/{session}/auth/qr (not /api/sessions/{session}/auth/qr).
@@ -620,7 +628,7 @@ async def waha_qr():
         return {"qr": "", "error": str(e)}
 
 @waha_router.post("/send")
-async def waha_send(phone: str, message: str):
+async def waha_send(phone: str, message: str, actor: Actor = Depends(require_role("admin", "manager"))):
     """Send WhatsApp message via WAHA."""
     try:
         import httpx

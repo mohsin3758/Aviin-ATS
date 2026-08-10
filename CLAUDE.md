@@ -3689,3 +3689,101 @@ backend container end-to-end against live production data and confirmed
 it completes with no unhandled exception and creates zero new duplicates.
 Full QA suite re-run clean: 153 passed / 2 skipped / 0 failed. Zero-token
 audit: `CONFIRMED CLEAN` (336 files, 0 external API refs).
+
+## Both critical findings closed: unauthenticated WhatsApp send + forgeable client-portal token, 2026-08-10
+Direct follow-up to the same-day "WhatsApp/Client Portal/Salary/Skills Fresh
+Audit" (4 parallel research agents, published as a report) - user asked to
+fix the 2 critical, live, unauthenticated-disclosure findings immediately.
+Both fixed, deployed, and verified against real production - not code
+review.
+
+**Critical #1 - unauthenticated public WhatsApp send, from the real company
+number.** All 4 routes on `phase3.py`'s `waha_router` (`/status`, `/start`,
+`/qr`, `/send`) had no `Depends(get_actor)` at all - every other route in
+that file does. Confirmed exploitable pre-fix: `POST /api/waha/send?phone=
+<any>&message=<any>` was reachable over the public internet with zero
+credentials and would send a real WhatsApp message from the company's
+actual linked business number (918884449990). Fixed by adding
+`Depends(require_role("admin","manager"))` to all 4 - same bar as other
+tenant-wide integration controls (offer approve/issue). Root-caused *why*
+these were built without auth in the first place while fixing the frontend:
+`whatsapp-setup/page.tsx`'s own `wahaGet`/`wahaPost` helpers used a raw,
+unauthenticated `fetch()` with no `Authorization` header at all - a second,
+independent bug on the frontend side, not just the backend being permissive.
+Fixed both together: the page now uses the app's standard `apiFetch()`
+(real Bearer token, standard 401-handling), matching every other
+authenticated page in the app.
+
+**Critical #2 - anonymous full-pipeline disclosure via a forgeable
+client-portal token.** The token was `base64url(tenant_id + ':' +
+requisition_id)` - unsigned, no secret, no DB record, minted entirely
+client-side. Both halves are derivable from public data (`tenant_id` is
+hardcoded in the public careers page's client bundle; requisition IDs are
+enumerable via the unauthenticated `GET /public/jobs`). Proven exploitable
+pre-fix: forged a token and pulled 151 real candidates (names, current
+employer, designation, stage, internal AI readiness score) off production
+with a plain curl request, zero credentials.
+
+Fixed with a real token system, `sql/43_client_portal_secure_tokens.sql`:
+- `client_portal_tokens` - real, cryptographically random token
+  (`secrets.token_urlsafe(32)`, minted server-side, never derivable from
+  public data), with `expires_at` (180 days), `revoked_at`, and real
+  access tracking (`access_count`, `last_accessed_at`) - closes the
+  audit's separate "zero issuance/access tracking" finding for free.
+  FORCE RLS + tenant_isolation policy.
+- `get_client_portal_token(token)` / `record_client_portal_access(token)` -
+  SECURITY DEFINER functions owned by `postgres`, same "anonymous token
+  resolves tenant_id" pattern already established in this codebase for
+  NDA/offer e-sign and device enrollment - the public endpoint has no
+  `app.tenant_id` to work with until the token itself resolves one.
+- New `POST /client-portal/generate-link` (authenticated) - mints a real
+  token, idempotently reusing an existing non-revoked/non-expired one for
+  the same requisition rather than spawning a new row on every click.
+  New `POST /client-portal/revoke/{requisition_id}` - the first real way
+  to invalidate a leaked link (previously impossible - there was no
+  record to revoke).
+- `GET /view/{token}` and `POST /feedback-public` rewritten to resolve
+  the token through the new table instead of decoding it locally - the
+  old base64-decode path is gone entirely, not kept as a fallback,
+  since the whole point is eliminating the forgeable scheme (0 real
+  client usage ever, per the same audit, so nothing was at risk of
+  breaking). Also dropped the `tenant_id` field the old response
+  returned at top level - a separate, smaller exposure the audit flagged
+  (handing the tenant UUID to anyone with any link).
+- Frontend: `requisitions/page.tsx`'s Share button no longer constructs
+  a token client-side (`btoa(tenantId+':'+req.id)` - deleted entirely) -
+  it now calls `/client-portal/generate-link` and copies the real token
+  URL. Same UX (click Share, link copied), same URL shape, so the public
+  `[token]/page.tsx` needed no changes at all - it already just passes
+  `params.token` through opaquely.
+
+**Verified for real end-to-end, not code review**: all 4 WAHA routes
+confirmed to genuinely 401 with zero credentials (including `/send`
+specifically, the one that was actively exploitable); confirmed a real
+admin token still gets a real 200 with genuine WAHA status data. For the
+portal: confirmed the *exact* old-style forged token (same construction
+used in the original audit's proof) now returns 404 "Invalid or expired
+link" against the live endpoint; walked the full legitimate flow
+end-to-end (authenticated generate → real 43-char random token → public
+`/view/{token}` returns real data → `access_count` genuinely incremented
+in the DB → revoke → the same token now 404s → a fresh generate call
+correctly mints a new token rather than reusing the revoked one);
+confirmed unauthenticated calls to `/generate-link` itself 401. Real
+headless-browser test clicked the actual Share button on `/requisitions`
+and confirmed a real, correctly-shaped token URL landed in the clipboard
+with zero console errors. All test-generated tokens deleted afterward,
+confirmed zero residue. Full QA suite re-run clean: 153 passed / 2
+skipped / 0 failed. Zero-token audit: `CONFIRMED CLEAN` (337 files, 0
+external API refs).
+
+**Not touched in this fix** (explicitly out of scope - the user asked for
+the 2 critical items specifically, not the full list of secondary
+findings from the same audit): the client-portal endpoint still returns
+the entire pipeline rather than a true shortlist (including rejected
+candidates), the Approve/Reject buttons' CHECK-constraint mismatch, the
+duplicate-feedback-row bug, `POST /client-portal/login`'s independent
+`''::uuid` crash, WhatsApp's consent-bypass-on-UI-reachable-paths finding,
+the wrong hardcoded WAHA key in `phase3.py`'s internal `send_whatsapp()`
+helper (distinct from the now-fixed `/waha/send` proxy), and the
+inbound-WhatsApp wrong-tenant routing bug - all still open, all
+documented in the published audit report for a future pass.

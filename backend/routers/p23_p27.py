@@ -472,17 +472,66 @@ async def submit_feedback(body: dict, actor: Actor=Depends(get_actor)):
     return dict(row) if row else {"status": "already submitted"}
 
 # ── Public client-portal endpoints (no auth, token-based) ─────────────────
-import base64 as _b64
+# CRITICAL FIX (2026-08-10 audit): the token used to be unsigned
+# base64url(tenant_id:req_id), forgeable by anyone since both halves are
+# derivable from public data (tenant_id is hardcoded in the public careers
+# page bundle, req_id is enumerable via GET /public/jobs). Proven live: a
+# forged token pulled 151 real candidates off production with a plain curl
+# request, zero credentials. Now a real, random, server-minted, DB-backed
+# token (client_portal_tokens, sql/43...sql) with expiry + revocation.
+# get_client_portal_token()/record_client_portal_access() are SECURITY
+# DEFINER functions (owned by postgres) - same "anonymous token resolves
+# tenant_id" pattern already used for NDA/offer e-sign and device
+# enrollment, since this endpoint doesn't know its own tenant_id up front.
+import secrets as _cp_secrets
 import db as _cpdb
+
+@client_portal_router.post("/generate-link")
+async def generate_client_portal_link(requisition_id: str, actor: Actor = Depends(get_actor)):
+    """Mint (or reuse) a real, random share token for a requisition. Replaces
+    the old client-side base64(tenant_id:req_id) construction entirely -
+    the frontend no longer builds tokens itself, it asks the backend for one."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        req = await conn.fetchval(
+            "SELECT id FROM requisitions WHERE id=$1 AND tenant_id=$2", requisition_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+        existing = await conn.fetchrow("""
+            SELECT id, token FROM client_portal_tokens
+            WHERE tenant_id=$1 AND requisition_id=$2
+              AND revoked_at IS NULL AND expires_at > now()
+            ORDER BY created_at DESC LIMIT 1
+        """, actor.tenant_id, requisition_id)
+        if existing:
+            return {"token": existing["token"], "reused": True}
+        token = _cp_secrets.token_urlsafe(32)
+        await conn.execute("""
+            INSERT INTO client_portal_tokens (tenant_id, requisition_id, token, created_by)
+            VALUES ($1, $2, $3, $4)
+        """, actor.tenant_id, requisition_id, token, actor.user_id)
+    return {"token": token, "reused": False}
+
+@client_portal_router.post("/revoke/{requisition_id}")
+async def revoke_client_portal_links(requisition_id: str, actor: Actor = Depends(get_actor)):
+    """Revoke every active share link for a requisition - the only way to
+    invalidate a leaked link now that tokens are real DB rows, not a
+    reversible encoding with nothing to revoke."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        result = await conn.execute("""
+            UPDATE client_portal_tokens SET revoked_at=now()
+            WHERE tenant_id=$1 AND requisition_id=$2 AND revoked_at IS NULL
+        """, actor.tenant_id, requisition_id)
+    return {"status": "ok", "revoked": result}
 
 @client_portal_router.get("/view/{token}")
 async def public_shortlist(token: str):
-    """No-auth shortlist view. token = base64url(tenant_id:req_id)."""
-    try:
-        decoded = _b64.urlsafe_b64decode(token + '==').decode()
-        tenant_id, req_id = decoded.split(':', 1)
-    except Exception:
-        raise HTTPException(400, "Invalid token")
+    """No-auth shortlist view, resolved via a real random token."""
+    async with _cpdb.system_conn() as sysconn:
+        row = await sysconn.fetchrow("SELECT * FROM get_client_portal_token($1)", token)
+        if not row:
+            raise HTTPException(404, "Invalid or expired link")
+        await sysconn.execute("SELECT record_client_portal_access($1)", token)
+    tenant_id, req_id = str(row["tenant_id"]), str(row["requisition_id"])
     async with _cpdb.tenant_conn(tenant_id) as conn:
         req_row = await conn.fetchrow(
             "SELECT id, title, client_name, status FROM requisitions WHERE id=$1::uuid AND tenant_id=$2::uuid",
@@ -505,18 +554,18 @@ async def public_shortlist(token: str):
     return {
         "requisition": dict(req_row),
         "candidates": [dict(r) for r in rows],
-        "tenant_id": tenant_id,
     }
 
 @client_portal_router.post("/feedback-public")
 async def public_feedback(body: dict):
-    """No-auth feedback submission. body must include token."""
+    """No-auth feedback submission, resolved via a real random token."""
     token = body.get('token', '')
-    try:
-        decoded = _b64.urlsafe_b64decode(token + '==').decode()
-        tenant_id, req_id = decoded.split(':', 1)
-    except Exception:
-        raise HTTPException(400, "Invalid token")
+    async with _cpdb.system_conn() as sysconn:
+        row = await sysconn.fetchrow("SELECT * FROM get_client_portal_token($1)", token)
+        if not row:
+            raise HTTPException(404, "Invalid or expired link")
+        await sysconn.execute("SELECT record_client_portal_access($1)", token)
+    tenant_id, req_id = str(row["tenant_id"]), str(row["requisition_id"])
     async with _cpdb.tenant_conn(tenant_id) as conn:
         await conn.execute("""
             INSERT INTO client_feedback
