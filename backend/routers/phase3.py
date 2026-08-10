@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import db
 import events
+import ai_router
 from deps import Actor, get_actor
 from routers.p23_p27 import _suggest_interviewer
 from routers.pipeline_stages import is_valid_stage
@@ -84,21 +85,6 @@ SEQUENCE:0
 END:VEVENT
 END:VCALENDAR"""
 
-async def call_ollama(prompt: str, max_tokens: int = 500) -> Optional[str]:
-    """Call local Ollama Qwen2.5. Returns None on failure."""
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=30.0) as cli:
-            r = await cli.post("http://ollama:11434/api/generate", json={
-                "model": "qwen2.5:1.5b-instruct-q4_K_M",
-                "prompt": prompt, "stream": False,
-                "options": {"num_predict": max_tokens, "temperature": 0.7}
-            })
-            if r.status_code == 200:
-                return r.json().get("response", "").strip()
-    except Exception as e:
-        log.warning(f"Ollama call failed: {e}")
-    return None
 
 # ── Auto Interview Engine ─────────────────────────────────────────────────────
 class InterviewScheduleIn(BaseModel):
@@ -304,7 +290,20 @@ Experience: {exp_y} years
 
 Write a warm, professional offer letter (200-250 words). Include: congratulations, role details, CTC, joining date, and excitement about them joining. Sign off as "HR Team, {company}". Do NOT include salary breakdowns or legal boilerplate. Just the main offer letter body."""
 
-            offer_text = await call_ollama(prompt, max_tokens=400)
+            # HARD RULE #4 fix (2026-08-10 audit): this used to call Ollama
+            # directly via a bespoke httpx POST, bypassing the shared AI
+            # Router's semantic cache entirely — the same class of gap
+            # already found and fixed once for resume parsing. Routed
+            # through ai_router.generate() so offer letters get real
+            # cache hits and the AI Router really is "the ONE module every
+            # AI call passes through," not just documented as one.
+            try:
+                result = await ai_router.generate(
+                    conn, actor.tenant_id, f"offer_letter:{body.application_id}", prompt)
+                offer_text = result["text"]
+            except Exception as e:
+                log.warning(f"AI Router offer-letter generation failed: {e}")
+                offer_text = None
 
         if not offer_text:
             # Template fallback

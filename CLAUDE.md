@@ -3439,3 +3439,108 @@ skipped / 0 failed (down from the prior 157 baseline by exactly the 4
 Assessments-specific tests removed as part of the retirement — confirms
 no real regressions, not a weaker suite). Zero-token audit: CONFIRMED
 CLEAN (336 files, 0 external API refs).
+
+## Re-check against the Assessments/Offers/n8n audit report, 6 remaining items closed, 2026-08-10
+Direct follow-up, same day. User asked to re-check the published audit report
+against current state ("critical finding, assessments, N8n workflow issue and
+error, recommendation and other issue") - re-fetched the report and cross-
+checked every item, not just the 5 ranked recommendations already built
+earlier today. Found 6 real open items that were flagged in the report but
+fell outside the 5 numbered recommendations (2 under "Offer Management,"
+1 under "n8n," 1 under "Cross-cutting patterns," plus the historical bad
+data itself and one automation row's fate never actually being decided).
+User said "built it complete all 6... and fix it" - all 6 done.
+
+1. **Historical pre-fix offers still had zero audit trail.** The HITL fix
+   built earlier today closes the bug going forward but doesn't retroactively
+   repair the 4 real production offers (`0003a467`, `003a796d`, `d9f9b7ad`,
+   `02d5ee6e`) created via the old bypass, all still `approved_by IS NULL`
+   with zero `assignment_event`/`audit_log` rows. Deliberately did **not**
+   fabricate an approval that never happened - no fake `approved_by`, no
+   invented "approved" event, since that would make the audit trail lie
+   rather than fix it. `sql/40_offer_hitl_audit_backfill_and_cleanup.sql`
+   instead writes one honestly-worded `assignment_event` +  `audit_log` row
+   per affected offer (actor_user_id NULL - system-flagged, not attributed to
+   a specific human who didn't actually review these), stating plainly: this
+   offer bypassed HITL via the pre-fix path, no human ever approved it,
+   flagged retroactively for audit-trail accuracy. Verified for real:
+   confirmed all 4 offers now show exactly 1 `assignment_event` + 1
+   `audit_log` row each, and spot-read one entry's actual text to confirm it
+   says what really happened rather than a sanitized cover story.
+2. **HARD RULE #4 (AI Router) violation, still live in the offer-generation
+   path.** `phase3.py`'s local `call_ollama()` helper called Ollama directly
+   via a bespoke `httpx` POST, bypassing the shared AI Router's semantic
+   cache entirely - the exact same violation class already found and fixed
+   once in this project for resume parsing, just never caught here because
+   this audit was the first time anyone looked closely at the offer-
+   generation path specifically. Deleted the local helper (its only caller
+   was `auto_generate_offer`) and routed through `ai_router.generate()`
+   instead, wrapped in try/except so a failure still falls through to the
+   existing template fallback exactly as before. Verified for real:
+   generated a real offer letter for a throwaway candidate, confirmed
+   `generated_by:"ollama_qwen2.5"` in the response, and confirmed a genuine
+   new `ai_cache` row (`cache_key:"offer_letter:<application_id>"`, real
+   response text) - the AI Router path, including its embed + cache_store
+   calls, is now genuinely exercised on offer generation, not just resume
+   parsing and JD generation.
+3. **`bgv.py::draft_offer_letter` / `GET /bgv/offer-letter/{id}` removed.**
+   Confirmed via grep (frontend, backend, tests) these had zero callers
+   anywhere - a second, non-overlapping-route duplicate of `offers.py`'s
+   real draft/approve/issue/PDF/e-sign flow on the same `offer_letters`
+   table. Deleted both endpoints and the now-unused `ai_router.generate`
+   import from `bgv.py`; kept the India Verification stubs in the same file
+   untouched (unrelated, already-flagged-separately scaffolding). Verified:
+   both routes now return genuine 404s, not 401/403.
+4. **`offers.py`'s PDF renderer had no embedded logo image**, unlike
+   `call_letters.py` (built earlier today) - offer letters were still
+   text-only, "the one PDF generator in the codebase" the audit called out
+   by name. Added the identical `Image` flowable + sizing pattern
+   `call_letters.py` already established (`backend/assets/aviintech-logo.png`,
+   4.5cm width scaled to the file's real 730×342 aspect ratio so it's never
+   stretched). Verified for real, not by reading the code: downloaded a real
+   generated offer PDF and confirmed via raw PDF byte inspection it contains
+   a genuine embedded `/Subtype /Image` XObject sized exactly 730×342 -
+   matching the actual logo file's real dimensions, not a guess.
+5. **`docs/n8n-setup.md` was stale**, documenting 3 webhook paths
+   (`retention-bank-released`, `loyalty-milestone-achieved`,
+   `monthly-incentive-summary`) that matched neither the live
+   `automation_workflows` table nor n8n's actual registered workflows -
+   and, checking those 3 paths directly while rewriting the doc, confirmed
+   all 3 were **also genuinely 404ing** (real backend callers in
+   `scheduler.py`, zero matching n8n workflows) - a 4th silent gap beyond
+   the 10 `automation_workflows` rows the original audit scoped to, only
+   found because fixing the docs meant actually checking what they
+   described instead of just editing prose. Registered real n8n workflows
+   for all 3 via the same CLI import/publish/restart process used earlier
+   today, verified each with a direct webhook POST (`{"message":"Workflow
+   was started"}`, HTTP 200, not 404). Rewrote the doc to accurately list
+   every real webhook path grouped by whether it's `automation_workflows`-
+   tracked, fired-but-untracked, or the one real pre-existing workflow
+   (`aviin-stage-change`) that isn't in the table at all - a known,
+   documented gap, not silently glossed over - plus the real CLI-based
+   registration process (the doc's old "Manual Setup" section assumed an
+   n8n API key that was never actually configured).
+6. **Candidate Birthday/Anniversary automation row removed.** Already
+   documented earlier today as "genuinely unbuildable without inventing new
+   data capture" (no DOB/anniversary field exists anywhere in this schema,
+   confirmed via grep across every `sql/*.sql` file) but left sitting in
+   `automation_workflows` unused rather than actually resolved either way.
+   The audit's own recommendation was "wire real triggers... or remove
+   them" - this one was neither. `sql/40...sql` deletes the row. Verified:
+   `GET /automations` now returns exactly 9 rows, `candidate-engagement` no
+   longer among them.
+
+Full QA suite re-run clean after all 6: **153 passed / 2 skipped / 0
+failed** - identical to the pre-existing baseline, confirming no
+regressions from any of today's two rounds of fixes combined. Zero-token
+audit: `CONFIRMED CLEAN` (334 files, 0 external API refs). All throwaway
+test data (2 candidates, 2 applications, 1 offer, 1 ai_cache row, consent
+records) cleaned up after verification, confirmed zero residue.
+
+**What's still honestly open, not touched in either round today** (flagged
+for completeness, not fixed - out of scope for "these 6"): `aviin-stage-
+change`, the single most-used real n8n workflow in the system (500+ real
+executions), still isn't a row in `automation_workflows` - the Automations
+dashboard has zero visibility into the one integration that actually works
+at scale. A real gap, deliberately left for a future pass rather than
+folded into this one silently.

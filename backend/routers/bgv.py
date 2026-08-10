@@ -2,7 +2,6 @@
 
 BGV checks (identity/education/employment/criminal/credit/address/reference/digilocker)
 Trust graph (referral/worked_with/placed/vouched/reported_fraud edges)
-Offer letter generation via AI Router (Tier-2 Ollama Qwen2.5 — ZERO external API)
 Aadhaar OTP e-sign + DigiLocker: scaffolded endpoints (require production credentials)
 """
 
@@ -12,7 +11,6 @@ from pydantic import BaseModel
 
 import db
 from deps import Actor, get_actor
-from ai_router import generate  # Tier-2 local Ollama — HARD RULE #1
 
 router = APIRouter(prefix="/bgv", tags=["bgv"])
 
@@ -206,50 +204,11 @@ async def add_trust_edge(body: TrustEdgeCreate, actor: Actor = Depends(get_actor
     return dict(row)
 
 
-# ─── Offer Letter Generation (Tier-2 Qwen via AI Router — HARD RULE #1) ──────
-
-class OfferLetterRequest(BaseModel):
-    offer_id: str
-    candidate_id: str
-    candidate_name: str
-    role_title: str
-    client_name: str
-    start_date: str
-    compensation: str
-
-
-@router.post("/offer-letter/draft")
-async def draft_offer_letter(body: OfferLetterRequest, actor: Actor = Depends(get_actor)):
-    """Generate offer letter draft via AI Router (Tier-2 Qwen2.5 local — never external API)."""
-    prompt = (
-        f"Draft a professional offer letter for {body.candidate_name} "
-        f"for the role of {body.role_title} at {body.client_name}. "
-        f"Start date: {body.start_date}. Compensation: {body.compensation}. "
-        f"Include standard employment terms. Keep it formal and concise. India employment law."
-    )
-    cache_key = f"offer_letter:{body.candidate_id}:{body.role_title}:{body.client_name}"
-
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        result = await generate(conn, actor.tenant_id, cache_key, prompt)
-        draft_text = result["text"]
-        row = await conn.fetchrow(
-            """INSERT INTO offer_letters(tenant_id, offer_id, candidate_id, draft_text)
-               VALUES ($1,$2,$3,$4)
-               RETURNING id, status, created_at""",
-            actor.tenant_id, body.offer_id, body.candidate_id, draft_text,
-        )
-    return {**dict(row), "draft_text": draft_text, "cached": result.get("cached", False)}
-
-
-@router.get("/offer-letter/{offer_id}")
-async def get_offer_letter(offer_id: str, actor: Actor = Depends(get_actor)):
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM offer_letters WHERE offer_id = $1", offer_id
-        )
-    if not row:
-        raise HTTPException(404, "No offer letter generated yet")
-    return dict(row)
+# Offer-letter generation used to live here as a second, non-overlapping-
+# route duplicate of offers.py's real draft/approve/issue/PDF/e-sign flow
+# on the same offer_letters table — confirmed zero callers anywhere
+# (frontend or backend) before removal (2026-08-10 audit follow-up).
+# offers.py is the one real offer-letter path now.
 
 
 # ─── India Verification API Stubs ─────────────────────────────────────────────

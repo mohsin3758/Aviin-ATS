@@ -211,9 +211,14 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle, Image
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
 import asyncpg
+
+# Same logo asset + embedding pattern as call_letters.py (2026-08-10 audit
+# follow-up — this was the one PDF generator in the codebase still
+# rendering only the company name as text, not the actual logo image).
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "aviintech-logo.png")
 
 
 def _build_offer_pdf(offer: dict, candidate: dict, company_name: str = "AVIIN Jobs Services") -> bytes:
@@ -255,6 +260,17 @@ def _build_offer_pdf(offer: dict, candidate: dict, company_name: str = "AVIIN Jo
     letter_text = offer.get('offer_letter_text', '')
 
     story = []
+
+    if os.path.exists(LOGO_PATH):
+        # Fixed display width, height scaled to the source file's own
+        # aspect ratio (730x342) so the logo never looks stretched —
+        # same sizing math as call_letters.py's embedding.
+        logo_w = 4.5 * cm
+        logo_h = logo_w * (342 / 730)
+        img = Image(LOGO_PATH, width=logo_w, height=logo_h)
+        img.hAlign = 'CENTER'
+        story.append(img)
+        story.append(Spacer(1, 0.3*cm))
 
     # Header
     story.append(Paragraph(company_name, h1))
