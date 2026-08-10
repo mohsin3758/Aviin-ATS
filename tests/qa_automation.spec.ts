@@ -403,12 +403,19 @@ test.describe('S11 WhatsApp Outreach', () => {
   });
 
   test('WhatsApp templates tab shows 14 languages', async ({ page }) => {
+    // Fixed 2026-08-10: this used to assert against 4 hardcoded strings in
+    // the page itself that didn't exist in the real backend templates at
+    // all — a false green that never actually verified "14" anything (see
+    // CLAUDE.md's WhatsApp audit). The tab now renders the real
+    // GET /whatsapp/templates response; assert against the real language
+    // code list every template key actually carries.
     await page.goto(`${BASE}/whatsapp`);
     await page.waitForSelector('[data-testid="session-panel"]', { state: 'visible', timeout: 10000 });
     await page.click('[data-tab="templates"]');
     await page.waitForSelector('[data-testid="templates-panel"]', { state: 'visible', timeout: 5000 });
     const text = await page.locator('[data-testid="templates-panel"]').textContent();
-    expect(text).toMatch(/Hindi|Tamil|Telugu|Kannada/);
+    expect(text).toMatch(/14 languages available/);
+    expect(text).toMatch(/en, hi, ta, te, kn, ml, mr, gu, pa, bn, or, as, ur, kok/);
   });
 
   test('WhatsApp consent tab visible', async ({ page }) => {

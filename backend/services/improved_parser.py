@@ -15,8 +15,18 @@ Zero API cost. All free.
 import re
 from typing import Optional
 try:
-    from services.skill_normalizer import normalize_skills_list, normalize_skill, _CACHE as _SKILL_CACHE, _CACHE_LOADED
+    # BUG FIX (2026-08-10 audit): this used to import _CACHE_LOADED BY NAME,
+    # which copies its value (False) at import time and never sees the real
+    # module's later update to True once init_cache() runs — the guard
+    # below permanently read a stale False, so DB-backed skill
+    # normalization never executed a single time in production despite the
+    # cache genuinely loading correctly. Importing the module itself and
+    # reading skill_normalizer._CACHE_LOADED at call time (not import time)
+    # fixes it - the same variable, always current.
+    import services.skill_normalizer as skill_normalizer
+    from services.skill_normalizer import normalize_skills_list, normalize_skill
 except ImportError:
+    skill_normalizer = None
     normalize_skills_list = None
     normalize_skill = None
 
@@ -741,7 +751,7 @@ def parse_resume_v2(text: str, from_name: str = '', from_email: str = '', filena
     phone = extract_phone_v2(full_text)
     skills = extract_skills_from_text(full_text)
     # Phase C: normalize skills against DB taxonomy
-    if normalize_skills_list is not None and _CACHE_LOADED:
+    if normalize_skills_list is not None and skill_normalizer is not None and skill_normalizer._CACHE_LOADED:
         skills = normalize_skills_list(skills)
     exp_years = extract_experience_v2(full_text)
     # Filename hint: if filename explicitly states years, take the MAX

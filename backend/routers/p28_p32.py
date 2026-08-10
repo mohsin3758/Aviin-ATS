@@ -191,7 +191,13 @@ async def salary_suggestion(role: str, exp_years: float,
                    salary_min, salary_median, salary_max
             FROM salary_benchmarks
             WHERE (tenant_id IS NULL OR tenant_id=$1)
-              AND role_title ILIKE '%'||$2||'%'
+              -- BUG FIX (2026-08-10 audit): this only matched when the
+              -- STORED benchmark title contained the caller's query -
+              -- real titles like "Senior Python Developer, 3yr" never
+              -- matched a stored "Python Developer 2-5yr" row, since the
+              -- stored (shorter) title doesn't contain the longer query.
+              -- Bidirectional match fixes both directions.
+              AND ($2 ILIKE '%'||role_title||'%' OR role_title ILIKE '%'||$2||'%')
               AND exp_min<=$3 AND (exp_max IS NULL OR exp_max>=$3)
               AND location ILIKE '%'||$4||'%'
             ORDER BY ABS(($3-(exp_min+COALESCE(exp_max,exp_min))/2)) ASC
@@ -209,15 +215,20 @@ async def salary_suggestion(role: str, exp_years: float,
 @salary_router.get("/market-demand")
 async def market_demand(actor: Actor=Depends(get_actor)):
     """Skills demand from open requisitions — zero-token market intelligence."""
+    # BUG FIX (2026-08-10 audit): missing the is_active filter every other
+    # endpoint adopted when soft-delete shipped - this was counting
+    # soft-deleted (mostly QA test) requisitions as real open demand.
+    # Verified live pre-fix: reported 240 open reqs / 194 Python demand
+    # where the real figures were 21 open / 9 Python.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT skill, COUNT(*) AS demand_count
             FROM requisitions, unnest(skills_required) AS skill
-            WHERE tenant_id=$1 AND status='open'
+            WHERE tenant_id=$1 AND status='open' AND is_active IS NOT FALSE
             GROUP BY skill ORDER BY demand_count DESC LIMIT 30
         """, actor.tenant_id)
         total_open = await conn.fetchval(
-            "SELECT COUNT(*) FROM requisitions WHERE tenant_id=$1 AND status='open'",
+            "SELECT COUNT(*) FROM requisitions WHERE tenant_id=$1 AND status='open' AND is_active IS NOT FALSE",
             actor.tenant_id)
     return {"total_open_reqs": total_open,
             "top_skills": [dict(r) for r in rows]}
@@ -225,58 +236,77 @@ async def market_demand(actor: Actor=Depends(get_actor)):
 # ── P32: Notification Center ──────────────────────────────────
 notif_router = APIRouter(prefix="/notifications", tags=["notifications"])
 
+# BUG FIX (2026-08-10 audit): every one of these queries filtered on
+# `user_id` (a legacy column almost nothing writes to anymore) instead of
+# the real, documented recipient columns `recipient_user_id`/
+# `recipient_role` every real write site actually populates. This let
+# role-targeted notifications (207 real rows: manager/admin/recruiter)
+# leak to EVERY user in the tenant regardless of who they were addressed
+# to — confirmed live, a real recruiter's unread count included every
+# manager- and admin-only alert. Fixed to the documented contract
+# (sql/03_phase2_n8n_additions.sql's own comment: "frontend P4+ queries
+# WHERE recipient_user_id = me OR recipient_role = my_role").
+_RECIPIENT_SCOPE_SQL = "(recipient_user_id=$2 OR recipient_role=$3)"
+
+
 @notif_router.get("")
 async def get_notifications(is_read: Optional[bool]=None, limit: int=30,
                               actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(f"""
             SELECT * FROM notifications
-            WHERE tenant_id=$1 AND (user_id IS NULL OR user_id=$2)
-              AND ($3::bool IS NULL OR is_read=$3)
-            ORDER BY created_at DESC LIMIT $4
-        """, actor.tenant_id, actor.user_id, is_read, limit)
+            WHERE tenant_id=$1 AND {_RECIPIENT_SCOPE_SQL}
+              AND ($4::bool IS NULL OR is_read=$4)
+            ORDER BY created_at DESC LIMIT $5
+        """, actor.tenant_id, actor.user_id, actor.role, is_read, limit)
     return [dict(r) for r in rows]
 
 @notif_router.get("/unread-count")
 async def unread_count(actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        count = await conn.fetchval("""
+        count = await conn.fetchval(f"""
             SELECT COUNT(*) FROM notifications
-            WHERE tenant_id=$1 AND (user_id IS NULL OR user_id=$2) AND NOT is_read
-        """, actor.tenant_id, actor.user_id)
+            WHERE tenant_id=$1 AND {_RECIPIENT_SCOPE_SQL} AND NOT is_read
+        """, actor.tenant_id, actor.user_id, actor.role)
     return {"unread": count}
 
 @notif_router.post("/{notif_id}/read")
 async def mark_read(notif_id: str, actor: Actor=Depends(get_actor)):
+    # BUG FIX: previously had no recipient check at all — any authenticated
+    # user could mark any other user's notification read. Now scoped the
+    # same way the list/count endpoints are.
     async with db.tenant_conn(actor.tenant_id) as conn:
         await conn.execute("""
             UPDATE notifications SET is_read=true, read_at=now()
-            WHERE id=$1 AND tenant_id=$2
-        """, notif_id, actor.tenant_id)
+            WHERE id=$1 AND tenant_id=$2 AND (recipient_user_id=$3 OR recipient_role=$4)
+        """, notif_id, actor.tenant_id, actor.user_id, actor.role)
     return {"marked_read": True}
 
 @notif_router.post("/read-all")
 async def mark_all_read(actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        await conn.execute("""
+        await conn.execute(f"""
             UPDATE notifications SET is_read=true, read_at=now()
-            WHERE tenant_id=$1 AND (user_id IS NULL OR user_id=$2) AND NOT is_read
-        """, actor.tenant_id, actor.user_id)
+            WHERE tenant_id=$1 AND {_RECIPIENT_SCOPE_SQL} AND NOT is_read
+        """, actor.tenant_id, actor.user_id, actor.role)
     return {"marked_all_read": True}
 
 @notif_router.post("")
 async def create_notification(body: dict, actor: Actor=Depends(get_actor)):
-    # "message" isn't a real column (notifications has body instead), and
     # notifications_check requires recipient_user_id or recipient_role to be
     # set — same bug class as scheduler.py's SLA-escalation insert, fixed the
     # same way (matches the working nda.py/resume_intake_service.py pattern).
+    # BUG FIX: body.get('message') read a field name that doesn't exist on
+    # this table (the real column is `body`) — this endpoint has zero real
+    # callers today per the audit, but fixed for correctness rather than
+    # left as a landmine for whoever wires it up next.
     target_user = body.get('user_id')
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO notifications (tenant_id,user_id,recipient_user_id,recipient_role,title,body,type,resource,resource_id,channel)
             VALUES ($1,$2,$2,$3,$4,$5,$6,$7,$8,'inapp') RETURNING *
         """, actor.tenant_id, target_user, body.get('recipient_role') if not target_user else None,
-             body['title'], body.get('message'), body.get('type', 'info'),
+             body['title'], body.get('body') or body.get('message'), body.get('type', 'info'),
              body.get('resource'), body.get('resource_id'))
     return dict(row)
 

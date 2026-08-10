@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 
 router = APIRouter(prefix="/whatsapp-bot", tags=["whatsapp-bot"])
 
@@ -123,6 +123,15 @@ async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str) -> str
                VALUES ($1,$2,'whatsapp','WhatsApp Inbound',$3,$4,$5,$6,$7,'auto_accepted',$8,$9,'auto_accepted')""",
             tenant_id, candidate_id, f"{phone}@whatsapp", filename, file_path, mimetype, len(data),
             _json.dumps(parsed), round(float(parsed.get("_confidence", 0.7) or 0.7), 3))
+        # Real fix (2026-08-10 audit): inbound WhatsApp was never logged to
+        # candidate_messages, so the Conversations page's WhatsApp folder
+        # could never show an inbound message even though real ones arrive
+        # daily. Logged here (resume) and in handle_cmd (commands) below.
+        await conn.execute("""
+            INSERT INTO candidate_messages
+              (tenant_id, candidate_id, channel, direction, body, status)
+            VALUES ($1,$2,'whatsapp','inbound',$3,'received')
+        """, tenant_id, candidate_id, f"[Resume attachment: {filename}]")
 
     first_name = (parsed.get("name") or "").split()[0] if parsed.get("name") else ""
     greeting = f"Thanks {first_name}!" if first_name else "Thanks!"
@@ -137,6 +146,13 @@ async def handle_cmd(phone: str, text: str, tenant_id: str) -> str:
         if not cand:
             return "Hi! We don't have your number on file. Contact your recruiter."
         name = cand["full_name"].split()[0]
+        # Real fix (2026-08-10 audit): see the matching note in
+        # _handle_inbound_resume — inbound commands were never logged either.
+        await conn.execute("""
+            INSERT INTO candidate_messages
+              (tenant_id, candidate_id, channel, direction, body, status)
+            VALUES ($1,$2,'whatsapp','inbound',$3,'received')
+        """, tenant_id, cand["id"], text[:2000])
         if cmd == "STATUS":
             apps = await conn.fetch(
                 "SELECT a.stage, r.title FROM applications a "
@@ -169,11 +185,80 @@ async def handle_cmd(phone: str, text: str, tenant_id: str) -> str:
                 f"Link: {iv['meeting_link'] or 'Will be shared separately'}",
             ]
             return "\n".join(lines)
+        elif cmd == "OFFER":
+            # Real fix (2026-08-10 audit): OFFER was advertised in HELP_LINES
+            # and the frontend's COMMANDS list but had no branch here at all -
+            # fell through to the help menu, which told the candidate to type
+            # OFFER, which showed them the help menu again.
+            off = await conn.fetchrow("""
+                SELECT o.status, o.ctc_offered, o.currency, o.joining_date, r.title
+                FROM offers o
+                JOIN applications a ON a.id = o.application_id
+                JOIN requisitions r ON r.id = a.requisition_id
+                WHERE a.candidate_id=$1 AND o.tenant_id=$2
+                ORDER BY o.created_at DESC LIMIT 1
+            """, cand["id"], tenant_id)
+            if not off:
+                return f"Hi {name}! No offer on file yet. Contact your recruiter for updates."
+            if off["status"] in ("draft", "pending_approval", "approved"):
+                return f"Hi {name}! Your offer for {off['title']} is being finalized internally. We'll share full details once it's issued."
+            lines = [f"Hi {name}! Your offer for {off['title']}:", f"Status: {off['status'].upper()}"]
+            if off["ctc_offered"]:
+                lines.append(f"CTC: {off['currency'] or 'INR'} {off['ctc_offered']:,.0f}")
+            if off["joining_date"]:
+                lines.append(f"Joining: {off['joining_date'].strftime('%d %b %Y')}")
+            if off["status"] == "issued":
+                lines.append("Reply ACCEPT or DECLINE to respond.")
+            return "\n".join(lines)
         elif cmd == "CALLBACK":
+            # Real fix: used to be a no-op reassurance with nothing written
+            # anywhere. Now creates a real recruiter_tasks row, same pattern
+            # as the auto-created tasks on stage changes (applications.py).
+            app_row = await conn.fetchrow("""
+                SELECT a.id AS application_id, a.requisition_id, a.assigned_recruiter_id, r.title
+                FROM applications a JOIN requisitions r ON r.id=a.requisition_id
+                WHERE a.candidate_id=$1 AND a.tenant_id=$2
+                ORDER BY a.updated_at DESC LIMIT 1
+            """, cand["id"], tenant_id)
+            await conn.execute("""
+                INSERT INTO recruiter_tasks
+                  (tenant_id, requisition_id, application_id, candidate_name, req_title,
+                   recruiter_id, task_type, title, priority)
+                VALUES ($1,$2,$3,$4,$5,$6,'callback_request',$7,'high')
+            """, tenant_id, app_row["requisition_id"] if app_row else None,
+                 app_row["application_id"] if app_row else None, cand["full_name"],
+                 app_row["title"] if app_row else None,
+                 app_row["assigned_recruiter_id"] if app_row else None,
+                 f"Callback requested by {cand['full_name']} via WhatsApp")
             return f"Hi {name}! A recruiter will call you within 2 hours. Office: Mon-Sat 9AM-7PM IST"
         elif cmd in ("ACCEPT", "DECLINE"):
-            action = "accepted" if cmd == "ACCEPT" else "declined"
-            return f"Hi {name}! Your response ({action}) has been noted. Team will contact you within 24h."
+            # Real fix: used to write nothing anywhere despite telling the
+            # candidate their response "has been noted". Per explicit
+            # decision (2026-08-10): a WhatsApp reply is not a verified
+            # identity the way an e-signed link is, so this notifies the
+            # recruiter to confirm and act rather than directly flipping a
+            # real offer's status (keeps a human in the loop for this
+            # high-stakes action, same spirit as HARD RULE #10).
+            action = "ACCEPTED" if cmd == "ACCEPT" else "DECLINED"
+            app_row = await conn.fetchrow("""
+                SELECT a.assigned_recruiter_id, r.title
+                FROM applications a JOIN requisitions r ON r.id=a.requisition_id
+                WHERE a.candidate_id=$1 AND a.tenant_id=$2
+                ORDER BY a.updated_at DESC LIMIT 1
+            """, cand["id"], tenant_id)
+            recipient = app_row["assigned_recruiter_id"] if app_row else None
+            if not recipient:
+                manager = await conn.fetchrow(
+                    "SELECT id FROM users WHERE tenant_id=$1 AND role='manager' LIMIT 1", tenant_id)
+                recipient = manager["id"] if manager else None
+            if recipient:
+                await conn.execute("""
+                    INSERT INTO notifications
+                      (tenant_id, user_id, recipient_user_id, title, body, type, resource, channel)
+                    VALUES ($1,$2,$2,$3,$4,'warning','candidate','inapp')
+                """, tenant_id, recipient, f"Offer {action.lower()} via WhatsApp",
+                     f"{cand['full_name']} replied {action} to their offer for {app_row['title'] if app_row else 'their role'} via WhatsApp — please confirm and action manually.")
+            return f"Hi {name}! Your response ({action.lower()}) has been noted. Team will contact you within 24h."
         else:
             return HELP_MSG
 
@@ -214,8 +299,17 @@ async def webhook(request: Request):
         # would be silently dropped.
         if (not text and not has_media) or msg.get("fromMe") or "@g.us" in from_:
             return {"ok": True}
+        # Real bug fix (2026-08-10 audit): no ORDER BY meant this returned
+        # whatever row Postgres physically stored first, which flips
+        # unpredictably (any UPDATE on the "first" tenant's own row can move
+        # it later in physical storage). Confirmed live: this had silently
+        # started returning the wrong tenant, misrouting every real inbound
+        # WhatsApp message. The bot has no real number->tenant mapping
+        # (single-tenant by design, a separate, bigger limitation not fixed
+        # here) - ORDER BY created_at picks the same, real primary tenant
+        # deterministically instead of depending on physical row order.
         async with db.system_conn() as conn:
-            tenant = await conn.fetchrow("SELECT id FROM tenants LIMIT 1")
+            tenant = await conn.fetchrow("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
         if not tenant:
             return {"ok": True}
         tenant_id = str(tenant["id"])
@@ -230,7 +324,10 @@ async def webhook(request: Request):
     return {"ok": True}
 
 @router.post("/send")
-async def send_message(phone: str, message: str, actor: Actor = Depends(get_actor)):
+async def send_message(phone: str, message: str, actor: Actor = Depends(require_role("admin", "manager"))):
+    """Raw connectivity-test send (arbitrary phone, no candidate_id) - not a
+    candidate-consent path, but the same 'send arbitrary WhatsApp to
+    arbitrary number' danger class as /waha/send, so held to the same bar."""
     success = await send_wa(phone, message)
     return {"sent": success, "phone": phone}
 

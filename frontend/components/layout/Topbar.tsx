@@ -99,15 +99,18 @@ export function Topbar() {
           <Keyboard size={16} style={{ color:'var(--gray-400)' }} />
         </button>
 
-        {/* Notifications */}
-        <button className="btn btn-ghost btn-icon relative" title="Notifications">
+        {/* Notifications — BUG FIX (2026-08-10 audit): the badge count was
+            always real and live, but this button had no onClick/href at
+            all, unlike the Settings link right below it — clicking it did
+            nothing, and there was no Notification Center page to go to. */}
+        <Link href="/notifications" className="btn btn-ghost btn-icon relative" title="Notifications">
           <Bell size={16} style={{ color:'var(--gray-500)' }} />
           {unread > 0 && (
             <span className="absolute -top-0.5 -right-0.5 w-4 h-4 text-xs font-bold text-white rounded-full flex items-center justify-center" style={{ background:'var(--red)', fontSize:'9px' }}>
               {unread > 9 ? '9+' : unread}
             </span>
           )}
-        </button>
+        </Link>
 
         {/* Settings */}
         <Link href="/settings/users" className="btn btn-ghost btn-icon" title="Settings">

@@ -36,6 +36,7 @@ function WhatsAppPageInner() {
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState(searchParams?.get('tab') || 'session');
   const { data: status } = useFetch<any>('/whatsapp-bot/status');
+  const { data: templatesData } = useFetch<any[]>('/whatsapp/templates');
   const [phone, setPhone] = useState('');
   const [msg, setMsg] = useState('');
   const [sending, setSending] = useState(false);
@@ -49,6 +50,86 @@ function WhatsAppPageInner() {
   const [activeStageKey, setActiveStageKey] = useState('nda');
   const [savingStage, setSavingStage] = useState(false);
   const [stageSaveMsg, setStageSaveMsg] = useState('');
+
+  // ── Consent Management (2026-08-10 audit: was a static stub with zero
+  // API calls — there was no way to grant WhatsApp consent for a real
+  // candidate anywhere in the product, so every consent-gated send path
+  // always correctly refused every real candidate) ──
+  const [consentSearch, setConsentSearch] = useState('');
+  const [consentResults, setConsentResults] = useState<any[]>([]);
+  const [consentSelected, setConsentSelected] = useState<any>(null);
+  const [consentRecords, setConsentRecords] = useState<any[]>([]);
+  const [consentNote, setConsentNote] = useState('');
+  const [consentSaving, setConsentSaving] = useState(false);
+  const [consentMsg, setConsentMsg] = useState('');
+
+  useEffect(() => {
+    if (consentSearch.trim().length < 2) { setConsentResults([]); return; }
+    const t = setTimeout(() => {
+      apiFetch('/candidates?search=' + encodeURIComponent(consentSearch) + '&limit=8')
+        .then((r) => setConsentResults(r.items || []))
+        .catch(() => setConsentResults([]));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [consentSearch]);
+
+  function selectConsentCandidate(c: any) {
+    setConsentSelected(c);
+    setConsentResults([]);
+    setConsentSearch('');
+    setConsentMsg('');
+    apiFetch('/consent-records?candidate_id=' + c.id)
+      .then((rows) => setConsentRecords(rows || []))
+      .catch(() => setConsentRecords([]));
+  }
+
+  const hasWhatsappConsent = consentRecords.some((r) => r.channel === 'whatsapp' && r.consent_given);
+
+  async function grantWhatsappConsent() {
+    if (!consentSelected) return;
+    setConsentSaving(true); setConsentMsg('');
+    try {
+      await apiFetch('/consent-records', {
+        method: 'POST',
+        body: JSON.stringify({
+          candidate_id: consentSelected.id,
+          data_category: 'whatsapp_communication',
+          channel: 'whatsapp',
+          consent_given: true,
+          consent_text: consentNote.trim() || 'Consent obtained and recorded by staff via the WhatsApp Consent tab.',
+        }),
+      });
+      setConsentMsg('Consent recorded.');
+      setConsentNote('');
+      const rows = await apiFetch('/consent-records?candidate_id=' + consentSelected.id);
+      setConsentRecords(rows || []);
+    } catch (e: any) {
+      setConsentMsg('Failed: ' + (e?.message || ''));
+    } finally { setConsentSaving(false); }
+  }
+
+  async function revokeWhatsappConsent() {
+    if (!consentSelected) return;
+    setConsentSaving(true); setConsentMsg('');
+    try {
+      await apiFetch('/consent-records', {
+        method: 'POST',
+        body: JSON.stringify({
+          candidate_id: consentSelected.id,
+          data_category: 'whatsapp_communication',
+          channel: 'whatsapp',
+          consent_given: false,
+          consent_text: consentNote.trim() || 'Consent withdrawn/revoked by staff via the WhatsApp Consent tab.',
+        }),
+      });
+      setConsentMsg('Consent revoked.');
+      setConsentNote('');
+      const rows = await apiFetch('/consent-records?candidate_id=' + consentSelected.id);
+      setConsentRecords(rows || []);
+    } catch (e: any) {
+      setConsentMsg('Failed: ' + (e?.message || ''));
+    } finally { setConsentSaving(false); }
+  }
 
   useEffect(() => {
     if (waSettings) {
@@ -203,17 +284,92 @@ function WhatsAppPageInner() {
       {activeTab === 'templates' && (
         <div data-testid="templates-panel" style={{padding:'20px',background:'white',borderRadius:'12px'}}>
           <h3>WhatsApp Message Templates</h3>
-          <div><strong>Hindi:</strong> नमस्ते! आपका आवेदन प्राप्त हुआ।</div>
-          <div><strong>Tamil:</strong> வணக்கம்! உங்கள் விண்ணப்பம் பெற்றப்பட்டது.</div>
-          <div><strong>Telugu:</strong> నమస్కారం! మీ దరఖాస్తు అందుకోబడింది.</div>
-          <div><strong>Kannada:</strong> ನಮಸ್ಕಾರ! ನಿಮ್ಮ ಅರ್ಜಿ ಸ್ವೀಕರಿಸಲಾಗಿದೆ.</div>
+          <p style={{color:'#64748b',fontSize:13,marginBottom:12}}>Real templates from the backend (<code>/whatsapp/templates</code>) — each supports 14 languages; English sample shown per template key.</p>
+          {(templatesData || []).map((t: any) => (
+            <div key={t.template_key} style={{padding:'10px 0',borderBottom:'1px solid #f1f5f9'}}>
+              <div style={{fontWeight:700,fontSize:13}}>{t.template_key}</div>
+              <div style={{fontSize:12.5,color:'#475569',marginTop:2}}>{t.sample_en}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{t.languages?.length || 0} languages available: {(t.languages || []).join(', ')}</div>
+            </div>
+          ))}
+          {(!templatesData || templatesData.length === 0) && <div style={{color:'#94a3b8',fontSize:13}}>No templates loaded.</div>}
         </div>
       )}
 
       {activeTab === 'consent' && (
         <div data-testid="consent-panel" style={{padding:'20px',background:'white',borderRadius:'12px'}}>
           <h3>Consent Management</h3>
-          <p>Manage WhatsApp communication consent for candidates and employees.</p>
+          <p style={{color:'#64748b',fontSize:13}}>HARD RULE #7/#12 (DPDP 2023) — WhatsApp messages can only be sent to a candidate once real consent is on file here. Search for a candidate to view or grant/revoke their WhatsApp consent.</p>
+
+          <div style={{position:'relative',maxWidth:420,marginTop:12}}>
+            <input
+              data-testid="consent-search"
+              placeholder="Search candidate by name, email, or phone..."
+              value={consentSearch}
+              onChange={(e) => setConsentSearch(e.target.value)}
+              style={inputStyle}
+            />
+            {consentResults.length > 0 && (
+              <div style={{position:'absolute',zIndex:10,top:'100%',left:0,right:0,background:'white',border:'1px solid #e2e8f0',borderRadius:8,boxShadow:'0 4px 12px rgba(0,0,0,0.08)',maxHeight:260,overflowY:'auto'}}>
+                {consentResults.map((c: any) => (
+                  <div key={c.id} onClick={() => selectConsentCandidate(c)}
+                       style={{padding:'8px 12px',cursor:'pointer',borderBottom:'1px solid #f1f5f9',fontSize:13}}
+                       onMouseEnter={(e) => (e.currentTarget.style.background = '#f8fafc')}
+                       onMouseLeave={(e) => (e.currentTarget.style.background = 'white')}>
+                    <div style={{fontWeight:600}}>{c.full_name}</div>
+                    <div style={{color:'#94a3b8',fontSize:11.5}}>{c.email || 'no email'} · {c.phone || 'no phone'}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {consentSelected && (
+            <div style={{marginTop:16,padding:16,border:'1px solid #e2e8f0',borderRadius:10,maxWidth:480}} data-testid="consent-detail">
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div>
+                  <div style={{fontWeight:700}}>{consentSelected.full_name}</div>
+                  <div style={{fontSize:12,color:'#64748b'}}>{consentSelected.phone || 'no phone on file'}</div>
+                </div>
+                <span data-testid="consent-status" style={{
+                  fontSize:11, fontWeight:700, padding:'3px 10px', borderRadius:999,
+                  background: hasWhatsappConsent ? '#dcfce7' : '#fee2e2',
+                  color: hasWhatsappConsent ? '#166534' : '#991b1b',
+                }}>{hasWhatsappConsent ? 'CONSENT ON FILE' : 'NO CONSENT'}</span>
+              </div>
+
+              <textarea
+                placeholder="Note: how was consent obtained? (e.g. verbal on call, WhatsApp opt-in reply)"
+                value={consentNote}
+                onChange={(e) => setConsentNote(e.target.value)}
+                style={{...inputStyle, marginTop:12, minHeight:60, resize:'vertical' as const}}
+              />
+              <div style={{display:'flex',gap:8,marginTop:4}}>
+                <button data-testid="consent-grant" onClick={grantWhatsappConsent} disabled={consentSaving}
+                        style={{padding:'7px 14px',background:'#16a34a',color:'white',border:'none',borderRadius:6,cursor:'pointer',fontSize:12.5,fontWeight:600}}>
+                  {consentSaving ? 'Saving...' : 'Grant Consent'}
+                </button>
+                {hasWhatsappConsent && (
+                  <button data-testid="consent-revoke" onClick={revokeWhatsappConsent} disabled={consentSaving}
+                          style={{padding:'7px 14px',background:'#dc2626',color:'white',border:'none',borderRadius:6,cursor:'pointer',fontSize:12.5,fontWeight:600}}>
+                    Revoke Consent
+                  </button>
+                )}
+              </div>
+              {consentMsg && <div style={{marginTop:8,fontSize:12.5,color: consentMsg.startsWith('Failed') ? '#dc2626' : '#16a34a'}}>{consentMsg}</div>}
+
+              {consentRecords.length > 0 && (
+                <div style={{marginTop:14,borderTop:'1px solid #f1f5f9',paddingTop:10}}>
+                  <div style={{fontSize:11,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',marginBottom:6}}>History</div>
+                  {consentRecords.map((r: any) => (
+                    <div key={r.id} style={{fontSize:11.5,color:'#64748b',padding:'3px 0'}}>
+                      {new Date(r.created_at).toLocaleString()} — <strong>{r.channel}</strong>: {r.consent_given ? 'granted' : 'revoked'} {r.consent_text ? `(${r.consent_text})` : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

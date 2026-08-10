@@ -11,6 +11,7 @@ import ai_router
 from deps import Actor, get_actor, require_role
 from routers.p23_p27 import _suggest_interviewer
 from routers.pipeline_stages import is_valid_stage
+from routers.whatsapp import _ensure_consent
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +27,12 @@ async def send_whatsapp(phone: str, message: str):
         phone_clean = phone.replace("+","").replace(" ","").replace("-","")
         if not phone_clean.startswith("91"): phone_clean = "91" + phone_clean
         payload = {"chatId": f"{phone_clean}@c.us", "text": message, "session": "default"}
-        headers = {"X-Api-Key": "2037c635e42c471a9f2032800ee6ff5b", "Content-Type": "application/json"}
+        # BUG FIX (2026-08-10 audit): this hardcoded key never matched the
+        # real one (confirmed live: WAHA 401s on it, the real key comes from
+        # WAHA_API_KEY). Silently swallowed by the try/except below and the
+        # caller's fire-and-forget background task - every interview
+        # invite/reminder WhatsApp had never once been delivered.
+        headers = {"X-Api-Key": os.getenv("WAHA_API_KEY", "aviinATS2026secure"), "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=5.0) as cli:
             r = await cli.post("http://waha:3000/api/sendText", json=payload, headers=headers)
             return r.status_code == 200 or r.status_code == 201
@@ -178,8 +184,12 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
         # Update invite_sent_at
         await conn.execute("UPDATE interview_schedules SET invite_sent_at=NOW() WHERE id=$1", sched_id)
 
-        # WhatsApp message (background task)
-        if body.send_whatsapp and app["phone"]:
+        # WhatsApp message (background task). HARD RULE #7/#12 fix
+        # (2026-08-10 audit): this was one of the UI-reachable send paths
+        # that skipped consent entirely - the Interview Scheduler UI calls
+        # this endpoint directly. Same _ensure_consent used everywhere else.
+        has_consent = await _ensure_consent(conn, actor.tenant_id, app["candidate_id"])
+        if body.send_whatsapp and app["phone"] and has_consent:
             dt_fmt = scheduled_dt.strftime("%d %b %Y at %I:%M %p")
             msg = (f"Hi {app['full_name']}, your interview for {app['job_title'] or 'the position'} "
                    f"is scheduled on {dt_fmt}. Mode: {body.mode.replace('_',' ').title()}. "
@@ -193,7 +203,7 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
             "candidate": app["full_name"],
             "scheduled_at": body.scheduled_at,
             "ics_content": ics,
-            "whatsapp_queued": bool(body.send_whatsapp and app["phone"]),
+            "whatsapp_queued": bool(body.send_whatsapp and app["phone"] and has_consent),
             "stage_moved": app["stage"] != "interview",
         }
 
@@ -239,6 +249,9 @@ async def send_interview_reminder(schedule_id: str, bg: BackgroundTasks, actor: 
         """, schedule_id, actor.tenant_id)
         if not s: raise HTTPException(404, "Schedule not found")
         if not s["phone"]: raise HTTPException(400, "Candidate has no phone number")
+        # Same HARD RULE #7/#12 fix as auto_schedule_interview() above.
+        if not await _ensure_consent(conn, actor.tenant_id, s["candidate_id"]):
+            raise HTTPException(403, "WhatsApp consent not recorded for this candidate (HARD RULE #7/#12)")
 
         dt_fmt = s["scheduled_at"].strftime("%d %b at %I:%M %p") if s["scheduled_at"] else "TBD"
         msg = (f"Reminder: Hi {s['full_name']}, your interview for {s['job_title'] or 'the position'} "

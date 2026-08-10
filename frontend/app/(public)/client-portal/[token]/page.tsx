@@ -14,9 +14,14 @@ const GRADE_COLOR: Record<string, string> = {
   A: '#16a34a', B: '#2563eb', C: '#d97706', D: '#dc2626',
 };
 
+// BUG FIX (2026-08-10 audit): these keys are sent verbatim as the
+// `decision` value to the backend, which used to send 'approve'/'reject'
+// against a DB CHECK constraint that only allows 'approved'/'rejected'/
+// 'hold'/'interview_requested' — every Approve/Reject click 500'd, only
+// "On Hold" ever worked. Now matches the real constraint exactly.
 const DECISION_CFG: Record<string, { label: string; color: string; bg: string; icon: any }> = {
-  approve: { label: 'Approved', color: '#16a34a', bg: '#f0fdf4', icon: CheckCircle },
-  reject: { label: 'Rejected', color: '#dc2626', bg: '#fef2f2', icon: XCircle },
+  approved: { label: 'Approved', color: '#16a34a', bg: '#f0fdf4', icon: CheckCircle },
+  rejected: { label: 'Rejected', color: '#dc2626', bg: '#fef2f2', icon: XCircle },
   hold: { label: 'On Hold', color: '#d97706', bg: '#fef3c7', icon: Clock },
 };
 
@@ -194,8 +199,8 @@ export default function ClientPortalPage({ params }: { params: { token: string }
 
   const req = data!.requisition;
   const candidates = data!.candidates;
-  const approved = candidates.filter(c => (localFeedback[c.application_id]?.decision || c.client_decision) === 'approve').length;
-  const rejected = candidates.filter(c => (localFeedback[c.application_id]?.decision || c.client_decision) === 'reject').length;
+  const approved = candidates.filter(c => (localFeedback[c.application_id]?.decision || c.client_decision) === 'approved').length;
+  const rejected = candidates.filter(c => (localFeedback[c.application_id]?.decision || c.client_decision) === 'rejected').length;
   const pending = candidates.filter(c => !(localFeedback[c.application_id]?.decision || c.client_decision)).length;
 
   return (

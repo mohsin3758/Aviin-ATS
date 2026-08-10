@@ -9,6 +9,7 @@ from pydantic import BaseModel
 import httpx
 import db
 from deps import Actor, get_actor
+from routers.whatsapp import _ensure_consent
 
 router = APIRouter(prefix="/communications", tags=["communications"])
 # Public (no auth) — the recipient's own email client fetches this, not the
@@ -534,6 +535,12 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
         if body.channel in ("whatsapp", "both"):
             phone = to_phone if body.candidate_id else None
             if not phone: results["whatsapp"] = "no_phone"
+            # HARD RULE #7/#12 fix (2026-08-10 audit): this was the one path
+            # every real WhatsApp-composer UI actually calls, and it never
+            # checked consent — the consent-checking code in whatsapp.py
+            # existed but had zero UI callers. Same _ensure_consent used there.
+            elif body.candidate_id and not await _ensure_consent(conn, actor.tenant_id, body.candidate_id):
+                results["whatsapp"] = "no_consent"
             else:
                 ok = await _send_wa(phone, body.message)
                 st = "sent" if ok else "failed"
@@ -592,6 +599,9 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
                     sent += 1
             if body.channel in ("whatsapp","both"):
                 if not cand["phone"]: skipped += 1
+                # Same HARD RULE #7/#12 fix as send_msg() above.
+                elif not await _ensure_consent(conn, actor.tenant_id, str(cand["id"])):
+                    skipped += 1
                 else:
                     ok = await _send_wa(cand["phone"], msg)
                     st = "sent" if ok else "failed"

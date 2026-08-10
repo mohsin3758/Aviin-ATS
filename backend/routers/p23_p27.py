@@ -36,6 +36,16 @@ async def add_skill(body: dict, actor: Actor=Depends(get_actor)):
             RETURNING *
         """, actor.tenant_id, body['skill_name'], body.get('category','other'),
              body.get('aliases',[]))
+        # BUG FIX (2026-08-10 audit): refresh_cache() had zero callers -
+        # adding/editing a skill here never refreshed the live resume-parser
+        # cache, so a newly-added alias wouldn't be usable until the backend
+        # process happened to restart. Best-effort: a stale cache is a minor
+        # parsing-quality issue, not worth failing the whole request over.
+        try:
+            import services.skill_normalizer as skill_normalizer
+            await skill_normalizer.refresh_cache(conn)
+        except Exception:
+            pass
     return dict(row)
 
 @skills_router.get("/categories")
@@ -412,15 +422,26 @@ async def send_interview_reminder(interview_id: str, actor: Actor=Depends(get_ac
 # ── P25: Client Portal ────────────────────────────────────────
 client_portal_router = APIRouter(prefix="/client-portal", tags=["client-portal"])
 
+class ClientLoginBody(BaseModel):
+    email: str
+    password: str
+
 @client_portal_router.post("/login")
-async def client_login(email: str, password: str):
+async def client_login(body: ClientLoginBody):
+    """BUG FIX (2026-08-10 audit): this 500'd on every call, for any input -
+    email/password were bare function params (bound as query params by
+    FastAPI, not body, so credentials would travel in the URL and land in
+    access logs) and the lookup crashed on db.system_conn()'s ''::uuid
+    against a FORCE-RLS table. Real Pydantic body + a SECURITY DEFINER
+    email-lookup function (sql/44...sql), same pattern as the token
+    resolution above."""
     async with db.system_conn() as conn:
-        user = await conn.fetchrow(
-            "SELECT * FROM client_portal_users WHERE email=$1 AND is_active", email)
-        if not user or not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
+        user = await conn.fetchrow("SELECT * FROM get_client_portal_user_by_email($1)", body.email)
+        if not user or not bcrypt.checkpw(body.password.encode(), user['password_hash'].encode()):
             raise HTTPException(401, "Invalid credentials")
-        await conn.execute(
-            "UPDATE client_portal_users SET last_login_at=now() WHERE id=$1", user['id'])
+        async with db.tenant_conn(str(user['tenant_id'])) as tconn:
+            await tconn.execute(
+                "UPDATE client_portal_users SET last_login_at=now() WHERE id=$1", user['id'])
     return {"id": str(user['id']), "email": user['email'],
             "full_name": user['full_name'], "company_name": user['company_name']}
 
@@ -459,16 +480,26 @@ async def client_shortlist(requisition_id: str, actor: Actor=Depends(get_actor))
 
 @client_portal_router.post("/feedback")
 async def submit_feedback(body: dict, actor: Actor=Depends(get_actor)):
+    # BUG FIX (2026-08-10 audit): ON CONFLICT DO NOTHING had no matching
+    # unique/exclusion constraint to ever actually fire on, so every submit
+    # inserted a fresh row - proven live, one candidate listed 3x on the
+    # same client view. sql/44...sql adds a real UNIQUE(tenant_id,
+    # application_id); this now genuinely upserts a revised decision
+    # instead of stacking duplicates.
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO client_feedback
               (tenant_id,application_id,candidate_id,requisition_id,
                decision,feedback_text,rating)
             VALUES ($1,$2,$3,$4,$5,$6,$7)
-            ON CONFLICT DO NOTHING RETURNING *
+            ON CONFLICT (tenant_id, application_id) DO UPDATE SET
+              decision=EXCLUDED.decision, feedback_text=EXCLUDED.feedback_text,
+              rating=EXCLUDED.rating, created_at=now()
+            RETURNING *
         """, actor.tenant_id, body.get('application_id'), body['candidate_id'],
              body.get('requisition_id'), body['decision'],
              body.get('feedback_text'), body.get('rating'))
+        await _notify_recruiter_of_feedback(conn, actor.tenant_id, body.get('application_id'), body['decision'], body.get('feedback_text'))
     return dict(row) if row else {"status": "already submitted"}
 
 # ── Public client-portal endpoints (no auth, token-based) ─────────────────
@@ -485,6 +516,40 @@ async def submit_feedback(body: dict, actor: Actor=Depends(get_actor)):
 # enrollment, since this endpoint doesn't know its own tenant_id up front.
 import secrets as _cp_secrets
 import db as _cpdb
+
+
+async def _notify_recruiter_of_feedback(conn, tenant_id: str, application_id: str, decision: str, feedback_text: str):
+    """BUG FIX (2026-08-10 audit): client feedback used to be write-only —
+    zero notification/outbox/email anywhere, so a client's decision never
+    reached any internal user. Writes a real notification to the assigned
+    recruiter (or a manager if unassigned), same correct column convention
+    established elsewhere in this codebase (recipient_user_id/body)."""
+    if not application_id:
+        return
+    app_row = await conn.fetchrow("""
+        SELECT a.assigned_recruiter_id, c.full_name AS candidate_name, r.title
+        FROM applications a
+        JOIN candidates c ON c.id = a.candidate_id
+        JOIN requisitions r ON r.id = a.requisition_id
+        WHERE a.id = $1 AND a.tenant_id = $2
+    """, application_id, tenant_id)
+    if not app_row:
+        return
+    recipient = app_row["assigned_recruiter_id"]
+    if not recipient:
+        manager = await conn.fetchrow(
+            "SELECT id FROM users WHERE tenant_id=$1 AND role='manager' LIMIT 1", tenant_id)
+        recipient = manager["id"] if manager else None
+    if not recipient:
+        return
+    body_text = f"Client marked {app_row['candidate_name']} as '{decision}' for {app_row['title']}."
+    if feedback_text:
+        body_text += f" Note: {feedback_text}"
+    await conn.execute("""
+        INSERT INTO notifications
+          (tenant_id, user_id, recipient_user_id, title, body, type, resource, resource_id, channel)
+        VALUES ($1,$2,$2,$3,$4,'info','application',$5,'inapp')
+    """, tenant_id, recipient, "Client feedback received", body_text, application_id)
 
 @client_portal_router.post("/generate-link")
 async def generate_client_portal_link(requisition_id: str, actor: Actor = Depends(get_actor)):
@@ -548,7 +613,7 @@ async def public_shortlist(token: str):
             JOIN candidates c ON c.id=a.candidate_id
             LEFT JOIN candidate_scores cs ON cs.candidate_id=c.id AND cs.tenant_id=c.tenant_id
             LEFT JOIN client_feedback cf ON cf.application_id=a.id
-            WHERE a.requisition_id=$1 AND a.tenant_id=$2
+            WHERE a.requisition_id=$1 AND a.tenant_id=$2 AND a.stage <> 'rejected'
             ORDER BY cs.readiness_index DESC NULLS LAST
         """, req_id, tenant_id)
     return {
@@ -566,14 +631,30 @@ async def public_feedback(body: dict):
             raise HTTPException(404, "Invalid or expired link")
         await sysconn.execute("SELECT record_client_portal_access($1)", token)
     tenant_id, req_id = str(row["tenant_id"]), str(row["requisition_id"])
+    application_id = body.get('application_id')
     async with _cpdb.tenant_conn(tenant_id) as conn:
+        # BUG FIX (2026-08-10 audit): nothing previously checked that the
+        # submitted application actually belongs to the token's own
+        # requisition - a valid link for req A could attribute feedback to
+        # any candidate in the tenant. RLS/FKs bounded it to the tenant, but
+        # not to the right requisition.
+        if application_id:
+            owns = await conn.fetchval(
+                "SELECT 1 FROM applications WHERE id=$1::uuid AND requisition_id=$2::uuid AND tenant_id=$3::uuid",
+                application_id, req_id, tenant_id)
+            if not owns:
+                raise HTTPException(400, "Application does not belong to this requisition's shortlist")
+        # Same duplicate-row fix as submit_feedback() above.
         await conn.execute("""
             INSERT INTO client_feedback
               (tenant_id, application_id, candidate_id, requisition_id, decision, feedback_text, rating)
             VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7)
-            ON CONFLICT DO NOTHING
-        """, tenant_id, body.get('application_id'), body['candidate_id'],
+            ON CONFLICT (tenant_id, application_id) DO UPDATE SET
+              decision=EXCLUDED.decision, feedback_text=EXCLUDED.feedback_text,
+              rating=EXCLUDED.rating, created_at=now()
+        """, tenant_id, application_id, body['candidate_id'],
              req_id, body['decision'], body.get('feedback_text'), body.get('rating'))
+        await _notify_recruiter_of_feedback(conn, tenant_id, application_id, body['decision'], body.get('feedback_text'))
     return {"status": "ok"}
 
 # ── P26: SLA Dashboard ────────────────────────────────────────

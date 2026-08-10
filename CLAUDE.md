@@ -3787,3 +3787,151 @@ the wrong hardcoded WAHA key in `phase3.py`'s internal `send_whatsapp()`
 helper (distinct from the now-fixed `/waha/send` proxy), and the
 inbound-WhatsApp wrong-tenant routing bug - all still open, all
 documented in the published audit report for a future pass.
+
+## All remaining findings closed: WhatsApp, Client Portal, Salary/Notifications, Skills/Question Bank, 2026-08-10
+Direct follow-up to the same-day "WhatsApp/Client Portal/Salary/Skills Fresh
+Audit" - after the 2 critical unauthenticated-disclosure bugs were closed
+separately, user asked to build and complete everything else the audit
+found. Three clarifying decisions made before starting (all per explicit
+user choice): WhatsApp's ACCEPT/DECLINE notifies the recruiter to confirm
+manually rather than directly flipping a real offer's status (a WhatsApp
+reply isn't a verified identity the way an e-sign link is - keeps a human
+in the loop for this high-stakes action); the Client Portal now filters
+out `stage='rejected'` (a genuine shortlist, not the whole pipeline); the
+Notification Center got a real minimal page built, not just the leak fix.
+
+### WhatsApp Chatbot (P9)
+- **Consent bypass closed on every UI-reachable send path.** `_ensure_consent`
+  (already correct in `whatsapp.py`, previously with zero UI callers) is now
+  called from `communications.py`'s `/send` + `/bulk-send` (the real
+  Conversations/Candidate-360 composer paths) and `phase3.py`'s
+  `/auto-interview/schedule` + `/send-reminder` (the real Interview
+  Scheduler path) before any WhatsApp send. `/whatsapp-bot/send` (a raw
+  connectivity-test tool, no candidate_id to check consent against) was
+  instead gated to admin/manager, same bar as `/waha/send`.
+- **The wrong hardcoded WAHA key in `phase3.py`'s internal `send_whatsapp()`
+  helper fixed** (distinct from the already-fixed `/waha/send` proxy) -
+  every interview invite/reminder had silently 401'd forever, swallowed by
+  a bare `except`. Now reads `WAHA_API_KEY` like every other caller.
+  Verified live: the same request now gets a real WAHA-side error ("No LID
+  for user" for a fake test number) instead of 401 Unauthorized.
+- **Inbound tenant misrouting fixed.** `SELECT id FROM tenants LIMIT 1`
+  had no `ORDER BY` and was returning the wrong tenant depending on
+  physical row order (a real UPDATE on either tenant's row can move it).
+  `ORDER BY created_at ASC` deterministically picks the real primary
+  tenant, matching all 15 historical real inbound resumes.
+- **OFFER command implemented** (was advertised, unimplemented, fell
+  through to the help menu) - queries the candidate's real offer and
+  replies with status/CTC/joining date, or a "being finalized" message
+  pre-issue. **CALLBACK now creates a real `recruiter_tasks` row**
+  (was a no-op reassurance). **ACCEPT/DECLINE now write a real
+  `notifications` row** to the assigned recruiter (or a manager fallback)
+  instead of writing nothing - per the explicit decision above, this
+  notifies rather than directly mutates the offer.
+- **Inbound messages now logged to `candidate_messages`** (both resume
+  attachments and text commands) - the Conversations page's WhatsApp
+  folder could never show an inbound message before this, despite real
+  ones arriving daily.
+- **A real Consent tab built** - was a static stub with zero API calls,
+  meaning there was no way to grant WhatsApp consent for a real candidate
+  anywhere in the product (every one of the fixes above was previously
+  unsatisfiable for any real candidate as a direct result). Candidate
+  search → grant/revoke via the existing `consent-records` API → real
+  history. **Templates tab fixed to show real backend data** instead of 4
+  hardcoded strings that didn't match any real template - the QA test that
+  "verified" 14-language support only ever regex-matched those 4 fake
+  strings; rewritten to assert the real 14-language-code list instead.
+
+### Client Portal (P25)
+- **Approve/Reject 500 fixed** - frontend sent `approve`/`reject` against
+  a DB CHECK constraint expecting `approved`/`rejected`; only "Hold" ever
+  worked. Aligned the frontend's `DECISION_CFG` keys to the real values.
+- **Duplicate-feedback-row bug fixed** - `sql/44_client_portal_fixes.sql`
+  consolidates the 2 known duplicate E2E rows and adds a real
+  `UNIQUE(tenant_id, application_id)` constraint; both feedback endpoints
+  now `ON CONFLICT ... DO UPDATE` (a revised decision replaces the old
+  one) instead of `DO NOTHING` with nothing to conflict on.
+- **Feedback now reaches a real recruiter.** Was write-only into a void -
+  a client's decision never surfaced anywhere internally. Both feedback
+  endpoints now write a real `notifications` row to the assigned
+  recruiter (or a manager fallback). Verified live: two real feedback
+  submissions produced two real notification rows with accurate text.
+- **`POST /client-portal/login` fixed** - was a guaranteed 500 on every
+  call (bare `email`/`password` params bound as query args instead of a
+  body, plus the same `''::uuid` RLS-cast crash class fixed repeatedly
+  elsewhere in this project). Real Pydantic body + a SECURITY DEFINER
+  email-lookup function, since login needs to resolve a tenant it doesn't
+  know yet - same anonymous-token pattern as the token-forgery fix.
+- **Shortlist now genuinely excludes rejected candidates** and validates
+  that a submitted `application_id` actually belongs to the token's own
+  requisition (previously unvalidated - a valid link for req A could
+  attribute feedback to any candidate in the tenant).
+
+### Salary Benchmarking (P31) + Notification Center (P32)
+- **Market Demand's missing `is_active` filter fixed** - was counting
+  soft-deleted (mostly QA test) requisitions as real demand. Verified
+  live: dashboard went from 240 open reqs / 194 Python demand to the real
+  21 open / 9 Python.
+- **`/suggest`'s backwards substring match fixed** - required the stored
+  benchmark title to contain the caller's query, not vice versa, so real
+  titles like "Senior Python Developer, 3yr" never matched a shorter
+  stored "Python Developer 2-5yr" row. Now bidirectional. Verified live
+  with the exact failing query from the audit - now resolves correctly.
+- **Notification recipient-scope leak fixed** - every list/count/mark-read
+  endpoint filtered on the legacy `user_id` column instead of the real,
+  documented `recipient_user_id`/`recipient_role` columns every write site
+  actually populates, so all 207 real role-targeted notifications
+  (manager/admin/recruiter-only) leaked to every user in the tenant.
+  `mark_read` also gained a real recipient check - previously any
+  authenticated user could mark any other user's notification read.
+- **A real Notification Center page built** at `/notifications` - the
+  bell badge was always real and live but had no `onClick`/`href` and no
+  page to go to. Minimal: unread/all filter, mark-one/mark-all-read, links
+  into the related candidate/application/requisition. Verified via a real
+  headless-browser click-through: bell → page → 100 real rows → mark-read
+  round-trip, zero console errors.
+
+### Skills Taxonomy (P23) + Interview Question Bank (P34)
+- **The resume-parser skill-normalization stale-import bug fixed.**
+  `improved_parser.py` imported `_CACHE_LOADED` **by name** from
+  `skill_normalizer.py`, which copies the value at import time (`False`)
+  and never sees the real module's later flip to `True` once
+  `init_cache()` runs - the guard permanently read a stale `False`, so
+  DB-backed skill normalization had never executed once in production
+  despite the cache genuinely loading correctly. Fixed by importing the
+  module itself and reading `skill_normalizer._CACHE_LOADED` at call time.
+  **Verified end-to-end with a real resume parse**: `Kafka`→`Apache Kafka`,
+  `Spring`→`Spring Boot`, `Vue`→`Vue.js`, `REST`→`REST API` - the exact 4
+  canonical rewrites the audit named - now genuinely apply, for the first
+  time. Also wired `refresh_cache()` (previously zero callers) into
+  `POST /skills` so a newly-added alias becomes usable immediately instead
+  of only after the next backend restart.
+- **Question Bank's case-sensitivity matching bug fixed.**
+  `GET /question-bank/generate/{req_id}` intersected lowercase `tags`
+  against Title-Case `skills_required` with case-sensitive `&&`, matching
+  0 of 262 real requisitions and silently falling through to 5 generic HR
+  questions every time. Fixed by lowercasing both sides. Verified live:
+  a real "Senior Python Developer" requisition now returns genuinely
+  relevant technical questions (GIL, decorators, list vs tuple) instead
+  of "what's your greatest weakness." (SAP-tagged requisitions still get
+  HR fallback questions - a real data gap, zero SAP-tagged questions
+  exist in the 26-question bank - not something a matching-logic fix can
+  address.) Also guarded the two NULL/empty-input crash risks the audit
+  flagged as latent but real.
+- **The missing `expected_answer` field fixed** - the list endpoint's
+  SELECT never included it, so the browse page's "Expected Answer /
+  Evaluation Guide" panel - the single most valuable field on every
+  question - could never render even though the data was always there.
+
+Full QA suite re-run clean after all of the above: **153 passed / 2
+skipped / 0 failed**. One test needed a real fix along the way (not a
+regression): `S11 WhatsApp Outreach`'s "templates tab shows 14 languages"
+had been asserting against the exact 4 hardcoded fake strings this batch
+removed - confirmed as the audit's own "false green" finding, rewritten to
+assert the real 14-language-code list instead, verified passing against
+the actual fixed page. Zero-token audit: `CONFIRMED CLEAN` (338 files, 0
+external API refs). Every fix verified against real production data end-
+to-end, not code review - all throwaway test data (candidates,
+applications, consent_records, notifications, recruiter_tasks,
+candidate_messages, client_portal_tokens) cleaned up after each check,
+confirmed zero residue.

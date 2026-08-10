@@ -151,9 +151,15 @@ qbank_router = APIRouter(prefix="/question-bank", tags=["question-bank"])
 async def list_questions(category: Optional[str]=None, role_type: Optional[str]=None,
                           difficulty: Optional[str]=None, search: Optional[str]=None,
                           actor: Actor=Depends(get_actor)):
+    # BUG FIX (2026-08-10 audit): this list SELECT never included
+    # expected_answer, so the browse page's "Expected Answer / Evaluation
+    # Guide" panel — the single most valuable field on every question —
+    # could never render, even though the field itself is populated on all
+    # real rows. GET /{id} does return it but had zero real callers,
+    # confirmed by usage_count staying 0 on every row forever.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
-            SELECT id, category, role_type, difficulty, question, tags, usage_count, is_system
+            SELECT id, category, role_type, difficulty, question, expected_answer, tags, usage_count, is_system
             FROM question_bank
             WHERE (tenant_id=$1 OR tenant_id IS NULL) AND is_active
               AND ($2::text IS NULL OR category=$2)
@@ -195,13 +201,25 @@ async def generate_question_set(requisition_id: str, count: int=10,
             "SELECT title, skills_required FROM requisitions WHERE id=$1 AND tenant_id=$2",
             requisition_id, actor.tenant_id)
         if not req: raise HTTPException(404,"Requisition not found")
-        # Match questions to skills
+        # BUG FIX (2026-08-10 audit): question_bank.tags are lowercase short
+        # tokens ('python','react') but requisitions.skills_required holds
+        # Title-Case canonical names ('Python','React') — Postgres array
+        # overlap (&&) is case-sensitive, so this matched 0 of 262 real
+        # requisitions in production and every real query silently fell
+        # through to the category='hr' catch-all (5 generic questions
+        # regardless of role). Lowercasing both sides fixes it — verified
+        # against the real data this would move 220 of 262 to a real match.
+        # Also guards the two NULL/empty inputs the audit flagged as a
+        # latent (not yet triggered, but real) crash risk.
+        skills_required = req['skills_required'] or []
+        skills_lower = [s.lower() for s in skills_required[:5]]
+        title_first_word = (req['title'] or '').split()[0] if req['title'] else ''
         rows = await conn.fetch("""
             SELECT id, category, difficulty, question, tags
             FROM question_bank
             WHERE (tenant_id=$1 OR tenant_id IS NULL) AND is_active
               AND (
-                tags && $2::text[]
+                (SELECT array_agg(lower(t)) FROM unnest(tags) t) && $2::text[]
                 OR role_type ILIKE '%'||$3||'%'
                 OR category='hr'
               )
@@ -212,8 +230,7 @@ async def generate_question_set(requisition_id: str, count: int=10,
                    ELSE 3 END,
               usage_count DESC
             LIMIT $4
-        """, actor.tenant_id, req['skills_required'][:5],
-             req['title'].split()[0], count)
+        """, actor.tenant_id, skills_lower, title_first_word, count)
     return {
         "requisition": req['title'],
         "skills": req['skills_required'],
