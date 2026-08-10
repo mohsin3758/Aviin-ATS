@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
 import db
 from deps import Actor, get_actor
+from services import candidate_ownership as ownership
 
 import_router = APIRouter(prefix="/import", tags=["import"])
 
@@ -49,6 +50,15 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                         "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
                         "VALUES ($1,$2,'resume_processing','bulk_import',TRUE,$3)",
                         actor.tenant_id, new_id, f"Added via CSV bulk import by {actor.user_id}.")
+                    # Individual recruiter ownership (2026-08-11): whoever
+                    # runs the bulk import individually owns every new
+                    # candidate it creates for 30 days (never the existing-
+                    # row UPDATE branch above — an update never transfers
+                    # ownership per the business rule).
+                    if actor.user_id and actor.email:
+                        await ownership.claim_ownership(
+                            conn, actor.tenant_id, str(new_id), str(actor.user_id), actor.email, "bulk_upload",
+                        )
                     created += 1
             except Exception as e:
                 errors += 1
@@ -112,6 +122,11 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                         "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
                         "VALUES ($1,$2,'resume_processing','bulk_import',TRUE,$3)",
                         actor.tenant_id, new_id, f"Added via Excel bulk import by {actor.user_id}.")
+                    # Same individual-ownership claim as the CSV path above.
+                    if actor.user_id and actor.email:
+                        await ownership.claim_ownership(
+                            conn, actor.tenant_id, str(new_id), str(actor.user_id), actor.email, "bulk_upload",
+                        )
                     created += 1
             except Exception as e:
                 errors += 1; errs.append({"row":i,"error":str(e)[:80]})

@@ -2,7 +2,7 @@
 import { useState, useRef, useMemo, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions, SectionDivider } from '@/components/ui/Modal';
-import { API, authHeaders } from '@/lib/auth';
+import { API, authHeaders, getTokenPayload } from '@/lib/auth';
 import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
@@ -512,7 +512,21 @@ export default function CandidatesPage() {
   const [minExpYr,setMinExpYr] = useState('');
   const [maxExpYr,setMaxExpYr] = useState('');
   const [tagFilter,setTagFilter] = useState('');
+  const [ownedFilter,setOwnedFilter] = useState(''); // '' | 'unowned' | 'active' — 2026-08-11 ownership filter
   const [showFilters,setShowFilters] = useState(false);
+  // SSR-safe deferred localStorage read (established pattern elsewhere in
+  // this app) — avoids a hydration mismatch between the server's first
+  // paint and the client's real role.
+  const [mounted,setMounted] = useState(false);
+  useEffect(()=>{ setMounted(true); },[]);
+  const canManageOwnership = mounted && ['admin','super_admin','manager'].includes(getTokenPayload()?.role||'');
+  const [claimingId,setClaimingId] = useState('');
+  async function claimCandidate(id:string){
+    setClaimingId(id);
+    try{ await apiFetch(`/candidates/${id}/ownership/claim`,{method:'POST'}); refetch(); }
+    catch(e:any){ showStatus(e?.message||'Claim failed'); }
+    finally{ setClaimingId(''); }
+  }
   const [appliedFilters,setAppliedFilters] = useState<Record<string,string>>({});
   const {data:savedFilters,refetch:refetchSavedFilters} = useFetch<any[]>('/saved-filters');
   const [selectedSavedFilter,setSelectedSavedFilter] = useState('');
@@ -547,7 +561,7 @@ export default function CandidatesPage() {
   const showStatus = (m:string,ms=3000)=>{setStatusMsg(m);setTimeout(()=>setStatusMsg(''),ms);};
 
   // reset page on filter/sort/source change
-  useEffect(()=>{ setPage(0); }, [appliedFilters, sort, srcFilter, tagFilter]);
+  useEffect(()=>{ setPage(0); }, [appliedFilters, sort, srcFilter, tagFilter, ownedFilter]);
 
   const apiQuery = useMemo(()=>{
     const p = new URLSearchParams({limit:String(PAGE_SIZE), offset:String(page*PAGE_SIZE), sort_by:sort.by, sort_dir:sort.dir});
@@ -559,8 +573,9 @@ export default function CandidatesPage() {
     if (appliedFilters.maxExp)   p.set('max_exp', String(Number(appliedFilters.maxExp)*12));
     if (srcFilter) p.set('source',srcFilter);
     if (tagFilter) p.set('tag_id',tagFilter);
+    if (ownedFilter) p.set('owned',ownedFilter);
     return `/candidates?${p.toString()}`;
-  },[appliedFilters,sort,page,srcFilter,tagFilter]);
+  },[appliedFilters,sort,page,srcFilter,tagFilter,ownedFilter]);
 
   const {data:cr,loading,refetch} = useFetch<any>(apiQuery);
   const items:any[] = (cr as any)?.items||[];
@@ -693,7 +708,7 @@ export default function CandidatesPage() {
   };
 
   const applyFilters=()=>{setAppliedFilters({search,skill:skillFilter,location:locationFilter,employer:employerFilter,minExp:minExpYr,maxExp:maxExpYr});};
-  const clearFilters=()=>{setSearch('');setSkillFilter('');setLocationFilter('');setEmployerFilter('');setMinExpYr('');setMaxExpYr('');setSrcFilter('');setTagFilter('');setAppliedFilters({});setSelectedSavedFilter('');};
+  const clearFilters=()=>{setSearch('');setSkillFilter('');setLocationFilter('');setEmployerFilter('');setMinExpYr('');setMaxExpYr('');setSrcFilter('');setTagFilter('');setOwnedFilter('');setAppliedFilters({});setSelectedSavedFilter('');};
   const saveCurrentFilter=async()=>{
     const name=prompt('Name this filter:');
     if(!name)return;
@@ -712,7 +727,7 @@ export default function CandidatesPage() {
     setAppliedFilters({search:filters.search||'',skill:filters.skill||'',location:filters.location||'',employer:filters.employer||'',minExp:filters.minExp||'',maxExp:filters.maxExp||''});
   };
   const deleteSavedFilter=async(id:string)=>{await apiFetch(`/saved-filters/${id}`,{method:'DELETE'});if(selectedSavedFilter===id)setSelectedSavedFilter('');refetchSavedFilters();};
-  const hasActiveFilters = Boolean(Object.values(appliedFilters).some(Boolean)||srcFilter||tagFilter);
+  const hasActiveFilters = Boolean(Object.values(appliedFilters).some(Boolean)||srcFilter||tagFilter||ownedFilter);
 
   return (
     <div style={{padding:'24px',maxWidth:'1600px'}}>
@@ -788,6 +803,12 @@ export default function CandidatesPage() {
                 <option value="">All tags</option>
                 {allTags.map((t:any)=><option key={t.id} value={t.id}>{t.name} ({t.usage_count||0})</option>)}
               </select></div>
+            <div><label style={{fontSize:'11px',fontWeight:'600',color:'#64748b',display:'block',marginBottom:'4px'}}>OWNERSHIP</label>
+              <select data-testid="owned-filter" value={ownedFilter} onChange={e=>setOwnedFilter(e.target.value)} style={{width:'100%',padding:'7px 10px',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}>
+                <option value="">All candidates</option>
+                <option value="unowned">Unowned</option>
+                <option value="active">Actively owned</option>
+              </select></div>
           </div>
         )}
       </div>
@@ -807,7 +828,7 @@ export default function CandidatesPage() {
         ) : (
           <>
           <div style={{overflowX:'auto'}}>
-            <table style={{width:'100%',minWidth:'1100px',borderCollapse:'collapse'}}>
+            <table style={{width:'100%',minWidth:'1220px',borderCollapse:'collapse'}}>
               <thead>
                 <tr style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0'}}>
                   <th style={{padding:'10px 14px',width:'36px'}}>
@@ -822,6 +843,7 @@ export default function CandidatesPage() {
                   <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Pipeline</th>
                   <SortTh label="Activity" col="last_activity" sort={sort} onSort={handleSort}/>
                   <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Source</th>
+                  <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Owner</th>
                   <th style={{padding:'10px 14px',position:'sticky',right:0,background:'#f8fafc',boxShadow:'-2px 0 4px rgba(0,0,0,0.06)',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',textAlign:'center'}}>Actions</th>
                 </tr>
               </thead>
@@ -905,6 +927,24 @@ export default function CandidatesPage() {
                       {/* Source */}
                       <td style={{padding:'10px 14px'}}>
                         <span style={{fontSize:'11px',padding:'2px 8px',borderRadius:'10px',background:'#f1f5f9',color:'#475569',fontWeight:'500'}}>{d.source||'direct'}</span>
+                      </td>
+                      {/* Owner (2026-08-11: 30-day individual recruiter ownership) */}
+                      <td style={{padding:'10px 14px'}}>
+                        {d.owner && d.owner.status==='active' && new Date(d.owner.expires_at) > new Date() ? (
+                          <div>
+                            <div style={{fontSize:'11px',fontWeight:'600',color:'#0f172a'}}>{d.owner.recruiter_name}</div>
+                            <div style={{fontSize:'10px',color:Math.ceil((new Date(d.owner.expires_at).getTime()-Date.now())/86400000)<=5?'#d97706':'#94a3b8'}}>
+                              {Math.max(0,Math.ceil((new Date(d.owner.expires_at).getTime()-Date.now())/86400000))}d left
+                            </div>
+                          </div>
+                        ) : canManageOwnership ? (
+                          <button onClick={()=>claimCandidate(d.id)} disabled={claimingId===d.id}
+                            style={{fontSize:'10px',fontWeight:'700',padding:'3px 9px',borderRadius:'6px',border:'1px solid #bbf7d0',background:'#f0fdf4',color:'#166534',cursor:claimingId===d.id?'not-allowed':'pointer'}}>
+                            {claimingId===d.id?'…':'Claim'}
+                          </button>
+                        ) : (
+                          <span style={{fontSize:'11px',color:'#cbd5e1'}}>Unowned</span>
+                        )}
                       </td>
                       {/* Actions */}
                       <td style={{padding:'10px 14px',position:'sticky',right:0,background:isSel?'#eff6ff':'white',boxShadow:'-2px 0 4px rgba(0,0,0,0.05)'}}>

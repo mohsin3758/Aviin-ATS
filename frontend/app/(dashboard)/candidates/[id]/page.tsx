@@ -1,13 +1,14 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { getTokenPayload } from '@/lib/auth';
 import {
   ArrowLeft, Mail, Phone, MessageCircle, Briefcase,
   Star, FileText, History, CheckCircle, Clock, AlertCircle,
   Database, FileSearch, Award, TrendingUp, Calendar, Building2,
   AlertTriangle, Download, Edit2, Save, X, Plus, Linkedin, Share2, Copy, CheckCheck,
-  MapPin, DollarSign, Timer,
+  MapPin, DollarSign, Timer, UserCheck, Repeat,
 } from 'lucide-react';
 
 const STAGE_COLORS: Record<string,{color:string,bg:string}> = {
@@ -748,6 +749,121 @@ function WhatsAppModal({ candidate, onClose }: { candidate: any; onClose: () => 
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Ownership Card (2026-08-11: 30-day individual recruiter ownership) ────────
+function daysUntil(iso: string): number {
+  return Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+}
+
+function OwnershipCard({ candidateId }: { candidateId: string }) {
+  const { data, loading, refetch } = useFetch<any>(`/candidates/${candidateId}/ownership`);
+  const [mounted, setMounted] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
+  const [recruiterId, setRecruiterId] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const { data: recruiters } = useFetch<any[]>(showTransfer ? '/users?is_active=true&role=recruiter' : null);
+
+  // SSR-safe deferred localStorage read — same pattern used elsewhere in
+  // this app (device-monitoring, recruiter-ops) to avoid a hydration
+  // mismatch between the server's first paint and the client's.
+  useEffect(() => { setMounted(true); }, []);
+  const role = mounted ? (getTokenPayload()?.role || '') : '';
+  const canManage = ['admin', 'super_admin', 'manager'].includes(role);
+
+  const owner = data?.owner;
+  const isActive = owner && owner.status === 'active' && new Date(owner.ownership_expires_at) > new Date();
+
+  async function claim() {
+    setBusy(true);
+    try { await apiFetch(`/candidates/${candidateId}/ownership/claim`, { method: 'POST' }); refetch(); }
+    catch (e: any) { alert(e?.message || 'Claim failed'); }
+    finally { setBusy(false); }
+  }
+
+  async function transfer() {
+    if (!recruiterId) return;
+    setBusy(true);
+    try {
+      await apiFetch(`/candidates/${candidateId}/ownership/transfer/${recruiterId}`, { method: 'POST', body: JSON.stringify({ reason: reason || undefined }) });
+      setShowTransfer(false); setRecruiterId(''); setReason('');
+      refetch();
+    } catch (e: any) { alert(e?.message || 'Transfer failed'); }
+    finally { setBusy(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom: isActive || owner ? '12px' : 0}}>
+        <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',display:'flex',alignItems:'center',gap:'6px'}}>
+          <UserCheck size={15}/> Candidate Ownership
+        </h3>
+        {canManage && (
+          <div style={{display:'flex',gap:'8px'}}>
+            {!isActive && (
+              <button onClick={claim} disabled={busy}
+                style={{padding:'5px 12px',borderRadius:'7px',border:'1px solid #bbf7d0',background:'#f0fdf4',color:'#166534',fontSize:'11px',fontWeight:'700',cursor:busy?'not-allowed':'pointer'}}>
+                {busy?'…':'Claim for me'}
+              </button>
+            )}
+            <button onClick={()=>setShowTransfer(s=>!s)}
+              style={{display:'flex',alignItems:'center',gap:'4px',padding:'5px 12px',borderRadius:'7px',border:'1px solid #e2e8f0',background:'white',color:'#374151',fontSize:'11px',fontWeight:'700',cursor:'pointer'}}>
+              <Repeat size={11}/> Transfer
+            </button>
+          </div>
+        )}
+      </div>
+
+      {isActive ? (
+        <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
+          <div style={{width:32,height:32,borderRadius:'50%',background:'#1e40af',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:800,color:'#fff',flexShrink:0}}>
+            {(owner.recruiter_name||'?').split(' ').map((n:string)=>n[0]).join('').slice(0,2).toUpperCase()}
+          </div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:'13px',fontWeight:'700',color:'#0f172a'}}>{owner.recruiter_name}</div>
+            <div style={{fontSize:'11px',color:'#64748b'}}>{owner.recruiter_email} · via {owner.source?.replace('_',' ')}</div>
+          </div>
+          <div style={{textAlign:'right'}}>
+            <div style={{fontSize:'11px',fontWeight:'700',color: daysUntil(owner.ownership_expires_at) <= 5 ? '#d97706' : '#166534'}}>
+              {daysUntil(owner.ownership_expires_at)}d left
+            </div>
+            <div style={{fontSize:'10px',color:'#94a3b8'}}>until {new Date(owner.ownership_expires_at).toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}</div>
+          </div>
+        </div>
+      ) : owner ? (
+        <div style={{fontSize:'12px',color:'#94a3b8'}}>
+          Ownership expired ({owner.recruiter_name}, was until {new Date(owner.ownership_expires_at).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}) — available to claim.
+        </div>
+      ) : (
+        <div style={{fontSize:'12px',color:'#94a3b8'}}>Unowned — not yet claimed by any recruiter.</div>
+      )}
+
+      {showTransfer && canManage && (
+        <div style={{marginTop:'14px',paddingTop:'14px',borderTop:'1px solid #f1f5f9',display:'flex',flexDirection:'column',gap:'8px'}}>
+          <select value={recruiterId} onChange={e=>setRecruiterId(e.target.value)}
+            style={{padding:'8px 10px',borderRadius:'8px',border:'1px solid #e2e8f0',fontSize:'13px'}}>
+            <option value="">Select recruiter…</option>
+            {(recruiters||[]).map((u:any)=><option key={u.id} value={u.id}>{u.full_name}</option>)}
+          </select>
+          <input value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason (optional)"
+            style={{padding:'8px 10px',borderRadius:'8px',border:'1px solid #e2e8f0',fontSize:'13px'}}/>
+          <div style={{display:'flex',gap:'8px'}}>
+            <button onClick={transfer} disabled={busy||!recruiterId}
+              style={{padding:'7px 14px',borderRadius:'8px',border:'none',background:'#0f172a',color:'white',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+              {busy?'Transferring…':'Confirm Transfer'}
+            </button>
+            <button onClick={()=>setShowTransfer(false)}
+              style={{padding:'7px 14px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',fontSize:'12px',cursor:'pointer'}}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1612,6 +1728,7 @@ export default function CandidateProfilePage() {
         {/* Profile tab */}
         {activeTab==='profile' && (
           <div data-testid="profile-panel" style={{marginTop:'16px',display:'flex',flexDirection:'column',gap:'16px'}}>
+            {id && <OwnershipCard candidateId={id as string} />}
             {candidate.ai_scores?.length > 0 && (
               <div data-testid="ai-score-panel" style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
                 <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>AI Match Score</h3>

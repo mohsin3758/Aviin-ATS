@@ -4,10 +4,11 @@ from typing import List
 from typing import Optional
 import json
 import db, events
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 from schemas import CandidateCreate, CandidateUpdate
 from routers.pipeline_stages import is_valid_stage
 from permissions import require_permission
+from services import candidate_ownership as ownership
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
@@ -29,6 +30,7 @@ async def list_candidates(
     min_exp:  Optional[int] = Query(None),
     max_exp:  Optional[int] = Query(None),
     tag_id:   Optional[str] = Query(None),
+    owned:    Optional[str] = Query(None),  # 'unowned' | 'active' — 2026-08-11 ownership filter
     limit:    int = Query(100, le=500),
     offset:   int = Query(0, ge=0),
     sort_by:  str = Query('created_at'),
@@ -63,6 +65,12 @@ async def list_candidates(
         conditions.append(
             f"EXISTS (SELECT 1 FROM candidate_tag_map ctm WHERE ctm.candidate_id=c.id AND ctm.tag_id=${len(params)})"
         )
+    _owned_exists = ("EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
+                      "AND co.status='active' AND co.ownership_expires_at > now())")
+    if owned == "unowned":
+        conditions.append(f"NOT {_owned_exists}")
+    elif owned == "active":
+        conditions.append(_owned_exists)
 
     ALLOWED = {"full_name","total_exp_mo","expected_ctc","created_at","last_activity","updated_at"}
     if sort_by not in ALLOWED: sort_by = "created_at"
@@ -76,11 +84,15 @@ async def list_candidates(
     tags_sub = ("(SELECT json_agg(json_build_object('id',ct.id,'name',ct.name,'color',ct.color) ORDER BY ct.name)"
                 " FROM candidate_tag_map ctm JOIN candidate_tags ct ON ct.id=ctm.tag_id"
                 " WHERE ctm.candidate_id=c.id) AS tags_json")
+    owner_sub = ("(SELECT json_build_object('recruiter_name',u.full_name,'recruiter_email',co.recruiter_email,"
+                 "'expires_at',co.ownership_expires_at,'status',co.status,'source',co.source)"
+                 " FROM candidate_ownership co JOIN users u ON u.id=co.recruiter_id"
+                 " WHERE co.candidate_id=c.id) AS owner_json")
     flds = ", ".join("c." + f.strip() for f in FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
         rows  = await conn.fetch(
-            f"SELECT {flds}, {pl_sub}, {tags_sub} FROM candidates c {where} ORDER BY c.{sort_by} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
+            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub} FROM candidates c {where} ORDER BY c.{sort_by} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
             *params, limit, offset)
     items = []
     for r in rows:
@@ -95,6 +107,8 @@ async def list_candidates(
             d["pipeline_job"]   = None
         tj = d.pop("tags_json", None)
         d["tags"] = json.loads(tj) if tj else []
+        oj = d.pop("owner_json", None)
+        d["owner"] = json.loads(oj) if oj else None
         items.append(d)
     return {"items": items, "total": int(total), "limit": limit, "offset": offset}
 
@@ -395,6 +409,32 @@ async def check_duplicate(
         return {"duplicates": results, "has_duplicate": len(results) > 0}
 
 
+async def _ownership_conflict_detail(conn, tenant_id: str, existing_row) -> dict:
+    """Builds the 409 payload for an existing-candidate match, adding real
+    ownership context when the match is actively owned by someone else —
+    the "Candidate Already Owned... until <date>" UX the ownership rule
+    calls for, instead of a bare "already exists" with no context."""
+    detail = {
+        "detail": "A candidate with this email already exists",
+        "existing_id": str(existing_row["id"]),
+        "existing_name": existing_row["full_name"],
+    }
+    owner = await ownership.get_ownership(conn, tenant_id, str(existing_row["id"]))
+    if owner and owner["status"] == "active":
+        detail["detail"] = (
+            f"Candidate Already Owned — currently owned by {owner['recruiter_name']} "
+            f"until {owner['ownership_expires_at']}. You cannot claim or process this "
+            f"candidate during the active ownership period."
+        )
+        detail["owner"] = {
+            "recruiter_id": str(owner["recruiter_id"]),
+            "recruiter_name": owner["recruiter_name"],
+            "recruiter_email": owner["recruiter_email"],
+            "expires_at": owner["ownership_expires_at"].isoformat(),
+        }
+    return detail
+
+
 @router.post("")
 async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require_permission("candidates", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -409,11 +449,7 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
                 f"SELECT {FIELDS} FROM candidates WHERE email=$1 AND is_active IS NOT FALSE LIMIT 1",
                 body.email.strip().lower())
             if existing:
-                raise HTTPException(409, {
-                    "detail": "A candidate with this email already exists",
-                    "existing_id": str(existing["id"]),
-                    "existing_name": existing["full_name"]
-                })
+                raise HTTPException(409, await _ownership_conflict_detail(conn, actor.tenant_id, existing))
         try:
             row = await conn.fetchrow(
                 f"""INSERT INTO candidates
@@ -430,16 +466,23 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
                 existing2 = await conn.fetchrow(
                     f"SELECT {FIELDS} FROM candidates WHERE email=$1 AND is_active IS NOT FALSE LIMIT 1",
                     body.email.strip().lower())
-                raise HTTPException(409, {
-                    "detail": "A candidate with this email already exists",
-                    "existing_id": str(existing2["id"]) if existing2 else None
-                }) from exc
+                if existing2:
+                    raise HTTPException(409, await _ownership_conflict_detail(conn, actor.tenant_id, existing2)) from exc
+                raise HTTPException(409, {"detail": "A candidate with this email already exists", "existing_id": None}) from exc
             raise
         cid = row["id"]
         ct = getattr(body, "consent_text", None) or f"{body.full_name} consented to DPDP 2023."
         await conn.execute(
             "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) VALUES ($1,$2,'resume_processing','api',TRUE,$3)",
             actor.tenant_id, cid, ct)
+        # Individual recruiter ownership (2026-08-11): the logged-in
+        # recruiter who manually adds a candidate individually owns them
+        # for 30 days — never trust a submitted owner id, always the
+        # authenticated actor.
+        if actor.user_id and actor.email:
+            await ownership.claim_ownership(
+                conn, actor.tenant_id, str(cid), str(actor.user_id), actor.email, "manual_add",
+            )
         await events.write_outbox(conn, actor.tenant_id, "candidate.created",
             {"candidate_id": str(cid), "full_name": body.full_name}, f"candidate.created:{cid}")
     return dict(row)
@@ -642,3 +685,65 @@ async def parse_history(candidate_id: str, actor: Actor = Depends(get_actor)):
         "total_files":     len(files),
         "has_parsed_data": cpd is not None,
     }
+
+
+# ─── Individual Recruiter Candidate Ownership (30-day FCFS lock) ────────────
+
+class OwnershipTransferBody(BaseModel):
+    reason: str | None = None
+
+
+@router.get("/{candidate_id}/ownership")
+async def get_candidate_ownership(candidate_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        owner = await ownership.get_ownership(conn, actor.tenant_id, candidate_id)
+        history = await conn.fetch(
+            """SELECT h.*, u.full_name AS recruiter_name
+               FROM candidate_ownership_history h
+               LEFT JOIN users u ON u.id = h.recruiter_id
+               WHERE h.tenant_id=$1 AND h.candidate_id=$2
+               ORDER BY h.created_at DESC""",
+            actor.tenant_id, candidate_id,
+        )
+    return {"owner": owner, "history": [dict(h) for h in history]}
+
+
+@router.post("/{candidate_id}/ownership/claim")
+async def claim_candidate_ownership(candidate_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
+    """Manual claim from the unowned/review queue — admin/manager only,
+    matching the ownership rule's "authorized manager/admin can assign the
+    candidate" for the channels with no individual recruiter naturally in
+    the loop at intake (WhatsApp, public apply, browser extension)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow("SELECT id FROM candidates WHERE id=$1 AND tenant_id=$2", candidate_id, actor.tenant_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        result = await ownership.claim_ownership(
+            conn, actor.tenant_id, candidate_id, str(actor.user_id), actor.email, "manual_assign",
+        )
+    return result
+
+
+@router.post("/{candidate_id}/ownership/transfer/{new_recruiter_id}")
+async def transfer_candidate_ownership(candidate_id: str, new_recruiter_id: str, body: OwnershipTransferBody,
+                                        actor: Actor = Depends(require_role("admin", "manager"))):
+    """Explicit admin/manager override — always allowed regardless of an
+    active lock (rule 10/11's "authorized ownership transfer")."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow("SELECT id FROM candidates WHERE id=$1 AND tenant_id=$2", candidate_id, actor.tenant_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        new_recruiter = await conn.fetchrow(
+            "SELECT id, email FROM users WHERE id=$1 AND tenant_id=$2 AND role='recruiter' AND is_active",
+            new_recruiter_id, actor.tenant_id)
+        if not new_recruiter:
+            raise HTTPException(404, "Recruiter not found")
+        result = await ownership.transfer_ownership(
+            conn, actor.tenant_id, candidate_id, new_recruiter_id, new_recruiter["email"],
+            str(actor.user_id), body.reason,
+        )
+        await events.write_audit(
+            conn, actor.tenant_id, actor.user_id, "candidate.ownership_transferred",
+            "candidate", candidate_id, after={"new_recruiter_id": new_recruiter_id, "reason": body.reason},
+        )
+    return result

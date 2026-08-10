@@ -653,6 +653,47 @@ async def process_duplicate_scan():
         logger.error(f"process_duplicate_scan error: {e}")
 
 
+async def process_ownership_expiry():
+    """Daily 04:00 IST: flip candidate_ownership.status from 'active' to
+    'expired' for locks past their 30-day window (2026-08-11, individual
+    recruiter ownership). Not strictly required for correctness — every
+    real check already compares ownership_expires_at live — but keeps
+    `status` queryable without a date comparison in every list/filter
+    query, and writes the matching history row so an expiry is visible
+    in a candidate's ownership timeline even if nobody re-claims it."""
+    logger.info("scheduler: expiring lapsed candidate ownership locks")
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    lapsed = await conn.fetch(
+                        """SELECT candidate_id, recruiter_id, recruiter_email, source
+                           FROM candidate_ownership
+                           WHERE tenant_id=$1 AND status='active' AND ownership_expires_at < now()""",
+                        tid,
+                    )
+                    for row in lapsed:
+                        await conn.execute(
+                            "UPDATE candidate_ownership SET status='expired', updated_at=now() "
+                            "WHERE tenant_id=$1 AND candidate_id=$2",
+                            tid, row["candidate_id"],
+                        )
+                        await conn.execute(
+                            """INSERT INTO candidate_ownership_history
+                               (tenant_id, candidate_id, recruiter_id, recruiter_email, action, source)
+                               VALUES ($1,$2,$3,$4,'expired',$5)""",
+                            tid, row["candidate_id"], row["recruiter_id"], row["recruiter_email"], row["source"],
+                        )
+                    if lapsed:
+                        logger.info(f"Ownership expiry: {len(lapsed)} lock(s) expired for tenant {tid}")
+            except Exception as e:
+                logger.error(f"Ownership expiry failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_ownership_expiry error: {e}")
+
+
 def start_scheduler():
     """Register and start all jobs.
 
@@ -711,6 +752,10 @@ def start_scheduler():
     # nobody remembered to click it).
     scheduler.add_job(process_duplicate_scan, "cron", hour=3, minute=30,
                       id="duplicate_scan", replace_existing=True)
+    # Daily at 04:00 IST — expire lapsed candidate-ownership locks
+    # (2026-08-11 individual recruiter ownership).
+    scheduler.add_job(process_ownership_expiry, "cron", hour=4, minute=0,
+                      id="ownership_expiry", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

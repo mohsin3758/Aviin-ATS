@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -9,6 +10,7 @@ from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
 from permissions import require_permission
 from routers.p30_p35 import fire_webhook
+from services import candidate_ownership as ownership
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 rejection_reasons_router = APIRouter(prefix="/rejection-reasons", tags=["applications"])
@@ -134,9 +136,21 @@ async def create_application(body: ApplicationCreate, background_tasks: Backgrou
         if existing:
             raise HTTPException(status_code=409, detail="Application already exists for this candidate/requisition")
 
+        # Individual recruiter ownership (2026-08-11): when no recruiter is
+        # explicitly given (an admin/manager choosing someone specific is
+        # always respected — matches the ownership rule's "authorized
+        # transfer" escape hatch), default to the candidate's real active
+        # owner instead of silently defaulting to whoever happens to be
+        # logged in and creating this application.
+        default_recruiter_id = actor.user_id
+        if not body.assigned_recruiter_id:
+            owner = await ownership.get_ownership(conn, actor.tenant_id, body.candidate_id)
+            if owner and owner["status"] == "active" and owner["ownership_expires_at"] > datetime.now(timezone.utc):
+                default_recruiter_id = owner["recruiter_id"]
+
         # Per-role submission cap. NULL limit (the default) = unlimited, no
         # behavior change unless an admin sets one on the requisition.
-        recruiter_for_limit = body.assigned_recruiter_id or actor.user_id
+        recruiter_for_limit = body.assigned_recruiter_id or default_recruiter_id
         if recruiter_for_limit:
             req_row = await conn.fetchrow(
                 "SELECT submission_limit_per_recruiter FROM requisitions WHERE id=$1", body.requisition_id)

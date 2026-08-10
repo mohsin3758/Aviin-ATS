@@ -374,7 +374,14 @@ def merge_parsed(base: dict, llm: dict) -> dict:
 # ─── Phase 3: Candidate Upsert ────────────────────────────────────────────────
 async def upsert_candidate(conn, tenant_id: str, parsed: dict,
                            job_board: str, label: str,
-                           from_email: str, file_path: str, resume_text: str) -> str:
+                           from_email: str, file_path: str, resume_text: str,
+                           received_by: dict | None = None) -> str:
+    """received_by: {"user_id", "email"} of the recruiter whose registered
+    personal mailbox this resume arrived in (2026-08-11, individual
+    recruiter ownership) — None when there's no known per-recruiter
+    mailbox for this message (e.g. backlog reprocessing with no account
+    context), in which case no ownership claim is made and the candidate
+    falls into the unassigned/review queue rather than guessing."""
     cand_email = (parsed.get('email') or '').lower().strip().lstrip('-.+@')
     # Reject: content-id emails (image001.png@...), too-short domains, no real TLD
     if cand_email:
@@ -476,6 +483,16 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
         "VALUES ($1,$2,'resume_processing','email',TRUE,$3)",
         tenant_id, new_id, f"Resume received via email from {from_email} and processed for candidate matching.",
     )
+    # Individual recruiter ownership (2026-08-11): the recruiter whose own
+    # registered mailbox received this resume individually owns the
+    # resulting candidate for 30 days — only on genuine creation, never on
+    # the existing_id UPDATE branch above (an update never transfers
+    # ownership per the business rule).
+    if received_by and received_by.get("user_id") and received_by.get("email"):
+        from services import candidate_ownership as _ownership
+        await _ownership.claim_ownership(
+            conn, tenant_id, str(new_id), str(received_by["user_id"]), received_by["email"], "personal_mailbox",
+        )
     return str(new_id)
 
 
@@ -551,7 +568,16 @@ async def _pick_round_robin_recruiter(conn, tenant_id: str):
 
 async def create_application(conn, tenant_id: str, candidate_id: str, requisition_id: str):
     try:
-        recruiter_id = await _pick_round_robin_recruiter(conn, tenant_id)
+        # Individual recruiter ownership (2026-08-11) overrides round-robin
+        # entirely: if this candidate has an active 30-day ownership lock,
+        # the owner is the assigned recruiter, full stop — round-robin only
+        # ever applies as the fallback for candidates nobody currently owns.
+        from services import candidate_ownership as _ownership
+        owner = await _ownership.get_ownership(conn, tenant_id, candidate_id)
+        if owner and owner["status"] == "active" and owner["ownership_expires_at"] > datetime.now(timezone.utc):
+            recruiter_id = owner["recruiter_id"]
+        else:
+            recruiter_id = await _pick_round_robin_recruiter(conn, tenant_id)
         await conn.execute("""
             INSERT INTO applications(tenant_id,requisition_id,candidate_id,stage,assigned_recruiter_id)
             VALUES($1,$2,$3,'sourced',$4)
@@ -865,8 +891,23 @@ async def process_email_for_resume(
 
     # Only create candidate if confidence is sufficient
     if routing_decision != 'low_confidence':
+        # Individual recruiter ownership (2026-08-11): account_id already
+        # tells us exactly which recruiter's own registered mailbox this
+        # resume arrived in (user_email_accounts.user_id) — that identity
+        # used to be discarded entirely; now resolved once and threaded
+        # into upsert_candidate() so the receiving recruiter claims the
+        # candidate on genuine creation. None when there's no per-recruiter
+        # mailbox context (e.g. some backlog-reprocessing calls) — falls
+        # into the unassigned queue rather than guessing.
+        received_by = None
+        if account_id:
+            acc = await conn.fetchrow(
+                "SELECT user_id, email FROM user_email_accounts WHERE id=$1", account_id)
+            if acc:
+                received_by = {"user_id": str(acc["user_id"]), "email": acc["email"]}
         candidate_id = await upsert_candidate(conn, tenant_id, parsed, job_board, label,
-                                              from_email, file_path, resume_text)
+                                              from_email, file_path, resume_text,
+                                              received_by=received_by)
     else:
         candidate_id = None
         print(f'[Routing] LOW_CONFIDENCE (conf={conf:.2f}): file stored, no candidate created')

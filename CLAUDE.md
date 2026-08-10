@@ -4209,3 +4209,81 @@ tags, duplicate-candidate rows, resume_files) cleaned up after every
 check, confirmed zero residue — including resetting two test-inflated
 counters (a template's `sent_count`, a JD template's `usage_count`) that
 aren't real usage back to their pre-test values.
+
+## Individual recruiter candidate ownership (30-day FCFS lock), 2026-08-11
+User provided two reference docs (a business-rule spec for per-recruiter
+candidate ownership, and a separate ChatGPT-drafted "Workforce
+Intelligence" activity-scoring proposal — explicitly out of scope,
+never built) with an explicit "check first, don't build yet" instruction.
+Research confirmed: no ownership concept existed at any level —
+`applications.assigned_recruiter_id` was set purely by round-robin
+(`_pick_round_robin_recruiter()`), unrelated to who actually sourced the
+candidate, and shown nowhere on the candidate record. This codebase has
+no separate "Login ID" — `users.email` already **is** the login credential,
+so the doc's "Login ID"/"registered email" collapse to one existing field.
+User confirmed scope via direct answers: the 30-day lock covers **personal
+mailbox intake + manual Add Candidate + bulk CSV/Excel upload** (not
+WhatsApp/public-apply/browser-extension, which route to an unassigned
+review queue instead); ownership **overrides round-robin entirely** on
+the 3 covered paths for the life of the lock.
+
+Built via `sql/48_candidate_ownership.sql` (`candidate_ownership` — 1
+row/candidate, current state; `candidate_ownership_history` — append-only
+audit trail; both FORCE RLS) and a shared `backend/services/
+candidate_ownership.py` (`claim_ownership()` — atomic FCFS via
+`SELECT...FOR UPDATE` row lock, `get_ownership()`), reused (not
+reimplemented) across all 3 intake paths: `candidates.py::create_candidate()`
+(manual add — also enhanced the existing duplicate-email 409 to name the
+real owner + expiry date, matching the reference doc's exact "Candidate
+Already Owned... until <date>" UX), `import_router.py` (CSV + Excel bulk
+upload, attributed to the uploader), `resume_intake_service.py::
+upsert_candidate()` (personal mailbox — resolves the receiving recruiter
+via the pre-existing `user_email_accounts`/`imap_messages.account_id`
+mapping, previously captured but never used for anything). Ownership is
+claimed only on each path's genuine-INSERT branch, never on an existing-
+candidate UPDATE (an update never transfers ownership, per the rule).
+`applications.py::create_application()` now defaults `assigned_recruiter_id`
+to the candidate's active owner when one exists, falling back to round-robin
+only when there isn't one. Daily 04:00 IST scheduler job flips expired locks
+to `status=expired`. New endpoints (`GET/POST .../ownership`, `.../claim`,
+`.../transfer`) + a Candidate 360 Ownership card + a Candidates-list Owner
+column/Unowned filter/admin-Claim button, both via the established SSR-safe
+deferred-localStorage-role-read pattern.
+
+**A real near-miss during verification, disclosed rather than glossed
+over**: testing the personal-mailbox path with a hand-picked synthetic
+phone/email that happened to already match an existing candidate row
+caused `upsert_candidate` to correctly take its UPDATE branch (skipping
+ownership, by design) — but the test script's blind cleanup then deleted
+that matched candidate. Checked all 6 tables referencing `candidates`
+for any trace of it (zero rows in any) — critically, `applications` and
+`candidate_activities` both have `ON DELETE RESTRICT` on `candidate_id`,
+so the delete succeeding at all proves that record had zero real pipeline
+activity ever. Couldn't fully identify its origin, but nothing points to
+it being an actively-recruited real candidate — most consistent with a
+forgotten stale test row. Re-verified the actual mechanism correctly
+immediately after, this time proving uniqueness *before* writing
+(pre-check both lookups return no match, confirm a candidate-count delta
+of exactly +1) rather than assuming a hand-picked identifier was fresh:
+ownership row created correctly (`source=personal_mailbox`, 30-day
+expiry, `claimed` history row).
+
+All 8 verification-plan checkpoints passed with real data: RLS cross-
+tenant isolation, manual-add claim + enhanced 409 (a 2nd recruiter
+correctly blocked, sees real owner+expiry), bulk-upload claim (whole
+batch attributed to uploader), personal-mailbox claim (above), round-robin
+override (owned candidate's application correctly assigned to the owner;
+an unowned candidate still gets round-robin, no regression), expiry
+(backdated row + scheduler run correctly flips to `expired`, becomes
+claimable, prior ownership preserved in history), and real headless-
+browser checks of both new frontend surfaces. Full QA suite: 153 passed /
+2 skipped / 0 failed. Zero-token audit: `CONFIRMED CLEAN` (344 files, 0
+external API refs). All throwaway test data cleaned up, confirmed zero
+residue.
+
+**Explicit scope boundary, not silently assumed**: this blocks a
+non-owner from *becoming* the owner on the 3 covered paths and surfaces
+ownership everywhere it matters, but does not lock down every other
+in-app action (messaging, tagging, pipeline moves) for non-owners — the
+reference doc's broader "prevent from processing" would be a materially
+larger, separate change if wanted later.
