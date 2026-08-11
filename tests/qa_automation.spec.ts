@@ -2160,6 +2160,15 @@ test.describe.serial('S21 Device Monitoring Gaps', () => {
 // localStorage, all 4 backed by the same real `filtered` requisitions
 // array — this test confirms every mode renders the identical real
 // item count (not empty/broken) and that the choice survives a reload.
+//
+// Extended 2026-08-12: a user flagged, from real screenshots, that the
+// Table/Details view was missing the stage breakdown (Inbox/Interested/
+// Screened/Submitted/L1 Interview/etc.) and the Share button that Card
+// view always had — switching views felt like losing information, not
+// just re-laying it out. Fixed by extracting Card's stage-pill + share
+// logic into shared `StageBreakdown`/`ShareButton`/`InboxBadge`
+// components reused by all 4 modes, plus added Client/Location/Type/
+// Deadline filters (previously only Status/Priority/Work-Mode existed).
 test('S22 Requisitions view switcher: card/compact/list/table all render real data, choice persists', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -2173,15 +2182,41 @@ test('S22 Requisitions view switcher: card/compact/list/table all render real da
   await page.getByTestId('req-view-compact').click();
   await expect(page.getByTestId('req-view-content')).toBeVisible();
   expect(await page.locator('[data-testid="req-view-content"] > div').count()).toBe(cardCount);
+  // Compact view now carries a Share action too (previously Card-only)
+  expect(await page.locator('[title="Copy client shortlist link"]').count()).toBeGreaterThan(0);
 
   await page.getByTestId('req-view-list').click();
   await expect(page.getByTestId('req-view-content')).toBeVisible();
   expect(await page.locator('[data-testid="req-view-content"] > div').count()).toBe(cardCount);
+  expect(await page.locator('[title="Copy client shortlist link"]').count()).toBeGreaterThan(0);
 
   await page.getByTestId('req-view-table').click();
   await expect(page.locator('table')).toBeVisible({ timeout: 10000 });
   expect(await page.locator('table tbody tr').count()).toBe(cardCount);
   await expect(page.locator('table thead th').first()).toHaveText('Title');
+  // Table view now carries the same stage-breakdown/Inbox/Share parity Card had
+  const headers = await page.locator('table thead th').allTextContents();
+  expect(headers).toContain('Inbox');
+  expect(headers).toContain('Pipeline');
+  expect(await page.locator('table [title="Copy client shortlist link"]').count()).toBeGreaterThan(0);
+
+  // New filters (Client/Location/Type/Deadline) — pick a real client
+  // option dynamically rather than a hardcoded name, so this stays
+  // correct regardless of seed-data changes.
+  const clientSelect = page.locator('select').filter({ hasText: 'All Clients' });
+  const clientOptions = await clientSelect.locator('option').allTextContents();
+  const realClient = clientOptions.find(c => c && c !== 'All Clients');
+  if (realClient) {
+    await clientSelect.selectOption(realClient);
+    await page.waitForTimeout(300);
+    const rowTexts = await page.locator('table tbody tr').allInnerTexts();
+    expect(rowTexts.length).toBeGreaterThan(0);
+    for (const t of rowTexts) expect(t).toContain(realClient);
+    await expect(page.getByRole('button', { name: /Clear/i })).toBeVisible();
+    await page.getByRole('button', { name: /Clear/i }).click();
+    await page.waitForTimeout(300);
+    expect(await page.locator('table tbody tr').count()).toBe(cardCount);
+  }
 
   // Persistence: reload should keep the table view (localStorage), not reset to card
   await page.reload();

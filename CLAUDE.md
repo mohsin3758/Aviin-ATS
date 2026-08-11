@@ -5131,3 +5131,58 @@ on a re-run after a genuine 15-minute rate-limit cooldown, consistent
 with this suite's well-documented back-to-back-run flakiness, not a real
 regression). Zero-token audit: `CONFIRMED CLEAN` (364 files, 0 external
 API refs).
+
+## Jobs & Requisitions: view-mode feature parity + Client/Location/Type/Deadline filters, 2026-08-12
+User pasted 2 real screenshots (Card view vs the Details/table view added
+2026-08-11) and pointed out the table view was missing the stage
+breakdown (Inbox/Interested/Screened/Submitted/L1 Interview/etc.) and the
+Share button Card view always had — switching views felt like losing
+information, not just re-laying it out. Also asked for Client/Location/
+Deadline filters (only Status/Priority/Work-Mode existed).
+
+Root cause: Card's stage-pill rendering and its "copy client shortlist
+link" logic were written inline inside `JobCard` only, never extracted,
+so the 3 views added a day earlier (Compact/List/Table) never got them.
+Fixed by extracting 3 shared components (`StageBreakdown`, `InboxBadge`,
+`ShareButton` — `frontend/app/(dashboard)/requisitions/page.tsx`) reused
+across all 4 modes rather than duplicating the logic a 4th time:
+- **Table (Details)**: new "Inbox" column, the "Pipeline" column now
+  shows the real stage pills (not just a bare candidate count) stacked
+  under the total, and a Share icon button added to Actions.
+- **List**: an inbox badge + the same stage pills inserted inline, Share
+  icon button added next to the existing Pipeline link.
+- **Small (Compact)**: a Share icon button added next to View (this view
+  stays deliberately dense — no full stage breakdown, matching its
+  original "small/scannable" intent).
+- **Cards**: unchanged behavior, just now calling the same shared
+  `ShareButton` instead of its own private copy of the same logic.
+
+New filters: Client and Location (dropdowns built from the real distinct
+values present in the tenant's own requisitions, not a hardcoded list —
+stays correct as new clients/locations appear), Employment Type, and
+Deadline (Overdue / Due in 7 days / Due in 8–30 days / No deadline set,
+computed from the same `daysRemaining()` helper the Card view's own
+deadline badge already used). A "Clear" button appears only when any of
+these 4 secondary filters is active, resetting just those four (leaves
+Status/Priority/Work-Mode/search untouched, since those were already
+there and working).
+
+Verified for real against production, not code review: the Details view's
+real SAP ABAP Developer row now shows the identical stage breakdown as
+its Card ("2 Interested, 1 Screened, 1 Submitted, 2 L1 Interview, 1 L3
+Interview, 1 Offer") instead of a bare "23 candidates"; clicked its real
+Share button and confirmed the clipboard held a genuine, working
+`/client-portal/<43-char-token>` link (not a placeholder); selected a
+real client in the new filter and confirmed every visible row's client
+matched, then confirmed Clear restored the full list; confirmed Share
+buttons render and are clickable in Table, List, and Compact (21 of 21
+open requisitions each, matching real data) with zero console errors.
+Extended the existing permanent "S22" regression test (rather than
+writing a parallel one, since this is a direct extension of what S22
+already covers) with the Inbox/Pipeline header check, Share-button
+presence checks in all 3 non-card views, and a real dynamic-client-filter
+narrow+clear cycle. Full QA suite re-run clean: 192 passed / 2 skipped /
+1 transient failure (S21 Device Monitoring, unrelated to this change —
+confirmed to pass cleanly in isolation immediately after, consistent
+with this suite's documented back-to-back-run flakiness). Zero-token
+audit: `CONFIRMED CLEAN` (364 files, 0 external API refs).

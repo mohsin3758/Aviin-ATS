@@ -3,7 +3,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
-import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2 } from 'lucide-react';
+import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X } from 'lucide-react';
 
 const SKILLS_LIST = [
   'Python','Java','React','Node.js','FastAPI','Django','AWS','Docker','Kubernetes',
@@ -60,27 +60,97 @@ function fmtLakh(val: number): string {
   return String(val);
 }
 
-function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any }) {
-  const [hover, setHover] = useState(false);
-  const [copied, setCopied] = useState(false);
+// Shared across all 4 view modes so Details/List/Small carry the exact
+// same stage breakdown and Share action Cards always had — those two
+// were previously Card-only, which is what made switching views feel
+// like losing information rather than just re-laying it out.
+function pillStyle(color: string): React.CSSProperties {
+  return {
+    display: 'inline-flex', alignItems: 'center', gap: 3,
+    fontSize: '10px', fontWeight: 700, padding: '2px 7px',
+    borderRadius: 10, background: color + '14', color, border: `1px solid ${color}30`,
+    whiteSpace: 'nowrap',
+  };
+}
 
-  async function shareShortlist(e: React.MouseEvent) {
-    e.stopPropagation();
-    // SECURITY FIX (2026-08-10 audit): the token used to be constructed
-    // client-side as base64(tenantId:reqId) — unsigned and trivially
-    // forgeable by anyone, since both halves are derivable from public
-    // data. The backend now mints a real random token and remembers it
-    // (client_portal_tokens); this just asks for one instead of building
-    // it locally. Same URL shape, so no dashboard-side migration needed.
+function StageBreakdown({ counts }: { counts?: any }) {
+  if (!counts) return null;
+  const stages: { key: string; label: string; color: string; count: number }[] = counts.stages || [];
+  const active = stages.filter((s: any) => s.count > 0);
+  if (!active.length && !(counts.rejected > 0)) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+      {active.map(s => (
+        <span key={s.key} style={pillStyle(s.color)}>{s.count} {s.label}</span>
+      ))}
+      {counts.rejected > 0 && (
+        <span style={pillStyle('#94a3b8')}>{counts.rejected} Rejected</span>
+      )}
+    </div>
+  );
+}
+
+function InboxBadge({ reqId, count, iconOnly }: { reqId: string; count: number; iconOnly?: boolean }) {
+  if (!count) return null;
+  return (
+    <a href={`/resume-inbox?req=${reqId}`} title="Resumes auto-matched to this JD from inbox" style={{ textDecoration: 'none' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: iconOnly ? '3px 8px' : '3px 10px', borderRadius: 20, background: '#7c3aed', cursor: 'pointer' }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color: '#fff' }}>{count}</span>
+        <span style={{ fontSize: 9, fontWeight: 600, color: '#e9d5ff', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Inbox</span>
+      </div>
+    </a>
+  );
+}
+
+function ShareButton({ reqId, size = 'normal' }: { reqId: string; size?: 'normal' | 'icon' }) {
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // SECURITY FIX (2026-08-10 audit): the token used to be constructed
+  // client-side as base64(tenantId:reqId) — unsigned and trivially
+  // forgeable by anyone, since both halves are derivable from public
+  // data. The backend now mints a real random token and remembers it
+  // (client_portal_tokens); this just asks for one instead of building
+  // it locally. Same URL shape, so no dashboard-side migration needed.
+  async function handleShare(e: React.MouseEvent) {
+    e.stopPropagation(); e.preventDefault();
+    setBusy(true);
     try {
-      const res = await apiFetch(`/client-portal/generate-link?requisition_id=${req.id}`, { method: 'POST' });
+      const res = await apiFetch(`/client-portal/generate-link?requisition_id=${reqId}`, { method: 'POST' });
       const url = window.location.origin + '/client-portal/' + res.token;
       await navigator.clipboard.writeText(url);
       setCopied(true); setTimeout(() => setCopied(false), 2500);
     } catch (err) {
       alert('Could not generate a share link: ' + (err as Error).message);
-    }
+    } finally { setBusy(false); }
   }
+  if (size === 'icon') {
+    return (
+      <button onClick={handleShare} disabled={busy} title="Copy client shortlist link" style={{
+        width: '26px', height: '26px', borderRadius: '6px', cursor: busy ? 'default' : 'pointer',
+        background: copied ? '#f0fdf4' : '#faf5ff',
+        border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        {copied ? <Copy size={12} style={{ color: '#15803d' }} /> : <Link2 size={12} style={{ color: '#7c3aed' }} />}
+      </button>
+    );
+  }
+  return (
+    <button onClick={handleShare} disabled={busy} title="Copy client shortlist link" style={{
+      display: 'flex', alignItems: 'center', gap: '4px',
+      fontSize: '12px', fontWeight: '600',
+      color: copied ? '#15803d' : '#7c3aed',
+      background: copied ? '#f0fdf4' : '#faf5ff',
+      border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
+      padding: '5px 10px', borderRadius: '6px', cursor: busy ? 'default' : 'pointer',
+    }}>
+      {copied ? <><Copy size={11}/> Copied!</> : <><Link2 size={11}/> Share</>}
+    </button>
+  );
+}
+
+function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any }) {
+  const [hover, setHover] = useState(false);
   const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
   const wm = WORK_MODE_CONFIG[req.work_mode] || WORK_MODE_CONFIG.onsite;
   const [clientNow, setClientNow] = useState<number|undefined>(undefined);
@@ -299,16 +369,7 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
         }}>
           <Eye size={12} /> View Pipeline
         </a>
-        <button onClick={shareShortlist} title="Copy client shortlist link" style={{
-          display: 'flex', alignItems: 'center', gap: '4px',
-          fontSize: '12px', fontWeight: '600',
-          color: copied ? '#15803d' : '#7c3aed',
-          background: copied ? '#f0fdf4' : '#faf5ff',
-          border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
-          padding: '5px 10px', borderRadius: '6px', cursor: 'pointer',
-        }}>
-          {copied ? <><Copy size={11}/> Copied!</> : <><Link2 size={11}/> Share</>}
-        </button>
+        <ShareButton reqId={req.id} />
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '4px' }}>
           <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{
             width: '30px', height: '30px', borderRadius: '7px',
@@ -369,9 +430,10 @@ function JobCardCompact({ req, onEdit, onDelete, counts }: { req: any; onEdit: (
         )}
       </div>
       <div style={{ marginTop: 'auto', display: 'flex', gap: '4px', paddingTop: '6px', borderTop: '1px solid #f1f5f9' }}>
-        <a href={`/pipeline?job=${req.id}`} style={{ flex: 1, textAlign: 'center', fontSize: '10.5px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '4px 0', borderRadius: '5px', border: '1px solid #bfdbfe' }}>
+        <a href={`/pipeline?job=${req.id}`} title="View Pipeline" style={{ flex: 1, textAlign: 'center', fontSize: '10.5px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '4px 0', borderRadius: '5px', border: '1px solid #bfdbfe' }}>
           View
         </a>
+        <ShareButton reqId={req.id} size="icon" />
         <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{ width: '24px', height: '24px', borderRadius: '5px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
           <Edit size={11} style={{ color: '#64748b' }} />
         </button>
@@ -419,18 +481,23 @@ function JobListRow({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: a
       <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: '#64748b', flexShrink: 0 }}>
         <Users size={11} /> {req.positions_count} pos.
       </span>
+      <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
       {counts && counts.total > 0 && (
-        <span style={{ fontSize: '12px', fontWeight: 700, color: '#1e40af', flexShrink: 0 }}>{counts.total} in pipeline</span>
+        <a href={`/pipeline?job=${req.id}`} style={{ textDecoration: 'none', flexShrink: 0 }}>
+          <span style={{ fontSize: '12px', fontWeight: 700, color: '#1e40af' }}>{counts.total} in pipeline</span>
+        </a>
       )}
+      <StageBreakdown counts={counts} />
       {days !== null && (
         <span style={{ fontSize: '11px', fontWeight: 500, color: days < 0 ? '#dc2626' : days <= 7 ? '#ca8a04' : '#15803d', flexShrink: 0 }}>
           {days < 0 ? `Overdue ${Math.abs(days)}d` : days === 0 ? 'Due today' : `${days}d left`}
         </span>
       )}
       <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px', flexShrink: 0 }}>
-        <a href={`/pipeline?job=${req.id}`} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '5px 10px', borderRadius: '6px', border: '1px solid #bfdbfe' }}>
+        <a href={`/pipeline?job=${req.id}`} title="View Pipeline" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '5px 10px', borderRadius: '6px', border: '1px solid #bfdbfe' }}>
           <Eye size={11} /> Pipeline
         </a>
+        <ShareButton reqId={req.id} size="icon" />
         <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{ width: '28px', height: '28px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
           <Edit size={12} style={{ color: '#64748b' }} />
         </button>
@@ -450,7 +517,7 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; on
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-            {['Title', 'Client', 'Type', 'Priority', 'Location', 'Positions', 'Status', 'Pipeline', 'Deadline', 'Actions'].map((h, i) => (
+            {['Title', 'Client', 'Type', 'Priority', 'Location', 'Positions', 'Status', 'Inbox', 'Pipeline', 'Deadline', 'Actions'].map((h, i) => (
               <th key={i} style={{ padding: '10px 14px', textAlign: 'left', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', whiteSpace: 'nowrap' }}>{h}</th>
             ))}
           </tr>
@@ -475,15 +542,29 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; on
                 <td style={{ padding: '10px 14px', fontSize: '12px', color: '#64748b' }}>{req.location || '—'}</td>
                 <td style={{ padding: '10px 14px', fontSize: '12px', color: '#64748b' }}>{req.positions_count}</td>
                 <td style={{ padding: '10px 14px' }}><span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '10px' }}>{req.status}</span></td>
-                <td style={{ padding: '10px 14px', fontSize: '12px', fontWeight: 700, color: '#1e40af' }}>{counts?.total > 0 ? `${counts.total} candidates` : '—'}</td>
+                <td style={{ padding: '10px 14px' }}>
+                  <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
+                  {!(counts?.inbox_count > 0) && <span style={{ fontSize: '12px', color: '#94a3b8' }}>—</span>}
+                </td>
+                <td style={{ padding: '10px 14px', maxWidth: '260px' }}>
+                  {counts?.total > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <a href={`/pipeline?job=${req.id}`} style={{ textDecoration: 'none', fontSize: '12px', fontWeight: 700, color: '#1e40af' }}>
+                        {counts.total} candidates
+                      </a>
+                      <StageBreakdown counts={counts} />
+                    </div>
+                  ) : <span style={{ fontSize: '12px', color: '#94a3b8' }}>—</span>}
+                </td>
                 <td style={{ padding: '10px 14px', fontSize: '11px', fontWeight: 500, color: days === null ? '#94a3b8' : days < 0 ? '#dc2626' : days <= 7 ? '#ca8a04' : '#15803d' }}>
                   {days === null ? '—' : days < 0 ? `Overdue ${Math.abs(days)}d` : days === 0 ? 'Due today' : `${days}d`}
                 </td>
                 <td style={{ padding: '10px 14px' }}>
                   <div style={{ display: 'flex', gap: '6px' }}>
-                    <a href={`/pipeline?job=${req.id}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', borderRadius: '6px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                    <a href={`/pipeline?job=${req.id}`} title="View Pipeline" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', borderRadius: '6px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
                       <Eye size={12} style={{ color: '#2563eb' }} />
                     </a>
+                    <ShareButton reqId={req.id} size="icon" />
                     <button onClick={() => onEdit(req)} style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
                       <Edit size={12} style={{ color: '#64748b' }} />
                     </button>
@@ -543,6 +624,15 @@ function RequisitionsPageInner() {
   const [statusFilter, setStatusFilter] = useState('open');
   const [priorityFilter, setPriorityFilter] = useState('');
   const [workModeFilter, setWorkModeFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [clientFilter, setClientFilter] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
+  const [deadlineFilter, setDeadlineFilter] = useState('');
+  // Same deferred-read pattern as viewMode below — Date.now() must only
+  // be evaluated after mount, or the deadline filter's day math would
+  // differ between server and client first paint.
+  const [clientNow, setClientNow] = useState<number | undefined>(undefined);
+  useEffect(() => { setClientNow(Date.now()); }, []);
   const [skillInput, setSkillInput] = useState('');
   const [error, setError] = useState('');
   // View mode preference — read from localStorage in an effect (not
@@ -581,12 +671,31 @@ function RequisitionsPageInner() {
   const { data: stageCounts } = useFetch<any>('/pipeline/req-stage-counts');
   const reqs: any[] = Array.isArray(rawReqs) ? rawReqs : (rawReqs?.items || []);
 
-  const filtered = reqs.filter(r =>
-    (!search || r.title?.toLowerCase().includes(search.toLowerCase()) || r.client_name?.toLowerCase().includes(search.toLowerCase())) &&
-    (!statusFilter || r.status === statusFilter) &&
-    (!priorityFilter || r.priority === priorityFilter) &&
-    (!workModeFilter || r.work_mode === workModeFilter)
-  );
+  const clientOptions = Array.from(new Set(reqs.map(r => r.client_name).filter(Boolean))).sort();
+  const locationOptions = Array.from(new Set(reqs.map(r => r.location).filter(Boolean))).sort();
+
+  const filtered = reqs.filter(r => {
+    if (search && !(r.title?.toLowerCase().includes(search.toLowerCase()) || r.client_name?.toLowerCase().includes(search.toLowerCase()))) return false;
+    if (statusFilter && r.status !== statusFilter) return false;
+    if (priorityFilter && r.priority !== priorityFilter) return false;
+    if (workModeFilter && r.work_mode !== workModeFilter) return false;
+    if (typeFilter && r.employment_type !== typeFilter) return false;
+    if (clientFilter && r.client_name !== clientFilter) return false;
+    if (locationFilter && r.location !== locationFilter) return false;
+    if (deadlineFilter) {
+      const days = daysRemaining(r.deadline, clientNow);
+      if (deadlineFilter === 'overdue' && !(days !== null && days < 0)) return false;
+      if (deadlineFilter === 'this_week' && !(days !== null && days >= 0 && days <= 7)) return false;
+      if (deadlineFilter === 'this_month' && !(days !== null && days > 7 && days <= 30)) return false;
+      if (deadlineFilter === 'no_deadline' && r.deadline) return false;
+    }
+    return true;
+  });
+
+  const extraFiltersActive = !!(typeFilter || clientFilter || locationFilter || deadlineFilter);
+  const clearExtraFilters = () => {
+    setTypeFilter(''); setClientFilter(''); setLocationFilter(''); setDeadlineFilter('');
+  };
 
   const openCreate = () => {
     setForm({ ...EMPTY_FORM }); setEditId(null); setError(''); setShowModal(true);
@@ -746,6 +855,38 @@ function RequisitionsPageInner() {
             <option value="remote">Remote</option>
             <option value="hybrid">Hybrid</option>
           </select>
+          <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} style={{ ...inputStyle, width: '130px' }}>
+            <option value="">All Types</option>
+            <option value="contract">Contract</option>
+            <option value="fulltime">Full-time</option>
+            <option value="c2h">Contract to Hire</option>
+            <option value="fte">FTE</option>
+            <option value="part_time">Part-time</option>
+          </select>
+          <select value={clientFilter} onChange={e => setClientFilter(e.target.value)} style={{ ...inputStyle, width: '140px' }}>
+            <option value="">All Clients</option>
+            {clientOptions.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <select value={locationFilter} onChange={e => setLocationFilter(e.target.value)} style={{ ...inputStyle, width: '140px' }}>
+            <option value="">All Locations</option>
+            {locationOptions.map(l => <option key={l} value={l}>{l}</option>)}
+          </select>
+          <select value={deadlineFilter} onChange={e => setDeadlineFilter(e.target.value)} style={{ ...inputStyle, width: '150px' }}>
+            <option value="">Any Deadline</option>
+            <option value="overdue">🔴 Overdue</option>
+            <option value="this_week">Due in 7 days</option>
+            <option value="this_month">Due in 8–30 days</option>
+            <option value="no_deadline">No deadline set</option>
+          </select>
+          {extraFiltersActive && (
+            <button onClick={clearExtraFilters} title="Clear Client/Location/Type/Deadline filters" style={{
+              display: 'flex', alignItems: 'center', gap: '4px',
+              padding: '9px 12px', borderRadius: '8px', border: '1px solid #fecaca',
+              background: '#fef2f2', color: '#dc2626', fontSize: '12px', fontWeight: '600', cursor: 'pointer',
+            }}>
+              <X size={12} /> Clear
+            </button>
+          )}
           <ViewSwitcher mode={viewMode} onChange={setViewMode} />
           <button onClick={openCreate} style={{
             display: 'flex', alignItems: 'center', gap: '6px',
