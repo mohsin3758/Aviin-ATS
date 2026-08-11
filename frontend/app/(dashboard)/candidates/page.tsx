@@ -557,6 +557,12 @@ export default function CandidatesPage() {
   const [jdText,setJdText] = useState('');
   const [ranking,setRanking] = useState(false);
   const [rankResult,setRankResult] = useState<any>(null);
+  // Select-and-add-to-pipeline straight from the ranked list (2026-08-11 —
+  // the list previously had no way to open a candidate or act on the
+  // ranking at all, reported live). Own Set, kept separate from the main
+  // table's `selected` so the two selection mechanisms never cross-pollute.
+  const [jdSelected,setJdSelected] = useState<Set<string>>(new Set());
+  const [jdBulkAssignOpen,setJdBulkAssignOpen] = useState(false);
 
   // status toast
   const [statusMsg,setStatusMsg] = useState('');
@@ -1051,28 +1057,46 @@ export default function CandidatesPage() {
       </Modal>
 
       {/* ── JD Match modal ───────────────────────────────────────────────── */}
-      <Modal open={showJD} onClose={()=>{setShowJD(false);setRankResult(null);}} title="JD Match — AI Ranking" subtitle="Paste a job description to rank your candidates by fit" size="lg"
-        footer={<FormActions onClose={()=>{setShowJD(false);setRankResult(null);}} onSubmit={runJDRank} loading={ranking} submitLabel="Rank Candidates"/>}>
+      <Modal open={showJD} onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());}} title="JD Match — AI Ranking" subtitle="Paste a job description to rank your candidates by fit" size="lg"
+        footer={!rankResult
+          ? <FormActions onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());}} onSubmit={runJDRank} loading={ranking} submitLabel="Rank Candidates"/>
+          : <div style={{display:'flex',justifyContent:'flex-end',gap:'10px'}}>
+              <button onClick={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());}} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Close</button>
+              <button onClick={()=>setJdBulkAssignOpen(true)} disabled={jdSelected.size===0}
+                style={{display:'flex',alignItems:'center',gap:'6px',padding:'9px 18px',borderRadius:'8px',border:'none',background:jdSelected.size===0?'#94a3b8':'#1e40af',color:'white',cursor:jdSelected.size===0?'not-allowed':'pointer',fontSize:'13px',fontWeight:'700'}}>
+                <Users size={13}/>Add {jdSelected.size>0?jdSelected.size:''} to Pipeline
+              </button>
+            </div>}>
         {!rankResult ? (
           <textarea style={{...INP,height:'220px',resize:'vertical'}} placeholder="Paste the full job description here..." value={jdText} onChange={e=>setJdText(e.target.value)}/>
         ) : (
           <div>
-            <div style={{padding:'10px 14px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',marginBottom:'16px'}}>✅ Ranked {(rankResult as any).ranked?.length||0} candidates by fit</div>
-            <div style={{maxHeight:'400px',overflowY:'auto'}}>
+            <div style={{padding:'10px 14px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',marginBottom:'16px'}}>✅ Ranked {(rankResult as any).ranked?.length||0} candidates by fit — click a name to open their profile, or select candidates to add them straight to a requisition's pipeline.</div>
+            <div data-testid="jd-rank-results" style={{maxHeight:'400px',overflowY:'auto'}}>
               {((rankResult as any).ranked||[]).length===0&&<div style={{padding:'32px',textAlign:'center',color:'#64748b',fontSize:'13px'}}>No candidates matched the job description skills.</div>}
               {((rankResult as any).ranked||[]).map((c:any,i:number)=>(
                 <div key={c.id} style={{padding:'12px 14px',borderBottom:'1px solid #f1f5f9',display:'flex',alignItems:'center',gap:'12px'}}>
-                  <span style={{fontSize:'18px',fontWeight:'800',color:'#94a3b8',width:'28px',textAlign:'center'}}>{i+1}</span>
-                  <div style={{width:'36px',height:'36px',borderRadius:'50%',background:gc(c.full_name||''),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:'700',color:'white',flexShrink:0}}>{gi(c.full_name||'')}</div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:'13px',fontWeight:'700',color:'#0f172a'}}>{c.full_name}</div>
-                    <div style={{fontSize:'11px',color:'#64748b'}}>{c.current_designation||'—'} · {c.current_employer||'—'} · {c.total_exp_mo>0?gx(c.total_exp_mo):'—'}</div>
-                    {(c.matched_skills?.length>0||c.missing_skills?.length>0)&&<div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'4px'}}>
-                      {c.matched_skills?.slice(0,4).map((s:string)=><span key={'m-'+s} style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#d1fae5',color:'#065f46',fontWeight:'600'}}>{s}</span>)}
-                      {c.missing_skills?.slice(0,4).map((s:string)=><span key={'x-'+s} title="Missing from this candidate's profile" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#fee2e2',color:'#991b1b',fontWeight:'600'}}>✕ {s}</span>)}
-                    </div>}
-                  </div>
-                  <div style={{textAlign:'right',flexShrink:0}}>
+                  <input type="checkbox" checked={jdSelected.has(c.id)} onChange={e=>{
+                    setJdSelected(prev=>{const n=new Set(prev); e.target.checked?n.add(c.id):n.delete(c.id); return n;});
+                  }} style={{width:'15px',height:'15px',cursor:'pointer',flexShrink:0}}/>
+                  <span style={{fontSize:'18px',fontWeight:'800',color:'#94a3b8',width:'28px',textAlign:'center',flexShrink:0}}>{i+1}</span>
+                  <a href={'/candidates/'+c.id} target="_blank" rel="noopener noreferrer" title="Open candidate profile (new tab)"
+                    style={{display:'flex',alignItems:'center',gap:'12px',flex:1,minWidth:0,textDecoration:'none',color:'inherit'}}>
+                    <div style={{width:'36px',height:'36px',borderRadius:'50%',background:gc(c.full_name||''),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:'700',color:'white',flexShrink:0}}>{gi(c.full_name||'')}</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:'13px',fontWeight:'700',color:'#1e40af'}}>{c.full_name}</div>
+                      <div style={{fontSize:'11px',color:'#64748b'}}>{c.current_designation||'—'} · {c.current_employer||'—'} · {c.total_exp_mo>0?gx(c.total_exp_mo):'—'}</div>
+                      {(c.matched_skills?.length>0||c.missing_skills?.length>0)&&<div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'4px'}}>
+                        {c.matched_skills?.slice(0,4).map((s:string)=><span key={'m-'+s} style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#d1fae5',color:'#065f46',fontWeight:'600'}}>{s}</span>)}
+                        {c.missing_skills?.slice(0,4).map((s:string)=><span key={'x-'+s} title="Missing from this candidate's profile" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#fee2e2',color:'#991b1b',fontWeight:'600'}}>✕ {s}</span>)}
+                      </div>}
+                    </div>
+                  </a>
+                  <button onClick={()=>{setJdSelected(new Set([c.id]));setJdBulkAssignOpen(true);}} title="Add to pipeline"
+                    style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>
+                    <Users size={13} style={{color:'#64748b'}}/>
+                  </button>
+                  <div style={{textAlign:'right',flexShrink:0,width:'48px'}}>
                     <div style={{fontSize:'20px',fontWeight:'800',color:c.rank_score>=70?'#16a34a':c.rank_score>=40?'#d97706':'#94a3b8'}}>{Math.round(c.rank_score||0)}%</div>
                     <div style={{fontSize:'9px',color:'#94a3b8'}}>match</div>
                   </div>
@@ -1082,6 +1106,7 @@ export default function CandidatesPage() {
           </div>
         )}
       </Modal>
+      {jdBulkAssignOpen && <BulkAssignModal candidateIds={Array.from(jdSelected)} onClose={()=>setJdBulkAssignOpen(false)} onDone={()=>{setJdSelected(new Set());showStatus(`✅ Added to pipeline`);}}/>}
     </div>
   );
 }

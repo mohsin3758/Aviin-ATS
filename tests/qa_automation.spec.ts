@@ -1985,3 +1985,47 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
     await request.delete(`${API}/candidates/${onboardCandId}`, { headers: auth }).catch(() => {});
   });
 });
+
+// S20 JD Match ranked list (2026-08-11): reported live by the user — the
+// ranked-candidate rows had no way to open a profile or act on the
+// ranking at all (a plain, unlinked, unclickable div). Fixed with a real
+// profile link + checkbox-select + "Add N to Pipeline" reusing the
+// existing BulkAssignModal. `data-testid="jd-rank-results"` scopes
+// locators to the modal's own list — the main candidates table sits in
+// the DOM right behind the modal overlay with its own, separate
+// `a[href^="/candidates/"]` links, and an unscoped locator matches those
+// first (caught by this exact test failing that way before the fix).
+test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipeline works', async ({ page, context }) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(e.message));
+
+  await page.goto('/candidates');
+  await page.getByRole('button', { name: /JD Match/i }).click();
+  await page.getByPlaceholder('Paste the full job description here...').fill(
+    'We are hiring a Python developer with AWS and Docker experience. SQL knowledge required.'
+  );
+  await page.getByRole('button', { name: /Rank Candidates/i }).click();
+  await expect(page.getByText(/Ranked \d+ candidates by fit/)).toBeVisible({ timeout: 20000 });
+
+  const results = page.getByTestId('jd-rank-results');
+  const rows = results.locator('input[type="checkbox"]');
+  const rowCount = await rows.count();
+  test.skip(rowCount === 0, 'no ranked candidates in this environment to test against');
+
+  const firstLink = results.locator('a[href^="/candidates/"]').first();
+  const href = await firstLink.getAttribute('href');
+  expect(href).toMatch(/^\/candidates\/[a-f0-9-]+$/);
+
+  const [profilePage] = await Promise.all([context.waitForEvent('page'), firstLink.click()]);
+  await profilePage.waitForLoadState();
+  expect(profilePage.url()).toContain(href!);
+  await profilePage.close();
+
+  await rows.first().check();
+  const addBtn = page.getByRole('button', { name: /Add 1 to Pipeline/i });
+  await expect(addBtn).toBeEnabled();
+  await addBtn.click();
+  await expect(page.getByText(/Assign 1 Candidate to Requisition/i)).toBeVisible({ timeout: 5000 });
+
+  expect(errors).toHaveLength(0);
+});

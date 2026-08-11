@@ -4614,3 +4614,48 @@ token audit: `CONFIRMED CLEAN` (349 files, 0 external API refs). All
 throwaway test data (candidates, requisitions, applications, offers,
 placements, onboarding records, users) cleaned up after every check in
 FK-safe order, confirmed zero residue.
+
+## JD Match ranked-candidate list: dead links + no pipeline action, fixed, 2026-08-11
+User reported live, from a screenshot: after ranking candidates against a
+pasted JD (`candidates/page.tsx`'s "JD Match" modal, backed by the real
+`POST /candidates/rank` endpoint — the ranking itself worked correctly,
+20 candidates with real match scores), there was no way to click through
+to a candidate's profile, and no way to move a ranked candidate into the
+next process/pipeline. Checked the actual JSX: the ranked-row markup was
+a plain, unlinked `<div>` with zero `onClick`/`href` — the backend had
+always returned everything needed (`id`, `matched_skills`, `missing_
+skills`, `rank_score`); only the UI never wired it up.
+
+Fixed by reusing two things already established elsewhere in this exact
+file rather than inventing new patterns: the candidate-name area is now
+a real `<a href={'/candidates/'+id}>` (same convention as the main
+table's "Open full page" icon-link and the quick-view drawer's "Full"
+button), opened in a new tab so ranking results aren't lost; and a
+checkbox-select + "Add N to Pipeline" action reuses the existing
+`BulkAssignModal` component (candidate-id array in, requisition picker,
+`POST /candidates/bulk-assign`) that already powers the main list's own
+"Add to Pipeline" bulk action — no new backend endpoint needed. A
+per-row quick-add icon button does the same thing for a single
+candidate without needing to check a box first.
+
+**A real test-scoping bug caught by the verification itself, not the
+app**: the first Playwright attempt used an unscoped `a[href^="/
+candidates/"]` locator, which matched the *main candidates table's*
+existing link (still present in the DOM directly behind the modal
+overlay, per this app's `Modal` component using `createPortal` to
+`document.body`) instead of the new one inside the JD Match modal —
+correctly failed to click through an overlay it shouldn't be able to
+reach. Fixed by adding `data-testid="jd-rank-results"` to the ranked-
+list container and scoping all locators to it.
+
+Verified for real via a genuine headless-browser run: ranked 20 real
+candidates from a real pasted JD, clicked the first result's name and
+confirmed a real new tab opened to `/candidates/{their real id}`,
+selected one candidate, clicked "Add 1 to Pipeline", and confirmed the
+real `BulkAssignModal` ("Assign 1 Candidate to Requisition") opened —
+zero console errors throughout. New permanent "S20" test added to
+`qa_automation.spec.ts`. Full QA suite re-run clean: 168 passed / 2
+skipped / 0 failed (one already-documented occasional flake on an
+unrelated S18 test passed clean on retry, consistent with its known
+characteristic noted earlier this session). Zero-token audit:
+`CONFIRMED CLEAN` (349 files, 0 external API refs).
