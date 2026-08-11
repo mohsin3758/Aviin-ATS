@@ -4852,3 +4852,159 @@ relay flake on an unrelated KAE-email test passed on Playwright's
 automatic retry — a known characteristic of that specific real-email-
 send test, not a regression from this change). Zero-token audit:
 `CONFIRMED CLEAN` (352 files, 0 external API refs).
+
+## Time Champ gap-analysis: 5 of 8 recommended features built, 2026-08-11
+Direct follow-up to the same-day Time Champ competitive research (see the
+earlier "What Time Champ has that FinStack doesn't" report). User picked
+the full ranked list to build, plus explicitly chose to reverse the
+Device Monitoring privacy scope (screenshots/keystroke-intensity/DLP/
+silent mode — see the separate entry below) after being shown the
+original DPDP 2023 rationale against it. This entry covers the 5
+non-privacy-sensitive items; the Device Monitoring expansion is documented
+separately.
+
+**1. GPS-verified contractor attendance** (the audit's "standout gap") —
+new `client_site_geofences`/`placement_geofence_assignments`/
+`contractor_attendance`/`field_attendance_tokens` tables
+(`sql/51_field_attendance.sql`), plain-SQL haversine distance (no PostGIS
+needed at this scale), and a long-lived public check-in token per
+placement (same anonymous-token-resolves-tenant SECURITY DEFINER pattern
+as NDA/offer e-sign/client-portal). `backend/routers/field_attendance.py`
+— geofence CRUD, placement search/config, check-in/out link generation,
+records + summary reporting, manual override. New public mobile page
+`/field-checkin/[token]` (Geolocation API, big Check-In/Check-Out
+buttons, distance-from-site feedback) and admin page `/field-attendance`
+(Placements/Records/Geofences tabs). Deliberately NOT auto-wired into
+timesheets/billing — kept as read-only supporting evidence next to the
+real timesheet approval flow, not a replacement for it.
+Verified for real against a real placement (Nikhil Joshi / Globex
+Manufacturing India): check-in at the exact site coordinates →
+`within_geofence:true, distance_m:0.0`; check-out simulated from Mumbai
+(~845km away) → `within_geofence:false, distance_m:845318` (matches the
+real-world Bengaluru–Mumbai distance); manual override recorded
+correctly. Real headless-browser test confirmed the public check-in page
+with actual Playwright geolocation mocking (grant permission, set
+coordinates, click Check In → "verified at the site", change coordinates,
+Check Out → "flagged for review") and the admin page's 3 tabs.
+
+**2. Internal shift scheduling** — distinct from `requisitions.shift_type`
+(the client job's shift), this schedules FinStack's own staff.
+`sql/52_shift_scheduling.sql` (`shift_templates`, `staff_shifts`,
+`shift_swap_requests`). `backend/routers/shift_scheduling.py` — template
+CRUD, shift assignment (template-based or custom hours), swap request/
+approve/reject. **Real bug caught by first live test, not code review**:
+the exact "asyncpg needs a real date/time object, not a plain string"
+bug class documented repeatedly elsewhere in this project recurred here —
+`create_template`/`assign_shift`/`list_shifts`/`my_shifts` all passed raw
+ISO strings against DATE/TIME columns despite importing `date`/`time` at
+the top and never actually using them. Fixed with `date.fromisoformat()`/
+`time.fromisoformat()` at every conversion point; verified with a real
+template create → shift assign → list → swap request → approve cycle
+end-to-end after the fix. New `/shift-scheduling` page: a weekly
+calendar grid (staff × days, click-to-assign), My Upcoming Shifts +
+swap-request modal, pending-swap approval panel (admin/manager), template
+management sidebar.
+
+**3. Burnout/attrition-risk scoring** — deliberately distinct from
+`recruiter_performance_scores` (output/quality, built same day under
+Workforce Intelligence): this scores RISK from real weekly trend signals,
+zero-token (pure SQL on data already collected, no external AI).
+`sql/53_burnout_risk_scoring.sql` (`risk_signal_config` — tenant-tunable
+thresholds, seeded for every tenant; `recruiter_risk_scores`).
+`compute_recruiter_risk_scores()` (`scheduler.py`, weekly Monday 03:30
+IST) computes 4 signals per recruiter per week from
+`recruiter_productivity_daily`: extended hours (this week's avg
+active-mins vs the recruiter's own trailing-4-week baseline), declining
+productivity (this week vs the prior 2-week average), irregular pattern
+(day-to-day coefficient of variation), workload pressure (open
+`recruiter_tasks` ÷ `users.capacity_weekly`). Requires ≥3 real days of
+data in the week to score at all — no fabricated score from too little
+signal (same honesty standard as `sla_predictions.py`'s "insufficient
+training data" path). Each fired signal contributes 25 points to a 0-100
+risk score (multi-signal by design, not one metric, matching Time
+Champ's own positioning). New `/manager/risk-config` (GET/PUT),
+`/manager/risk-scores`, `/recruiter/my-risk-history` (self-transparency —
+a recruiter sees the same data a manager sees about them, same principle
+as Device Monitoring).
+**Verified with hand-calculated synthetic data, every number matched
+exactly**: seeded a real pattern (baseline 400 active-mins/75%
+productivity for 4 weeks, softening to 65% for 2 weeks, then a target
+week averaging 550 mins/48.4% productivity with high day-to-day swing) on
+a real recruiter, triggered the job, and got back `hours_increase_pct:
+37.5` (exactly (550-400)/400), `productivity_trend_pct: -25.54` (exactly
+(48.4-65)/65), `activity_variance_score: 40.12` (exactly the sample
+stddev/mean of the 5 seeded values), `risk_score: 75, risk_level: "high"`
+(3 signals × 25) — all correct to 2 decimal places, not approximately
+right. `workload_ratio` came back reflecting real pre-existing open tasks
+plus the 10 test ones added, confirming it reads real data, not just the
+test fixture. All seeded data cleaned up after. New "Risk & Wellbeing"
+tab on Recruiter Ops — team view + tunable thresholds for managers, own
+history for everyone.
+**Real bug found and fixed via the permanent regression test, not the
+manual check**: `@router.get("/recruiter/my-risk-history")` — `router`
+already carries `prefix="/recruiter"`, so this doubled to
+`/recruiter/recruiter/my-risk-history` and 404'd for every real call.
+Fixed to `@router.get("/my-risk-history")`.
+
+**4. Break-time split tracking** — extends the existing `work_sessions`
+clock-in/out (Recruiter Ops) with a distinct "on break" state.
+`sql/54_break_time_tracking.sql` (`work_session_breaks`). New
+`/work-sessions/break/start`, `/break/end` (state-machine correct: no
+break without an open session, no double-start, no double-end — all
+3 conditions verified with real 409s) and `/work-sessions/break-report`
+(admin/manager — work-vs-break split per recruiter). Verified with a
+real clock-in → break → break-end → clock-out cycle: `total_session_mins
+4.34 - total_break_mins 0.02 = net_work_mins 4.32`, exact arithmetic
+match. Work Sessions tab gained Start/End Break buttons + a team
+break-time-split report table.
+
+**5. Payroll webhook export + subscribable calendar feed** — both
+explicitly scoped to what's buildable without a named-vendor OAuth
+partnership (no Google/Outlook/ADP credentials exist for this project,
+same constraint already documented for Naukri/LinkedIn/MS Teams app
+review elsewhere in this file). Payroll: `sql/55_payroll_webhook_and_
+calendar_feed.sql` (`payroll_export_webhooks`) — a generic "bring your
+own endpoint" webhook, fired as a `BackgroundTask` after every real
+payroll run, carrying the full structured payslip data (not a chat
+message like the existing Slack/Teams/Discord notifier). **Verified for
+real, not code review**: registered a webhook pointed at a real local
+HTTP listener bound to the Docker bridge gateway (same technique as the
+earlier MS Teams verification), walked a real placement through
+timesheet-create → submit → approve → payroll-run-generate, and confirmed
+the exact real payslip numbers arrived at the listener (₹400,000 gross
+= 40 hours × ₹10,000 rate, ₹40,000 TDS, ₹48,000 PF, ₹312,000 net — all
+byte-identical to the payroll-run API response). Calendar: `calendar_
+feed_tokens` + `GET /calendar-feed/{token}.ics` (public, SECURITY
+DEFINER token resolution) — a real subscribable iCal feed (standard
+`REFRESH-INTERVAL` header, works with Google/Outlook/Apple Calendar,
+generated fresh on every poll from real upcoming interviews as
+interviewer or assigned recruiter), unlike the pre-existing one-time
+`.ics` download. **Verified for real**: confirmed an empty feed for a
+user with no interviews (honest, not fabricated), then temporarily set a
+real interview's `interviewer_id` and confirmed a correctly-formed
+`VEVENT` appeared (right UID, DTSTART/DTEND matching `duration_mins`,
+meeting link in the description) — caught and worked around one real,
+pre-existing data quirk in the process (a test interview row with a
+dangling, non-existent `candidate_id`, unrelated to this feature, simply
+skipped for a different real interview with a valid link). Reverted the
+test interviewer assignment after. New "Subscribe from Google/Outlook/
+Apple Calendar" card on `/calendar` (get link, copy, reset-if-leaked) and
+a "Payroll Export Webhooks" panel on the Finance page's Payroll tab.
+
+New permanent regression suites S23–S27 added to `qa_automation.spec.ts`
+(`.serial()`, matching the established convention), one per feature.
+**One genuine test-design bug found and fixed via 2 consecutive full-suite
+runs showing the identical failure** (not rate-limit flakiness, which was
+separately ruled out by directly checking the login endpoint's own 429
+state before concluding this was real): S23's test always resolves the
+same real placement via `placements-search?q=a` (broadest possible
+query), so a second same-day run inherits the first run's already-
+`manual_override`d attendance row — and `record_field_checkout()`
+deliberately never reverts an override back to `flagged` on a later
+checkout (correct app behavior, protecting a human decision from being
+silently undone). Fixed the test to assert on the specific record's
+`check_out_within_geofence` field directly rather than filtering by
+`status=flagged`, and to only attempt the override step when the record
+is genuinely still in `flagged` state. Full suite re-run clean after:
+155 passed / 2 skipped / 0 failed. Zero-token audit: `CONFIRMED CLEAN`
+(362 files, 0 external API refs).
