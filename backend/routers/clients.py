@@ -32,10 +32,16 @@ class ClientIn(BaseModel):
 # ─── Basic CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("/clients")
-async def list_clients(actor: Actor = Depends(require_permission("companies", "read"))):
+async def list_clients(include_inactive: bool = False, actor: Actor = Depends(require_permission("companies", "read"))):
+    # REAL BUG FIX (2026-08-12): `is_active` has existed on this table all
+    # along (frontend already renders an Active/Inactive badge off it) but
+    # was never filtered here — every soft-deleted client stayed visible
+    # in the real Companies list forever. `include_inactive` matches the
+    # same convention GET /requisitions already uses.
     async with db.tenant_conn(actor.tenant_id) as conn:
+        where = "" if include_inactive else "WHERE is_active IS NOT FALSE"
         rows = await conn.fetch(
-            "SELECT id, name, industry, priority_tier, created_at FROM clients ORDER BY name")
+            f"SELECT id, name, industry, priority_tier, is_active, created_at FROM clients {where} ORDER BY name")
         return [dict(r) for r in rows]
 
 
@@ -311,7 +317,16 @@ async def update_client(client_id: str, body: ClientIn, actor: Actor = Depends(r
 
 @router.delete("/clients/{client_id}", status_code=204)
 async def delete_client(client_id: str, actor: Actor = Depends(require_permission("companies", "delete"))):
+    # REAL BUG FIX (2026-08-12): this was a real hard DELETE FROM clients —
+    # requisitions.client_id is a plain FK with no ON DELETE clause, so
+    # deleting any client with requisition history (soft-deleted or not)
+    # 500'd on the FK constraint. The frontend's handleDelete swallows the
+    # error in an empty catch{} (same silent-failure pattern already found
+    # and fixed once for the Requisitions page's own Delete button), so
+    # clicking Delete on a real client with any job history has always
+    # silently done nothing. Switched to the same is_active soft-delete
+    # convention every other entity in this codebase already uses.
     async with db.tenant_conn(actor.tenant_id) as conn:
-        result = await conn.execute("DELETE FROM clients WHERE id=$1", client_id)
-        if result == "DELETE 0":
+        result = await conn.execute("UPDATE clients SET is_active=false WHERE id=$1", client_id)
+        if result == "UPDATE 0":
             raise HTTPException(404, "Client not found")

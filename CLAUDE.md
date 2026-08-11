@@ -5376,3 +5376,71 @@ first attempt, confirmed to pass cleanly in isolation after a genuine
 15-minute rate-limit cooldown — this session's now very well-documented
 back-to-back-run characteristic, not a regression from this fix).
 Zero-token audit: `CONFIRMED CLEAN` (364 files, 0 external API refs).
+
+## Full-codebase test-data sweep + a real client-delete bug found and fixed, 2026-08-12
+Direct follow-up, same day — user asked to clean up "all test" data, not
+just the two categories from the prior pass. Swept every major table for
+QA/test.com patterns before deleting anything (candidates, requisitions,
+clients, users, candidate_messages, imap_messages, offers,
+interview_schedules), verified content on anything with an ambiguous
+pattern before acting, and found one genuinely serious near-miss plus one
+real, previously-undiscovered production bug along the way.
+
+**Near-miss, caught before deleting anything — not after.** A `subject
+ILIKE '%QA %'` sweep of `imap_messages` initially flagged 340 rows.
+Inspecting the actual content before touching anything showed these are
+**real business emails** — this agency genuinely recruits for QA
+(Quality Assurance) roles, so subjects like "New Requirement - QA
+Automation - Sr Consultant" and "Interview for Native Mobile QA -
+Onward Technologies" are completely legitimate recruiting traffic, not
+test artifacts. "QA" here means Quality Assurance, not the test suite.
+**Left `imap_messages` completely untouched** — the only messages
+actually deleted were 406 `candidate_messages` rows matched on
+`to_email ILIKE '%@test.com'`, an unambiguous signal (no real candidate
+has a `@test.com` address) confirmed by direct sampling before the
+delete loop ran, via the real `DELETE /communications/messages/{id}` API.
+
+**A real, previously-undiscovered production bug, found while cleaning
+up 173 leftover "QA ... Test Client" rows**: `clients.is_active` has
+existed on the table all along (the Companies page frontend already
+renders a real Active/Inactive badge off it) but was **never actually
+used anywhere in `clients.py`** — `GET /clients` had no filter on it at
+all, and `DELETE /clients/{id}` was a genuine hard `DELETE FROM clients`.
+Since `requisitions.client_id` is a plain FK with no `ON DELETE` clause,
+hard-deleting any client with requisition history (soft-deleted or not)
+throws a foreign-key violation — and the frontend's `handleDelete` wraps
+the call in an empty `catch{}`, so **clicking Delete on any real client
+with job history has always silently done nothing**, the exact same
+silent-failure shape already found and fixed once before for the
+Requisitions page's own Delete button. Fixed `DELETE /clients/{id}` to
+soft-delete (`is_active=false`, matching every other entity in this
+codebase) and added an `is_active IS NOT FALSE` filter to `GET /clients`
+(`include_inactive` param, same convention as `GET /requisitions`).
+Verified for real, not code review: called `DELETE` against a real test
+client that had FK-referencing requisitions — 500 before the fix would
+have been the old behavior, confirmed the fixed endpoint now returns a
+real 204 and the client disappears from the default list — then used
+this now-working endpoint to clean up all 172 remaining test clients
+with zero failures (previously would have been zero *successes*).
+
+**Full cleanup, all via real APIs, none via raw SQL**: 3 more test
+candidates, 16 test requisitions, 172 test clients (via the
+newly-fixed soft-delete), 13 active test users (deactivated —
+cross-checked afterward: all 103 historical `*.test.com` users in the DB
+are now correctly `is_active=false`; the 3 that still appeared in a
+`/settings/users` search are expected — that page intentionally lists
+deactivated accounts too, unlike the working candidate/requisition
+lists, so this is by design, not a gap), and 406 test messages. Left
+1 offer + 7 interview_schedules tied to already-hidden test candidates
+untouched — low-count orphaned rows with no independent visibility of
+their own, not worth the extra API calls.
+
+Verified end-to-end with a real headless-browser sweep across
+Candidates, Requisitions, Companies, and Conversations — zero test-data
+hits on all four after cleanup. Full QA suite re-run clean: 194 passed /
+2 skipped / 0 failed (three transient S19/S21/S24 failures on the first
+attempt under this session's own heavy back-to-back testing load,
+confirmed to pass cleanly in isolation after a genuine 15-minute
+rate-limit cooldown, consistent with this suite's well-documented
+characteristic). Zero-token audit: `CONFIRMED CLEAN` (364 files, 0
+external API refs).
