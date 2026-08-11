@@ -13,7 +13,7 @@ import_router = APIRouter(prefix="/import", tags=["import"])
 async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get_actor)):
     content = (await file.read()).decode("utf-8", "ignore")
     reader = csv.DictReader(io.StringIO(content))
-    created = updated = errors = 0
+    created = updated = errors = skipped_owned = 0
     error_list = []
     async with db.tenant_conn(actor.tenant_id) as conn:
         for i, row in enumerate(reader, 1):
@@ -32,10 +32,31 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                         "SELECT id FROM candidates WHERE email=$1 AND tenant_id=$2",
                         email, actor.tenant_id)
                 if existing:
-                    await conn.execute(
-                        "UPDATE candidates SET full_name=$1, total_exp_mo=$2 WHERE id=$3",
-                        name, exp_mo, existing["id"])
-                    updated += 1
+                    # Individual recruiter ownership (rule 11): a bulk-
+                    # import row hitting an already-owned candidate must
+                    # not silently rewrite their record for a different
+                    # recruiter — this update was previously unconditional
+                    # (not even COALESCE'd, unlike every other intake path
+                    # in this codebase), so any importer could clobber
+                    # someone else's owned candidate's name outright.
+                    # Unowned/expired -> this importer legitimately claims
+                    # it; owned by someone else -> skip the update entirely
+                    # (blocked_attempt logged by claim_ownership itself).
+                    claim = {"claimed": True}
+                    if actor.user_id and actor.email:
+                        claim = await ownership.claim_ownership(
+                            conn, actor.tenant_id, str(existing["id"]), str(actor.user_id), actor.email, "bulk_upload",
+                        )
+                    if claim["claimed"]:
+                        await conn.execute(
+                            "UPDATE candidates SET "
+                            "full_name=COALESCE(NULLIF(full_name,''),$1), "
+                            "total_exp_mo=CASE WHEN total_exp_mo=0 AND $2>0 THEN $2 ELSE total_exp_mo END "
+                            "WHERE id=$3",
+                            name, exp_mo, existing["id"])
+                        updated += 1
+                    else:
+                        skipped_owned += 1
                 else:
                     new_id = await conn.fetchval(
                         """INSERT INTO candidates (tenant_id,full_name,email,phone,location,
@@ -67,7 +88,7 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
             except Exception as e:
                 errors += 1
                 error_list.append({"row": i, "error": str(e)[:100]})
-    return {"created": created, "updated": updated, "errors": errors, "error_details": error_list[:20]}
+    return {"created": created, "updated": updated, "skipped_owned": skipped_owned, "errors": errors, "error_details": error_list[:20]}
 
 @import_router.get("/template/candidates")
 async def candidate_import_template(actor: Actor=Depends(get_actor)):
@@ -92,7 +113,7 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
     aliases = {"name":"full_name","experience":"total_exp_years","exp":"total_exp_years",
                "company":"current_employer","skill":"skills","skill_set":"skills"}
     header = [aliases.get(h, h) for h in header]
-    created = updated = errors = 0
+    created = updated = errors = skipped_owned = 0
     errs = []
     async with db.tenant_conn(actor.tenant_id) as conn:
         for i, row in enumerate(rows_iter, 2):
@@ -108,9 +129,23 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                     "SELECT id FROM candidates WHERE email=$1 AND tenant_id=$2", email, actor.tenant_id
                 ) if email else None
                 if existing:
-                    await conn.execute("UPDATE candidates SET full_name=$1, total_exp_mo=$2 WHERE id=$3",
-                                       name, exp_mo, existing["id"])
-                    updated += 1
+                    # Individual recruiter ownership (rule 11) — same
+                    # block-entirely-on-conflict treatment as the CSV path.
+                    claim = {"claimed": True}
+                    if actor.user_id and actor.email:
+                        claim = await ownership.claim_ownership(
+                            conn, actor.tenant_id, str(existing["id"]), str(actor.user_id), actor.email, "bulk_upload",
+                        )
+                    if claim["claimed"]:
+                        await conn.execute(
+                            "UPDATE candidates SET "
+                            "full_name=COALESCE(NULLIF(full_name,''),$1), "
+                            "total_exp_mo=CASE WHEN total_exp_mo=0 AND $2>0 THEN $2 ELSE total_exp_mo END "
+                            "WHERE id=$3",
+                            name, exp_mo, existing["id"])
+                        updated += 1
+                    else:
+                        skipped_owned += 1
                 else:
                     new_id = await conn.fetchval("""
                         INSERT INTO candidates (tenant_id,full_name,email,phone,location,
@@ -137,7 +172,7 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                     created += 1
             except Exception as e:
                 errors += 1; errs.append({"row":i,"error":str(e)[:80]})
-    return {"created":created,"updated":updated,"errors":errors,"error_details":errs[:20]}
+    return {"created":created,"updated":updated,"skipped_owned":skipped_owned,"errors":errors,"error_details":errs[:20]}
 
 @import_router.get("/template/excel")
 async def excel_template(actor: Actor = Depends(get_actor)):

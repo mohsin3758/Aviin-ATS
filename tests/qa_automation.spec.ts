@@ -1899,6 +1899,67 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
     await request.patch(`${API}/users/${nonOwnerId}/deactivate`, { headers: auth }).catch(() => {});
   });
 
+  // 2026-08-11 follow-up: rule 11 of the ownership spec ("resume upload
+  // does not override ownership") wasn't enforced on the existing-
+  // candidate branch of email intake or bulk CSV/Excel import — a
+  // different recruiter's re-upload could silently overwrite an owned
+  // candidate's fields with zero check or log. Fixed to block the update
+  // entirely (not just fill blanks) when a non-owner's import targets an
+  // already-owned candidate.
+  test('Ownership enforcement: bulk CSV import cannot overwrite an owned candidate, real owner still can', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const owner = await request.post(`${API}/users`, { headers: auth, data: { email: `qa.s19b.owner.${stamp}@test.com`, full_name: 'QA S19b Owner', role: 'recruiter', password: 'TestPass123!' } });
+    const ownerId = (await owner.json()).id;
+    const ownerLogin = await request.post(`${API}/auth/login`, { data: { email: `qa.s19b.owner.${stamp}@test.com`, password: 'TestPass123!' } });
+    const ownerToken = (await ownerLogin.json()).access_token;
+    const ownerAuth = { 'Authorization': `Bearer ${ownerToken}`, 'Content-Type': 'application/json' };
+
+    const nonOwner = await request.post(`${API}/users`, { headers: auth, data: { email: `qa.s19b.nonowner.${stamp}@test.com`, full_name: 'QA S19b NonOwner', role: 'recruiter', password: 'TestPass123!' } });
+    const nonOwnerId = (await nonOwner.json()).id;
+    const nonOwnerLogin = await request.post(`${API}/auth/login`, { data: { email: `qa.s19b.nonowner.${stamp}@test.com`, password: 'TestPass123!' } });
+    const nonOwnerToken = (await nonOwnerLogin.json()).access_token;
+
+    const bulkEmail = `qa.s19b.bulk.${stamp}@test.com`;
+    const cand = await request.post(`${API}/candidates`, {
+      headers: ownerAuth,
+      data: { full_name: 'Owned Before Bulk Import', email: bulkEmail, phone: `7${stamp}`.slice(0, 10) },
+    });
+    candId = (await cand.json()).id;
+
+    // Non-owner's bulk CSV import targeting the same email must be
+    // skipped entirely, not merged/overwritten.
+    const csvBody = `full_name,email,total_exp_years\nHijacked By Bulk Import,${bulkEmail},9\n`;
+    const blockedImport = await request.post(`${API}/import/candidates`, {
+      headers: { 'Authorization': `Bearer ${nonOwnerToken}` },
+      multipart: { file: { name: 'test.csv', mimeType: 'text/csv', buffer: Buffer.from(csvBody) } },
+    });
+    expect(blockedImport.ok()).toBeTruthy();
+    const blockedBody = await blockedImport.json();
+    expect(blockedBody.skipped_owned).toBe(1);
+    expect(blockedBody.updated).toBe(0);
+
+    const afterBlocked = await request.get(`${API}/candidates?search=${encodeURIComponent(bulkEmail)}`, { headers: auth });
+    const afterBlockedRows = await afterBlocked.json();
+    const stillOriginal = (Array.isArray(afterBlockedRows) ? afterBlockedRows : afterBlockedRows.items || []).find((c: any) => c.email === bulkEmail);
+    expect(stillOriginal?.full_name).toBe('Owned Before Bulk Import');
+
+    // The real owner's own bulk re-import of the same candidate must
+    // still succeed normally.
+    const csvBody2 = `full_name,email,total_exp_years\nOwned Before Bulk Import,${bulkEmail},9\n`;
+    const ownerImport = await request.post(`${API}/import/candidates`, {
+      headers: { 'Authorization': `Bearer ${ownerToken}` },
+      multipart: { file: { name: 'test.csv', mimeType: 'text/csv', buffer: Buffer.from(csvBody2) } },
+    });
+    const ownerImportBody = await ownerImport.json();
+    expect(ownerImportBody.skipped_owned).toBe(0);
+    expect(ownerImportBody.updated).toBe(1);
+
+    await request.patch(`${API}/users/${ownerId}/deactivate`, { headers: auth }).catch(() => {});
+    await request.patch(`${API}/users/${nonOwnerId}/deactivate`, { headers: auth }).catch(() => {});
+  });
+
   test('Job Board: a pending-approval requisition is hidden from public listing and apply', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };

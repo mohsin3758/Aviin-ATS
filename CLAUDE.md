@@ -4780,3 +4780,75 @@ Playwright auth-state browser profile and would otherwise leak into
 later tests in the same run). Full QA suite re-run clean: 139 passed /
 2 skipped / 0 failed. Zero-token audit: `CONFIRMED CLEAN` (352 files,
 0 external API refs).
+
+## Candidate ownership re-checked against the original spec doc — 1 real gap found and fixed, 2026-08-11
+User pasted the original "Recruiter-Specific Candidate Ownership Rule"
+doc and asked for a check against current state, avoiding duplicate
+work. Read the actual running code against all 14 numbered rules rather
+than trusting memory of the earlier build. 12 of 14 were already fully
+built and correct — no rebuilding: individual identification (rules 1,
+7), email→recruiter mapping via the existing `user_email_accounts`
+table rather than a new one (rules 2, 8, 9 — including the unmapped-
+email → unassigned-queue fallback), backend-only identity resolution
+with no frontend-trusted owner id (rule 3), bulk-upload attribution
+(rule 4), the 30-day window + expiry scheduler + history preservation
+(rules 5, 10), the exact "Candidate Already Owned" block (rule 6 — plus
+broadened beyond the doc to pipeline moves/tagging/messaging, built
+earlier the same day), admin-gated claim/transfer (rule 12), and the
+two-table schema (rule 13, already matching almost exactly).
+
+**One real gap, rule 11** ("resume upload does not override ownership"):
+`upsert_candidate()` in `resume_intake_service.py` — the shared function
+under email intake — had an existing-candidate UPDATE branch with zero
+ownership awareness: no check, no block, no log, and it unconditionally
+overwrote `resume_path` (not `COALESCE`'d like every other field on that
+same UPDATE) — so a resume landing in a *different* recruiter's mailbox
+could silently become the "current" resume for someone else's owned
+candidate. `import_router.py`'s CSV and Excel bulk-import existing-row
+branches were worse: `UPDATE candidates SET full_name=$1,
+total_exp_mo=$2` with no `COALESCE` and no ownership check at all — any
+importer's spreadsheet could rename another recruiter's owned candidate
+outright. Confirmed WhatsApp/public-apply are correctly unaffected —
+they never pass a `received_by`, matching that intake-ownership feature's
+original, deliberate scope boundary (mailbox/manual-add/bulk-upload
+only, documented on 2026-08-11 in the ownership feature's own entry
+above).
+
+User picked "block entirely" over "fill only empty fields" when asked.
+Fixed by calling the existing `claim_ownership()` on the existing-
+candidate branch in both places, before any field write: unowned/
+expired → the receiving recruiter legitimately claims it (consistent
+with rule 10 — a record with no active owner is fair game to the next
+real claimant) and the update proceeds; owned by someone else → the
+update is skipped entirely (`claim_ownership()`'s own existing
+`blocked_attempt` history logging fires for free, no new logging code
+needed) and the function returns without touching a single field. The
+incoming resume is still preserved as its own `resume_files` row
+regardless (that insert already happens unconditionally, right after
+`upsert_candidate()` returns, matching rule 11's "preserve the uploaded
+resume" — only the candidate's own current fields are protected).
+Bulk-import's genuine-owner-update path was also tightened to
+`COALESCE`-style (name only if blank, exp only if currently 0), fixing
+the pre-existing unconditional-overwrite bug for the *legitimate* owner
+case too, matching every other intake path's established convention —
+found while already touching this exact line, not scope creep beyond
+it. Added a `skipped_owned` counter to both bulk-import endpoints'
+responses and surfaced it in the Candidates page's import-result banner
+("N skipped (owned by another recruiter)").
+
+Verified for real, not code review: created two real throwaway
+recruiters (A, B), a candidate owned by A. Called the actual
+`upsert_candidate()` function directly inside the backend container —
+B's (non-owner) email-intake attempt left `full_name`/`resume_path`
+completely untouched and produced a real `blocked_attempt` history row
+tagged to B; A's (real owner) attempt updated `resume_path` normally
+right after. Separately, called the real `POST /import/candidates`
+endpoint over HTTP as B against A's owned candidate — `{"created":0,
+"updated":0,"skipped_owned":1,"errors":0}`, and the candidate's real
+`full_name` in the DB was confirmed unchanged. All throwaway recruiters/
+candidates/ownership rows cleaned up after each check. Full QA suite
+re-run clean: 138 passed / 2 skipped / 0 failed (one transient SMTP-
+relay flake on an unrelated KAE-email test passed on Playwright's
+automatic retry — a known characteristic of that specific real-email-
+send test, not a regression from this change). Zero-token audit:
+`CONFIRMED CLEAN` (352 files, 0 external API refs).

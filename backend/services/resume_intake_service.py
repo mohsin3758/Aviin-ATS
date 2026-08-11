@@ -443,6 +443,29 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
             tenant_id, cand_phone)
 
     if existing_id:
+        # Individual recruiter ownership (rule 11, 2026-08-11 doc): a resume
+        # re-arriving for an already-owned candidate must never silently
+        # update that candidate's record for anyone but the owner — doing
+        # so previously overwrote resume_path unconditionally (not even
+        # COALESCE'd), so a different recruiter's mailbox could silently
+        # replace the "current" resume shown/downloaded for someone else's
+        # owned candidate. When the receiving mailbox belongs to a known
+        # recruiter, resolve ownership first: unowned/expired -> this
+        # recruiter legitimately claims it (consistent with rule 10 — an
+        # existing record with no active owner is fair game to the next
+        # real claimant); owned by someone else -> block the update
+        # entirely and log it as a blocked_attempt (the incoming resume
+        # file itself is still preserved as its own resume_files row by
+        # the caller, unconditionally, right after this returns — only the
+        # candidate's own fields are protected, per the user's explicit
+        # "block entirely, don't silently merge" decision).
+        if received_by and received_by.get("user_id") and received_by.get("email"):
+            from services import candidate_ownership as _ownership
+            claim = await _ownership.claim_ownership(
+                conn, tenant_id, str(existing_id), received_by["user_id"], received_by["email"], "personal_mailbox",
+            )
+            if not claim["claimed"]:
+                return str(existing_id)
         await conn.execute("""
             UPDATE candidates SET
               source_label=COALESCE(source_label,$3), source=COALESCE(source,$4),

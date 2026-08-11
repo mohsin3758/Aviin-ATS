@@ -548,7 +548,7 @@ export default function CandidatesPage() {
 
   // import/export
   const [importing,setImporting] = useState(false);
-  const [importResult,setImportResult] = useState<{created:number,errors:number}|null>(null);
+  const [importResult,setImportResult] = useState<{created:number,errors:number,skippedOwned:number}|null>(null);
   const [exporting,setExporting] = useState(false);
   const importRef = useRef<HTMLInputElement>(null);
 
@@ -690,7 +690,7 @@ export default function CandidatesPage() {
       });
       const data = await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(data?.detail || 'Import failed');
-      setImportResult({created:(data.created||0)+(data.updated||0), errors:data.errors||0});
+      setImportResult({created:(data.created||0)+(data.updated||0), errors:data.errors||0, skippedOwned:data.skipped_owned||0});
       refetch();
     } catch(e:any){showStatus('Import error: '+(e?.message||'unknown'));}
     finally{setImporting(false);if(target)target.value='';}
@@ -759,7 +759,7 @@ export default function CandidatesPage() {
 
       {importResult && (
         <div style={{marginBottom:'12px',padding:'10px 16px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <span>✅ Import done: <strong>{importResult.created}</strong> added, <strong>{importResult.errors}</strong> errors</span>
+          <span>✅ Import done: <strong>{importResult.created}</strong> added, <strong>{importResult.errors}</strong> errors{importResult.skippedOwned > 0 && <> , <strong>{importResult.skippedOwned}</strong> skipped (owned by another recruiter)</>}</span>
           <button onClick={()=>setImportResult(null)} style={{background:'none',border:'none',cursor:'pointer',color:'#166534'}}><X size={14}/></button>
         </div>
       )}
