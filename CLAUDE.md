@@ -5307,3 +5307,72 @@ toggle) confirmed via real headless-browser rendering checks. Full QA
 suite re-run clean: 193 passed / 2 skipped / 0 failed — no regressions
 from any of the 9 total fixes (7 findings + 2 bonus bugs). Zero-token
 audit: `CONFIRMED CLEAN` (364 files, 0 external API refs).
+
+## Candidate-list junk cleanup + a real production bounce-email bug found and fixed, 2026-08-12
+User spotted "Mail Delivery System" and "QA S19 Candidate ..." rows live
+on the Candidates list and asked for them deleted. Checked scope and root
+cause before deleting anything (this project's own established
+discipline) — found two genuinely different bugs, not one:
+
+**"Mail Delivery System" (15 rows) — a real production data-quality bug,
+not just test residue.** Each row's `resume_files.source_email` was
+`MAILER-DAEMON@<this tenant's own real Hostinger SMTP relay domain>` — a
+genuine bounce notification (from the tenant's own outbound mail, most
+likely S17's KAE-submission test emails hitting a bad recipient) that
+still carried the original resume PDF as an attachment, and sailed
+straight through resume intake as if the bounce itself were a candidate.
+This isn't test-only: any real bounce on a real candidate submission
+(recruiter typos a KAE's email, a real inbox is full, etc.) would trigger
+the identical bug in normal production use, unrelated to QA at all — and
+critically, these records are NOT tied to any tracked variable in the
+test suite, so no test cleanup could ever have caught them; they only
+surface later when IMAP sync happens to pick up the bounce.
+`is_junk_sender()` (`resume_intake_service.py`) only ever checked the
+sender's *domain* against a blacklist — useless here since the bounce's
+domain is the tenant's own legitimate relay, not a blacklistable third
+party. Fixed with a narrow, dedicated `BOUNCE_NAME_PATTERNS` list +
+`BOUNCE_LOCAL_PARTS` set (`mailer-daemon`, `postmaster`, `mail delivery
+system/subsystem`, etc.), checked against both the sender's email local-
+part and display name, now passed `from_name` for the first time.
+**A real near-regression caught before deploy, not after**: the file
+already had an unused `NON_RESUME_NAME_PATTERNS` list (confirmed dead —
+defined, never referenced anywhere) containing generic terms like
+`'alert'`/`'notification'`; my first attempt wired `is_junk_sender()` up
+to that whole list to "finally use" it, and directly testing it against
+`is_junk_sender('alerts@naukri.com', 'Naukri Alert')` immediately showed
+`True` — a real regression, since this codebase's own `SUBJECT_PATTERNS`
+confirms Naukri job-alert forwarding emails are a genuine, expected
+resume source with exactly that kind of from-name. Reverted to the
+narrow, bounce-specific-only list instead and left the old dead list
+untouched (documented as a candidate for a future, more careful
+per-pattern audit, not deleted or wired up wholesale). Verified with 5
+real test calls directly inside the container before and after: bounce
+sender → True, real candidate → False, Naukri alert → **False** (the
+regression, confirmed fixed), postmaster → True.
+
+**"QA S19 Candidate ..." (11 rows) — confirmed genuine test-suite leakage
+despite a real, correct `afterAll` cleanup already existing** (`candId`
+IS deleted via the real `DELETE /candidates/{id}` API, verified working
+correctly when called directly). Root cause not fully pinned down — most
+likely explanation, given this exact session's own repeated documented
+login-rate-limit hits during back-to-back full-suite runs: `getApiToken()`
+(the test file's cached-login helper for API-context tests) has zero
+error handling — a 429 during login would leave `_cachedToken` unset,
+and since Playwright's `request.*()` calls don't reject on non-2xx
+responses, every subsequent cleanup DELETE in that run would silently
+401 under an invalid "Bearer undefined" header and be swallowed by the
+existing `.catch(() => {})`, leaking the candidate with no visible test
+failure. Not hardened in this pass (would need either a real retry/
+backoff or making failures loud, and the loud-failure trade-off needs its
+own judgment call) — flagged here as the most likely mechanism, not
+fixed, so a future session doesn't have to re-derive it from scratch.
+
+Cleanup executed via the real `DELETE /candidates/{id}` API (not raw
+SQL), all 26 rows across both categories — confirmed 0 remaining via
+direct DB count and a real headless-browser search on `/candidates`
+showing zero hits for either name. Full QA suite re-run clean: 195
+passed / 2 skipped / 0 failed (two transient S19/S21 failures on the
+first attempt, confirmed to pass cleanly in isolation after a genuine
+15-minute rate-limit cooldown — this session's now very well-documented
+back-to-back-run characteristic, not a regression from this fix).
+Zero-token audit: `CONFIRMED CLEAN` (364 files, 0 external API refs).

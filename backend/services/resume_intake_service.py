@@ -108,11 +108,41 @@ NON_RESUME_NAME_PATTERNS = [
     'master service agreement', 'service agreement',
     'linkedin customer', 'gopayments', 'paynet',
 ]
+# NOTE (2026-08-12): confirmed this list is still genuinely dead — nothing
+# reads it. Deliberately NOT wiring it up wholesale: it contains generic
+# terms ('alert', 'notification', 'support') that would false-positive
+# against real, legitimate resume-forwarding senders this codebase already
+# expects (e.g. Naukri/Indeed job-alert emails, per SUBJECT_PATTERNS below,
+# routinely have from-names like "Naukri Alert") — activating it wholesale
+# was tried and reverted after catching that regression before deploy, not
+# after. Left in place for a future, more careful per-pattern audit.
 
-def is_junk_sender(from_email: str) -> bool:
+# REAL BUG FIX (2026-08-12): is_junk_sender() only ever checked the
+# sender's domain — never caught a genuine bounce notification. Confirmed
+# live: 15 real "Mail Delivery System" garbage candidates, each with
+# source_email MAILER-DAEMON@<this tenant's own real Hostinger relay
+# domain> — a real bounce from this tenant's own outbound mail (e.g. a
+# KAE-submission email to a bad address) that still had the original
+# resume PDF attached, sailing through resume intake as if the bounce
+# itself were a candidate. Domain-blacklisting alone can't catch this
+# since the bounce's domain is the tenant's own legitimate mail relay, not
+# a blacklistable third party — needs its own narrow, bounce-specific check.
+BOUNCE_NAME_PATTERNS = [
+    'mail delivery system', 'mail delivery subsystem', 'mailer-daemon',
+    'mail delivery failure', 'delivery status notification',
+    'undelivered mail returned to sender', 'returned mail', 'postmaster',
+]
+BOUNCE_LOCAL_PARTS = {'mailer-daemon', 'postmaster', 'mail-daemon', 'bounce', 'bounces'}
+
+def is_junk_sender(from_email: str, from_name: str = '') -> bool:
     """Returns True if this sender is clearly not sending resumes."""
-    domain = (from_email or '').lower().split('@')[-1] if '@' in (from_email or '') else ''
-    return domain in SENDER_BLACKLIST
+    email_l = (from_email or '').lower()
+    domain = email_l.split('@')[-1] if '@' in email_l else ''
+    local_part = email_l.split('@')[0] if '@' in email_l else ''
+    if domain in SENDER_BLACKLIST or local_part in BOUNCE_LOCAL_PARTS:
+        return True
+    name_l = (from_name or '').lower().strip()
+    return any(p in name_l for p in BOUNCE_NAME_PATTERNS)
 
 # Phase E: Confidence-Based Routing Thresholds
 CONF_AUTO_ACCEPT   = 0.55   # >= this → auto_accepted (create candidate immediately)
@@ -765,8 +795,8 @@ async def process_email_for_resume(
     message IMAP IDLE path, where this is unavoidable)."""
     job_board, label = detect_source(from_email, subject)
 
-    # Skip blacklisted senders (banks, alerts, newsletters)
-    if is_junk_sender(from_email):
+    # Skip blacklisted senders (banks, alerts, newsletters, bounce notifications)
+    if is_junk_sender(from_email, from_name):
         await conn.execute(
             "UPDATE imap_messages SET auto_processed=TRUE,process_status='junk_sender' WHERE id=$1", msg_id)
         return {'status': 'junk_sender'}
