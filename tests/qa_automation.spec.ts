@@ -2091,3 +2091,49 @@ test.describe.serial('S21 Device Monitoring Gaps', () => {
     // as a real, legitimately-retired device would be.
   });
 });
+
+// S22 Jobs & Requisitions view modes (2026-08-11): the page only ever
+// rendered one fixed card-grid layout — user asked for List/Small/
+// Medium/Details options, matching standard SaaS view switchers. Added
+// a 4-mode ViewSwitcher (card/compact/list/table), persisted to
+// localStorage, all 4 backed by the same real `filtered` requisitions
+// array — this test confirms every mode renders the identical real
+// item count (not empty/broken) and that the choice survives a reload.
+test('S22 Requisitions view switcher: card/compact/list/table all render real data, choice persists', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/requisitions');
+  await expect(page.getByText('Jobs & Requisitions')).toBeVisible({ timeout: 15000 });
+
+  await expect(page.getByTestId('req-view-content')).toBeVisible({ timeout: 10000 });
+  const cardCount = await page.locator('[data-testid="req-view-content"] > div').count();
+  expect(cardCount).toBeGreaterThan(0);
+
+  await page.getByTestId('req-view-compact').click();
+  await expect(page.getByTestId('req-view-content')).toBeVisible();
+  expect(await page.locator('[data-testid="req-view-content"] > div').count()).toBe(cardCount);
+
+  await page.getByTestId('req-view-list').click();
+  await expect(page.getByTestId('req-view-content')).toBeVisible();
+  expect(await page.locator('[data-testid="req-view-content"] > div').count()).toBe(cardCount);
+
+  await page.getByTestId('req-view-table').click();
+  await expect(page.locator('table')).toBeVisible({ timeout: 10000 });
+  expect(await page.locator('table tbody tr').count()).toBe(cardCount);
+  await expect(page.locator('table thead th').first()).toHaveText('Title');
+
+  // Persistence: reload should keep the table view (localStorage), not reset to card
+  await page.reload();
+  await expect(page.getByText('Jobs & Requisitions')).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('table')).toBeVisible({ timeout: 10000 });
+
+  // Reset to card view (the default most other pages assume) so this test
+  // never leaves a different recruiter's saved localStorage preference
+  // — this pref is per-browser-profile, and the shared auth state file
+  // this suite reuses means an unreset value here would leak into every
+  // later test in the run.
+  await page.getByTestId('req-view-card').click();
+  await expect(page.getByTestId('req-view-content')).toBeVisible();
+
+  expect(errors).toHaveLength(0);
+});

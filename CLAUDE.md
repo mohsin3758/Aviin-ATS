@@ -4728,3 +4728,55 @@ after the cooldown window — not a real regression). Zero-token audit:
 data (the one real enrolled+deactivated test device) left in its
 legitimate deactivated state, matching what a real retired device would
 look like — no hard-delete endpoint exists for this table by design.
+
+## Jobs & Requisitions: 4-mode view switcher, 2026-08-11
+User asked, from a screenshot of the current card-grid layout: "View
+option to list, small size view, Medium Size, details, other option as
+per standard to look different view." Checked `requisitions/page.tsx`
+first — it had exactly one fixed rendering (`JobCard`, a rich card with
+a full pipeline-funnel visualization, in a `minmax(380px,1fr)` grid), no
+`viewMode` state, and no switcher UI anywhere in the file.
+
+Built a `ViewSwitcher` (4 icon buttons — `LayoutGrid`/`Grid2x2`/`List`/
+`Table2` from lucide-react, confirmed present in this project's
+lucide-react install before using them) in the header next to the
+existing filters, backed by `viewMode: 'card'|'compact'|'list'|'table'`
+state persisted to `localStorage('req_view_mode')`. Read via a deferred
+`useEffect` rather than synchronously during render — the same SSR/
+hydration-mismatch guard applied repeatedly elsewhere in this project
+(device-monitoring, recruiter-ops TargetsTab) — since `localStorage`
+doesn't exist during Next.js's server render.
+
+Four render paths, all driven by the same `filtered` array and existing
+`PRIORITY_CONFIG`/`WORK_MODE_CONFIG`/`TYPE_BADGE`/`STATUS_BADGE`
+constants (no duplicated color/label logic):
+- **Cards** (existing `JobCard`, unchanged) — the original full-detail
+  view, kept as the default.
+- **Small** (`JobCardCompact`, new) — a denser `minmax(220px,1fr)` grid;
+  title, priority emoji, status badge, location, position count, total
+  pipeline count, and 3 compact action controls only — no skills chips,
+  no funnel bars, no description preview.
+- **List** (`JobListRow`, new) — single-line-per-requisition horizontal
+  rows, everything inline (badges, location, positions, pipeline count,
+  deadline, actions) — good for scanning many roles at once.
+- **Details** (`JobTableView`, new) — a real `<table>` (Title/Client/
+  Type/Priority/Location/Positions/Status/Pipeline/Deadline/Actions),
+  matching the exact table styling convention already used by
+  `companies/page.tsx`, the most information-dense of the 4.
+
+Verified for real via a genuine headless-browser run, not code review:
+loaded `/requisitions` (21 real requisitions), clicked through all 4
+modes and confirmed each rendered exactly 21 items (not 0, not a
+subset — proving every view reads the same real filtered data), clicked
+into Details and confirmed a real `<table>` with the correct header
+row, reloaded the page and confirmed the Table choice survived (proving
+the localStorage persistence actually works, not just that the click
+handler fires), and switched back to Cards confirming real requisition
+text (title/client/badges) renders correctly. Zero console errors
+throughout. Added a permanent "S22" regression test to
+`qa_automation.spec.ts` covering the same flow (resets the view back to
+Cards at the end, since this preference is stored in the shared
+Playwright auth-state browser profile and would otherwise leak into
+later tests in the same run). Full QA suite re-run clean: 139 passed /
+2 skipped / 0 failed. Zero-token audit: `CONFIRMED CLEAN` (352 files,
+0 external API refs).

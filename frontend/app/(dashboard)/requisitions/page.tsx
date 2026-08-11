@@ -3,7 +3,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
-import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy } from 'lucide-react';
+import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2 } from 'lucide-react';
 
 const SKILLS_LIST = [
   'Python','Java','React','Node.js','FastAPI','Django','AWS','Docker','Kubernetes',
@@ -330,6 +330,210 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
   );
 }
 
+function JobCardCompact({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any }) {
+  const [hover, setHover] = useState(false);
+  const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
+  return (
+    <div
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{
+        background: 'white', border: `1px solid ${hover ? '#2563eb' : '#e2e8f0'}`,
+        borderRadius: '10px', padding: '12px 14px',
+        boxShadow: hover ? '0 4px 12px rgba(37,99,235,0.1)' : '0 1px 3px rgba(0,0,0,0.04)',
+        transition: 'all 0.15s', display: 'flex', flexDirection: 'column', gap: '6px', minHeight: '128px',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '6px' }}>
+        <h3 style={{ fontSize: '12.5px', fontWeight: '700', color: '#0f172a', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>
+          {req.title}
+        </h3>
+        <span title={req.priority} style={{ fontSize: '13px', flexShrink: 0 }}>{pri.emoji}</span>
+      </div>
+      {req.client_name && (
+        <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {req.client_name}
+        </div>
+      )}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', alignItems: 'center' }}>
+        <span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '9px' }}>{req.status}</span>
+        {req.location && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: '2px', fontSize: '10px', color: '#94a3b8' }}>
+            <MapPin size={9} /> {req.location}
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '10px', color: '#94a3b8' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: '2px' }}><Users size={9} /> {req.positions_count}</span>
+        {counts && counts.total > 0 && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: '2px', color: '#1e40af', fontWeight: 700 }}>{counts.total} in pipeline</span>
+        )}
+      </div>
+      <div style={{ marginTop: 'auto', display: 'flex', gap: '4px', paddingTop: '6px', borderTop: '1px solid #f1f5f9' }}>
+        <a href={`/pipeline?job=${req.id}`} style={{ flex: 1, textAlign: 'center', fontSize: '10.5px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '4px 0', borderRadius: '5px', border: '1px solid #bfdbfe' }}>
+          View
+        </a>
+        <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{ width: '24px', height: '24px', borderRadius: '5px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <Edit size={11} style={{ color: '#64748b' }} />
+        </button>
+        <button onClick={e => { e.stopPropagation(); if (confirm('Delete this job?')) onDelete(req.id); }} style={{ width: '24px', height: '24px', borderRadius: '5px', border: '1px solid #fee2e2', background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <Trash2 size={11} style={{ color: '#ef4444' }} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function JobListRow({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any }) {
+  const [hover, setHover] = useState(false);
+  const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
+  const [clientNow, setClientNow] = useState<number | undefined>(undefined);
+  useEffect(() => { setClientNow(Date.now()); }, []);
+  const days = daysRemaining(req.deadline, clientNow);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{
+        background: 'white', border: `1px solid ${hover ? '#2563eb' : '#e2e8f0'}`,
+        borderRadius: '10px', padding: '10px 16px',
+        boxShadow: hover ? '0 2px 8px rgba(37,99,235,0.08)' : 'none',
+        transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap',
+      }}
+    >
+      <div style={{ width: '34px', height: '34px', borderRadius: '8px', background: '#eff6ff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <Briefcase size={16} style={{ color: '#2563eb' }} />
+      </div>
+      <div style={{ flex: '2 1 200px', minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '13px', fontWeight: 700, color: '#0f172a' }}>{req.title}</span>
+          <span title={req.priority} style={{ fontSize: '12px' }}>{pri.emoji}</span>
+        </div>
+        {req.client_name && <div style={{ fontSize: '11px', color: '#64748b' }}>{req.client_name}{req.industry ? ` · ${req.industry}` : ''}</div>}
+      </div>
+      <span className={`badge ${TYPE_BADGE[req.employment_type] || 'badge-gray'}`} style={{ fontSize: '10px', flexShrink: 0 }}>{req.employment_type}</span>
+      <span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '10px', flexShrink: 0 }}>{req.status}</span>
+      {req.location && (
+        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: '#64748b', flexShrink: 0 }}>
+          <MapPin size={11} /> {req.location}
+        </span>
+      )}
+      <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: '#64748b', flexShrink: 0 }}>
+        <Users size={11} /> {req.positions_count} pos.
+      </span>
+      {counts && counts.total > 0 && (
+        <span style={{ fontSize: '12px', fontWeight: 700, color: '#1e40af', flexShrink: 0 }}>{counts.total} in pipeline</span>
+      )}
+      {days !== null && (
+        <span style={{ fontSize: '11px', fontWeight: 500, color: days < 0 ? '#dc2626' : days <= 7 ? '#ca8a04' : '#15803d', flexShrink: 0 }}>
+          {days < 0 ? `Overdue ${Math.abs(days)}d` : days === 0 ? 'Due today' : `${days}d left`}
+        </span>
+      )}
+      <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px', flexShrink: 0 }}>
+        <a href={`/pipeline?job=${req.id}`} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '5px 10px', borderRadius: '6px', border: '1px solid #bfdbfe' }}>
+          <Eye size={11} /> Pipeline
+        </a>
+        <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{ width: '28px', height: '28px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <Edit size={12} style={{ color: '#64748b' }} />
+        </button>
+        <button onClick={e => { e.stopPropagation(); if (confirm('Delete this job?')) onDelete(req.id); }} style={{ width: '28px', height: '28px', borderRadius: '6px', border: '1px solid #fee2e2', background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <Trash2 size={12} style={{ color: '#ef4444' }} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; onEdit: (r: any) => void; onDelete: (id: string) => void; stageCounts: any }) {
+  const [clientNow, setClientNow] = useState<number | undefined>(undefined);
+  useEffect(() => { setClientNow(Date.now()); }, []);
+  return (
+    <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '12px', overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+            {['Title', 'Client', 'Type', 'Priority', 'Location', 'Positions', 'Status', 'Pipeline', 'Deadline', 'Actions'].map((h, i) => (
+              <th key={i} style={{ padding: '10px 14px', textAlign: 'left', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', whiteSpace: 'nowrap' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {reqs.map(req => {
+            const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
+            const days = daysRemaining(req.deadline, clientNow);
+            const counts = stageCounts?.[req.id];
+            return (
+              <tr key={req.id} data-testid={`req-table-row-${req.id}`} style={{ borderBottom: '1px solid #f1f5f9' }}
+                onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#f8faff'}
+                onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}>
+                <td style={{ padding: '10px 14px', fontSize: '12.5px', fontWeight: 600, color: '#0f172a', maxWidth: '220px' }}>{req.title}</td>
+                <td style={{ padding: '10px 14px', fontSize: '12px', color: '#475569' }}>{req.client_name || '—'}</td>
+                <td style={{ padding: '10px 14px' }}><span className={`badge ${TYPE_BADGE[req.employment_type] || 'badge-gray'}`} style={{ fontSize: '10px' }}>{req.employment_type}</span></td>
+                <td style={{ padding: '10px 14px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: pri.bg, color: pri.color, border: `1px solid ${pri.border}` }}>
+                    {pri.emoji} {req.priority}
+                  </span>
+                </td>
+                <td style={{ padding: '10px 14px', fontSize: '12px', color: '#64748b' }}>{req.location || '—'}</td>
+                <td style={{ padding: '10px 14px', fontSize: '12px', color: '#64748b' }}>{req.positions_count}</td>
+                <td style={{ padding: '10px 14px' }}><span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '10px' }}>{req.status}</span></td>
+                <td style={{ padding: '10px 14px', fontSize: '12px', fontWeight: 700, color: '#1e40af' }}>{counts?.total > 0 ? `${counts.total} candidates` : '—'}</td>
+                <td style={{ padding: '10px 14px', fontSize: '11px', fontWeight: 500, color: days === null ? '#94a3b8' : days < 0 ? '#dc2626' : days <= 7 ? '#ca8a04' : '#15803d' }}>
+                  {days === null ? '—' : days < 0 ? `Overdue ${Math.abs(days)}d` : days === 0 ? 'Due today' : `${days}d`}
+                </td>
+                <td style={{ padding: '10px 14px' }}>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <a href={`/pipeline?job=${req.id}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', borderRadius: '6px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                      <Eye size={12} style={{ color: '#2563eb' }} />
+                    </a>
+                    <button onClick={() => onEdit(req)} style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+                      <Edit size={12} style={{ color: '#64748b' }} />
+                    </button>
+                    <button onClick={() => { if (confirm('Delete this job?')) onDelete(req.id); }} style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid #fee2e2', background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+                      <Trash2 size={12} style={{ color: '#ef4444' }} />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+type ViewMode = 'card' | 'compact' | 'list' | 'table';
+const VIEW_MODES: { key: ViewMode; label: string; icon: any }[] = [
+  { key: 'card', label: 'Cards', icon: LayoutGrid },
+  { key: 'compact', label: 'Small', icon: Grid2x2 },
+  { key: 'list', label: 'List', icon: List },
+  { key: 'table', label: 'Details', icon: Table2 },
+];
+
+function ViewSwitcher({ mode, onChange }: { mode: ViewMode; onChange: (m: ViewMode) => void }) {
+  return (
+    <div style={{ display: 'flex', gap: '2px', background: '#f1f5f9', borderRadius: '8px', padding: '3px' }}>
+      {VIEW_MODES.map(({ key, label, icon: Icon }) => (
+        <button
+          key={key}
+          data-testid={`req-view-${key}`}
+          title={label}
+          onClick={() => onChange(key)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '5px',
+            padding: '6px 10px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            background: mode === key ? 'white' : 'transparent',
+            boxShadow: mode === key ? '0 1px 2px rgba(0,0,0,0.08)' : 'none',
+            color: mode === key ? '#1e40af' : '#64748b',
+            fontSize: '12px', fontWeight: 600,
+          }}
+        >
+          <Icon size={14} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function RequisitionsPageInner() {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -341,6 +545,21 @@ function RequisitionsPageInner() {
   const [workModeFilter, setWorkModeFilter] = useState('');
   const [skillInput, setSkillInput] = useState('');
   const [error, setError] = useState('');
+  // View mode preference — read from localStorage in an effect (not
+  // during the initial render) so the server's first paint and the
+  // client's first paint always match. Reading it synchronously here
+  // would differ between server (no localStorage) and client, the same
+  // hydration-mismatch bug class documented and fixed repeatedly
+  // elsewhere in this app (device-monitoring, recruiter-ops).
+  const [viewMode, setViewModeState] = useState<ViewMode>('card');
+  useEffect(() => {
+    const saved = localStorage.getItem('req_view_mode') as ViewMode | null;
+    if (saved && VIEW_MODES.some(v => v.key === saved)) setViewModeState(saved);
+  }, []);
+  const setViewMode = (m: ViewMode) => {
+    setViewModeState(m);
+    localStorage.setItem('req_view_mode', m);
+  };
   // BUG FIX (2026-08-10 audit): JD Templates had zero integration into
   // requisition creation — 0 of 26 real requisitions ever used template
   // content, and there was no picker on this form at all. Fetches the
@@ -527,6 +746,7 @@ function RequisitionsPageInner() {
             <option value="remote">Remote</option>
             <option value="hybrid">Hybrid</option>
           </select>
+          <ViewSwitcher mode={viewMode} onChange={setViewMode} />
           <button onClick={openCreate} style={{
             display: 'flex', alignItems: 'center', gap: '6px',
             padding: '9px 18px', background: '#1e40af', color: 'white',
@@ -551,7 +771,7 @@ function RequisitionsPageInner() {
         })}
       </div>
 
-      {/* Grid */}
+      {/* Requisitions list — 4 selectable view modes (card/compact/list/table) */}
       {loading ? (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(380px,1fr))', gap: '16px' }}>
           {[1, 2, 3].map(i => <div key={i} className="skeleton" style={{ height: '200px', borderRadius: '12px' }} />)}
@@ -575,8 +795,24 @@ function RequisitionsPageInner() {
             + Add Requirement
           </button>
         </div>
+      ) : viewMode === 'table' ? (
+        <div data-testid="req-view-content">
+          <JobTableView reqs={filtered} onEdit={openEdit} onDelete={handleDelete} stageCounts={stageCounts} />
+        </div>
+      ) : viewMode === 'list' ? (
+        <div data-testid="req-view-content" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {filtered.map((req: any) => (
+            <JobListRow key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} />
+          ))}
+        </div>
+      ) : viewMode === 'compact' ? (
+        <div data-testid="req-view-content" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: '10px' }}>
+          {filtered.map((req: any) => (
+            <JobCardCompact key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} />
+          ))}
+        </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(380px,1fr))', gap: '16px' }}>
+        <div data-testid="req-view-content" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(380px,1fr))', gap: '16px' }}>
           {filtered.map((req: any) => (
             <JobCard key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} />
           ))}
