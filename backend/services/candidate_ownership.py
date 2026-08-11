@@ -12,7 +12,53 @@ divergent copies.
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from fastapi import HTTPException
+
 OWNERSHIP_DAYS = 30
+
+
+def owner_blocked(owner: Optional[dict], actor) -> bool:
+    """True if `owner` is an active lock held by someone other than
+    `actor` — the shared gate for broadened enforcement (2026-08-11:
+    pipeline moves, messaging, tagging). Admin/manager and the owner
+    themselves are never blocked; an unowned or expired-lock candidate
+    is never blocked either."""
+    if actor.role in ("admin", "super_admin", "manager"):
+        return False
+    if not owner or owner["status"] != "active":
+        return False
+    return str(owner["recruiter_id"]) != str(actor.user_id)
+
+
+def _ownership_403_detail(owner: dict) -> dict:
+    return {
+        "detail": (
+            f"Candidate Already Owned — currently owned by {owner['recruiter_name']} "
+            f"until {owner['ownership_expires_at']}. You cannot process this candidate "
+            f"during the active ownership period."
+        ),
+        "owner": {
+            "recruiter_id": str(owner["recruiter_id"]),
+            "recruiter_name": owner["recruiter_name"],
+            "recruiter_email": owner["recruiter_email"],
+            "expires_at": str(owner["ownership_expires_at"]),
+        },
+    }
+
+
+async def check_ownership_or_raise(conn, tenant_id: str, candidate_id: str, actor) -> None:
+    """Raise 403 if `candidate_id` has an active owner who isn't `actor`.
+    No-op for admin/manager, the owner themselves, or an unowned/expired
+    candidate. For SINGLE-candidate call sites only — bulk call sites
+    should call get_ownership() directly and skip-not-raise per item
+    (see applications.py bulk-action / communications.py bulk-send for
+    the established pattern)."""
+    if actor.role in ("admin", "super_admin", "manager"):
+        return
+    owner = await get_ownership(conn, tenant_id, candidate_id)
+    if owner_blocked(owner, actor):
+        raise HTTPException(403, _ownership_403_detail(owner))
+    # (owner may still be None or unowned/expired here — both fine, no-op)
 
 
 async def get_ownership(conn, tenant_id: str, candidate_id: str) -> Optional[dict]:

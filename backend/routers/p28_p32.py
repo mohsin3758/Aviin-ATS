@@ -1,8 +1,8 @@
 """P28-P32: Audit Log, Reports, Job Board, n8n Workflows,
 Salary Benchmarking, Notification Center."""
-import csv, io, os
+import csv, io, os, json as _json
 from typing import Optional
-from fastapi import APIRouter, Depends, Response, HTTPException
+from fastapi import APIRouter, Depends, Response, HTTPException, Form, File, UploadFile
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
@@ -340,6 +340,19 @@ async def create_notification(body: dict, actor: Actor=Depends(get_actor)):
 
 # ── Public Jobs Board (no auth) ───────────────────────────────────────────────
 import db as _db_public
+import uuid as _uuid_public
+
+
+def _require_valid_tenant_id(tenant_id: str) -> None:
+    """These endpoints are fully public/anonymous — a malformed tenant_id
+    used to hit the ::uuid cast inside RLS policies and surface as an
+    unhandled 500 (asyncpg.exceptions.DataError) instead of a clean 400.
+    Validated once here, at every public entry point, before any query."""
+    try:
+        _uuid_public.UUID(str(tenant_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid tenant_id")
+
 
 public_jobs_router = APIRouter(prefix="/public", tags=["public"])
 
@@ -350,12 +363,14 @@ async def public_list_jobs(
     location: Optional[str] = None,
 ):
     """No-auth public job board endpoint — uses db.tenant_conn for RLS."""
+    _require_valid_tenant_id(tenant_id)
     async with _db_public.tenant_conn(tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
                    r.skills_required, r.positions_count, r.created_at
             FROM requisitions r
-            WHERE r.tenant_id=$1::uuid AND r.status='open'
+            WHERE r.tenant_id=$1::uuid AND r.status='open' AND r.approval_status='approved'
+              AND r.is_active IS NOT FALSE
               AND ($2::text IS NULL OR lower(r.title) LIKE '%'||lower($2)||'%')
               AND ($3::text IS NULL OR lower(r.location) LIKE '%'||lower($3)||'%')
             ORDER BY r.created_at DESC LIMIT 50
@@ -373,6 +388,7 @@ async def public_jobs_feed(tenant_id: str):
     This is the actual mechanism "free multi-board auto-posting" runs on
     everywhere it's genuinely free; there is no zero-click free posting
     path that skips it."""
+    _require_valid_tenant_id(tenant_id)
     import xml.sax.saxutils as sx
     base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
     async with _db_public.tenant_conn(tenant_id) as conn:
@@ -381,7 +397,8 @@ async def public_jobs_feed(tenant_id: str):
                    r.skills_required, r.created_at, t.name AS company_name
             FROM requisitions r
             JOIN tenants t ON t.id = r.tenant_id
-            WHERE r.tenant_id=$1::uuid AND r.status='open'
+            WHERE r.tenant_id=$1::uuid AND r.status='open' AND r.approval_status='approved'
+              AND r.is_active IS NOT FALSE
             ORDER BY r.created_at DESC LIMIT 500
         """, tenant_id)
 
@@ -419,12 +436,14 @@ async def public_get_job(job_id: str, tenant_id: str):
     Facebook/LinkedIn/Twitter's crawlers, which don't execute JS, see a
     real title/description in the page's initial HTML) and by the
     client-rendered apply UI on the same page."""
+    _require_valid_tenant_id(tenant_id)
     async with _db_public.tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
                    r.skills_required, r.positions_count, r.created_at
             FROM requisitions r
-            WHERE r.id=$1::uuid AND r.tenant_id=$2::uuid AND r.status='open'
+            WHERE r.id=$1::uuid AND r.tenant_id=$2::uuid AND r.status='open' AND r.approval_status='approved'
+              AND r.is_active IS NOT FALSE
         """, job_id, tenant_id)
     if not row:
         raise HTTPException(status_code=404, detail="Job not found or closed")
@@ -432,7 +451,19 @@ async def public_get_job(job_id: str, tenant_id: str):
 
 
 @public_jobs_router.post("/jobs/apply")
-async def public_apply(body: dict):
+async def public_apply(
+    tenant_id: str = Form(...),
+    job_id: str = Form(...),
+    full_name: str = Form(''),
+    email: str = Form(''),
+    phone: Optional[str] = Form(None),
+    location: Optional[str] = Form(None),
+    current_employer: Optional[str] = Form(None),
+    experience_months: int = Form(0),
+    consent_given: bool = Form(False),
+    ref: Optional[str] = Form(None),
+    resume: Optional[UploadFile] = File(None),
+):
     """No-auth public job application — uses db.tenant_conn for RLS.
 
     HARD RULE #12: this is a genuinely public, anonymous endpoint that
@@ -445,49 +476,119 @@ async def public_apply(body: dict):
     consent_given=true — reject outright if it's missing rather than
     silently defaulting it, since this is the one path where genuine,
     explicit, candidate-given consent is both meaningful and achievable.
+
+    Resume upload (2026-08-11 audit — this was the one real gap found in
+    an otherwise-fully-manual form): switched from a plain JSON body to
+    multipart/form-data so an optional resume file can ride along.
+    Parsing reuses the exact same extract -> classify -> parse pipeline
+    as WhatsApp/email intake (services.resume_intake_service /
+    document_classifier / improved_parser) — never reimplemented. A bad
+    or non-resume upload never blocks the application itself (the
+    manually-typed fields are always the primary source of truth here);
+    it's purely additive enrichment, same spirit as upsert_candidate's
+    own COALESCE-only-fills-gaps convention on an existing candidate.
     """
-    tenant_id = body.get('tenant_id', '')
-    job_id = body.get('job_id', '')
     if not tenant_id or not job_id:
         raise HTTPException(status_code=400, detail="tenant_id and job_id required")
-    if not body.get('consent_given'):
+    _require_valid_tenant_id(tenant_id)
+    if not consent_given:
         raise HTTPException(status_code=400, detail="Consent to store and process your details is required to apply")
+
+    parsed: dict = {}
+    resume_bytes: Optional[bytes] = None
+    resume_filename: Optional[str] = None
+    resume_mime: Optional[str] = None
+    if resume is not None and resume.filename:
+        try:
+            resume_bytes = await resume.read()
+            resume_filename = resume.filename
+            resume_mime = resume.content_type or ''
+            from services.resume_intake_service import extract_text_from_attachment, save_resume_file
+            from services.document_classifier import classify_document
+            from services.improved_parser import parse_resume_v2
+            text = extract_text_from_attachment(resume_bytes, resume_mime, resume_filename)
+            doc_result = classify_document(text, resume_filename, resume_mime)
+            if doc_result.is_resume:
+                parsed = parse_resume_v2(text, from_name=full_name, from_email=email, filename=resume_filename)
+                parsed["_resume_text"] = text
+        except Exception:
+            # Best-effort enrichment only — a parsing failure must never
+            # block a real applicant from submitting.
+            parsed = {}
+
     async with _db_public.tenant_conn(tenant_id) as conn:
+        # Same approval-chain gate as the public listing endpoints — a
+        # not-yet-approved requisition's real job_id shouldn't be directly
+        # applyable even if somehow known/guessed.
         job = await conn.fetchrow(
-            "SELECT id FROM requisitions WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='open'",
+            "SELECT id FROM requisitions WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='open' AND approval_status='approved' AND is_active IS NOT FALSE",
             job_id, tenant_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found or closed")
-        email = body.get('email', '').lower()
+        email = email.lower()
         cand = await conn.fetchrow(
             "SELECT id FROM candidates WHERE email=$1 AND tenant_id=$2::uuid",
             email, tenant_id)
         if not cand:
+            skills = parsed.get("skills") or []
+            resume_text = parsed.get("_resume_text")
             cand = await conn.fetchrow("""
                 INSERT INTO candidates
-                  (tenant_id, full_name, email, phone, location, current_employer, total_exp_mo, source)
-                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, 'job_board') RETURNING id
+                  (tenant_id, full_name, email, phone, location, current_employer, total_exp_mo, source,
+                   skills, resume_text)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, 'job_board', $8, $9) RETURNING id
             """, tenant_id,
-                 body.get('full_name', ''), email,
-                 body.get('phone'), body.get('location'),
-                 body.get('current_employer'),
-                 int(body.get('experience_months', 0)))
+                 full_name, email,
+                 phone, location,
+                 current_employer,
+                 experience_months, skills, resume_text)
             await conn.execute(
                 "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
                 "VALUES ($1::uuid,$2,'resume_processing','public_job_board',TRUE,$3)",
                 tenant_id, cand['id'],
                 f"Applicant checked the DPDP 2023 consent box on the public job application form for job {job_id}.",
             )
+        elif parsed.get("_resume_text"):
+            # Existing candidate re-applying with a resume — same
+            # gap-fill-only convention as upsert_candidate(), never
+            # overwrites a value that's already on file.
+            await conn.execute("""
+                UPDATE candidates SET
+                  resume_text = CASE WHEN (resume_text IS NULL OR resume_text='') THEN $2 ELSE resume_text END,
+                  skills = CASE WHEN skills = '{}' AND $3::text[] <> '{}' THEN $3 ELSE skills END
+                WHERE id=$1""",
+                cand['id'], parsed.get("_resume_text"), parsed.get("skills") or [])
+
+        if resume_bytes:
+            file_path = save_resume_file(resume_bytes, tenant_id, resume_filename)
+            await conn.execute("""
+                INSERT INTO resume_files
+                  (tenant_id, candidate_id, job_board, job_board_label, source_email,
+                   file_name, file_path, mime_type, file_size,
+                   parse_status, parsed_data, parse_confidence, routing_decision)
+                VALUES ($1,$2,'public_apply','Public Career Page',$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
+                tenant_id, cand['id'], email, resume_filename, file_path, resume_mime, len(resume_bytes),
+                'auto_accepted' if parsed else 'not_a_resume',
+                _json.dumps(parsed) if parsed else '{}',
+                round(float(parsed.get("_confidence", 0.7) or 0.7), 3) if parsed else 0.0,
+                'auto_accepted' if parsed else 'rejected')
+
         await conn.execute("""
             INSERT INTO applications (tenant_id, candidate_id, requisition_id, stage)
             VALUES ($1::uuid, $2, $3::uuid, 'sourced')
             ON CONFLICT DO NOTHING
         """, tenant_id, cand['id'], job_id)
-        ref_code = body.get('ref')
-        if ref_code:
+        if ref:
             await conn.execute("""
                 UPDATE referral_links SET candidate_ids = array_append(candidate_ids, $1::uuid)
                 WHERE tenant_id=$2::uuid AND unique_code=$3 AND NOT ($1::uuid = ANY(candidate_ids))
-            """, cand['id'], tenant_id, ref_code)
-    return {"applied": True, "candidate_id": str(cand['id'])}
+            """, cand['id'], tenant_id, ref)
+        # Low-severity finding (2026-08-11 audit): returning the real
+        # internal candidate_id here, and always with the same shape
+        # whether the email matched an existing candidate or created a
+        # new one, let an anonymous caller confirm whether a given email
+        # is already a candidate and learn their internal id. The
+        # frontend never reads candidate_id from this response (confirmed
+        # via grep) — dropped from the public payload entirely.
+    return {"applied": True}
 

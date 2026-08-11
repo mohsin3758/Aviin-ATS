@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 import httpx
 import db
+from services import candidate_ownership as ownership
 from deps import Actor, get_actor
 from routers.whatsapp import _ensure_consent
 
@@ -608,6 +609,10 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
                 "SELECT full_name,email,phone FROM candidates WHERE id=$1 AND tenant_id=$2",
                 body.candidate_id, actor.tenant_id)
             if not cand: raise HTTPException(404, "Candidate not found")
+            # Broadened candidate-ownership enforcement (2026-08-11) —
+            # only applies to a real candidate_id send; a free-form
+            # to_email recipient has no ownership concept.
+            await ownership.check_ownership_or_raise(conn, actor.tenant_id, body.candidate_id, actor)
             to_email = cand["email"]
             to_name = cand["full_name"]
             to_phone = cand["phone"]
@@ -696,6 +701,15 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
         smtp = await _get_smtp(conn, actor.tenant_id)
         sent = failed = skipped = 0
         for cand in cands:
+            # Broadened candidate-ownership enforcement (2026-08-11) —
+            # skip (not fail-the-whole-batch) a candidate someone else
+            # actively owns, same treatment as every other per-candidate
+            # skip reason in this loop (no email/phone, SMTP not
+            # configured, WhatsApp consent missing).
+            owner = await ownership.get_ownership(conn, actor.tenant_id, str(cand["id"]))
+            if ownership.owner_blocked(owner, actor):
+                skipped += 1
+                continue
             cvars = await _resolve_template_vars(conn, actor.tenant_id, str(cand["id"]))
             msg = _personalize(body.message, cvars)
             if body.channel in ("email","both"):

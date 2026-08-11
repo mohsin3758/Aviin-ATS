@@ -25,6 +25,26 @@ def _to_dt(val):
     try: return datetime.fromisoformat(str(val).replace('Z',''))
     except: return None
 
+
+def _parsed(row: dict) -> dict:
+    """asyncpg has no jsonb codec registered in this app (the same class
+    of gap documented repeatedly elsewhere in this project, e.g.
+    role_definitions.permissions) — a jsonb column comes back as a raw
+    JSON string, not a parsed list/dict, unless explicitly decoded here.
+    Found live via genuine UI/API testing on 2026-08-11 (this module had
+    never had a real caller before that, so nothing had ever hit this):
+    every read endpoint below returned `tasks` as a string, so the
+    frontend's `selected.tasks.map(...)` would throw a real TypeError
+    the moment anyone actually clicked into a record's checklist."""
+    d = dict(row)
+    for key in ("tasks",):
+        if key in d and isinstance(d[key], str):
+            try:
+                d[key] = json.loads(d[key])
+            except (TypeError, ValueError):
+                pass
+    return d
+
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
 class OnboardIn(BaseModel):
@@ -48,7 +68,7 @@ async def list_templates(actor: Actor = Depends(get_actor)):
         rows = await conn.fetch(
             "SELECT * FROM onboarding_templates WHERE tenant_id=$1 AND is_active ORDER BY name",
             actor.tenant_id)
-    return [dict(r) for r in rows]
+    return [_parsed(r) for r in rows]
 
 @router.post("")
 async def create_onboarding(body: OnboardIn, actor: Actor = Depends(get_actor)):
@@ -74,7 +94,7 @@ async def create_onboarding(body: OnboardIn, actor: Actor = Depends(get_actor)):
         """, actor.tenant_id, body.candidate_id, body.placement_id, body.template_id,
              body.client_name, _to_date(body.joining_date), body.hr_spoc, body.hr_phone,
              body.notes, json.dumps(tasks), total)
-    return dict(row) if row else {"error": "already exists"}
+    return _parsed(row) if row else {"error": "already exists"}
 
 @router.get("")
 async def list_onboarding(status: Optional[str] = None, actor: Actor = Depends(get_actor)):
@@ -87,7 +107,7 @@ async def list_onboarding(status: Optional[str] = None, actor: Actor = Depends(g
             WHERE co.tenant_id=$1 AND ($2::text IS NULL OR co.status=$2)
             ORDER BY co.joining_date ASC NULLS LAST, co.created_at DESC
         """, actor.tenant_id, status)
-    return [dict(r) for r in rows]
+    return [_parsed(r) for r in rows]
 
 @router.get("/{onboard_id}")
 async def get_onboarding(onboard_id: str, actor: Actor = Depends(get_actor)):
@@ -99,7 +119,7 @@ async def get_onboarding(onboard_id: str, actor: Actor = Depends(get_actor)):
             WHERE co.id=$1 AND co.tenant_id=$2
         """, onboard_id, actor.tenant_id)
         if not row: raise HTTPException(404, "Not found")
-    return dict(row)
+    return _parsed(row)
 
 @router.patch("/{onboard_id}/task")
 async def update_task(onboard_id: str, body: TaskUpdate, actor: Actor = Depends(get_actor)):
@@ -124,7 +144,7 @@ async def update_task(onboard_id: str, body: TaskUpdate, actor: Actor = Depends(
             UPDATE candidate_onboarding SET tasks=$1::jsonb, completed_count=$2,
               status=$3, updated_at=now() WHERE id=$4 RETURNING *
         """, json.dumps(tasks), done, status, onboard_id)
-    return dict(updated)
+    return _parsed(updated)
 
 @router.get("/summary/stats")
 async def onboarding_stats(actor: Actor = Depends(get_actor)):

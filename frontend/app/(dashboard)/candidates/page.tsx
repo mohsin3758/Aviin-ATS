@@ -136,33 +136,34 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
   const [showTagPicker,setShowTagPicker] = useState(false);
   const [newTagName,setNewTagName] = useState('');
   const [tagBusy,setTagBusy] = useState(false);
+  const [tagErr,setTagErr] = useState('');
   const exp = gx(candidate.total_exp_mo);
   const sc = candidate.pipeline_stage ? (stageMap[candidate.pipeline_stage]||null) : null;
   const availableTags = allTags.filter((t:any)=>!candTags.some((ct:any)=>ct.id===t.id));
 
   const addTag = async(tagId:string)=>{
-    setTagBusy(true);
+    setTagBusy(true);setTagErr('');
     try{
       await apiFetch(`/candidate-tags/assign?candidate_id=${candidate.id}`,{method:'POST',body:JSON.stringify([tagId])});
       refetchCandTags(); onTagsChanged();
-    }catch{} finally{setTagBusy(false);}
+    }catch(e:any){setTagErr(e?.message||'Failed to add tag');} finally{setTagBusy(false);}
   };
   const removeTag = async(tagId:string)=>{
-    setTagBusy(true);
+    setTagBusy(true);setTagErr('');
     try{
       await apiFetch(`/candidate-tags/remove?candidate_id=${candidate.id}&tag_id=${tagId}`,{method:'DELETE'});
       refetchCandTags(); onTagsChanged();
-    }catch{} finally{setTagBusy(false);}
+    }catch(e:any){setTagErr(e?.message||'Failed to remove tag');} finally{setTagBusy(false);}
   };
   const createAndAddTag = async()=>{
     const name = newTagName.trim();
     if(!name) return;
-    setTagBusy(true);
+    setTagBusy(true);setTagErr('');
     try{
       const t = await apiFetch('/candidate-tags',{method:'POST',body:JSON.stringify({name})});
       await apiFetch(`/candidate-tags/assign?candidate_id=${candidate.id}`,{method:'POST',body:JSON.stringify([t.id])});
       setNewTagName(''); refetchCandTags(); onTagsChanged();
-    }catch{} finally{setTagBusy(false);}
+    }catch(e:any){setTagErr(e?.message||'Failed to create tag');} finally{setTagBusy(false);}
   };
 
   return (
@@ -203,6 +204,7 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
             ))}
             <button onClick={()=>setShowTagPicker(v=>!v)} style={{fontSize:'11px',fontWeight:'600',padding:'3px 9px',borderRadius:'8px',border:'1px dashed #cbd5e1',background:'white',color:'#64748b',cursor:'pointer'}}>+ Add tag</button>
           </div>
+          {tagErr && <div style={{fontSize:'11px',color:'#dc2626',marginTop:'6px'}}>{tagErr}</div>}
           {showTagPicker && (
             <div style={{marginTop:'10px',padding:'10px',background:'#f8fafc',borderRadius:'8px',border:'1px solid #e2e8f0'}}>
               {availableTags.length>0 && (

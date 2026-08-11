@@ -7,6 +7,7 @@ write assignment_event + audit_log. issue also writes event_outbox
 """
 
 import os
+import json
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
 import db
@@ -200,14 +201,49 @@ async def respond_offer(offer_id: str, body: OfferRespond, background_tasks: Bac
             # billing, retention tracking, onboarding, compliance records,
             # v_monthly_billing) was silently blind to every real
             # acceptance through this endpoint.
-            await conn.execute(
+            placement_row = await conn.fetchrow(
                 """INSERT INTO placements
                      (tenant_id, offer_id, candidate_id, requisition_id, client_id, start_date, bill_rate, pay_rate)
                    SELECT $1, $2, $3, $4, r.client_id, COALESCE($5::date, CURRENT_DATE), NULL, NULL
                    FROM requisitions r WHERE r.id = $4
-                   ON CONFLICT (offer_id) DO NOTHING""",
+                   ON CONFLICT (offer_id) DO NOTHING
+                   RETURNING id, client_id""",
                 actor.tenant_id, offer_id, app_row["candidate_id"], app_row["requisition_id"], row["joining_date"],
             )
+            # 2026-08-11 audit finding: the onboarding module (real, working
+            # CRUD, correct RLS) had nothing anywhere in this codebase ever
+            # trigger it — offer acceptance is the natural, obvious moment,
+            # and this function's own comment already named "onboarding" as
+            # a downstream dependent of the placements insert above without
+            # ever actually wiring it. Picks the tenant's 'all'-role-type
+            # template if one exists, else any active template, else
+            # creates a blank-checklist record rather than skipping
+            # onboarding entirely for a tenant with zero templates.
+            if placement_row:
+                tpl = await conn.fetchrow(
+                    """SELECT id FROM onboarding_templates WHERE tenant_id=$1 AND is_active
+                       ORDER BY (role_type='all') DESC, created_at ASC LIMIT 1""",
+                    actor.tenant_id)
+                client_name = None
+                if placement_row["client_id"]:
+                    client_name = await conn.fetchval(
+                        "SELECT name FROM clients WHERE id=$1", placement_row["client_id"])
+                onboard_tasks = []
+                onboard_total = 0
+                if tpl:
+                    tpl_tasks = await conn.fetchval("SELECT tasks FROM onboarding_templates WHERE id=$1", tpl["id"])
+                    raw_tasks = tpl_tasks if isinstance(tpl_tasks, list) else json.loads(tpl_tasks or "[]")
+                    onboard_tasks = [{"completed": False, "completed_at": None, "notes": "", **t} for t in raw_tasks]
+                    onboard_total = len(onboard_tasks)
+                await conn.execute(
+                    """INSERT INTO candidate_onboarding
+                         (tenant_id, candidate_id, placement_id, template_id, client_name,
+                          joining_date, tasks, total_count, status)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,'not_started')""",
+                    actor.tenant_id, app_row["candidate_id"], placement_row["id"],
+                    tpl["id"] if tpl else None, client_name, row["joining_date"],
+                    json.dumps(onboard_tasks), onboard_total,
+                )
             # Two more dead automation_workflows rows closed alongside the
             # HITL fix (2026-08-10 audit item 4) — both fire from this exact
             # acceptance event, which is a real, single, unambiguous trigger

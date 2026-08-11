@@ -7,6 +7,7 @@ import httpx
 import db
 from deps import Actor, get_actor
 from services.dedup_service import merge_duplicate_candidates as _dedup_merge
+from services import candidate_ownership as ownership
 
 N8N_BASE = "http://n8n:5678"
 
@@ -133,6 +134,8 @@ async def assign_tags(candidate_id: str, tag_ids: List[str] = Body(...),
             "SELECT 1 FROM candidates WHERE id=$1 AND tenant_id=$2", candidate_id, actor.tenant_id)
         if not cand_ok:
             raise HTTPException(404, "Candidate not found")
+        # Broadened candidate-ownership enforcement (2026-08-11).
+        await ownership.check_ownership_or_raise(conn, actor.tenant_id, candidate_id, actor)
         real_tag_ids = await conn.fetch(
             "SELECT id FROM candidate_tags WHERE id=ANY($1::uuid[]) AND tenant_id=$2",
             tag_ids, actor.tenant_id)
@@ -147,6 +150,8 @@ async def assign_tags(candidate_id: str, tag_ids: List[str] = Body(...),
 @tags_router.delete("/remove")
 async def remove_tag(candidate_id: str, tag_id: str, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Broadened candidate-ownership enforcement (2026-08-11).
+        await ownership.check_ownership_or_raise(conn, actor.tenant_id, candidate_id, actor)
         await conn.execute("""
             DELETE FROM candidate_tag_map ctm
             USING candidates c

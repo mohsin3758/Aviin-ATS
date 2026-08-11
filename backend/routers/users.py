@@ -98,7 +98,7 @@ async def update_me(body: dict, actor: Actor = Depends(get_actor)):
 
 
 @router.post("")
-async def create_user(body: UserCreate, actor: Actor = Depends(get_actor)):
+async def create_user(body: UserCreate, actor: Actor = Depends(require_role("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Check email uniqueness
         exists = await conn.fetchval(
@@ -195,7 +195,7 @@ async def get_user(user_id: str, actor: Actor = Depends(get_actor)):
 
 
 @router.put("/{user_id}")
-async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(get_actor)):
+async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(require_role("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         if body.role:
             valid = await conn.fetchval(
@@ -229,7 +229,7 @@ async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(get
 
 
 @router.patch("/{user_id}/password")
-async def change_password(user_id: str, body: PasswordChange, actor: Actor = Depends(get_actor)):
+async def change_password(user_id: str, body: PasswordChange, actor: Actor = Depends(require_role("admin", "manager"))):
     if len(body.new_password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -243,7 +243,7 @@ async def change_password(user_id: str, body: PasswordChange, actor: Actor = Dep
 
 
 @router.patch("/{user_id}/deactivate")
-async def deactivate_user(user_id: str, actor: Actor = Depends(get_actor)):
+async def deactivate_user(user_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
     if user_id == actor.user_id:
         raise HTTPException(400, "Cannot deactivate yourself")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -257,7 +257,7 @@ async def deactivate_user(user_id: str, actor: Actor = Depends(get_actor)):
 
 
 @router.patch("/{user_id}/activate")
-async def activate_user(user_id: str, actor: Actor = Depends(get_actor)):
+async def activate_user(user_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE users SET is_active=true WHERE id=$1 AND tenant_id=$2

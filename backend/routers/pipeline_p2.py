@@ -37,6 +37,7 @@ from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
 from routers.pipeline_stages import is_valid_stage
+from services import candidate_ownership as ownership
 from permissions import require_permission
 
 log = logging.getLogger(__name__)
@@ -317,6 +318,21 @@ async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = De
                     WHERE a.id=$1 AND a.tenant_id=$2""", app_id, actor.tenant_id)
                 if not app:
                     results["failed"] += 1; continue
+
+                # Broadened candidate-ownership enforcement (2026-08-11):
+                # skip (not fail-the-whole-batch) a candidate someone else
+                # actively owns, same "process what's valid, report what
+                # wasn't" pattern this loop already uses for every other
+                # per-item failure. Admin/manager and the owner bypass.
+                if action.action == "move_stage":
+                    owner = await ownership.get_ownership(conn, actor.tenant_id, str(app["candidate_id"]))
+                    if ownership.owner_blocked(owner, actor):
+                        results["failed"] += 1
+                        results["details"].append({
+                            "name": app["full_name"],
+                            "status": f"locked — owned by {owner['recruiter_name']} until {owner['ownership_expires_at']}",
+                        })
+                        continue
 
                 if action.action == "move_stage" and action.target_stage:
                     if not await is_valid_stage(conn, actor.tenant_id, action.target_stage):

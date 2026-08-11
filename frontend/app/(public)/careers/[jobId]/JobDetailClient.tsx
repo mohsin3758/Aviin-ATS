@@ -24,6 +24,7 @@ function ApplyModal({ job, onClose }: { job: Job; onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
   const [err, setErr] = useState('');
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
 
   async function apply() {
     if (!form.full_name || !form.email) { setErr('Name and email are required'); return; }
@@ -31,11 +32,19 @@ function ApplyModal({ job, onClose }: { job: Job; onClose: () => void }) {
     setSaving(true); setErr('');
     try {
       const ref = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('ref') : null;
-      const r = await fetch(`${API_BASE}/public/jobs/apply`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, experience_months: Number(form.experience_months) || 0, job_id: job.id, tenant_id: TENANT_ID, ref, consent_given: true }),
-      });
+      const fd = new FormData();
+      fd.append('tenant_id', TENANT_ID);
+      fd.append('job_id', job.id);
+      fd.append('full_name', form.full_name);
+      fd.append('email', form.email);
+      if (form.phone) fd.append('phone', form.phone);
+      if (form.location) fd.append('location', form.location);
+      if (form.current_employer) fd.append('current_employer', form.current_employer);
+      fd.append('experience_months', String(Number(form.experience_months) || 0));
+      fd.append('consent_given', 'true');
+      if (ref) fd.append('ref', ref);
+      if (resumeFile) fd.append('resume', resumeFile);
+      const r = await fetch(`${API_BASE}/public/jobs/apply`, { method: 'POST', body: fd });
       if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
       setDone(true);
     } catch (e: any) { setErr(e.message); }
@@ -93,6 +102,11 @@ function ApplyModal({ job, onClose }: { job: Job; onClose: () => void }) {
                 <textarea value={form.cover_letter} onChange={e => setForm(f => ({ ...f, cover_letter: e.target.value }))}
                   rows={4} placeholder="Why are you a great fit for this role?"
                   style={{ ...iStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }} />
+              </div>
+              <div style={{ gridColumn: 'span 2' }}>
+                <label style={{ fontSize: '12px', fontWeight: '600', color: '#374151', display: 'block', marginBottom: '5px' }}>Resume (optional)</label>
+                <input type="file" accept=".pdf,.doc,.docx" onChange={e => setResumeFile(e.target.files?.[0] || null)} style={{ ...iStyle, padding: '7px 11px' }} />
+                {resumeFile && <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>{resumeFile.name}</div>}
               </div>
             </div>
             <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginTop: '16px', cursor: 'pointer' }}>

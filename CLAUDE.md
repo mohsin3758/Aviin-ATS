@@ -4418,3 +4418,199 @@ established S14-S17 convention). All throwaway test data (candidates,
 applications, requisitions, interviews, offers, placements, activity
 events, SLA tracking rows, productivity/score aggregates) cleaned up
 after every check in FK-safe order, confirmed zero residue.
+
+## Fresh audits (Onboarding, Job Board, User Management/RBAC) — all findings closed, 2026-08-11
+Direct follow-up to the same-day Workforce Intelligence work — user asked
+for a fresh research-only audit of 3 modules that had never had a
+dedicated pass this project (Onboarding, the public Job Board/Career
+Page, User Management/RBAC), run as 3 parallel background research
+agents with real SSH/psql access, then said "build and fix it" for
+every Critical/High/Medium/Low finding across all three plus the
+already-planned broadened ownership enforcement. All closed, deployed,
+and verified with real data — not code review.
+
+**CRITICAL — RBAC: live privilege-escalation gap, closed.**
+`backend/routers/users.py`'s `POST /users`, `PUT /users/{id}`, `PATCH
+.../password`, `.../deactivate`, `.../activate` had zero role gating —
+just `Depends(get_actor)`, right next to the correctly-gated `/roles/*`
+endpoints in the same file. Any authenticated recruiter could `PUT`
+their own record with `{"role":"admin"}` to self-promote, or deactivate/
+reset the password of the real admin account — exploitable today, not
+theoretical. Gated all 5 to `require_role("admin","manager")` (confirmed
+via grep that self-service password change goes through a *separate*
+`/auth/change-password` endpoint requiring the current password, so this
+didn't touch that). **Verified for real**: a genuine throwaway recruiter
+correctly 403'd on both a self-promotion attempt and a deactivate-admin
+attempt; admin's own equivalent calls still succeeded normally.
+
+**LOW — RBAC: `border2` CSS typo, closed.** `settings/permissions/page.tsx`
+had a stray `border2:` key (should be `border:`) inside a style object
+that *already* set `border: 'none'` as a base value — so fixing the typo
+alone created a genuine TypeScript "duplicate key" build error, caught
+immediately by the build (not a code-review guess) and fixed by removing
+the redundant base value.
+
+**Ownership enforcement broadened** (planned earlier the same session,
+built after this audit) — a shared `check_ownership_or_raise()` /
+`owner_blocked()` pair added to `backend/services/candidate_ownership.py`,
+reusing the exact "Candidate Already Owned" message already established
+for the candidate-creation 409 case. Wired into 6 real call sites across
+4 files: `applications.py::update_stage()`, `pipeline_p2.py::bulk_action()`
+(skip-and-report per item, not fail-the-whole-batch, matching that
+endpoint's own existing pattern), `p30_p35.py`'s tag assign/remove, and
+`communications.py`'s single-send + bulk-send (bulk-send folds a lock
+into its existing `skipped` counter). Admin/manager and the owner
+themselves always bypass; unowned/expired candidates are unrestricted.
+
+**A real, pre-existing bug found and fixed along the way, not code
+review**: `frontend/lib/useFetch.ts`'s `apiFetch()` never unwrapped
+FastAPI's nested `{"detail": {"detail": "...", "owner": {...}}}` shape —
+`new Error(data?.detail)` on a non-string `detail` silently stringifies
+to `"[object Object]"`. This affected the *existing* candidate-creation
+409 case too, not just the new 403s — nobody had ever seen the real
+"Candidate Already Owned" text render correctly in the UI before this
+fix. Fixed centrally in `apiFetch` (extracts the nested string, attaches
+the full body as `err.body` for callers that want `owner` directly);
+also found and fixed a second real gap while auditing call sites: the
+Candidates-list tag add/remove buttons had a bare `catch{}` that
+silently swallowed every error including the new 403 — added real
+`tagErr` state and a visible inline message.
+
+**Verified for real end-to-end**: two real throwaway recruiters (owner +
+non-owner) and a real owned candidate — non-owner blocked with the real
+message on single stage-move/tag/message (all three, individually,
+via real API calls), bulk-move and bulk-send both correctly skip the
+locked candidate while still processing an unowned one, owner and admin
+both unaffected, and a real headless-browser test confirmed the actual
+rendered UI text is genuine (not "[object Object]") after clicking the
+real "+ Add tag" button against a real 403. Also confirmed unowned
+candidates are genuinely unrestricted using a real pre-existing
+candidate with no ownership row at all.
+
+**HIGH — Job Board: public listings bypass the requisition approval
+chain, closed.** `p28_p32.py`'s `public_list_jobs`/`public_jobs_feed`
+(Indeed/Jooble XML)/`public_get_job`/`public_apply` all filtered only on
+`status='open'`, never `approval_status='approved'` — unlike
+`auto_distribute_on_open()` (Facebook/Telegram), which already checked
+it correctly. `requisitions.approval_status` defaults to `'approved'`
+at the column level (confirmed by reading `requisitions.py`), so this
+filter is safe for exempt/admin-created requisitions and only actually
+hides genuinely-pending ones. **Verified for real**: forced a real
+throwaway requisition to `pending_approval`, confirmed it vanished from
+listing/feed/direct-fetch/apply, then re-approved it and confirmed apply
+succeeded again.
+
+**LOW — Job Board: unhandled 500 on malformed `tenant_id`, closed.**
+These are fully public/anonymous endpoints — `GET /public/jobs?tenant_id=
+not-a-uuid` used to hit the `::uuid` cast inside RLS policies and surface
+a raw `asyncpg.exceptions.DataError` as a 500. Added a shared
+`_require_valid_tenant_id()` guard at all 4 public entry points, real
+`uuid.UUID()` validation, clean 400 instead. **Verified for real**: the
+exact failing query now returns `400 {"detail":"Invalid tenant_id"}`.
+
+**LOW — Job Board: candidate-existence oracle, closed.** `public_apply`
+always returned the real internal `candidate_id`, with the same response
+shape whether the email matched an existing candidate or created a new
+one — letting an anonymous caller confirm whether a given email is
+already a candidate and learn their internal id. Confirmed via grep
+that no frontend caller ever reads `candidate_id` from this response —
+dropped it from the public payload entirely (`{"applied": true}` only).
+
+**MEDIUM — Job Board: no resume upload in the public apply flow,
+closed.** Switched `public_apply` from a plain JSON body to
+`multipart/form-data` (`Form(...)` + optional `resume: UploadFile`) so
+an applicant can attach a resume — reuses the exact same extract →
+classify → parse pipeline as WhatsApp/email intake
+(`resume_intake_service`/`document_classifier`/`improved_parser`), never
+reimplemented. A bad or non-resume upload never blocks the application —
+purely additive enrichment, same COALESCE-only-fills-gaps spirit as
+`upsert_candidate()` for an existing candidate re-applying with a new
+resume. Writes a real `resume_files` row either way (accepted or
+rejected) for auditability, matching the WhatsApp-inbound convention.
+Both public apply forms (`careers/page.tsx` and the per-job
+`JobDetailClient.tsx`) updated to send `FormData` with an optional file
+input. **Verified for real** with a genuine synthetic PDF (reportlab,
+same technique used for the WhatsApp-inbound verification earlier this
+project): real skills/name/resume_text extracted and stored, a real
+`resume_files` row created with `parse_status='auto_accepted'`; a
+separate junk-text upload correctly still let the application through
+with zero fabricated data and `parse_status='not_a_resume'`.
+
+**A real, separate bug found by accident during this exact verification,
+not the original audit — closed**: the public job endpoints never
+checked `is_active` at all, so a *soft-deleted* requisition (this
+project's established delete convention) remained publicly listed and
+directly applyable indefinitely — caught when a real apply-flow test
+picked a stray, already-soft-deleted QA test requisition off the live
+public listing. Added `AND r.is_active IS NOT FALSE` to all 4 public
+query sites, matching the same guard already used correctly by this
+file's own authenticated `/jobs/board` endpoint just above it. **Verified
+for real**: confirmed 6 real soft-deleted `QA WI Test Role` rows
+immediately vanished from public search, and both direct-fetch and apply
+against one of them correctly 404'd.
+
+**HIGH — Onboarding: fully disconnected, closed.** Real, correctly-built
+CRUD with proper RLS, but nothing ever triggered it (offer acceptance
+never created a record despite `offers.py`'s own comment naming
+"onboarding" as a dependent) and no UI existed to create one manually
+(`page.tsx`'s own empty state literally said "POST /onboarding to
+create"). Fixed both ends:
+- `offers.py::respond_offer()`'s acceptance branch now auto-creates a
+  real `candidate_onboarding` record right after the `placements` insert
+  it already does (captured the placement's real `id`/`client_id` via
+  `RETURNING`), picking the tenant's `role_type='all'` template if one
+  exists, else any active template, else a blank checklist rather than
+  skipping onboarding entirely for a tenant with zero templates.
+- New `NewOnboardingModal` on `onboarding/page.tsx` — candidate
+  search-and-pick (reuses `GET /candidates?search=`), template picker,
+  client/joining-date/HR-SPOC fields, calls the real, already-existing
+  `POST /onboarding`. The backend was never the gap; only the form was
+  missing.
+- Schema-drift backfill (`sql/50_onboarding_schema_drift.sql`) —
+  `candidate_onboarding`/`onboarding_templates` existed live with zero
+  `CREATE TABLE` in any committed migration, captured byte-for-byte via
+  `pg_dump --schema-only`, not reconstructed from memory (this project's
+  own established discipline after an earlier migration once got every
+  guessed definition wrong). Also seeds a real default 8-task template
+  for the one tenant that had zero templates at all (the audit's
+  separate finding — only 1 of 2 tenants had any template, so that
+  tenant's onboarding records could only ever be blank checklists).
+
+**Two real, load-bearing bugs found only because this module was
+actually exercised for the first time in its history, not code
+review**: `onboarding.py`'s `create_onboarding`/`list_onboarding`/
+`get_onboarding`/`update_task` all returned `dict(row)` directly, and
+asyncpg has no jsonb codec registered in this app (the same class of
+gap already documented for `role_definitions.permissions` elsewhere in
+this project) — every response's `tasks` field was a raw, double-encoded
+JSON *string*, not a parsed array. The frontend's `selected.tasks.map(...)`
+would have thrown a real `TypeError` the instant anyone clicked into a
+real record's checklist — invisible until today because, per the
+original audit, this module had *never* had a real caller before. Added
+a shared `_parsed()` helper and applied it at all 4 response sites.
+Caught by a permanent regression test asserting `Array.isArray(record.
+tasks)` on a real `POST /onboarding` response, not by reading the code.
+
+**Verified for real end-to-end**: walked a genuine throwaway offer
+through submit→approve→issue→accept via real API calls and confirmed a
+real `candidate_onboarding` row was created with the correct placement/
+template/joining-date link and 10 real tasks (the tenant's own
+pre-existing template, correctly preferred over the newly-seeded
+default since it already existed) — toggled a real task via the API and
+confirmed `status`/`completed_count` recomputed correctly. Separately,
+a real headless-browser test used the actual "New Onboarding" button →
+searched for and selected a real candidate → set a joining date →
+submitted, and confirmed the record appeared in the real list with the
+correct data and zero console errors.
+
+New permanent "S19 RBAC/Ownership/JobBoard/Onboarding Fixes" suite added
+to `qa_automation.spec.ts` (`.serial()`, matching the established
+convention) covering all of the above at the API level. Full QA suite
+re-run clean: 162 passed / 2 skipped / 0 failed (one transient run hit
+this session's own well-documented login-rate-limit artifact from
+repeated back-to-back full-suite runs today, not a real regression —
+confirmed clean on the next attempt after the cooldown window). Zero-
+token audit: `CONFIRMED CLEAN` (349 files, 0 external API refs). All
+throwaway test data (candidates, requisitions, applications, offers,
+placements, onboarding records, users) cleaned up after every check in
+FK-safe order, confirmed zero residue.

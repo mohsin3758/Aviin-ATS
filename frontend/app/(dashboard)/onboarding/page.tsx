@@ -1,12 +1,118 @@
 'use client';
 import { useState } from 'react';
-import { ClipboardList, CheckCircle, Clock, Users, AlertTriangle } from 'lucide-react';
+import { ClipboardList, CheckCircle, Clock, Users, AlertTriangle, Plus, X } from 'lucide-react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Spinner } from '@/components/ui/Spinner';
+
+const fld: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, marginBottom: 10 };
+const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 };
+
+// 2026-08-11 audit finding: the backend has always had a real, working
+// POST /onboarding — this page's own empty state just said "POST
+// /onboarding to create" because no form was ever built to call it.
+function NewOnboardingModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const { data: templates } = useFetch<any[]>('/onboarding/templates');
+  const [candQuery, setCandQuery] = useState('');
+  const [candResults, setCandResults] = useState<any[]>([]);
+  const [candidate, setCandidate] = useState<any>(null);
+  const [templateId, setTemplateId] = useState('');
+  const [clientName, setClientName] = useState('');
+  const [joiningDate, setJoiningDate] = useState('');
+  const [hrSpoc, setHrSpoc] = useState('');
+  const [hrPhone, setHrPhone] = useState('');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function searchCandidates(q: string) {
+    setCandQuery(q); setCandidate(null);
+    if (q.trim().length < 2) { setCandResults([]); return; }
+    try {
+      const rows = await apiFetch(`/candidates?search=${encodeURIComponent(q)}&limit=8`);
+      setCandResults(Array.isArray(rows) ? rows : rows?.items || []);
+    } catch { setCandResults([]); }
+  }
+
+  async function submit() {
+    if (!candidate) { setErr('Pick a candidate first'); return; }
+    setSaving(true); setErr('');
+    try {
+      await apiFetch('/onboarding', {
+        method: 'POST',
+        body: JSON.stringify({
+          candidate_id: candidate.id,
+          template_id: templateId || null,
+          client_name: clientName || null,
+          joining_date: joiningDate || null,
+          hr_spoc: hrSpoc || null,
+          hr_phone: hrPhone || null,
+          notes: notes || null,
+        }),
+      });
+      onCreated(); onClose();
+    } catch (e: any) { setErr(e?.message || 'Failed to create onboarding record'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={onClose}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 440, padding: 22, maxHeight: '90vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>New Onboarding</h3>
+          <button onClick={onClose} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#94A3B8' }}><X size={18} /></button>
+        </div>
+        {err && <div style={{ background: '#FEF2F2', color: '#DC2626', fontSize: 12, padding: '8px 10px', borderRadius: 8, marginBottom: 10 }}>{err}</div>}
+
+        <label style={lbl}>CANDIDATE *</label>
+        <input value={candidate ? candidate.full_name : candQuery} onChange={e => searchCandidates(e.target.value)}
+          placeholder="Search by name or email…" style={fld} />
+        {candResults.length > 0 && !candidate && (
+          <div style={{ border: '1px solid #E2E8F0', borderRadius: 8, marginTop: -6, marginBottom: 10, maxHeight: 160, overflowY: 'auto' }}>
+            {candResults.map((c: any) => (
+              <div key={c.id} onClick={() => { setCandidate(c); setCandResults([]); }}
+                style={{ padding: '8px 10px', fontSize: 12, cursor: 'pointer', borderBottom: '1px solid #F1F5F9' }}>
+                <div style={{ fontWeight: 600 }}>{c.full_name}</div>
+                <div style={{ color: '#94A3B8', fontSize: 11 }}>{c.email}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <label style={lbl}>TEMPLATE</label>
+        <select value={templateId} onChange={e => setTemplateId(e.target.value)} style={fld}>
+          <option value="">No template (blank checklist)</option>
+          {(templates || []).map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+
+        <label style={lbl}>CLIENT NAME</label>
+        <input value={clientName} onChange={e => setClientName(e.target.value)} style={fld} />
+
+        <label style={lbl}>JOINING DATE</label>
+        <input type="date" value={joiningDate} onChange={e => setJoiningDate(e.target.value)} style={fld} />
+
+        <label style={lbl}>HR SPOC</label>
+        <input value={hrSpoc} onChange={e => setHrSpoc(e.target.value)} style={fld} />
+
+        <label style={lbl}>HR PHONE</label>
+        <input value={hrPhone} onChange={e => setHrPhone(e.target.value)} style={fld} />
+
+        <label style={lbl}>NOTES</label>
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} style={{ ...fld, resize: 'vertical' as const }} />
+
+        <button onClick={submit} disabled={saving || !candidate}
+          style={{ width: '100%', padding: '10px', borderRadius: 8, border: 'none', fontSize: 13, fontWeight: 700, cursor: saving || !candidate ? 'not-allowed' : 'pointer', background: saving || !candidate ? '#94A3B8' : '#0F766E', color: '#fff' }}>
+          {saving ? 'Creating…' : 'Create Onboarding'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function OnboardingPage() {
   const {data:stats}=useFetch<any>('/onboarding/summary/stats');
   const {data:list,loading,refetch}=useFetch<any[]>('/onboarding');
   const [selected,setSelected]=useState<any>(null);
+  const [showNew, setShowNew] = useState(false);
   async function toggleTask(id:string,taskId:number,done:boolean){await apiFetch(`/onboarding/${id}/task`,{method:'PATCH',body:JSON.stringify({task_id:taskId,completed:done})});refetch();setSelected(null);}
   const ST:Record<string,string>={completed:'badge-green',in_progress:'badge-blue',not_started:'badge-gray',cancelled:'badge-red'};
   return (
@@ -21,7 +127,12 @@ export default function OnboardingPage() {
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 card overflow-hidden">
-          <div className="card-header"><h3>Active Onboardings</h3></div>
+          <div className="card-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <h3>Active Onboardings</h3>
+            <button onClick={()=>setShowNew(true)} className="btn btn-sm" style={{display:'flex',alignItems:'center',gap:4,background:'#0F766E',color:'#fff',border:'none'}}>
+              <Plus size={13}/> New Onboarding
+            </button>
+          </div>
           {loading?<div className="p-8 text-center"><Spinner/></div>:
           <table className="data-table"><thead><tr><th>Candidate</th><th>Client</th><th>Joining</th><th>Progress</th><th>Status</th></tr></thead>
             <tbody>{(list||[]).map((o:any)=>(
@@ -32,7 +143,7 @@ export default function OnboardingPage() {
                 <td><div className="flex items-center gap-2"><div className="progress-bar" style={{width:'70px',height:'6px'}}><div className="progress-fill" style={{width:`${o.total_count>0?(o.completed_count/o.total_count)*100:0}%`,background:'var(--accent)'}}/></div><span className="text-xs">{o.completed_count}/{o.total_count}</span></div></td>
                 <td><span className={`badge ${ST[o.status]||'badge-gray'}`}>{o.status?.replace('_',' ')}</span></td>
               </tr>))}
-              {!list?.length&&<tr><td colSpan={5} className="text-center py-8" style={{color:'var(--gray-400)'}}>No onboarding records. POST /onboarding to create.</td></tr>}
+              {!list?.length&&<tr><td colSpan={5} className="text-center py-8" style={{color:'var(--gray-400)'}}>No onboarding records yet — click "New Onboarding" to create one.</td></tr>}
             </tbody>
           </table>}
         </div>
@@ -57,6 +168,7 @@ export default function OnboardingPage() {
           </div></div>
         )}
       </div>
+      {showNew && <NewOnboardingModal onClose={()=>setShowNew(false)} onCreated={refetch}/>}
     </div>
   );
 }

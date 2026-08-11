@@ -136,10 +136,10 @@ export default function PermissionsSettings() {
         </div>
         <button onClick={toggleEnforcement} disabled={togglingEnforcement || !enforcement}
           style={{
-            padding: '8px 18px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+            padding: '8px 18px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
             background: enforcement?.enabled ? '#fff' : '#1e40af',
             color: enforcement?.enabled ? '#dc2626' : '#fff',
-            border2: enforcement?.enabled ? '1px solid #fecaca' : 'none',
+            border: enforcement?.enabled ? '1px solid #fecaca' : 'none',
           } as any}>
           {togglingEnforcement ? 'Updating…' : enforcement?.enabled ? 'Turn Off' : 'Turn On Enforcement'}
         </button>

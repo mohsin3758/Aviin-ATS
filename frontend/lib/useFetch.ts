@@ -44,6 +44,21 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
     throw new Error('Session expired. Please log in again.');
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.detail || data?.message || 'Request failed');
+  if (!res.ok) {
+    // FastAPI's HTTPException(status, {dict}) shape nests the real message
+    // one level deeper (`{"detail": {"detail": "...", "owner": {...}}}`) —
+    // a bare `data?.detail` in that case is an object, and `new Error(obj)`
+    // silently stringifies to "[object Object]" instead of the real text
+    // (a real, pre-existing bug found 2026-08-11 while adding more call
+    // sites that use this same enriched-detail shape, e.g. the "Candidate
+    // Already Owned" ownership-conflict/lock messages).
+    const rawDetail = data?.detail;
+    const message = typeof rawDetail === 'string' ? rawDetail
+      : (rawDetail && typeof rawDetail === 'object' && typeof rawDetail.detail === 'string') ? rawDetail.detail
+      : data?.message || 'Request failed';
+    const err: any = new Error(message);
+    err.body = data; // full parsed body, for callers that want e.g. detail.owner
+    throw err;
+  }
   return data;
 }

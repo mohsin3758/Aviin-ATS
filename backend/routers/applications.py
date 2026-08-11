@@ -453,9 +453,16 @@ async def update_stage(
         raise HTTPException(status_code=403, detail="Rejecting a candidate requires manager/admin role (HITL)")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
-        old = await conn.fetchrow("SELECT stage FROM applications WHERE id = $1", application_id)
+        old = await conn.fetchrow("SELECT stage, candidate_id FROM applications WHERE id = $1", application_id)
         if old is None:
             raise HTTPException(status_code=404, detail="Application not found")
+
+        # Broadened candidate-ownership enforcement (2026-08-11): a
+        # non-owner recruiter can't move a candidate someone else
+        # actively owns through the pipeline. Admin/manager and the
+        # owner themselves are unaffected; unowned/expired candidates
+        # are unrestricted.
+        await ownership.check_ownership_or_raise(conn, actor.tenant_id, str(old["candidate_id"]), actor)
 
         # Stage keys are no longer a fixed Literal (sql/16_custom_stages.sql
         # lets tenants add custom stages) — validate against this tenant's
