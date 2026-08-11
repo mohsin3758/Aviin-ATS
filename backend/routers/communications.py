@@ -782,11 +782,6 @@ async def stats(actor: Actor = Depends(get_actor)):
         }}
 
 
-@router.get("/candidate/{cid}")
-async def cand_thread_compat(cid: str, actor: Actor = Depends(get_actor)):
-    return await get_thread(cid, actor)
-
-
 @router.get("/whatsapp/status")
 async def wa_status(actor: Actor = Depends(get_actor)):
     try:
@@ -808,21 +803,6 @@ async def wa_start(actor: Actor = Depends(get_actor)):
             return {"started": r.status_code < 400, "response": r.json() if r.content else {}}
     except Exception as e:
         return {"started": False, "error": str(e)}
-
-
-@router.get("/whatsapp/qr")
-async def wa_qr(actor: Actor = Depends(get_actor)):
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(f"{WAHA_BASE}/api/{WAHA_SESSION}/auth/qr",
-                headers={"X-Api-Key": WAHA_KEY}, params={"format": "image"})
-            if r.status_code == 200:
-                import base64
-                return {"qr_base64": base64.b64encode(r.content).decode(),
-                        "content_type": r.headers.get("content-type","image/png")}
-            return {"error": "QR not available"}
-    except Exception as e:
-        return {"error": str(e)}
 
 
 @router.patch("/imap/{msg_id}/read")
@@ -1087,16 +1067,24 @@ async def snooze_imap(msg_id: str, body: dict = None, actor: Actor = Depends(get
 
 @router.post("/imap/{msg_id}/archive")
 async def archive_imap(msg_id: str, actor: Actor = Depends(get_actor)):
-    """Move IMAP email to archive by updating folder"""
+    """Move IMAP email to the Archive folder.
+
+    REAL BUG FIX (2026-08-12 sidebar/orphaned-endpoint audit): this
+    previously set is_deleted=TRUE — the exact same effect as trash_imap_ep
+    below — silently moving an "archived" email to Trash instead. Never
+    caught because nothing in the frontend called this endpoint before now.
+    Fixed to match the same folder convention move_imap_message and
+    archive_list (GET /communications/archive, `folder ILIKE '%archive%'`)
+    already use.
+    """
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT account_id, imap_uid, folder FROM imap_messages WHERE id=$1 AND tenant_id=$2",
+            "SELECT id FROM imap_messages WHERE id=$1 AND tenant_id=$2",
             msg_id, actor.tenant_id)
         if not row:
             raise HTTPException(404, "Message not found")
-        # Mark as archived in DB (use a special flag or update folder)
         await conn.execute(
-            "UPDATE imap_messages SET is_deleted=TRUE, deleted_at=NOW() WHERE id=$1 AND tenant_id=$2",
+            "UPDATE imap_messages SET folder='INBOX.Outlook.Archive' WHERE id=$1 AND tenant_id=$2",
             msg_id, actor.tenant_id)
     return {"archived": True}
 

@@ -13,29 +13,26 @@ audit_router = APIRouter(prefix="/audit", tags=["audit"])
 @audit_router.get("")
 async def get_audit_log(resource: Optional[str]=None, user_id: Optional[str]=None,
                          limit: int=100, actor: Actor=Depends(get_actor)):
+    # REAL BUG FIX (2026-08-12 sidebar/orphaned-endpoint audit): this read
+    # from `audit_logs` (plural) — a table with ZERO real writers anywhere
+    # in the backend except the dead POST /log endpoint removed below. The
+    # real, tenant-wide audit trail every other router in this codebase
+    # writes to (per HARD RULE #5/#6) is `audit_log` (singular, partitioned)
+    # — confirmed live: 616 real rows in `audit_log` vs 0 in `audit_logs`.
+    # The Audit Trail page has shown an empty table since it was built.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
-            SELECT al.*, u.full_name AS user_name
-            FROM audit_logs al
-            LEFT JOIN users u ON u.id=al.user_id
+            SELECT al.id, al.created_at, al.action,
+                   al.entity_type AS resource, al.entity_id::text AS resource_id,
+                   al.actor_user_id AS user_id, u.full_name AS user_name, u.email AS user_email
+            FROM audit_log al
+            LEFT JOIN users u ON u.id=al.actor_user_id
             WHERE al.tenant_id=$1
-              AND ($2::text IS NULL OR al.resource=$2)
-              AND ($3::text IS NULL OR al.user_id::text=$3)
+              AND ($2::text IS NULL OR al.entity_type=$2)
+              AND ($3::text IS NULL OR al.actor_user_id::text=$3)
             ORDER BY al.created_at DESC LIMIT $4
         """, actor.tenant_id, resource, user_id, limit)
     return [dict(r) for r in rows]
-
-@audit_router.post("/log")
-async def write_audit(body: dict, actor: Actor=Depends(get_actor)):
-    """Write an audit log entry (called from frontend for UI actions)."""
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        await conn.execute("""
-            INSERT INTO audit_logs (tenant_id,user_id,user_email,action,resource,resource_id,new_data)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
-        """, actor.tenant_id, actor.user_id, actor.email,
-             body.get('action','update'), body.get('resource','unknown'),
-             body.get('resource_id'), '{}')
-    return {"logged": True}
 
 # ── P28: CSV/Excel Export ─────────────────────────────────────
 export_router = APIRouter(prefix="/export", tags=["export"])

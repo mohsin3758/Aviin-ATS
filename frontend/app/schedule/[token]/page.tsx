@@ -50,8 +50,13 @@ export default function SelfSchedulePage() {
     </div>
   );
 
-  const stageColor = STAGE_COLORS[data.current_stage] || '#64748b';
-  const stageIcon = STAGE_ICONS[data.current_stage] || '📋';
+  // Real interview rounds are l1_interview/l2_interview/l3_interview, not
+  // the literal "interview" key — matched by substring like the backend's
+  // stage_label lookup, so real interview-stage candidates get the right
+  // color/icon instead of silently falling back to the generic default.
+  const stageKey = (data.current_stage || '').includes('interview') ? 'interview' : data.current_stage;
+  const stageColor = STAGE_COLORS[stageKey] || '#64748b';
+  const stageIcon = STAGE_ICONS[stageKey] || '📋';
 
   return (
     <div style={{minHeight:'100vh',background:'#f8fafc',display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px'}}>
@@ -90,7 +95,7 @@ export default function SelfSchedulePage() {
               A calendar invite will be sent to your email shortly.
             </div>
           </div>
-        ) : data.current_stage === 'interview' || data.current_stage === 'screened' || data.current_stage === 'submitted' ? (
+        ) : (data.current_stage || '').includes('interview') || data.current_stage === 'screened' || data.current_stage === 'submitted' ? (
           <div style={{background:'white',borderRadius:'14px',padding:'24px',border:'1px solid #e2e8f0'}}>
             <h2 style={{fontSize:'16px',fontWeight:'800',color:'#0f172a',marginBottom:'4px'}}>Schedule Your Interview</h2>
             <p style={{fontSize:'13px',color:'#64748b',marginBottom:'20px'}}>Pick a time that works best for you</p>

@@ -17,6 +17,12 @@ const input: React.CSSProperties = { width: '100%', padding: '8px 10px', border:
 function TalentPoolTab() {
   const { data, refetch } = useFetch<any>('/talent-pool/');
   const rows = data?.candidates || [];
+  const [toggling, setToggling] = useState<string | null>(null);
+  const toggle = async (id: string) => {
+    setToggling(id);
+    try { await apiFetch('/talent-pool/' + id + '/toggle', { method: 'PATCH' }); refetch(); }
+    finally { setToggling(null); }
+  };
   return (
     <div style={card}>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Subscribers ({rows.length})</div>
@@ -25,9 +31,10 @@ function TalentPoolTab() {
           <span style={{ flex: 1, fontWeight: 600 }}>{r.name || r.email}</span>
           <span style={{ color: '#64748B' }}>{(r.job_categories || []).join(', ')}</span>
           <span style={{ color: '#94A3B8' }}>{r.preferred_location}</span>
-          <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 6, background: r.is_active ? '#F0FDF4' : '#F1F5F9', color: r.is_active ? '#16A34A' : '#94A3B8' }}>
-            {r.is_active ? 'active' : 'inactive'}
-          </span>
+          <button onClick={() => toggle(r.id)} disabled={toggling === r.id} title="Click to toggle active/inactive"
+            style={{ fontSize: 10, padding: '2px 8px', borderRadius: 6, border: 'none', cursor: toggling === r.id ? 'default' : 'pointer', background: r.is_active ? '#F0FDF4' : '#F1F5F9', color: r.is_active ? '#16A34A' : '#94A3B8', opacity: toggling === r.id ? 0.6 : 1 }}>
+            {toggling === r.id ? '…' : (r.is_active ? 'active' : 'inactive')}
+          </button>
         </div>
       ))}
       {!rows.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No subscribers yet — the public /careers page can offer a "Join our Talent Community" signup that posts to POST /talent-pool/subscribe.</div>}

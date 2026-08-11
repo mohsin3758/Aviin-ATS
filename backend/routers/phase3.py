@@ -479,27 +479,20 @@ async def generate_schedule_link(application_id: str, actor: Actor = Depends(get
             "expires_at": expires.isoformat(),
         }
 
-@schedule_router.get("/slots")
-async def get_available_slots(actor: Actor = Depends(get_actor)):
-    """Get available interview time slots for the next 7 days."""
-    from datetime import date
-    slots = []
-    now = datetime.now(timezone.utc)
-    for day_offset in range(1, 8):
-        day = now + timedelta(days=day_offset)
-        if day.weekday() < 5:  # Mon-Fri only
-            for hour in [10, 11, 14, 15, 16]:
-                slot_dt = day.replace(hour=hour, minute=0, second=0, microsecond=0)
-                slots.append({
-                    "datetime": slot_dt.isoformat(),
-                    "label": slot_dt.strftime("%a %d %b, %I:%M %p"),
-                    "available": True,
-                })
-    return {"slots": slots}
-
 @schedule_router.get("/public/{token}")
 async def get_public_schedule(token: str):
-    """Public endpoint — no auth, uses SECURITY DEFINER to bypass RLS UUID cast."""
+    """Public endpoint — no auth, uses SECURITY DEFINER to bypass RLS UUID cast.
+
+    REAL BUG FIX (2026-08-12 sidebar/orphaned-endpoint audit): the slot-
+    building + return block below was indented one level too deep — inside
+    the `if not row: raise ...` block above, making it unreachable dead
+    code. Every real call with a genuinely valid token fell through with
+    no return (implicit None), which the public /schedule/[token] page
+    reads as an error and renders "Link Expired" — meaning this page has
+    never worked for a single real candidate since it was built. Confirmed
+    live: generated a real token and confirmed GET returned `null` before
+    this fix. Dedented so the success path actually executes.
+    """
     async with db.system_conn() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM get_schedule_by_token($1)", token
@@ -507,29 +500,38 @@ async def get_public_schedule(token: str):
     if not row:
         raise HTTPException(404, "Link expired or invalid")
 
-        # Get upcoming slots
-        slots = []
-        now = datetime.now(timezone.utc)
-        for day_offset in range(1, 8):
-            day = now + timedelta(days=day_offset)
-            if day.weekday() < 5:
-                for hour in [10, 11, 14, 15, 16]:
-                    slot_dt = day.replace(hour=hour, minute=0, second=0, microsecond=0)
-                    slots.append({"datetime": slot_dt.isoformat(), "label": slot_dt.strftime("%a %d %b, %I:%M %p IST")})
+    # Get upcoming slots
+    slots = []
+    now = datetime.now(timezone.utc)
+    for day_offset in range(1, 8):
+        day = now + timedelta(days=day_offset)
+        if day.weekday() < 5:
+            for hour in [10, 11, 14, 15, 16]:
+                slot_dt = day.replace(hour=hour, minute=0, second=0, microsecond=0)
+                slots.append({"datetime": slot_dt.isoformat(), "label": slot_dt.strftime("%a %d %b, %I:%M %p IST")})
 
-        stage_labels = {
-            "sourced":"Application Received","screened":"Under Review",
-            "submitted":"Shortlisted","interview":"Interview Stage",
-            "offer":"Offer Extended","placed":"Placed","rejected":"Not Selected",
-        }
-        return {
-            "candidate_name": row["full_name"],
-            "job_title": row["job_title"],
-            "current_stage": row["stage"],
-            "stage_label": stage_labels.get(row["stage"] or "","Application Received"),
-            "application_id": str(row["application_id"]) if row["application_id"] else None,
-            "available_slots": slots[:10],
-        }
+    # Column is `current_stage` (see get_schedule_by_token()'s real return
+    # shape) — a plain `row["stage"]` KeyError'd on every real call, only
+    # surfaced once the earlier dead-code bug above was fixed. Stage-label
+    # lookup also widened to match on substring (matching the dynamic,
+    # tenant-configurable stage-key pattern used elsewhere in this project
+    # — real interview rounds are l1_interview/l2_interview/l3_interview,
+    # never the literal "interview").
+    stage = row["current_stage"] or ""
+    stage_labels = {
+        "sourced":"Application Received","screened":"Under Review",
+        "submitted":"Shortlisted","offer":"Offer Extended",
+        "placed":"Placed","rejected":"Not Selected",
+    }
+    stage_label = "Interview Stage" if "interview" in stage else stage_labels.get(stage, "Application Received")
+    return {
+        "candidate_name": row["full_name"],
+        "job_title": row["job_title"],
+        "current_stage": stage,
+        "stage_label": stage_label,
+        "application_id": str(row["application_id"]) if row["application_id"] else None,
+        "available_slots": slots[:10],
+    }
 
 @schedule_router.post("/book/{token}")
 async def book_slot(token: str, slot_datetime: str, mode: str = "video"):
@@ -681,21 +683,6 @@ async def waha_qr(actor: Actor = Depends(require_role("admin", "manager"))):
                     "session_status": session_status, "last_http": last_status}
     except Exception as e:
         return {"qr": "", "error": str(e)}
-
-@waha_router.post("/send")
-async def waha_send(phone: str, message: str, actor: Actor = Depends(require_role("admin", "manager"))):
-    """Send WhatsApp message via WAHA."""
-    try:
-        import httpx
-        phone_clean = phone.replace("+","").replace(" ","").replace("-","")
-        if not phone_clean.startswith("91"): phone_clean = "91" + phone_clean
-        async with httpx.AsyncClient(timeout=8.0) as cli:
-            r = await cli.post(f"{WAHA_BASE}/api/sendText",
-                               headers={"X-Api-Key": WAHA_KEY, "Content-Type": "application/json"},
-                               json={"chatId": f"{phone_clean}@c.us", "text": message, "session": "default"})
-            return {"sent": r.status_code in (200,201), "status": r.status_code}
-    except Exception as e:
-        return {"sent": False, "error": str(e)}
 
 
 @auto_offer_router.get("/candidate/{candidate_id}")

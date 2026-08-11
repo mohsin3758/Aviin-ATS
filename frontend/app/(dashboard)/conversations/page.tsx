@@ -1096,6 +1096,10 @@ export default function MailboxPage() {
     await apiFetch('/communications/messages/'+id+'/restore',{method:'PATCH'});
     showToast('Restored'); if(selectedId===id)setSelectedId(null); refetchTrash();refetchInbox();refetchStats();
   };
+  const handleArchive = async (id: string) => {
+    await apiFetch('/communications/imap/'+id+'/archive',{method:'POST'});
+    showToast('Archived'); if(selectedId===id)setSelectedId(null); refetchAll();
+  };
   const handleDeletePerm = async (id: string) => {
     if(!confirm('Permanently delete?'))return;
     await apiFetch('/communications/messages/'+id,{method:'DELETE'});
@@ -1487,6 +1491,12 @@ export default function MailboxPage() {
                             style={{padding:'4px',background:'none',border:'none',cursor:'pointer'}} title="Star">
                             <Star size={11} color="#f59e0b"/>
                           </button>
+                          {(item as any).imap_uid&&folder!=='trash'&&folder!=='archive'&&(
+                            <button onClick={e=>{e.stopPropagation();handleArchive(item.id);}}
+                              style={{padding:'4px',background:'none',border:'none',cursor:'pointer'}} title="Archive">
+                              <Archive size={11} color="#64748b"/>
+                            </button>
+                          )}
                           {folder!=='trash'&&(
                             <button onClick={e=>{e.stopPropagation();handleTrash(item.id);}}
                               style={{padding:'4px',background:'none',border:'none',cursor:'pointer'}} title="Delete">
@@ -1671,6 +1681,12 @@ export default function MailboxPage() {
                         ))}
                       </div>
                     </div>
+                  )}
+                  {(selectedMsg as any).imap_uid && folder!=='archive' && (
+                    <button onClick={()=>handleArchive(selectedMsg.id)}
+                      style={{display:'flex',alignItems:'center',gap:'5px',padding:'6px 12px',border:'1.5px solid #e2e8f0',borderRadius:'7px',background:'white',color:'#374151',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>
+                      <Archive size={12}/> Archive
+                    </button>
                   )}
                   <button onClick={()=>handleTrash(selectedMsg.id)}
                     style={{display:'flex',alignItems:'center',gap:'5px',padding:'6px 12px',border:'1.5px solid #fca5a5',borderRadius:'7px',background:'#fff5f5',color:'#dc2626',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>

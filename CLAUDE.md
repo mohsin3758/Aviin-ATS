@@ -5186,3 +5186,124 @@ narrow+clear cycle. Full QA suite re-run clean: 192 passed / 2 skipped /
 confirmed to pass cleanly in isolation immediately after, consistent
 with this suite's documented back-to-back-run flakiness). Zero-token
 audit: `CONFIRMED CLEAN` (364 files, 0 external API refs).
+
+## Sidebar-to-backend deep audit + all 7 orphaned-endpoint findings fixed, plus 2 severe bugs found along the way, 2026-08-12
+User pasted the collapsed sidebar screenshot and asked for a deep end-to-
+end check: does every sidebar item have a real page, does every page
+work, and does every backend feature have real frontend coverage. Ran it
+in 3 parts: (1) direct cross-check of all ~70 sidebar hrefs against real
+page routes — zero dead links, zero orphaned pages beyond 4 already-
+deliberate redirect stubs (`/pipeline-rules`, `/settings`, `/settings/
+sms`, `/settings/whatsapp`) and `/notifications` (correctly reached via
+the header bell, not the sidebar, by design); (2) a real headless-browser
+click-through of all 70 pages as admin — every one returned 200, rendered
+real content, zero console/page errors; (3) a background research agent
+grepping all ~90 registered backend routers against real frontend
+callers, since "built but never wired to any UI" is the single most
+recurring bug class in this project's history. Found no whole orphaned
+*routers* — everything major is connected — only 7 small dead individual
+endpoints sitting inside otherwise fully-wired routers. User said fix all
+7. Verifying each before fixing (this project's own established
+discipline) surfaced 2 additional, much more severe, previously-invisible
+bugs hiding directly adjacent to two of the 7 — both fixed too.
+
+**The 7 findings, fixed:**
+1. **`POST /waha/send`** (`phase3.py`) — deleted. A raw, un-consent-
+   checked WhatsApp send bypassing the real `/communications/send`
+   pipeline (consent gate, `candidate_messages` logging, personalization)
+   entirely; zero frontend callers. Confirmed genuinely dangerous dead
+   code, not just clutter — a future accidental UI wire-up would have
+   been a HARD RULE #7 bypass.
+2. **`GET /self-schedule/slots`** (`phase3.py`) — deleted (a duplicate,
+   never-called preview of the same slot list the public flow already
+   computes). **Investigating it surfaced a severe bug in its neighbor,
+   `GET /self-schedule/public/{token}`**: the entire success path (slot
+   generation + the `return {...}`) was indented one level too deep —
+   inside the `if not row: raise HTTPException(404,...)` block above it —
+   making it structurally unreachable. Every real call with a genuinely
+   valid token fell through with an implicit `None`, which the public
+   `/schedule/[token]` page's `useFetch` reads as an error and renders
+   "Link Expired." **This page has never worked for a single real
+   candidate since it was built.** Confirmed live before touching
+   anything: generated a real token against a real application and got
+   `null` back. Dedented the block so it executes unconditionally after
+   the 404 check. Redeploying surfaced a second, previously-unreachable
+   bug in the same function once it could finally run: `row["stage"]`
+   doesn't exist — `get_schedule_by_token()`'s real return shape (checked
+   via `pg_get_functiondef`) names the column `current_stage`, not
+   `stage` — a genuine `KeyError: 'stage'` on the very next real call.
+   Fixed the column name, and while there, fixed the same hardcoded-
+   stage-key bug class documented dozens of times elsewhere in this
+   project: `stage_labels` only matched the literal `"interview"`, never
+   this system's real `l1_interview`/`l2_interview`/`l3_interview` values
+   — widened to a substring match. The **frontend** page
+   (`app/schedule/[token]/page.tsx`) had the identical bug twice more:
+   its booking-eligibility gate checked `current_stage === 'interview'`
+   (meaning a real interview-stage candidate would never even see the
+   booking form) and its `STAGE_COLORS`/`STAGE_ICONS` lookups had the
+   same literal-key miss — both widened to the same substring match.
+   Verified for real, twice: a `sourced`-stage candidate correctly showed
+   `"Application Received"`; a real candidate (Kavitha Subramaniam) in
+   genuine `l1_interview` stage correctly showed `"current_stage":
+   "l1_interview","stage_label":"Interview Stage"`.
+3. **`GET /communications/whatsapp/qr`** (`communications.py`) — deleted
+   (duplicate of the real, working `/waha/qr` that `whatsapp-setup/
+   page.tsx` actually calls). Its two siblings on the same route,
+   `/whatsapp/status` and `/whatsapp/start-session`, were checked and
+   confirmed genuinely live and correct (called from `conversations/
+   page.tsx`'s connection badge) — not touched.
+4. **`POST /communications/imap/{id}/archive`** — fixed, then wired up.
+   **The endpoint itself was a real, dangerous, previously-unnoticed bug**:
+   despite its name and docstring ("Move IMAP email to archive"), it
+   actually ran `UPDATE imap_messages SET is_deleted=TRUE,deleted_at=
+   NOW()` — the exact same effect as the Trash endpoint right below it.
+   Had it ever been wired to a UI button labeled "Archive" without this
+   fix, every click would have silently trashed the email instead.
+   Rewritten to match the real archive convention already established by
+   `move_imap_message`/`archive_list` (`folder='INBOX.Outlook.Archive'`,
+   matched via `folder ILIKE '%archive%'` on read). Added a real Archive
+   button (icon-only in the message-list hover actions, full button in
+   the detail action bar, both gated on the message actually being IMAP-
+   sourced and not already in Trash/Archive) to `conversations/page.tsx`.
+5. **`GET /communications/candidate/{cid}`** (`cand_thread_compat`) —
+   deleted. A literal pass-through alias for `get_thread()` (the real
+   `/communications/thread/{cand_id}`, which is what's actually called
+   everywhere) with zero callers of its own.
+6. **`POST /audit/log`** — deleted, but investigating it surfaced a much
+   bigger bug: **`GET /audit` — the real, live Audit Trail sidebar page —
+   has been reading from the wrong table since it was built.** It queried
+   `audit_logs` (plural), which had exactly ONE writer anywhere in the
+   entire backend: this same dead `POST /audit/log` endpoint, itself
+   never called by anything. Meanwhile `audit_log` (singular, partitioned,
+   the real table dozens of routers across this project write to per
+   HARD RULE #5/#6) sat right next to it, completely unread by the UI.
+   Confirmed with real tenant-scoped counts before touching anything:
+   `audit_log` had 616 real rows, `audit_logs` had 0. **The Audit Trail
+   page has shown an empty table its entire existence**, invisible to
+   every earlier audit in this project because the page loaded fine and
+   returned valid (empty) JSON — nothing about "loads without error"
+   would ever have caught a wrong-table read. Rewrote `GET /audit` to
+   query `audit_log` with the correct column mapping (`entity_type`→
+   `resource`, `entity_id`→`resource_id`, `actor_user_id`→`user_id`,
+   joined to `users` for name/email) matching exactly what the frontend
+   table already expects. Deleted the dead write endpoint entirely rather
+   than pointing it at the real table — a client-POSTed audit entry is a
+   weaker trail than this codebase's established pattern of writing
+   `audit_log` server-side, in the same transaction as the real action.
+   Verified live: the fixed endpoint returned real rows immediately
+   (`submit_to_kae`, `application`, real user attribution) instead of `[]`.
+7. **`PATCH /talent-pool/{id}/toggle`** — wired up. The subscriber status
+   badge on Candidate Engagement's Talent Pool tab was static display
+   text; made it a real clickable toggle button calling the (already-
+   correct, just unreachable) backend endpoint.
+
+Every fix verified against real production data before moving on, not
+code review: all 4 deletions confirmed via real 404s; the archive fix
+confirmed by archiving then inspecting a real message's `folder`/
+`is_deleted` columns directly (then restoring it — it was a genuine live
+production email, not test data); the audit-log fix confirmed via real
+non-empty API output; both UI wire-ups (Archive buttons, Talent Pool
+toggle) confirmed via real headless-browser rendering checks. Full QA
+suite re-run clean: 193 passed / 2 skipped / 0 failed — no regressions
+from any of the 9 total fixes (7 findings + 2 bonus bugs). Zero-token
+audit: `CONFIRMED CLEAN` (364 files, 0 external API refs).
