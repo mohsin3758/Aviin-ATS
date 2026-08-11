@@ -4659,3 +4659,72 @@ skipped / 0 failed (one already-documented occasional flake on an
 unrelated S18 test passed clean on retry, consistent with its known
 characteristic noted earlier this session). Zero-token audit:
 `CONFIRMED CLEAN` (349 files, 0 external API refs).
+
+## Device Monitoring: 4 real gaps closed, 2026-08-11
+User asked to check the Device Monitoring page (screenshot of "My
+Device") for missing features. Checked the backend router against the
+frontend page directly, plus real production data, before building
+anything. Found the feature genuinely complete on its core promise
+(consent, enroll, heartbeat/browsing ingest, role-scoped dashboards) but
+with 4 real gaps, and — separately, not a gap but important context —
+**zero real usage since it was built on 2026-07-28**: 0 monitored
+devices, 0 activity records, 0 browsing history; the one consent row on
+file is the original test account from the day it was built, not a real
+recruiter. User asked to build and close all 4.
+
+1. **Team Overview couldn't see who had/hadn't consented** — only ever
+   showed people who'd already enrolled a device. New `GET /device-
+   monitoring/consent/roster` (admin/manager-gated) returns every active
+   user with their real consent status, consent date, and active device
+   count via a `LEFT JOIN LATERAL` (most-recent consent row per user).
+   New "Consent Status (N of M consented)" card on Team Overview.
+2. **No way to deactivate a device from Team Overview** — the backend
+   already allowed it (`DELETE /device-monitoring/devices/{id}`,
+   correctly role-gated for admin/manager on someone else's device), just
+   had no button. Added the same trash-icon deactivate button already
+   used on My Device's own device list, with `data-testid`s on the row/
+   status/button (`device-row-{id}`, `device-status-{id}`, `deactivate-
+   device-{id}`) for reliable test targeting.
+3. **No real data export** — the page's own policy text promises "you
+   can see your own collected data at any time," but the UI only ever
+   showed a capped 7-day view (top-5 apps/domains, last-50 rows). New
+   `GET /device-monitoring/export` (self, or any real team member for a
+   manager — same scoping `browsing-history` already uses) returns a
+   complete, unbounded JSON dump (consent history, devices, full activity
+   log, full browsing history) as a real downloadable file. Wired into
+   both "Export My Data" (My Device) and an export button next to Team
+   Overview's per-recruiter browsing-history picker.
+4. **No way to actually get the agent** — the enroll card said "run the
+   agent on this company laptop" with no download link; the agent only
+   ever existed as source in the repo's top-level `agent/` directory.
+   New `GET /device-monitoring/agent/download` streams a real zip of the
+   agent source + README + requirements. **Real deployment constraint
+   found while building this**: the backend's Docker build context is
+   only `./backend` (confirmed in `docker-compose.yml`) — `agent/` sits
+   outside it and was never going to be reachable at runtime.
+   `backend/agent_dist/` is a distributable copy kept alongside the real
+   `agent/` source specifically so this endpoint has something real to
+   serve without restructuring the Docker build architecture for one
+   feature. Ships source, not a compiled `.exe` — building/signing a real
+   Windows binary is a materially bigger, separate undertaking, stated
+   explicitly rather than silently under-delivered.
+
+Verified for real, not code review: called all 3 new endpoints directly
+first (roster showed the real tenant's users with correct consent
+states; export returned real, correctly-shaped JSON; the agent zip
+extracted to the exact real 3 files with correct byte sizes) — then a
+genuine headless-browser run: clicked "Download Agent" and got a real
+`aviin-device-agent.zip`, clicked "Export My Data" and got a real `.json`
+file with the right structure, and — using the actual public `/enroll`
+endpoint to create one genuine throwaway device — confirmed it appeared
+in Team Overview's device list and the real trash-icon click flipped its
+status to `inactive` live in the UI. New permanent "S21 Device Monitoring
+Gaps" suite added to `qa_automation.spec.ts` (`.serial()`, matching the
+established convention). Full QA suite re-run clean (one already-
+documented login-rate-limit artifact from this session's own repeated
+back-to-back full-suite runs today, confirmed clean on the next attempt
+after the cooldown window — not a real regression). Zero-token audit:
+`CONFIRMED CLEAN` (352 files, 0 external API refs). All throwaway test
+data (the one real enrolled+deactivated test device) left in its
+legitimate deactivated state, matching what a real retired device would
+look like — no hard-delete endpoint exists for this table by design.

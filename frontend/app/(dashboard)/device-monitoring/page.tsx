@@ -2,16 +2,36 @@
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
-import { Laptop, ShieldCheck, Clock, Globe, Trash2, KeyRound } from 'lucide-react';
+import { Laptop, ShieldCheck, Clock, Globe, Trash2, KeyRound, Download, CheckCircle2, XCircle } from 'lucide-react';
 
 const card: React.CSSProperties = { background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: 18 };
 const label: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 };
 const btn: React.CSSProperties = { padding: '7px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' };
 const btnDanger: React.CSSProperties = { ...btn, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' };
+const btnGhost: React.CSSProperties = { ...btn, background: '#fff', color: '#374151', border: '1px solid #E2E8F0' };
 const select: React.CSSProperties = { padding: '7px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12 };
 
 function fmtHours(seconds: number) {
   return (seconds / 3600).toFixed(1) + 'h';
+}
+
+// Same authenticated-blob-download pattern already used for resume
+// downloads elsewhere in this app (candidates/[id]/page.tsx) — these are
+// JWT-gated endpoints, not public URLs, so a plain <a href> won't carry
+// the auth header.
+async function downloadFile(path: string, filename: string) {
+  const token = localStorage.getItem('airecruit_token');
+  const apiBase = process.env.NEXT_PUBLIC_API_URL ?? '/api';
+  try {
+    const resp = await fetch(`${apiBase}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
 }
 
 function MyDeviceTab() {
@@ -72,9 +92,14 @@ function MyDeviceTab() {
             <div style={{ fontSize: 13, fontWeight: 700 }}>Enroll This Device</div>
           </div>
           <p style={{ fontSize: 12, color: '#64748B', marginBottom: 10 }}>
-            Generate a one-time code, then run the agent on this company laptop and paste the code when prompted. The code expires in 15 minutes and can only be used once.
+            Download the agent, install it on this company laptop, then generate a one-time code below and paste it when the agent prompts you. The code expires in 15 minutes and can only be used once.
           </p>
-          <button style={btn} onClick={generateCode} disabled={busy}>Generate Enrollment Code</button>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button style={btnGhost} onClick={() => downloadFile('/device-monitoring/agent/download', 'aviin-device-agent.zip')}>
+              <Download size={12} style={{ marginRight: 5, verticalAlign: 'middle' }} />Download Agent (.zip)
+            </button>
+            <button style={btn} onClick={generateCode} disabled={busy}>Generate Enrollment Code</button>
+          </div>
           {enrollCode && (
             <div style={{ marginTop: 10, padding: '10px 12px', background: '#EEF2FF', border: '1px solid #C7D2FE', borderRadius: 8 }}>
               <div style={{ fontSize: 20, fontWeight: 800, letterSpacing: 2, color: '#4338CA', fontFamily: 'monospace' }}>{enrollCode.token}</div>
@@ -102,7 +127,12 @@ function MyDeviceTab() {
 
       {hasConsent && summary && (
         <div style={card}>
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>My Activity (last 7 days) — exactly what's collected about you</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>My Activity (last 7 days) — exactly what's collected about you</div>
+            <button style={btnGhost} onClick={() => downloadFile('/device-monitoring/export', 'my-device-monitoring-data.json')} title="Download everything collected about you, in full — not just this 7-day summary">
+              <Download size={12} style={{ marginRight: 5, verticalAlign: 'middle' }} />Export My Data
+            </button>
+          </div>
           <div style={{ fontSize: 11, color: '#64748B', marginBottom: 6 }}>TOP APPLICATIONS</div>
           {(summary.top_apps || []).slice(0, 5).map((a: any, i: number) => (
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '4px 0' }}>
@@ -138,7 +168,8 @@ function MyDeviceTab() {
 
 function TeamOverviewTab() {
   const { data: users } = useFetch<any[]>('/users?is_active=true');
-  const { data: devices } = useFetch<any[]>('/device-monitoring/devices');
+  const { data: devices, refetch: refetchDevices } = useFetch<any[]>('/device-monitoring/devices');
+  const { data: roster } = useFetch<any[]>('/device-monitoring/consent/roster');
   const [selectedUser, setSelectedUser] = useState('');
   const { data: summary } = useFetch<any>(`/device-monitoring/summary?days=7${selectedUser ? `&user_id=${selectedUser}` : ''}`);
   const { data: history } = useFetch<any[]>(selectedUser ? `/device-monitoring/browsing-history?user_id=${selectedUser}&days=7&limit=100` : null);
@@ -149,16 +180,48 @@ function TeamOverviewTab() {
     activeByUser[r.user_id] = (activeByUser[r.user_id] || 0) + Number(r.active_seconds || 0);
   });
 
+  const deactivateDevice = async (id: string) => {
+    if (!confirm('Deactivate this device? It will stop reporting activity.')) return;
+    await apiFetch(`/device-monitoring/devices/${id}`, { method: 'DELETE' });
+    refetchDevices();
+  };
+
+  const consentedCount = (roster || []).filter((r: any) => r.has_active_consent).length;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div style={card}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
+          Consent Status ({consentedCount} of {(roster || []).length} team members have consented)
+        </div>
+        <div style={{ fontSize: 11, color: '#64748B', marginBottom: 10 }}>
+          Nobody can be enrolled without self-consenting first — this is a real-time roster, not a way to push consent onto anyone.
+        </div>
+        {(roster || []).map((r: any) => (
+          <div key={r.user_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
+            {r.has_active_consent
+              ? <CheckCircle2 size={14} color="#16A34A" />
+              : <XCircle size={14} color="#CBD5E1" />}
+            <span style={{ fontWeight: 600 }}>{r.full_name}</span>
+            <span style={{ color: '#94A3B8', fontSize: 11 }}>{r.email}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11, color: r.has_active_consent ? '#16A34A' : '#94A3B8' }}>
+              {r.has_active_consent ? `Consented ${new Date(r.consented_at).toLocaleDateString()}` : 'Not consented'}
+              {r.active_device_count > 0 && ` · ${r.active_device_count} device${r.active_device_count > 1 ? 's' : ''}`}
+            </span>
+          </div>
+        ))}
+        {!(roster || []).length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No active team members found.</div>}
+      </div>
+
+      <div style={card}>
         <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Enrolled Devices ({(devices || []).length})</div>
         {(devices || []).map((d: any) => (
-          <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
+          <div key={d.id} data-testid={`device-row-${d.id}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
             <Laptop size={14} color="#64748B" />
             <span style={{ fontWeight: 700 }}>{d.full_name}</span>
             <span style={{ color: '#64748B' }}>{d.hostname} · {d.os}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 10, padding: '2px 8px', borderRadius: 6, background: d.is_active ? '#DCFCE7' : '#F1F5F9', color: d.is_active ? '#16A34A' : '#94A3B8' }}>{d.is_active ? 'active' : 'inactive'}</span>
+            <span data-testid={`device-status-${d.id}`} style={{ marginLeft: 'auto', fontSize: 10, padding: '2px 8px', borderRadius: 6, background: d.is_active ? '#DCFCE7' : '#F1F5F9', color: d.is_active ? '#16A34A' : '#94A3B8' }}>{d.is_active ? 'active' : 'inactive'}</span>
+            {d.is_active && <button onClick={() => deactivateDevice(d.id)} title="Deactivate this device" data-testid={`deactivate-device-${d.id}`} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626' }}><Trash2 size={14} /></button>}
           </div>
         ))}
         {!(devices || []).length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No devices enrolled by anyone yet.</div>}
@@ -188,6 +251,9 @@ function TeamOverviewTab() {
         {!selectedUser && <div style={{ fontSize: 12, color: '#94A3B8' }}>Select a recruiter to view their browsing history.</div>}
         {selectedUser && (
           <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            <button style={{ ...btnGhost, marginBottom: 10 }} onClick={() => downloadFile(`/device-monitoring/export?user_id=${selectedUser}`, `device-monitoring-export-${userMap[selectedUser] || selectedUser}.json`)}>
+              <Download size={12} style={{ marginRight: 5, verticalAlign: 'middle' }} />Export {userMap[selectedUser] || 'this person'}'s Data
+            </button>
             {(history || []).length === 0 && <div style={{ fontSize: 12, color: '#94A3B8' }}>No browsing recorded for this person yet.</div>}
             {(history || []).map((h: any, i: number) => (
               <div key={i} style={{ padding: '6px 0', borderBottom: '1px solid #F1F5F9', fontSize: 11 }}>

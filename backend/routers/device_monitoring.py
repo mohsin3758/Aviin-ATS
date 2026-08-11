@@ -13,20 +13,31 @@ Two auth paths in this file:
     password.
 """
 import hashlib
+import io
+import json
+import os
 import secrets
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel
 
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 
 router = APIRouter(prefix="/device-monitoring", tags=["device-monitoring"])
 
 MANAGE_ROLES = ("admin", "super_admin", "manager")
+# The real agent source lives in the repo's top-level agent/ directory,
+# but the backend's Docker build context is only ./backend (confirmed via
+# docker-compose.yml: `build: ./backend`) — agent/ sits outside it and is
+# never copied into the image. backend/agent_dist/ is a distributable
+# copy kept in sync manually, specifically so this download endpoint has
+# something real to serve without restructuring the Docker build context.
+_AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent_dist")
 
 POLICY_VERSION = "2026-07-28.1"
 POLICY_TEXT = (
@@ -118,6 +129,33 @@ async def revoke_consent(actor: Actor = Depends(get_actor)):
             actor.tenant_id, actor.user_id,
         )
     return {"revoked": True}
+
+
+@router.get("/consent/roster")
+async def consent_roster(actor: Actor = Depends(require_role(*MANAGE_ROLES))):
+    """Real gap found 2026-08-11: Team Overview only ever showed people
+    who had *already* enrolled a device — a manager rolling this out had
+    no way to see who on the team still hadn't consented at all. One
+    roster row per active user, real consent/device counts, not a guess."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            """SELECT u.id AS user_id, u.full_name, u.email,
+                      c.consent_given AND c.revoked_at IS NULL AND c.policy_version=$2 AS has_active_consent,
+                      c.created_at AS consented_at,
+                      (SELECT count(*) FROM monitored_devices d
+                         WHERE d.tenant_id=$1 AND d.user_id=u.id AND d.is_active) AS active_device_count
+               FROM users u
+               LEFT JOIN LATERAL (
+                 SELECT consent_given, revoked_at, policy_version, created_at
+                 FROM device_monitoring_consent
+                 WHERE tenant_id=$1 AND user_id=u.id
+                 ORDER BY created_at DESC LIMIT 1
+               ) c ON true
+               WHERE u.tenant_id=$1 AND u.is_active
+               ORDER BY has_active_consent DESC NULLS LAST, u.full_name""",
+            actor.tenant_id, POLICY_VERSION,
+        )
+    return [dict(r) for r in rows]
 
 
 # ── Enrollment (recruiter generates a code, agent redeems it) ──────────────
@@ -341,3 +379,79 @@ async def browsing_history(
             actor.tenant_id, scoped, since, limit,
         )
     return [dict(r) for r in rows]
+
+
+# ── Data export (DPDP 2023 access/portability) ──────────────────────────────
+
+@router.get("/export")
+async def export_my_data(user_id: Optional[str] = None, actor: Actor = Depends(get_actor)):
+    """Real gap found 2026-08-11: the page's own policy text promises "you
+    can see your own collected data at any time," but the UI only ever
+    showed a capped view (top-5 apps/domains, last-50 rows) — never a
+    real, complete export. This returns everything, unbounded, as a real
+    downloadable JSON file. Same self/manager scoping as every other
+    endpoint here — recruiters can only export their own; a manager can
+    export any real team member's (matches their existing browsing-
+    history visibility, not a new permission)."""
+    scoped = _scope_user_id(actor, user_id) or actor.user_id
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        user_row = await conn.fetchrow("SELECT full_name, email FROM users WHERE id=$1 AND tenant_id=$2", scoped, actor.tenant_id)
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found")
+        consent_rows = await conn.fetch(
+            """SELECT policy_version, consent_given, created_at, revoked_at FROM device_monitoring_consent
+               WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC""",
+            actor.tenant_id, scoped)
+        device_rows = await conn.fetch(
+            """SELECT hostname, os, is_active, enrolled_at, last_heartbeat_at FROM monitored_devices
+               WHERE tenant_id=$1 AND user_id=$2 ORDER BY enrolled_at DESC""",
+            actor.tenant_id, scoped)
+        activity_rows = await conn.fetch(
+            """SELECT app_name, window_title, started_at, ended_at, is_idle FROM device_activity_log
+               WHERE tenant_id=$1 AND user_id=$2 ORDER BY started_at DESC""",
+            actor.tenant_id, scoped)
+        browsing_rows = await conn.fetch(
+            """SELECT url, page_title, browser, visited_at FROM device_browsing_history
+               WHERE tenant_id=$1 AND user_id=$2 ORDER BY visited_at DESC""",
+            actor.tenant_id, scoped)
+
+    payload = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "user": {"full_name": user_row["full_name"], "email": user_row["email"]},
+        "consent_history": [dict(r) for r in consent_rows],
+        "devices": [dict(r) for r in device_rows],
+        "activity_log": [dict(r) for r in activity_rows],
+        "browsing_history": [dict(r) for r in browsing_rows],
+    }
+    body = json.dumps(payload, indent=2, default=str)
+    filename = f"device-monitoring-export-{scoped}.json"
+    return Response(
+        content=body, media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Agent distribution ───────────────────────────────────────────────────────
+
+@router.get("/agent/download")
+async def download_agent(actor: Actor = Depends(get_actor)):
+    """Real gap found 2026-08-11: the enroll card told a recruiter to "run
+    the agent on this company laptop" with no way to actually get it —
+    the agent only ever existed as source in this repo. Serves the real
+    agent source + README + requirements as a zip; ships source (not a
+    compiled .exe — building/signing a real Windows binary is a separate,
+    larger undertaking) so at minimum every recruiter has a genuine,
+    working path to run `pip install -r requirements.txt` then the
+    agent's own documented `enroll`/`run`/`install-autostart` CLI."""
+    if not os.path.isdir(_AGENT_DIR):
+        raise HTTPException(status_code=404, detail="Agent distribution not available on this deployment")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(_AGENT_DIR):
+            fpath = os.path.join(_AGENT_DIR, fname)
+            if os.path.isfile(fpath):
+                zf.write(fpath, arcname=f"aviin-device-agent/{fname}")
+    return Response(
+        content=buf.getvalue(), media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="aviin-device-agent.zip"'},
+    )

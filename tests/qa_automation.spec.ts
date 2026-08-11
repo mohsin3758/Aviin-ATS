@@ -2029,3 +2029,65 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
 
   expect(errors).toHaveLength(0);
 });
+
+// S21 Device Monitoring gaps closed (2026-08-11): consent roster + device
+// deactivation on Team Overview, "Export My Data" + "Download Agent" on
+// My Device — all four found missing during a user-requested completeness
+// check, all reusing real existing data/endpoints rather than new
+// mechanisms (deactivate already existed server-side with no UI caller;
+// export/roster/agent-zip are the 3 new endpoints this fix added).
+test.describe.serial('S21 Device Monitoring Gaps', () => {
+  test('My Device: Download Agent and Export My Data buttons produce real downloads', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/device-monitoring');
+    await expect(page.getByText('What this monitors')).toBeVisible({ timeout: 15000 });
+
+    const agentBtn = page.getByRole('button', { name: /Download Agent/i });
+    await expect(agentBtn).toBeVisible();
+    const [agentDownload] = await Promise.all([page.waitForEvent('download'), agentBtn.click()]);
+    expect(agentDownload.suggestedFilename()).toBe('aviin-device-agent.zip');
+
+    const exportBtn = page.getByRole('button', { name: /Export My Data/i });
+    await expect(exportBtn).toBeVisible({ timeout: 10000 });
+    const [exportDownload] = await Promise.all([page.waitForEvent('download'), exportBtn.click()]);
+    expect(exportDownload.suggestedFilename()).toBe('my-device-monitoring-data.json');
+    const exportPath = await exportDownload.path();
+    const content = JSON.parse(require('fs').readFileSync(exportPath!, 'utf-8'));
+    expect(content).toHaveProperty('consent_history');
+    expect(content).toHaveProperty('activity_log');
+    expect(content).toHaveProperty('browsing_history');
+
+    expect(errors).toHaveLength(0);
+  });
+
+  test('Team Overview: consent roster renders and a real device can be deactivated', async ({ page, request }) => {
+    const admin = await (await request.post(`${API}/auth/login`, { data: { email: 'admin@example.com', password: 'changeme' } })).json();
+    const stamp = Date.now();
+    const tokenRes = await request.post(`${API}/device-monitoring/enrollment-token`, {
+      headers: { Authorization: `Bearer ${admin.access_token}` },
+    });
+    const { token: enrollToken } = await tokenRes.json();
+    const enrollRes = await request.post(`${API}/device-monitoring/enroll`, {
+      data: { token: enrollToken, hostname: `QA S21 Device ${stamp}`, os: 'Windows 11', device_fingerprint: `qa-s21-${stamp}` },
+    });
+    const enrolled = await enrollRes.json();
+
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/device-monitoring');
+    await page.getByRole('button', { name: /Team Overview/i }).click();
+    await expect(page.getByText(/Consent Status \(\d+ of \d+/)).toBeVisible({ timeout: 15000 });
+
+    const row = page.getByTestId(`device-row-${enrolled.device_id}`);
+    await expect(row).toBeVisible({ timeout: 10000 });
+    page.once('dialog', d => d.accept());
+    await page.getByTestId(`deactivate-device-${enrolled.device_id}`).click();
+    await expect(page.getByTestId(`device-status-${enrolled.device_id}`)).toHaveText('inactive', { timeout: 10000 });
+    expect(errors).toHaveLength(0);
+
+    // No hard-delete endpoint exists for monitored_devices (only
+    // deactivate) — the row this test creates is left deactivated, same
+    // as a real, legitimately-retired device would be.
+  });
+});
