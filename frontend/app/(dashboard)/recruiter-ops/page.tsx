@@ -2,13 +2,14 @@
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
-import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff, Sun, AlertCircle, Video, Activity, Trophy } from 'lucide-react';
+import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff, Sun, AlertCircle, Video, Activity, Trophy, HeartPulse } from 'lucide-react';
 
 const TABS = [
   { key: 'myday', label: 'My Day', icon: Sun },
   { key: 'activity', label: 'Activity', icon: Activity },
   { key: 'autoassign', label: 'Auto-Assign', icon: Sparkles },
   { key: 'leaderboard', label: 'Team Leaderboard', icon: Trophy },
+  { key: 'risk', label: 'Risk & Wellbeing', icon: HeartPulse },
   { key: 'presence', label: 'Presence', icon: Circle },
   { key: 'sessions', label: 'Work Sessions', icon: Clock },
   { key: 'tasks', label: 'Tasks', icon: ListChecks },
@@ -159,6 +160,116 @@ function LeaderboardTab() {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+const SIGNAL_LABEL: Record<string, string> = {
+  extended_hours: 'Extended hours',
+  declining_productivity: 'Declining productivity',
+  irregular_pattern: 'Irregular pattern',
+  overloaded: 'Overloaded',
+};
+const RISK_COLOR: Record<string, { color: string; bg: string }> = {
+  low: { color: '#15803d', bg: '#f0fdf4' },
+  medium: { color: '#b45309', bg: '#fffbeb' },
+  high: { color: '#dc2626', bg: '#fef2f2' },
+};
+
+// Burnout/attrition-risk scoring (Time Champ gap-analysis, 2026-08-11) —
+// distinct from the Team Leaderboard's performance score above: this is
+// risk, computed weekly from real trend signals (extended hours vs the
+// recruiter's own baseline, declining productivity, day-to-day
+// irregularity, workload pressure), not a single metric. Managers see the
+// whole team + can tune thresholds; a recruiter sees only their own
+// history (same self-transparency principle as Device Monitoring).
+function RiskWellbeingTab() {
+  const [role, setRole] = useState<string | null>(null);
+  useEffect(() => { setRole(getTokenPayload()?.role || ''); }, []);
+  const canManage = role !== null && ['admin', 'super_admin', 'manager'].includes(role);
+  const { data: teamScores, loading: teamLoading } = useFetch<any[]>(role !== null && canManage ? '/manager/risk-scores' : null);
+  const { data: myHistory, loading: myLoading } = useFetch<any[]>(role !== null ? '/recruiter/my-risk-history' : null);
+  const { data: cfg, refetch: refetchCfg } = useFetch<any>(canManage ? '/manager/risk-config' : null);
+  const [editCfg, setEditCfg] = useState<any>(null);
+  const [savingCfg, setSavingCfg] = useState(false);
+
+  async function saveCfg() {
+    if (!editCfg) return;
+    setSavingCfg(true);
+    try {
+      await apiFetch('/manager/risk-config', { method: 'PUT', body: JSON.stringify(editCfg) });
+      refetchCfg();
+    } finally { setSavingCfg(false); }
+  }
+
+  if (role === null) return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {canManage && (
+        <div style={card}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Team risk scores (most recent scored week)</div>
+          {teamLoading && <p style={{ fontSize: 12, color: '#94A3B8' }}>Loading…</p>}
+          {!teamLoading && !(teamScores || []).length && (
+            <p style={{ fontSize: 12, color: '#94A3B8' }}>No risk scores computed yet — the weekly job runs Monday 03:30 IST, or trigger it manually via POST /scheduler/trigger/risk-scores.</p>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {(teamScores || []).map((r: any) => {
+              const rc = RISK_COLOR[r.risk_level] || RISK_COLOR.low;
+              return (
+                <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: '#f8fafc', borderRadius: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{r.recruiter_name}</div>
+                    <div style={{ display: 'flex', gap: 5, marginTop: 4, flexWrap: 'wrap' }}>
+                      {(r.signals || []).map((s: string) => (
+                        <span key={s} style={{ fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 5, background: '#fef2f2', color: '#dc2626' }}>{SIGNAL_LABEL[s] || s}</span>
+                      ))}
+                      {(!r.signals || r.signals.length === 0) && <span style={{ fontSize: 10, color: '#94a3b8' }}>No risk signals this week</span>}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 12, fontWeight: 800, padding: '4px 12px', borderRadius: 20, background: rc.bg, color: rc.color, textTransform: 'uppercase' }}>{r.risk_level}</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: rc.color, width: 36, textAlign: 'right' }}>{Number(r.risk_score).toFixed(0)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div style={card}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>{canManage ? 'Your own' : 'Your'} risk history (last 8 weeks)</div>
+        {myLoading && <p style={{ fontSize: 12, color: '#94A3B8' }}>Loading…</p>}
+        {!myLoading && !(myHistory || []).length && <p style={{ fontSize: 12, color: '#94A3B8' }}>No risk scores computed for you yet.</p>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {(myHistory || []).map((r: any) => {
+            const rc = RISK_COLOR[r.risk_level] || RISK_COLOR.low;
+            return (
+              <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', background: '#f8fafc', borderRadius: 7, fontSize: 12 }}>
+                <span style={{ flex: 1 }}>{r.period_start} → {r.period_end}</span>
+                <span style={{ color: rc.color, fontWeight: 700 }}>{r.risk_level}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {canManage && cfg && (
+        <div style={card}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Risk signal thresholds</div>
+          <label style={label}>Extended-hours threshold (% above own baseline)</label>
+          <input type="number" style={input} value={editCfg?.hours_increase_threshold ?? cfg.hours_increase_threshold}
+            onChange={e => setEditCfg((c: any) => ({ ...(c || cfg), hours_increase_threshold: Number(e.target.value) }))} />
+          <label style={label}>Productivity-drop threshold (% decline vs prior 2 weeks)</label>
+          <input type="number" style={input} value={editCfg?.productivity_drop_threshold ?? cfg.productivity_drop_threshold}
+            onChange={e => setEditCfg((c: any) => ({ ...(c || cfg), productivity_drop_threshold: Number(e.target.value) }))} />
+          <label style={label}>Workload-overload ratio (open tasks ÷ weekly capacity)</label>
+          <input type="number" step="0.1" style={input} value={editCfg?.workload_overload_ratio ?? cfg.workload_overload_ratio}
+            onChange={e => setEditCfg((c: any) => ({ ...(c || cfg), workload_overload_ratio: Number(e.target.value) }))} />
+          <button onClick={saveCfg} disabled={!editCfg || savingCfg} style={{ ...btn, opacity: !editCfg || savingCfg ? 0.6 : 1 }}>
+            {savingCfg ? 'Saving…' : 'Save Thresholds'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -426,16 +537,30 @@ function LeaveTab() {
 function WorkSessionsTab() {
   const { data, refetch } = useFetch<any>('/work-sessions');
   const [busy, setBusy] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
+  useEffect(() => { setRole(getTokenPayload()?.role || ''); }, []);
+  const canManage = role !== null && ['admin', 'super_admin', 'manager'].includes(role);
+  const { data: breakReport } = useFetch<any[]>(canManage ? '/work-sessions/break-report' : null);
 
   const clockIn = async () => { setBusy(true); try { await apiFetch('/work-sessions/clock-in', { method: 'POST' }); refetch(); } finally { setBusy(false); } };
   const clockOut = async () => { setBusy(true); try { await apiFetch('/work-sessions/clock-out', { method: 'POST' }); refetch(); } finally { setBusy(false); } };
+  const startBreak = async () => { setBusy(true); try { await apiFetch('/work-sessions/break/start', { method: 'POST' }); refetch(); } finally { setBusy(false); } };
+  const endBreak = async () => { setBusy(true); try { await apiFetch('/work-sessions/break/end', { method: 'POST' }); refetch(); } finally { setBusy(false); } };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div style={{ ...card, display: 'flex', alignItems: 'center', gap: 14 }}>
         {data?.open_session ? (
           <>
-            <div style={{ flex: 1, fontSize: 13 }}>Clocked in since <strong>{new Date(data.open_session.clock_in).toLocaleTimeString()}</strong></div>
+            <div style={{ flex: 1, fontSize: 13 }}>
+              Clocked in since <strong>{new Date(data.open_session.clock_in).toLocaleTimeString()}</strong>
+              {data?.open_break && <span style={{ color: '#b45309', fontWeight: 700 }}> · On break since {new Date(data.open_break.break_start).toLocaleTimeString()}</span>}
+            </div>
+            {data?.open_break ? (
+              <button onClick={endBreak} disabled={busy} style={{ ...btn, background: '#b45309' }}>{busy ? '…' : 'End Break'}</button>
+            ) : (
+              <button onClick={startBreak} disabled={busy} style={{ ...btn, background: '#f59e0b' }}>{busy ? '…' : 'Start Break'}</button>
+            )}
             <button onClick={clockOut} disabled={busy} style={{ ...btn, background: '#DC2626' }}>{busy ? '…' : 'Clock Out'}</button>
           </>
         ) : (
@@ -455,6 +580,39 @@ function WorkSessionsTab() {
         ))}
         {!data?.sessions?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No sessions logged yet.</div>}
       </div>
+      {canManage && (
+        <div style={card}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Team break-time split (all completed sessions)</div>
+          {(breakReport || []).length === 0 ? (
+            <div style={{ fontSize: 12, color: '#94A3B8' }}>No completed sessions yet.</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', color: '#64748B', fontSize: 10, textTransform: 'uppercase' }}>
+                    <th style={{ padding: '6px 8px' }}>Recruiter</th>
+                    <th style={{ padding: '6px 8px' }}>Sessions</th>
+                    <th style={{ padding: '6px 8px' }}>Total Time</th>
+                    <th style={{ padding: '6px 8px' }}>Break Time</th>
+                    <th style={{ padding: '6px 8px' }}>Net Work Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(breakReport || []).map((r: any) => (
+                    <tr key={r.user_id} style={{ borderTop: '1px solid #F1F5F9' }}>
+                      <td style={{ padding: '8px' }}>{r.full_name}</td>
+                      <td style={{ padding: '8px' }}>{r.session_count}</td>
+                      <td style={{ padding: '8px' }}>{Number(r.total_session_mins).toFixed(0)} min</td>
+                      <td style={{ padding: '8px', color: '#b45309' }}>{Number(r.total_break_mins).toFixed(0)} min</td>
+                      <td style={{ padding: '8px', fontWeight: 700 }}>{Number(r.net_work_mins).toFixed(0)} min</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -665,6 +823,7 @@ export default function RecruiterOpsPage() {
       {tab === 'activity' && <ActivityTab />}
       {tab === 'autoassign' && <AutoAssignTab />}
       {tab === 'leaderboard' && <LeaderboardTab />}
+      {tab === 'risk' && <RiskWellbeingTab />}
       {tab === 'presence' && <PresenceTab />}
       {tab === 'sessions' && <WorkSessionsTab />}
       {tab === 'tasks' && <TasksTab />}

@@ -301,3 +301,66 @@ async def put_score_weights(body: ScoreWeightConfigIn, actor: Actor = Depends(re
     if not row:
         raise HTTPException(404, "No weight config for this tenant")
     return dict(row)
+
+
+# ─── Burnout/attrition-risk scoring (Time Champ gap-analysis, 2026-08-11) ──
+
+class RiskConfigIn(BaseModel):
+    hours_increase_threshold: float = Field(20.0, ge=0, le=200)
+    productivity_drop_threshold: float = Field(15.0, ge=0, le=100)
+    workload_overload_ratio: float = Field(1.3, ge=0.5, le=5)
+
+
+@manager_router.get("/risk-config")
+async def get_risk_config(actor: Actor = Depends(require_role("admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("SELECT * FROM risk_signal_config WHERE tenant_id=$1", actor.tenant_id)
+    if not row:
+        raise HTTPException(404, "No risk config for this tenant — this should have been seeded automatically")
+    return dict(row)
+
+
+@manager_router.put("/risk-config")
+async def put_risk_config(body: RiskConfigIn, actor: Actor = Depends(require_role("admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            UPDATE risk_signal_config SET
+              hours_increase_threshold=$2, productivity_drop_threshold=$3, workload_overload_ratio=$4, updated_at=now()
+            WHERE tenant_id=$1 RETURNING *
+        """, actor.tenant_id, body.hours_increase_threshold, body.productivity_drop_threshold, body.workload_overload_ratio)
+    if not row:
+        raise HTTPException(404, "No risk config for this tenant")
+    return dict(row)
+
+
+@manager_router.get("/risk-scores")
+async def list_risk_scores(period_start: str | None = None, risk_level: str | None = None,
+                            actor: Actor = Depends(require_role("admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        if not period_start:
+            latest = await conn.fetchval("SELECT MAX(period_start) FROM recruiter_risk_scores WHERE tenant_id=$1", actor.tenant_id)
+            period_start = latest
+        else:
+            period_start = date.fromisoformat(period_start)
+        q = """SELECT rs.*, u.full_name AS recruiter_name FROM recruiter_risk_scores rs
+               JOIN users u ON u.id = rs.recruiter_id
+               WHERE rs.tenant_id=$1 AND rs.period_start=$2"""
+        params = [actor.tenant_id, period_start]
+        if risk_level:
+            params.append(risk_level); q += f" AND rs.risk_level=${len(params)}"
+        q += " ORDER BY rs.risk_score DESC"
+        rows = await conn.fetch(q, *params)
+    return [dict(r) for r in rows]
+
+
+@router.get("/my-risk-history")
+async def my_risk_history(weeks: int = 8, actor: Actor = Depends(get_actor)):
+    """A recruiter can see their own risk-score history (same transparency
+    principle already established for Device Monitoring — a recruiter can
+    always see the same data a manager can see about them)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM recruiter_risk_scores WHERE tenant_id=$1 AND recruiter_id=$2
+               ORDER BY period_start DESC LIMIT $3""",
+            actor.tenant_id, actor.user_id, weeks)
+    return [dict(r) for r in rows]

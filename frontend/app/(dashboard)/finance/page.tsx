@@ -384,7 +384,70 @@ export default function FinancePage() {
           </CardContent>
         </Card>
       )}
+      {tab === 'payroll' && <PayrollWebhooksCard />}
     </div>
+  );
+}
+
+// Payroll webhook export (Time Champ gap-analysis, 2026-08-11) — a
+// generic "bring your own endpoint" webhook, since no named-vendor
+// payroll integration is buildable without real OAuth credentials
+// (same constraint documented for Naukri/LinkedIn/MS Teams elsewhere in
+// this codebase). Fires the full structured payslip data on every
+// payroll run generated above.
+interface PayrollWebhook {
+  id: string; name: string; webhook_url: string; is_active: boolean;
+  last_sent_at: string | null; send_count: number;
+}
+function PayrollWebhooksCard() {
+  const { data: hooks, refetch } = useFetch<PayrollWebhook[]>('/erp/payroll-webhooks');
+  const [name, setName] = useState('');
+  const [url, setUrl] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const create = async () => {
+    if (!name.trim() || !url.trim()) return;
+    setSaving(true);
+    try {
+      await apiFetch('/erp/payroll-webhooks', { method: 'POST', body: JSON.stringify({ name, webhook_url: url }) });
+      setName(''); setUrl(''); refetch();
+    } finally { setSaving(false); }
+  };
+  const remove = async (id: string) => {
+    await apiFetch(`/erp/payroll-webhooks/${id}`, { method: 'DELETE' });
+    refetch();
+  };
+
+  return (
+    <Card data-testid="payroll-webhooks-panel">
+      <CardHeader>
+        <h2 className="font-semibold text-gray-800 text-sm">Payroll Export Webhooks</h2>
+        <p className="text-xs text-gray-400 mt-0.5">Every payroll run generated above POSTs the full structured payslip data (JSON) to each active webhook — no named payroll-vendor OAuth exists yet, so this is a bring-your-own-endpoint integration.</p>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-2 mb-3">
+          <input className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs flex-1" placeholder="Name (e.g. Accounting System)" value={name} onChange={e => setName(e.target.value)} />
+          <input className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs flex-1" placeholder="https://your-endpoint.example.com/webhook" value={url} onChange={e => setUrl(e.target.value)} />
+          <button onClick={create} disabled={saving} className="px-3 py-1.5 rounded-lg bg-blue-700 text-white text-xs font-semibold">{saving ? '…' : 'Add'}</button>
+        </div>
+        {(!hooks || hooks.length === 0) ? (
+          <div className="text-xs text-gray-400 text-center py-4">No payroll export webhooks configured.</div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {hooks.map(h => (
+              <div key={h.id} className="flex items-center gap-3 bg-gray-50 rounded-lg px-3 py-2 text-xs">
+                <div className="flex-1">
+                  <div className="font-semibold">{h.name}</div>
+                  <div className="text-gray-400">{h.webhook_url}</div>
+                </div>
+                <div className="text-gray-400">{h.send_count} sent{h.last_sent_at ? ` · last ${new Date(h.last_sent_at).toLocaleDateString()}` : ''}</div>
+                <button onClick={() => remove(h.id)} className="text-red-500 font-semibold">Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

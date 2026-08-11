@@ -227,7 +227,86 @@ async def list_my_sessions(actor: Actor = Depends(get_actor)):
             "SELECT * FROM work_sessions WHERE tenant_id=$1 AND user_id=$2 AND clock_out IS NULL",
             actor.tenant_id, actor.user_id,
         )
-    return {"sessions": [dict(r) for r in rows], "open_session": dict(open_session) if open_session else None}
+        open_break = None
+        if open_session:
+            open_break = await conn.fetchrow(
+                "SELECT * FROM work_session_breaks WHERE tenant_id=$1 AND session_id=$2 AND break_end IS NULL",
+                actor.tenant_id, open_session["id"])
+    return {
+        "sessions": [dict(r) for r in rows],
+        "open_session": dict(open_session) if open_session else None,
+        "open_break": dict(open_break) if open_break else None,
+    }
+
+
+# ─── Break-time split (Time Champ gap-analysis, 2026-08-11) ────────────────
+
+@worksessions_router.post("/break/start")
+async def start_break(break_type: str = "short", actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        session = await conn.fetchrow(
+            "SELECT id FROM work_sessions WHERE tenant_id=$1 AND user_id=$2 AND clock_out IS NULL",
+            actor.tenant_id, actor.user_id)
+        if not session:
+            raise HTTPException(409, "You must be clocked in to start a break")
+        existing = await conn.fetchrow(
+            "SELECT id FROM work_session_breaks WHERE tenant_id=$1 AND session_id=$2 AND break_end IS NULL",
+            actor.tenant_id, session["id"])
+        if existing:
+            raise HTTPException(409, "Break already in progress")
+        row = await conn.fetchrow(
+            "INSERT INTO work_session_breaks (tenant_id, session_id, user_id, break_type) VALUES ($1,$2,$3,$4) RETURNING *",
+            actor.tenant_id, session["id"], actor.user_id, break_type)
+    return dict(row)
+
+
+@worksessions_router.post("/break/end")
+async def end_break(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """UPDATE work_session_breaks SET break_end=now(),
+                 duration_mins = ROUND(EXTRACT(EPOCH FROM (now() - break_start)) / 60, 2)
+               WHERE tenant_id=$1 AND user_id=$2 AND break_end IS NULL
+               RETURNING *""",
+            actor.tenant_id, actor.user_id)
+        if not row:
+            raise HTTPException(409, "No break in progress")
+    return dict(row)
+
+
+@worksessions_router.get("/break-report")
+async def break_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
+                        actor: Actor = Depends(require_role("admin", "manager"))):
+    """Work-vs-break split per recruiter — Time Champ's 'Break Time Split
+    Report' (Enterprise tier). Only completed sessions/breaks are counted
+    (an open session in progress has no final duration yet)."""
+    from datetime import date as _date
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        params: list = [actor.tenant_id]
+        date_clause = ""
+        if date_from:
+            params.append(_date.fromisoformat(date_from)); date_clause += f" AND ws.clock_in::date>=${len(params)}"
+        if date_to:
+            params.append(_date.fromisoformat(date_to)); date_clause += f" AND ws.clock_in::date<=${len(params)}"
+        rows = await conn.fetch(f"""
+            SELECT u.id AS user_id, u.full_name,
+                   COALESCE(SUM(ws.duration_mins), 0) AS total_session_mins,
+                   COALESCE((SELECT SUM(b.duration_mins) FROM work_session_breaks b
+                             WHERE b.tenant_id=$1 AND b.user_id=u.id
+                               AND b.session_id IN (SELECT id FROM work_sessions WHERE tenant_id=$1 AND user_id=u.id AND clock_out IS NOT NULL)
+                             ), 0) AS total_break_mins,
+                   COUNT(ws.id) AS session_count
+            FROM users u
+            JOIN work_sessions ws ON ws.tenant_id=$1 AND ws.user_id=u.id AND ws.clock_out IS NOT NULL {date_clause}
+            WHERE u.tenant_id=$1
+            GROUP BY u.id, u.full_name
+            HAVING COUNT(ws.id) > 0
+            ORDER BY total_session_mins DESC
+        """, *params)
+    return [
+        {**dict(r), "net_work_mins": float(r["total_session_mins"]) - float(r["total_break_mins"])}
+        for r in rows
+    ]
 
 
 @worksessions_router.post("/clock-in")

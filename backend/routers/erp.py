@@ -12,10 +12,11 @@ event_outbox/audit_log trace of any of it (HARD RULE #5 gap).
 """
 
 import os
+import httpx
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
 import db
@@ -325,7 +326,7 @@ class PayrollRunCreate(BaseModel):
 
 
 @router.post("/payroll-runs")
-async def create_payroll_run(body: PayrollRunCreate, actor: Actor = Depends(_FINANCE_ROLES)):
+async def create_payroll_run(body: PayrollRunCreate, background_tasks: BackgroundTasks, actor: Actor = Depends(_FINANCE_ROLES)):
     """Creates a payroll run and generates payslips from approved timesheets.
 
     Idempotent on two levels (2026-08-10 audit fix — a live double-pay of
@@ -404,8 +405,109 @@ async def create_payroll_run(body: PayrollRunCreate, actor: Actor = Depends(_FIN
                 after={"period_start": body.pay_period_start, "period_end": body.pay_period_end,
                        "total_gross": total_gross, "payslips_generated": len(rows)},
             )
+    background_tasks.add_task(_send_payroll_webhooks, actor.tenant_id, str(run_id))
     return {"payroll_run_id": str(run_id), "payslips_generated": len(rows),
             "total_gross": total_gross, "total_net": total_gross - total_tds - total_pf}
+
+
+# ─── Payroll webhook export (Time Champ gap-analysis, 2026-08-11) ─────────
+# No named-vendor payroll integration is buildable without real OAuth
+# credentials (same constraint already documented for Naukri/LinkedIn/MS
+# Teams app review) — this is a generic "bring your own endpoint" webhook,
+# same shape as the existing Slack/Teams/Discord notifier but carrying the
+# real structured payslip data an accounting system would actually need,
+# not a chat message.
+
+class PayrollWebhookIn(BaseModel):
+    name: str
+    webhook_url: str
+
+
+@router.get("/payroll-webhooks")
+async def list_payroll_webhooks(actor: Actor = Depends(_FINANCE_ROLES)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT id, name, webhook_url, is_active, last_sent_at, send_count, created_at FROM payroll_export_webhooks WHERE tenant_id=$1 ORDER BY created_at DESC",
+            actor.tenant_id)
+    return [dict(r) for r in rows]
+
+
+@router.post("/payroll-webhooks")
+async def create_payroll_webhook(body: PayrollWebhookIn, actor: Actor = Depends(require_role("admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO payroll_export_webhooks (tenant_id, name, webhook_url, created_by) VALUES ($1,$2,$3,$4) RETURNING *",
+            actor.tenant_id, body.name, body.webhook_url, actor.user_id)
+    return dict(row)
+
+
+@router.delete("/payroll-webhooks/{webhook_id}")
+async def delete_payroll_webhook(webhook_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM payroll_export_webhooks WHERE id=$1 AND tenant_id=$2 RETURNING id", webhook_id, actor.tenant_id)
+    if not row:
+        raise HTTPException(404, "Webhook not found")
+    return {"deleted": True}
+
+
+async def _send_payroll_webhooks(tenant_id: str, run_id: str):
+    """Fire-and-forget, same as every other webhook trigger in this
+    codebase (notify_event/fire_webhook) — must never be able to affect
+    the payroll run itself, which has already committed by the time this
+    runs as a BackgroundTask."""
+    try:
+        async with db.tenant_conn(tenant_id) as conn:
+            hooks = await conn.fetch(
+                "SELECT id, webhook_url FROM payroll_export_webhooks WHERE tenant_id=$1 AND is_active=TRUE", tenant_id)
+            if not hooks:
+                return
+            run = await conn.fetchrow(
+                "SELECT id, pay_period_start, pay_period_end, total_gross, total_tds, total_pf FROM payroll_runs WHERE id=$1 AND tenant_id=$2",
+                run_id, tenant_id)
+            if not run:
+                return
+            payslips = await conn.fetch(
+                """SELECT c.full_name AS candidate_name, ps.hours_worked, ps.pay_rate,
+                          ps.gross_pay, ps.tds_amount, ps.pf_amount
+                   FROM payslips ps JOIN candidates c ON c.id = ps.candidate_id
+                   WHERE ps.payroll_run_id=$1 AND ps.tenant_id=$2""",
+                run_id, tenant_id)
+            payload = {
+                "event": "payroll_run.generated",
+                "payroll_run_id": str(run["id"]),
+                "pay_period_start": str(run["pay_period_start"]),
+                "pay_period_end": str(run["pay_period_end"]),
+                "total_gross": float(run["total_gross"] or 0),
+                "total_tds": float(run["total_tds"] or 0),
+                "total_pf": float(run["total_pf"] or 0),
+                "total_net": float(run["total_gross"] or 0) - float(run["total_tds"] or 0) - float(run["total_pf"] or 0),
+                "payslip_count": len(payslips),
+                "payslips": [
+                    {
+                        "candidate_name": p["candidate_name"],
+                        "hours_worked": float(p["hours_worked"] or 0),
+                        "pay_rate": float(p["pay_rate"] or 0),
+                        "gross_pay": float(p["gross_pay"] or 0),
+                        "tds_amount": float(p["tds_amount"] or 0),
+                        "pf_amount": float(p["pf_amount"] or 0),
+                        "net_pay": float(p["gross_pay"] or 0) - float(p["tds_amount"] or 0) - float(p["pf_amount"] or 0),
+                    }
+                    for p in payslips
+                ],
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                for h in hooks:
+                    try:
+                        r = await client.post(h["webhook_url"], json=payload)
+                        if r.status_code < 400:
+                            await conn.execute(
+                                "UPDATE payroll_export_webhooks SET last_sent_at=now(), send_count=send_count+1 WHERE id=$1",
+                                h["id"])
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
 
 @router.get("/payroll-runs/{run_id}/payslips")

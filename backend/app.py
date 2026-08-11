@@ -65,6 +65,8 @@ from routers import recruiter_ops
 from routers import device_monitoring
 from routers import ops_gaps
 from routers import sla_predictions
+from routers import field_attendance
+from routers import shift_scheduling
 from routers import kae_submission
 from routers import call_letters
 
@@ -218,6 +220,9 @@ app.include_router(nda.router)
 app.include_router(nda.nda_router)
 app.include_router(nda.nda_sign_public)
 app.include_router(nda.doc_templates_router)
+app.include_router(field_attendance.router)
+app.include_router(field_attendance.public_router)
+app.include_router(shift_scheduling.router)
 from routers import pipeline_stages
 app.include_router(pipeline_stages.router)
 from routers import whatsapp_settings
@@ -246,6 +251,7 @@ app.include_router(p36_p42.compliance_router)
 app.include_router(import_router.import_router)
 app.include_router(job_sharing.router)
 app.include_router(calendar.router)
+app.include_router(calendar.feed_router)
 app.include_router(two_fa.router)
 app.include_router(sms.router)
 app.include_router(whatsapp_bot.router)

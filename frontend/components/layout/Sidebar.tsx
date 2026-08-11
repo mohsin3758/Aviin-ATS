@@ -16,7 +16,7 @@ import {
   ChevronDown, ChevronLeft, ChevronRight,
   FileSignature, Send, GitMerge, ExternalLink, Activity, Workflow,
   Users2, CalendarDays, Smile, Video, FileBarChart, UserPlus, Sliders,
-  Laptop, KeyRound,
+  Laptop, KeyRound, MapPin, CalendarClock, HeartPulse,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
@@ -30,6 +30,8 @@ const NAV_GROUPS = [
     { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates' },
     { icon:Users2,          href:'/recruiter-ops', label:'Recruiter Ops' },
     { icon:Laptop,          href:'/device-monitoring', label:'Device Monitoring' },
+    { icon:MapPin,          href:'/field-attendance', label:'Field Attendance', roles:['admin','super_admin','manager','lead_recruiter'] },
+    { icon:CalendarClock,   href:'/shift-scheduling', label:'Shift Scheduling' },
   ]},
   { id:'ai', label:'AI & INTELLIGENCE', defaultOpen:true, items:[
     { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },

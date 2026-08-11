@@ -969,6 +969,119 @@ async def compute_recruiter_performance_scores(score_date: date | None = None):
         logger.error(f"compute_recruiter_performance_scores error: {e}")
 
 
+async def compute_recruiter_risk_scores(period_start: date | None = None):
+    """Weekly burnout/attrition-risk scoring (Time Champ gap-analysis,
+    2026-08-11) — distinct from compute_recruiter_performance_scores
+    above (which scores output/quality, not risk). Zero-token: pure SQL
+    trend analysis on recruiter_productivity_daily, already collected by
+    the existing Workforce Intelligence rollups. Multi-signal, not a
+    single metric — extended hours vs the recruiter's own baseline,
+    declining productivity trend, day-to-day irregularity, and workload
+    pressure vs their configured weekly capacity. Requires at least 3
+    days of real productivity data in the week to score at all — no
+    fabricated score from too little signal (same honesty standard as
+    sla_predictions.py's "insufficient training data" path)."""
+    logger.info("scheduler: computing weekly recruiter risk scores")
+    if period_start is None:
+        today = date.today()
+        last_monday = today - timedelta(days=today.weekday() + 7)
+        period_start = last_monday
+    period_end = period_start + timedelta(days=6)
+    baseline_start = period_start - timedelta(days=28)
+    trend_start = period_start - timedelta(days=14)
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    cfg = await conn.fetchrow("SELECT * FROM risk_signal_config WHERE tenant_id=$1", tid)
+                    if not cfg:
+                        continue
+                    recruiters = await conn.fetch(
+                        """SELECT DISTINCT recruiter_id FROM recruiter_productivity_daily
+                           WHERE tenant_id=$1 AND period_start BETWEEN $2 AND $3""",
+                        tid, period_start, period_end)
+                    for r in recruiters:
+                        rid = r["recruiter_id"]
+                        week = await conn.fetchrow(
+                            """SELECT AVG(active_mins) avg_active, STDDEV(active_mins) stddev_active,
+                                      AVG(productivity_pct) avg_prod, COUNT(*) n_days
+                               FROM recruiter_productivity_daily
+                               WHERE tenant_id=$1 AND recruiter_id=$2 AND period_start BETWEEN $3 AND $4""",
+                            tid, rid, period_start, period_end)
+                        if not week or (week["n_days"] or 0) < 3:
+                            continue  # not enough real data to score this week honestly
+
+                        baseline = await conn.fetchrow(
+                            """SELECT AVG(active_mins) avg_active FROM recruiter_productivity_daily
+                               WHERE tenant_id=$1 AND recruiter_id=$2 AND period_start BETWEEN $3 AND $4""",
+                            tid, rid, baseline_start, period_start - timedelta(days=1))
+                        prior_trend = await conn.fetchrow(
+                            """SELECT AVG(productivity_pct) avg_prod FROM recruiter_productivity_daily
+                               WHERE tenant_id=$1 AND recruiter_id=$2 AND period_start BETWEEN $3 AND $4""",
+                            tid, rid, trend_start, period_start - timedelta(days=1))
+                        capacity = await conn.fetchval("SELECT capacity_weekly FROM users WHERE id=$1", rid)
+                        open_tasks = await conn.fetchval(
+                            "SELECT COUNT(*) FROM recruiter_tasks WHERE tenant_id=$1 AND recruiter_id=$2 AND status NOT IN ('completed','cancelled')",
+                            tid, rid)
+
+                        avg_active = float(week["avg_active"] or 0)
+                        stddev_active = float(week["stddev_active"] or 0)
+                        avg_prod = float(week["avg_prod"]) if week["avg_prod"] is not None else None
+                        baseline_active = float(baseline["avg_active"]) if baseline and baseline["avg_active"] is not None else None
+                        prior_prod = float(prior_trend["avg_prod"]) if prior_trend and prior_trend["avg_prod"] is not None else None
+
+                        signals: list[str] = []
+                        hours_increase_pct = None
+                        if baseline_active and baseline_active > 0:
+                            hours_increase_pct = (avg_active - baseline_active) / baseline_active * 100
+                            if hours_increase_pct >= float(cfg["hours_increase_threshold"]):
+                                signals.append("extended_hours")
+
+                        productivity_trend_pct = None
+                        if prior_prod and prior_prod > 0 and avg_prod is not None:
+                            productivity_trend_pct = (avg_prod - prior_prod) / prior_prod * 100
+                            if productivity_trend_pct <= -float(cfg["productivity_drop_threshold"]):
+                                signals.append("declining_productivity")
+
+                        activity_variance_score = min(100.0, (stddev_active / avg_active * 100) if avg_active > 0 else 0.0)
+                        if activity_variance_score >= 40:
+                            signals.append("irregular_pattern")
+
+                        workload_ratio = None
+                        if capacity and capacity > 0:
+                            workload_ratio = float(open_tasks or 0) / float(capacity)
+                            if workload_ratio >= float(cfg["workload_overload_ratio"]):
+                                signals.append("overloaded")
+
+                        risk_score = min(100.0, len(signals) * 25.0)
+                        risk_level = "high" if risk_score >= 60 else "medium" if risk_score >= 30 else "low"
+
+                        await conn.execute("""
+                            INSERT INTO recruiter_risk_scores
+                              (tenant_id, recruiter_id, period_start, period_end, avg_active_mins,
+                               baseline_active_mins, hours_increase_pct, avg_productivity_pct,
+                               productivity_trend_pct, activity_variance_score, workload_ratio,
+                               signals, risk_score, risk_level)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                            ON CONFLICT (tenant_id, recruiter_id, period_start) DO UPDATE SET
+                              period_end=$4, avg_active_mins=$5, baseline_active_mins=$6, hours_increase_pct=$7,
+                              avg_productivity_pct=$8, productivity_trend_pct=$9, activity_variance_score=$10,
+                              workload_ratio=$11, signals=$12, risk_score=$13, risk_level=$14, computed_at=now()
+                        """, tid, rid, period_start, period_end, round(avg_active, 2),
+                             round(baseline_active, 2) if baseline_active is not None else None,
+                             round(hours_increase_pct, 2) if hours_increase_pct is not None else None,
+                             round(avg_prod, 2) if avg_prod is not None else None,
+                             round(productivity_trend_pct, 2) if productivity_trend_pct is not None else None,
+                             round(activity_variance_score, 2), round(workload_ratio, 2) if workload_ratio is not None else None,
+                             signals, round(risk_score, 2), risk_level)
+            except Exception as e:
+                logger.error(f"Risk score computation failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"compute_recruiter_risk_scores error: {e}")
+
+
 def start_scheduler():
     """Register and start all jobs.
 
@@ -1043,6 +1156,10 @@ def start_scheduler():
                       id="wi_weekly_productivity", replace_existing=True)
     scheduler.add_job(compute_recruiter_performance_scores, "cron", hour=2, minute=45,
                       id="wi_performance_scores", replace_existing=True)
+    # Weekly, Monday 03:30 IST — burnout/attrition-risk scoring for the
+    # completed prior week (a trend metric, not a daily snapshot).
+    scheduler.add_job(compute_recruiter_risk_scores, "cron", day_of_week="mon", hour=3, minute=30,
+                      id="recruiter_risk_scores", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

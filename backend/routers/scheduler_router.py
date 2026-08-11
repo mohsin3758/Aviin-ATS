@@ -1,7 +1,7 @@
 """Scheduler status & manual trigger endpoints."""
 from fastapi import APIRouter, Depends
-from scheduler import scheduler, process_retention_bank_releases, check_loyalty_milestones
-from deps import Actor, get_actor
+from scheduler import scheduler, process_retention_bank_releases, check_loyalty_milestones, compute_recruiter_risk_scores
+from deps import Actor, get_actor, require_role
 
 router = APIRouter(prefix="/scheduler", tags=["scheduler"])
 
@@ -19,3 +19,8 @@ async def trigger_retention(actor: Actor = Depends(get_actor)):
 async def trigger_loyalty(actor: Actor = Depends(get_actor)):
     await check_loyalty_milestones()
     return {"triggered": "loyalty_milestones"}
+
+@router.post("/trigger/risk-scores")
+async def trigger_risk_scores(actor: Actor = Depends(require_role("admin", "manager"))):
+    await compute_recruiter_risk_scores()
+    return {"triggered": "recruiter_risk_scores"}
