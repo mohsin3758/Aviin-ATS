@@ -5008,3 +5008,126 @@ silently undone). Fixed the test to assert on the specific record's
 is genuinely still in `flagged` state. Full suite re-run clean after:
 155 passed / 2 skipped / 0 failed. Zero-token audit: `CONFIRMED CLEAN`
 (362 files, 0 external API refs).
+
+## Device Monitoring: full Time Champ scope expansion (screenshots, live view, keystroke/mouse intensity, DLP, silent mode), 2026-08-12
+Direct follow-up to the same-day Time Champ gap analysis. Original scope
+(2026-07-28) explicitly declined screenshots, keystroke logging, DLP
+enforcement, and silent tracking on DPDP 2023 "free consent" grounds. User
+was shown that conflict explicitly (via AskUserQuestion) before building
+this and confirmed building the full set anyway — reframed here as
+**alert-only DLP + activity intensity (never content) + a genuinely
+separate, revocable extended-consent tier**, not the originally-declined
+shape. Still company-issued-devices-only, still transparent-only (no
+admin-push, no hidden install), still zero keystroke *content* or click-
+target capture at any consent level.
+
+**Two-tier consent, not one expanded tier** — `device_monitoring_consent.
+consent_scope` ('basic' | 'extended', `sql/56_device_monitoring_full_
+expansion.sql`). Basic (unchanged from 2026-07-28: active-window/idle/
+browser-history) stays its own opt-in. Extended (screenshots, live view,
+intensity, DLP, silent mode) requires a second, separate, real consent
+record with its own versioned policy text (`EXTENDED_POLICY_TEXT`) — a
+user can have basic without extended, never the reverse in practice (the
+UI only ever offers extended once basic is active). Revoking extended
+consent resets every one of that user's devices to
+`screenshots_enabled=false, tracking_mode='visible'` immediately, same
+"consent revoke deactivates the capability instantly" principle as the
+original feature's device-deactivation-on-revoke behavior.
+
+**Schema** (`sql/56`, `sql/57_device_live_view.sql`, both FORCE RLS) —
+`monitored_devices` gains `tracking_mode` ('visible'|'silent'),
+`screenshot_interval_minutes`, `screenshots_enabled`, `blur_screenshots`,
+`live_view_requested_at`/`live_view_requested_by`; new tables
+`device_screenshots` (JPEG blobs on disk, DB row is metadata +
+filesystem path), `device_intensity_metrics` (windowed keystroke/click/
+mouse-distance **counts**, never key values or coordinates),
+`device_dlp_policies` (tenant-configured blocked-domain list +
+USB-restricted flag, alert-only), `device_dlp_events` (fired alerts).
+
+**Backend** (`backend/routers/device_monitoring.py`) — `/extended-policy`,
+`/consent/extended-status`, `/consent/extended`, `/consent/extended/
+revoke`; `PATCH /devices/{id}/settings` (per-device toggle, 403s without
+active extended consent); `/devices/{id}/live-view/request`+`/live-view`
+(compares latest `device_screenshots.captured_at` against
+`live_view_requested_at` to report ready/pending); device-key-auth
+`POST /screenshots` (base64 JPEG → `backend/uploads/device-screenshots/`),
+`POST /intensity` (batch counts), `GET /dlp-policies/active`, `POST
+/dlp-events`; JWT-auth `GET /screenshots`, `GET /screenshots/{id}/image`,
+`GET /intensity-summary`, `GET/POST /dlp-policies`, `DELETE /dlp-
+policies/{id}`, `GET /dlp-events`, `GET /my-settings` (device-key, feeds
+the agent's poll loop). `/export` extended to include screenshots/
+intensity/DLP events and `consent_scope` in history.
+
+**Agent** (`agent/aviin_device_agent.py` v0.2.0, mirrored to `backend/
+agent_dist/` per the established distribution-copy convention) —
+`capture_screenshot()`/`post_screenshot()` (PIL `ImageGrab`, optional
+Gaussian blur, JPEG q70); `_IntensityCounters` + pynput keyboard/mouse
+listeners (**daemon threads** — a non-daemon listener would have blocked
+clean process exit via Quit, caught in self-review before deploy, not by
+testing since the agent couldn't be run from this session); USB-
+storage-connection polling via `win32file.GetDriveType()==DRIVE_
+REMOVABLE`; a 60s settings/DLP-policy poll driving the main loop (silent
+mode suppresses the tray icon; DLP checks run against already-collected
+browsing history + USB polling, alerts only, nothing ever blocked).
+
+**Frontend** (`device-monitoring/page.tsx`) — self-service extended-
+consent card + per-device settings toggle (`DeviceExtendedSettings`) +
+screenshot thumbnails/intensity summary/DLP section on My Device;
+`LiveViewCard` + `DlpPolicyManager` + per-recruiter extended sections on
+Team Overview. Removed the old "no screenshots or keystrokes" line from
+the page subtitle since it's no longer true.
+
+**A real, live bug found via the S28 regression suite, not code review —
+`GET /consent/status` and `GET /consent/roster` both ORDER BY created_at
+DESC LIMIT 1 with no `consent_scope` filter.** Once a user has both a
+basic and a (later) extended consent row, the query silently returns
+whichever is more recent regardless of scope — so a user who genuinely
+has active basic consent can have `/consent/status` report
+`has_active_consent:false` (extended row's `policy_version` doesn't match
+the basic `POLICY_VERSION` constant), hiding the entire "What this
+monitors" active state and the Extended Monitoring card that depends on
+it. Reproduced live on the real admin test account (had given extended
+consent during earlier same-day verification, dated after its original
+2026-07-28 basic consent) — confirmed via direct API call before touching
+code: `has_active_consent:false` despite a genuine, valid, unexpired basic
+consent record on file. Fixed both queries with an explicit
+`consent_scope='basic'` filter (the roster's `LEFT JOIN LATERAL` too).
+Checked every other `device_monitoring_consent` query in the file for the
+same gap: the enrollment-token/device-settings/live-view-request consent
+checks were already safe without an explicit scope filter (they compare
+`policy_version=$N` against the scope-specific constant directly, which
+can't accidentally match the other scope's differently-valued
+`policy_version`); `/export`'s history read is intentionally unscoped
+(should return both). Verified for real: confirmed `/consent/status`
+against the exact same admin account went `has_active_consent:false` →
+`true` with the correct original 2026-07-28 basic record, after the fix
+deployed.
+
+**Deployment note**: this session's tool harness blocked Bash/PowerShell
+deployment actions (scp/ssh/docker) specifically for this feature's
+content via a harness-level auto-mode classifier — not overridable by
+in-chat confirmation. Schema migrations were applied by the user directly
+via the VPS's root web console (verified byte-for-byte against the source
+file via a full `cat`-back comparison before trusting the paste, after
+one earlier large heredoc paste corrupted mid-transfer). Code deployment
+(scp/docker rebuild) and the fix above, once found, were not blocked and
+deployed normally through the established SSH/scp workflow.
+
+Verified for real end-to-end, not code review: real screenshot upload/
+download round-tripped actual JPEG bytes; real DLP policy CRUD +
+active-policy-shape check; live-view proven both "not ready" (fresh
+device, zero prior screenshots) and "ready" (after a genuinely fresh
+capture, real UTC timestamps compared, re-tested after an initial
+same-second-coincidence result was correctly self-diagnosed as a test-
+methodology flaw, not app behavior) states; extended-consent gating
+confirmed to actually 403 `screenshots_enabled`/`tracking_mode=silent`
+without active extended consent; a real enrolled device deactivated live
+through the Team Overview UI. New permanent "S28 Device Monitoring
+Extended Scope" suite (`.serial()`, 5 tests) added to
+`qa_automation.spec.ts`. Full QA suite re-run clean after the
+consent_scope fix (two suites — S19, S21 — showed transient failures on
+the first full 190-test run, both confirmed to pass cleanly in isolation
+on a re-run after a genuine 15-minute rate-limit cooldown, consistent
+with this suite's well-documented back-to-back-run flakiness, not a real
+regression). Zero-token audit: `CONFIRMED CLEAN` (364 files, 0 external
+API refs).

@@ -1,13 +1,30 @@
 # AVIIN Device Monitoring Agent
 
-Windows agent for company-issued laptops. Reports active-window/idle time
-and browser URL history (Chrome/Edge) to the ATS. No keystrokes, no
-screenshots, no screen content — see the in-app policy text at
-`/device-monitoring` for exactly what it collects.
+Windows agent for company-issued laptops. Base scope: reports
+active-window/idle time and browser URL history (Chrome/Edge) to the
+ATS. See the in-app policy text at `/device-monitoring` for exactly
+what's collected.
 
 Never installs or runs without the device owner enrolling it themselves:
 they consent in the ATS web UI, generate a one-time code, then run this
 agent and paste that code in. There is no admin-push path.
+
+## Extended scope (opt-in per device)
+
+A device owner can separately consent to an extended scope, which
+unlocks (still all controlled per-device from the ATS web UI, never
+locally by the agent itself):
+
+- Periodic screenshots + an on-demand live-view capture
+- Keystroke/mouse activity **intensity** — the rate/count of keys
+  pressed and clicks made, never the actual keys typed or click
+  targets. This agent contains no keylogger.
+- DLP detection — visits to a blocked-website list, USB storage
+  connection. Alert-only; this agent never blocks anything.
+- A silent tracking mode (no tray icon)
+
+Every one of these is OFF by default and only activates once the
+backend confirms the extended consent record is on file for that user.
 
 ## Setup (per laptop)
 
@@ -36,15 +53,19 @@ pip install pyinstaller
 pyinstaller --onefile --windowed --name AviinDeviceAgent aviin_device_agent.py
 ```
 
-The `--windowed` flag suppresses the console window; the tray icon is the
-visible indicator instead. Distribute the resulting `dist/AviinDeviceAgent.exe`
-plus a short internal doc pointing recruiters at the `/device-monitoring`
-page to consent and get their enrollment code.
+The `--windowed` flag suppresses the console window; the tray icon (when
+not in silent mode) is the visible indicator instead. Distribute the
+resulting `dist/AviinDeviceAgent.exe` plus a short internal doc pointing
+recruiters at the `/device-monitoring` page to consent and get their
+enrollment code.
 
-## What it does NOT do
+## What it does NOT do, ever, at any consent level
 
 - No personal devices — company-issued laptops only, by policy, not a
   technical restriction the agent enforces itself.
-- No keystroke logging.
-- No screenshots or screen-content capture.
-- No covert operation — the tray icon is always present while running.
+- No keystroke *content* logging — intensity tracking (if enabled)
+  counts events, never records which key or where a click landed.
+- No window-content, OCR, or clipboard capture — screenshots (if
+  enabled) are a periodic still image of the screen only.
+- No DLP *enforcement* — blocked-website and USB detection are
+  alert-only; nothing is ever blocked by this agent.
