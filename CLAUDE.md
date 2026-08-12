@@ -5444,3 +5444,58 @@ confirmed to pass cleanly in isolation after a genuine 15-minute
 rate-limit cooldown, consistent with this suite's well-documented
 characteristic). Zero-token audit: `CONFIRMED CLEAN` (364 files, 0
 external API refs).
+
+## WhatsApp Status-broadcast garbage-candidate bug found and fixed, 2026-08-12
+Same day, direct follow-up — user pointed at a fresh screenshot showing
+10 candidates literally named "Status" (source=whatsapp, blank phone/
+email) plus another new "QA S19 Candidate" leak. Investigated the
+"Status" ones for real before assuming test noise, since nothing in the
+test suite creates a candidate named that.
+
+Traced it to a real, previously-undiscovered production bug in
+`whatsapp_bot.py`. `status@broadcast` is WhatsApp's reserved system JID
+for **Status updates** (the 24h disappearing photo/video feature) — WAHA
+fires webhook events for these too, and the webhook handler had no
+filter for it (only `@g.us` group messages were excluded). Confirmed via
+the real `resume_files` row behind one of these candidates:
+`source_email: status@broadcast@whatsapp`, `mime_type: image/jpeg`,
+`file_name: resume.pdf` — someone else's Status photo, not a resume,
+routed straight into the resume-intake path and OCR'd/parsed as if it
+were a job application. Phone ended up blank because `status@broadcast`
+has no digits left after phone normalization.
+
+**A second bug compounded it**: `_handle_inbound_resume`'s mimetype
+safety check defaulted a missing filename to the literal string
+`"resume.pdf"` — so even though the real mimetype (`image/jpeg`)
+correctly failed the resume-mimetype check, the fabricated filename's
+`.pdf` extension let it through anyway. This wasn't status-broadcast-
+specific — any media sent with no real filename (a photo forwarded
+without a name, for instance) could have bypassed the same check.
+
+Fixed both: excluded `"broadcast" in from_` alongside the existing
+`@g.us` group-message filter (same pattern, same line), and changed the
+missing-filename default to a neutral `"attachment"` string that can't
+accidentally satisfy the `.pdf`/`.doc`/`.docx` suffix check — real
+resume uploads still pass on mimetype alone (`_RESUME_MIME_HINTS`
+already covers `pdf`/`msword`/`wordprocessingml` reliably; WAHA reports
+real mimetypes accurately regardless of filename).
+
+Verified for real, not code review: replayed the exact webhook shape
+that created the real bug
+(`{"from":"status@broadcast","hasMedia":true,"media":{"mimetype":
+"image/jpeg"}}`) directly against the live `/whatsapp-bot/webhook`
+endpoint before and after the fix — candidate count stayed at 10 both
+times pre-fix (confirming reproduction), stayed unchanged after (fix
+holds). Directly tested the mimetype/filename check logic inside the
+container against 4 real scenarios: real PDF with no filename → still
+accepted; real DOCX → still accepted; the actual bug shape (JPEG, no
+filename) → now correctly rejected; a real PDF with an unrelated
+filename → still accepted (mimetype alone is enough, no new false
+rejection). Cleaned up all 11 real garbage records (10 "Status" +
+1 fresh "QA S19 Candidate" leak) via the real `DELETE /candidates/{id}`
+API; confirmed zero hits via a real headless-browser check on
+`/candidates`. Full QA suite re-run clean: 192 passed / 2 skipped / 0
+failed (one flaky S19 test self-resolved on Playwright's built-in
+retry — this session's well-documented back-to-back-run characteristic,
+not a regression). Zero-token audit: `CONFIRMED CLEAN` (364 files, 0
+external API refs).

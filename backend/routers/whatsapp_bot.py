@@ -91,7 +91,14 @@ async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str) -> str
     import json as _json
 
     mimetype = (media.get("mimetype") or "").lower()
-    filename = media.get("filename") or "resume.pdf"
+    # REAL BUG FIX (2026-08-12): this used to default a missing filename to
+    # "resume.pdf", which made the check below pass on filename alone even
+    # when the real mimetype (e.g. image/jpeg) clearly wasn't a resume —
+    # confirmed live via 10 real garbage "Status" candidates created from
+    # WhatsApp Status-broadcast photos this way. A neutral, non-resume-
+    # looking default means the check now relies on the real mimetype,
+    # which WAHA reports accurately.
+    filename = media.get("filename") or "attachment"
     if not any(h in mimetype for h in _RESUME_MIME_HINTS) and not filename.lower().endswith((".pdf", ".doc", ".docx")):
         return "We can only accept resumes as PDF or Word documents right now."
 
@@ -297,7 +304,15 @@ async def webhook(request: Request):
         # Media messages often have an empty/caption-only body — check media
         # BEFORE the text-emptiness bail below, or a resume with no caption
         # would be silently dropped.
-        if (not text and not has_media) or msg.get("fromMe") or "@g.us" in from_:
+        # REAL BUG FIX (2026-08-12): "status@broadcast" is WhatsApp's
+        # reserved system JID for Status updates (the 24h disappearing
+        # photo/video feature), not a real contact — WAHA fires webhook
+        # events for these too. Confirmed live: 10 real garbage candidates
+        # named "Status" with empty phone (no digits in "status@broadcast"
+        # to normalize) were created from other people's Status photos,
+        # processed as if they were resume submissions. Excluded the same
+        # way group messages (@g.us) already are.
+        if (not text and not has_media) or msg.get("fromMe") or "@g.us" in from_ or "broadcast" in from_:
             return {"ok": True}
         # Real bug fix (2026-08-10 audit): no ORDER BY meant this returned
         # whatever row Postgres physically stored first, which flips
