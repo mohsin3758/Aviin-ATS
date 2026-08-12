@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 import db
 from deps import Actor, get_actor, require_role
+from permissions import require_permission
 
 targets_router = APIRouter(prefix="/recruiter-targets", tags=["recruiter-targets"])
 tasks_router = APIRouter(prefix="/recruiter-tasks", tags=["recruiter-tasks"])
@@ -60,7 +61,8 @@ async def list_targets(recruiter_id: Optional[str] = None, period_year: Optional
 
 
 @targets_router.post("")
-async def create_target(body: TargetIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+async def create_target(body: TargetIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager")),
+                         _perm: Actor = Depends(require_permission("recruiter_ops", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             """INSERT INTO recruiter_targets
@@ -76,7 +78,8 @@ async def create_target(body: TargetIn, actor: Actor = Depends(require_role("adm
 
 
 @targets_router.patch("/{target_id}")
-async def update_target(target_id: str, body: TargetIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+async def update_target(target_id: str, body: TargetIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager")),
+                         _perm: Actor = Depends(require_permission("recruiter_ops", "update"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             """UPDATE recruiter_targets SET
@@ -125,7 +128,8 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
 
 
 @tasks_router.post("")
-async def create_task(body: TaskIn, actor: Actor = Depends(get_actor)):
+async def create_task(body: TaskIn, actor: Actor = Depends(get_actor),
+                       _perm: Actor = Depends(require_permission("recruiter_ops", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         recruiter_id = body.recruiter_id
         if not recruiter_id:
@@ -159,7 +163,8 @@ async def create_task(body: TaskIn, actor: Actor = Depends(get_actor)):
 
 
 @tasks_router.patch("/{task_id}")
-async def update_task_status(task_id: str, status: str, actor: Actor = Depends(get_actor)):
+async def update_task_status(task_id: str, status: str, actor: Actor = Depends(get_actor),
+                              _perm: Actor = Depends(require_permission("recruiter_ops", "update"))):
     if status not in ("pending", "in_progress", "completed", "cancelled"):
         raise HTTPException(400, "Invalid status")
     completed_at_clause = "completed_at = now()" if status == "completed" else "completed_at = NULL"
@@ -196,7 +201,8 @@ async def list_hotlist(actor: Actor = Depends(get_actor)):
 
 
 @hotlist_router.post("")
-async def add_to_hotlist(body: HotlistIn, actor: Actor = Depends(get_actor)):
+async def add_to_hotlist(body: HotlistIn, actor: Actor = Depends(get_actor),
+                          _perm: Actor = Depends(require_permission("recruiter_ops", "create"))):
     if body.reason and body.reason not in ("bench", "contract_ending", "other"):
         raise HTTPException(400, "reason must be one of: bench, contract_ending, other")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -209,7 +215,8 @@ async def add_to_hotlist(body: HotlistIn, actor: Actor = Depends(get_actor)):
 
 
 @hotlist_router.delete("/{hotlist_id}")
-async def remove_from_hotlist(hotlist_id: str, actor: Actor = Depends(get_actor)):
+async def remove_from_hotlist(hotlist_id: str, actor: Actor = Depends(get_actor),
+                               _perm: Actor = Depends(require_permission("recruiter_ops", "delete"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         result = await conn.execute(
             "DELETE FROM hotlist WHERE id=$1 AND tenant_id=$2", hotlist_id, actor.tenant_id,
@@ -248,7 +255,8 @@ async def list_leave(recruiter_id: Optional[str] = None, upcoming_only: bool = F
 
 
 @leave_router.post("")
-async def create_leave(body: LeaveIn, actor: Actor = Depends(get_actor)):
+async def create_leave(body: LeaveIn, actor: Actor = Depends(get_actor),
+                        _perm: Actor = Depends(require_permission("recruiter_ops", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             """INSERT INTO recruiter_leave (tenant_id, recruiter_id, leave_type, start_date, end_date, notes, created_by)
@@ -260,7 +268,8 @@ async def create_leave(body: LeaveIn, actor: Actor = Depends(get_actor)):
 
 
 @leave_router.delete("/{leave_id}")
-async def delete_leave(leave_id: str, actor: Actor = Depends(get_actor)):
+async def delete_leave(leave_id: str, actor: Actor = Depends(get_actor),
+                        _perm: Actor = Depends(require_permission("recruiter_ops", "delete"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         result = await conn.execute(
             "DELETE FROM recruiter_leave WHERE id=$1 AND tenant_id=$2", leave_id, actor.tenant_id,

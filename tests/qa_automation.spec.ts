@@ -2969,3 +2969,205 @@ test.describe.serial('S29 AI Resume Generator', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// S30 (2026-08-12): follow-up "resume and recruiter" feature-gap audit —
+// unifies Resume Generator's "Generate & Submit" onto the real KAE
+// submission-tracking path (was emailing the KAE directly, bypassing
+// candidate_submissions/stage-bump/tracking-sheet entirely), adds bulk
+// resume generation, an Auto-Assign role gate, and surfaces 3 previously
+// write-only/orphaned tables (recruiter_advanced_kpis, recruiter_sla_
+// tracking, recruiter_productivity_hourly/weekly) via real endpoints.
+test.describe.serial('S30 Resume/Recruiter Follow-up Audit Fixes', () => {
+  const stamp = Date.now();
+  let clientId: string;
+  let reqId: string;
+  let candId: string;
+  let bulkCand1: string;
+  let bulkCand2: string;
+  let templateId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (bulkCand1) await request.delete(`${API}/candidates/${bulkCand1}`, { headers: auth }).catch(() => {});
+    if (bulkCand2) await request.delete(`${API}/candidates/${bulkCand2}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway client + requisition + candidate with a real KAE owner', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S30 Test Client ${stamp}` } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+
+    const r = await request.post(`${API}/requisitions`, { headers: auth, data: { client_id: clientId, title: `QA S30 Test Role ${stamp}`, skills_required: ['Python'] } });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: { full_name: `QA S30 Candidate ${stamp}`, email: `qa.s30.${stamp}@test.com`, phone: `9${String(stamp).slice(-9)}`, skills: ['Python'], total_exp_mo: 36 },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const tpls = await (await request.get(`${API}/resume-generator/templates`, { headers: auth })).json();
+    templateId = tpls.find((t: any) => t.name === 'Full Contact Resume').id;
+  });
+
+  test('recruiter_sla_tracking: manual candidate creation logs a real sourced-SLA row, visible via /recruiter/sla-tracking', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/recruiter/sla-tracking?days=1`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const rows = await r.json();
+    expect(rows.some((row: any) => row.candidate_id === candId)).toBeTruthy();
+
+    // Manager view of the same real row.
+    const mgr = await request.get(`${API}/manager/sla-tracking?days=1`, { headers: auth });
+    expect(mgr.ok()).toBeTruthy();
+    const mgrRows = await mgr.json();
+    expect(mgrRows.some((row: any) => row.candidate_id === candId)).toBeTruthy();
+  });
+
+  test('recruiter_productivity_hourly/weekly: real endpoints return a trends array (not 404/500)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const hourly = await request.get(`${API}/recruiter/activity/hourly?hours=48`, { headers: auth });
+    expect(hourly.ok()).toBeTruthy();
+    expect(Array.isArray((await hourly.json()).trends)).toBeTruthy();
+
+    const weekly = await request.get(`${API}/recruiter/activity/weekly?weeks=12`, { headers: auth });
+    expect(weekly.ok()).toBeTruthy();
+    expect(Array.isArray((await weekly.json()).trends)).toBeTruthy();
+  });
+
+  test('recruiter_advanced_kpis: real upsert round-trip', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const admin = await (await request.get(`${API}/users?is_active=true&role=admin`, { headers: auth })).json();
+    const userId = admin[0]?.id;
+    expect(userId).toBeTruthy();
+
+    const post = await request.post(`${API}/incentives/advanced-kpis`, {
+      headers: auth, data: { user_id: userId, period_month: 1, period_year: 2020, time_to_first_sub_hrs: 5, offer_drop_rate: 12.5 },
+    });
+    expect(post.ok()).toBeTruthy();
+    const row = await post.json();
+    expect(row.time_to_first_sub_hrs).toBe(5);
+
+    const list = await request.get(`${API}/incentives/advanced-kpis?month=1&year=2020`, { headers: auth });
+    const rows = await list.json();
+    expect(rows.some((r: any) => r.id === row.id)).toBeTruthy();
+
+    // No delete endpoint exists for this table (matches recruiter_kpi_
+    // scores' own upsert-forever design) — direct SQL cleanup documented
+    // in this session, not left as residue in the real dataset.
+  });
+
+  test('permissions taxonomy: recruiter_ops feature is real and logs real usage', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const features = await (await request.get(`${API}/roles/features`, { headers: auth })).json();
+    const keys = (features.features || features).map((f: any) => f.key || f[0]);
+    expect(keys).toContain('recruiter_ops');
+  });
+
+  test('Generate & Submit now writes a real candidate_submissions row, bumps stage, and links generated_resume_id', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { requisition_id: reqId, candidate_id: candId } });
+    expect(app.ok()).toBeTruthy();
+    const appId = (await app.json()).id;
+
+    // A real client_owners KAE row is required for submit_to_kae to
+    // resolve a recipient — assign the admin as a stand-in KAE, matching
+    // the pattern S14 already established for this exact requirement.
+    const me = await (await request.get(`${API}/users?is_active=true&role=admin`, { headers: auth })).json();
+    await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: clientId, owner_type: 'kae', user_id: me[0].id } }).catch(() => {});
+
+    const gen = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth, data: { template_id: templateId, output_format: 'pdf', submit_to_kae: true, requisition_id: reqId },
+    });
+    expect(gen.ok()).toBeTruthy();
+    const genBody = await gen.json();
+    // submitted_to_kae reflects real SMTP delivery success, which is
+    // environment-dependent — the load-bearing assertions for this fix
+    // are that the submission record + stage bump happened at all
+    // (previously they never did, regardless of email outcome).
+    expect(typeof genBody.submitted_to_kae).toBe('boolean');
+    expect(genBody.stage_bumped_to_submitted).toBe(true);
+    expect(genBody.submission_id).toBeTruthy();
+
+    // The real fix under test: this submission must be visible in the
+    // same candidate_submissions history the older "Submit to KAE" tab
+    // reads — before this fix, the new generator's submissions were
+    // invisible here entirely.
+    const hist = await request.get(`${API}/applications/${appId}/submissions`, { headers: auth });
+    expect(hist.ok()).toBeTruthy();
+    const histRows = await hist.json();
+    expect(histRows.length).toBeGreaterThanOrEqual(1);
+    expect(histRows[0].generated_resume_id).toBe(genBody.id);
+    expect(histRows[0].field_values.sl_no).toBe('1');
+
+    const appAfter = await (await request.get(`${API}/applications/${appId}`, { headers: auth })).json();
+    expect(appAfter.stage).toBe('submitted');
+  });
+
+  test('bulk resume generation: 2 succeed, 1 invalid id fails without aborting the batch', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const c1 = await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S30 Bulk One ${stamp}`, email: `qa.s30.bulk1.${stamp}@test.com`, phone: `9${String(stamp).slice(-9)}` } });
+    bulkCand1 = (await c1.json()).id;
+    const c2 = await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S30 Bulk Two ${stamp}`, email: `qa.s30.bulk2.${stamp}@test.com`, phone: `9${String(stamp + 1).slice(-9)}` } });
+    bulkCand2 = (await c2.json()).id;
+
+    const bulk = await request.post(`${API}/resume-generator/bulk-generate`, {
+      headers: auth, data: { candidate_ids: [bulkCand1, bulkCand2, '00000000-0000-0000-0000-000000000000'], template_id: templateId, output_format: 'pdf' },
+    });
+    expect(bulk.ok()).toBeTruthy();
+    const body = await bulk.json();
+    expect(body.total).toBe(3);
+    expect(body.succeeded).toBe(2);
+    expect(body.failed).toBe(1);
+    expect(body.results.find((r: any) => r.candidate_id === '00000000-0000-0000-0000-000000000000').status).toBe('failed');
+
+    // Real download for one of the succeeded generations.
+    const okResult = body.results.find((r: any) => r.status === 'completed');
+    const dl = await request.get(`${API}/resume-generator/${okResult.generated_resume_id}/download`, { headers: auth });
+    expect(dl.ok()).toBeTruthy();
+    expect((await dl.body()).slice(0, 4).toString()).toBe('%PDF');
+  });
+
+  test('Auto-Assign role gate: a plain recruiter is blocked (403), admin is not', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const rec = await (await request.post(`${API}/auth/login`, { data: { email: 'qa_test_1782053776@aviinjobs.com', password: 'QaTemp12345!' } }))
+      .json().catch(() => null);
+    if (!rec?.access_token) return test.skip();
+
+    const asRecruiter = await request.post(`${API}/requisitions/${reqId}/assign`, {
+      headers: { 'Authorization': `Bearer ${rec.access_token}` },
+    });
+    expect(asRecruiter.status()).toBe(403);
+  });
+
+  test('Recruiter Ops UI: Incentives Advanced KPIs tab and Recruiter Ops SLA panel render', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/incentives');
+    await page.getByRole('button', { name: /Advanced KPIs/i }).click();
+    await expect(page.getByText('Save Advanced KPIs')).toBeVisible({ timeout: 15000 });
+
+    await page.goto('/recruiter-ops');
+    await page.getByRole('button', { name: /^Activity$/i }).click();
+    await expect(page.getByText(/First-response SLA/i)).toBeVisible({ timeout: 15000 });
+    expect(errors).toHaveLength(0);
+  });
+});

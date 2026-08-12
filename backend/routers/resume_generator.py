@@ -264,11 +264,13 @@ def _save_generated_file(data: bytes, tenant_id: str, candidate_id: str, ext: st
     return str(dest)
 
 
-@router.post("/candidates/{candidate_id}/generate")
-async def generate_resume(candidate_id: str, body: GenerateIn, actor: Actor = Depends(get_actor)):
-    if body.output_format not in ("pdf", "docx"):
-        raise HTTPException(400, "output_format must be 'pdf' or 'docx'")
-
+async def _generate_one(candidate_id: str, body: "GenerateIn", actor: Actor) -> tuple[dict, bytes]:
+    """Core single-candidate generation, shared by the single endpoint and
+    bulk-generate below — extracted so bulk generation doesn't duplicate
+    this logic a second time. Returns (generated_resumes row dict,
+    file_bytes) on success; on failure the row's generation_status is
+    'failed' and file_bytes is empty — caller decides whether to raise
+    (single) or record-and-continue (bulk)."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         candidate = await _load_candidate(conn, actor.tenant_id, candidate_id)
         template = None
@@ -338,33 +340,106 @@ async def generate_resume(candidate_id: str, body: GenerateIn, actor: Actor = De
                        "company_mode": cfg["company_mode"], "company_replacement": cfg["company_replacement"],
                        "version": version},
             )
+    return dict(row), file_bytes
+
+
+@router.post("/candidates/{candidate_id}/generate")
+async def generate_resume(candidate_id: str, body: GenerateIn, actor: Actor = Depends(get_actor)):
+    if body.output_format not in ("pdf", "docx"):
+        raise HTTPException(400, "output_format must be 'pdf' or 'docx'")
+
+    row, file_bytes = await _generate_one(candidate_id, body, actor)
+    template_name = row["template_name"]
 
     out = dict(row)
-    if status == "failed":
-        raise HTTPException(500, f"Resume generation failed: {error_msg}")
+    if row["generation_status"] == "failed":
+        raise HTTPException(500, f"Resume generation failed: {row['error_message']}")
 
+    # REAL BUG FIX (2026-08-12 audit): this used to email the KAE directly
+    # via _send_kae_email, completely bypassing the real submission-
+    # tracking system — no candidate_submissions row, no stage bump, no
+    # tracking-sheet sl_no increment, invisible in "Submit to KAE"'s own
+    # submission history even though both send to the same KAE for the
+    # same candidate/requisition. Now routes through the same shared
+    # _do_kae_submission() core kae_submission.py's 6 legacy styles use.
     if body.submit_to_kae and body.requisition_id:
-        from routers.kae_submission import _resolve_kae, _send_kae_email
+        from routers.kae_submission import _do_kae_submission
         async with db.tenant_conn(actor.tenant_id) as conn:
-            kae = await _resolve_kae(conn, actor.tenant_id, client_id) if client_id else None
-        if kae and kae["email"]:
-            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
-            ext = "pdf" if body.output_format == "pdf" else "docx"
-            subtype = "pdf" if ext == "pdf" else "vnd.openxmlformats-officedocument.wordprocessingml.document"
-            sent, err = await _send_kae_email(
-                actor.tenant_id, kae["email"], actor.email if body.cc_self else None,
-                f"Candidate Submission — {candidate['full_name']} ({template_name})",
-                f"Please find attached the generated resume for {candidate['full_name']} "
-                f"({template_name}, {ext.upper()}).\n\nRegards,\n{actor.full_name or 'AVIIN ATS'}",
-                [(f"Resume_{safe_name}.{ext}", file_bytes, subtype)],
-            )
-            out["submitted_to_kae"] = sent
-            out["submit_error"] = err
-        else:
+            app_row = await conn.fetchrow(
+                """SELECT id FROM applications WHERE candidate_id=$1 AND requisition_id=$2 AND tenant_id=$3
+                   ORDER BY updated_at DESC LIMIT 1""",
+                candidate_id, body.requisition_id, actor.tenant_id)
+        if not app_row:
             out["submitted_to_kae"] = False
-            out["submit_error"] = "No active KAE with an email address is assigned to this client"
+            out["submit_error"] = "No application links this candidate to this requisition — cannot resolve a submission record"
+        else:
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", row["display_name"] or "candidate")
+            ext = "pdf" if body.output_format == "pdf" else "docx"
+            try:
+                submission = await _do_kae_submission(
+                    actor.tenant_id, str(app_row["id"]), actor, file_bytes,
+                    f"Resume_{safe_name}_{template_name.replace(' ', '_')}.{ext}", "custom_generated",
+                    f"{template_name} ({ext.upper()}, via Resume Generator)",
+                    generated_resume_id=str(row["id"]), cc_self=body.cc_self,
+                )
+                out["submitted_to_kae"] = submission["email_sent"]
+                out["submit_error"] = submission["email_error"]
+                out["submission_id"] = str(submission["id"])
+                out["stage_bumped_to_submitted"] = submission["stage_bumped_to_submitted"]
+            except HTTPException as exc:
+                out["submitted_to_kae"] = False
+                out["submit_error"] = exc.detail
 
     return out
+
+
+class BulkGenerateIn(BaseModel):
+    candidate_ids: list[str]
+    template_id: Optional[str] = None
+    output_format: str = "pdf"
+    # Same compositional overrides as single-candidate generation, applied
+    # identically to every candidate in the batch — bulk generation is
+    # deliberately single-template, no per-candidate live preview (spec
+    # gap: "no bulk resume generation", not "no per-candidate bulk config").
+    name_format: Optional[str] = None
+    show_mobile: Optional[bool] = None
+    show_email: Optional[bool] = None
+    show_location: Optional[bool] = None
+    company_mode: Optional[str] = None
+    company_replacement: Optional[str] = None
+    project_mode: Optional[str] = None
+    client_name_mode: Optional[str] = None
+
+
+@router.post("/bulk-generate")
+async def bulk_generate_resumes(body: BulkGenerateIn, actor: Actor = Depends(get_actor)):
+    if body.output_format not in ("pdf", "docx"):
+        raise HTTPException(400, "output_format must be 'pdf' or 'docx'")
+    if not body.candidate_ids:
+        raise HTTPException(400, "candidate_ids must be a non-empty list")
+
+    per_candidate_body = GenerateIn(
+        template_id=body.template_id, name_format=body.name_format, show_mobile=body.show_mobile,
+        show_email=body.show_email, show_location=body.show_location, company_mode=body.company_mode,
+        company_replacement=body.company_replacement, project_mode=body.project_mode,
+        client_name_mode=body.client_name_mode, output_format=body.output_format,
+    )
+
+    results = []
+    for cid in body.candidate_ids:
+        try:
+            row, _ = await _generate_one(cid, per_candidate_body, actor)
+            results.append({
+                "candidate_id": cid, "generated_resume_id": str(row["id"]),
+                "status": row["generation_status"], "error": row["error_message"],
+            })
+        except HTTPException as exc:
+            results.append({"candidate_id": cid, "generated_resume_id": None, "status": "failed", "error": exc.detail})
+        except Exception as exc:
+            results.append({"candidate_id": cid, "generated_resume_id": None, "status": "failed", "error": str(exc)})
+
+    succeeded = sum(1 for r in results if r["status"] == "completed")
+    return {"total": len(results), "succeeded": succeeded, "failed": len(results) - succeeded, "results": results}
 
 
 @router.get("/candidates/{candidate_id}/versions")

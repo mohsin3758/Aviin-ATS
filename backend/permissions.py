@@ -39,6 +39,7 @@ FEATURES: list[tuple[str, str]] = [
     ("collections", "Collections"),
     ("account_pl", "Account P&L"),
     ("bu_tracker", "BU Tracker"),
+    ("recruiter_ops", "Recruiter Ops (Tasks/Targets/Hotlist/Leave)"),
 ]
 ACTIONS: list[str] = ["create", "read", "update", "delete", "export"]
 _FEATURE_KEYS = {f[0] for f in FEATURES}

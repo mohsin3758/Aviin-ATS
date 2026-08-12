@@ -1,9 +1,9 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions } from '@/components/ui/Modal';
 import { Plus, Search, Building2, MapPin, Phone, Mail, Globe,
-         Star, Edit, Trash2, Eye, ChevronRight, Briefcase, Users } from 'lucide-react';
+         Star, Edit, Trash2, Eye, ChevronRight, Briefcase, Users, FileText } from 'lucide-react';
 
 const INDUSTRIES = ['Information Technology','IT Services','IT Consulting','Banking & Finance',
   'Manufacturing','Retail','Healthcare','Pharma','BFSI','Telecom','E-commerce','Consulting','Other'];
@@ -17,7 +17,62 @@ const AVATAR_COLORS = ['#1e40af','#7c3aed','#0f766e','#92400e','#be185d','#0369a
 const getColor = (name:string) => AVATAR_COLORS[(name?.charCodeAt(0)||0) % AVATAR_COLORS.length];
 const getInitials = (name:string) => (name||'?').split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase();
 
-function SidePanel({ client, reqs, onClose, onEdit }: any) {
+// REAL GAP FIX (2026-08-12 audit): PUT /clients/{id}/resume-preference
+// existed and worked (verified directly via API) but had zero frontend
+// caller — the auto-recommendation engine could only ever fall back to
+// "most recently used" or the default, never a real intentional client
+// preference. This is that missing caller.
+function ResumePreferenceRow({ client, onSaved }: { client: any; onSaved: () => void }) {
+  const { data: templates } = useFetch<any[]>('/resume-generator/templates');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  // Local state, not just client.default_resume_template_id directly —
+  // `client` is a snapshot captured when the row was clicked, and the
+  // parent's refetch() updates the list, not this stale prop, so a
+  // controlled <select> bound straight to the prop would visually revert
+  // right after a successful save.
+  const [value, setValue] = useState(client.default_resume_template_id || '');
+  useEffect(() => { setValue(client.default_resume_template_id || ''); }, [client.id]);
+
+  async function save(templateId: string) {
+    setValue(templateId);
+    setSaving(true); setSaved(false);
+    try {
+      await apiFetch(`/clients/${client.id}/resume-preference`, {
+        method: 'PUT', body: JSON.stringify({ default_resume_template_id: templateId || null }),
+      });
+      setSaved(true); onSaved();
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e: any) { alert(e?.message || 'Failed to save resume preference'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div style={{ padding: '16px', borderBottom: '1px solid #f1f5f9' }}>
+      <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#94a3b8', marginBottom: '10px' }}>
+        Default Resume Format
+      </div>
+      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+        <FileText size={14} style={{ color: '#94a3b8', flexShrink: 0 }} />
+        <select
+          value={value}
+          onChange={e => save(e.target.value)}
+          disabled={saving}
+          style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: '7px', padding: '6px 8px', fontSize: '12.5px', outline: 'none', background: 'white' }}
+        >
+          <option value="">No preference (auto: most recently used, else Full Contact)</option>
+          {(templates || []).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+        {saved && <span style={{ fontSize: '11px', color: '#16a34a', fontWeight: 600, flexShrink: 0 }}>Saved</span>}
+      </div>
+      <p style={{ fontSize: '10.5px', color: '#94a3b8', marginTop: '6px' }}>
+        Drives the Resume Generator's auto-recommendation when submitting a candidate for this client.
+      </p>
+    </div>
+  );
+}
+
+function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
   return (
     <div style={{
       position:'fixed', right:0, top:0, height:'100vh', width:'400px',
@@ -68,6 +123,8 @@ function SidePanel({ client, reqs, onClose, onEdit }: any) {
             </div>
           ))}
         </div>
+
+        <ResumePreferenceRow client={client} onSaved={onRefetch} />
 
         {/* Open Jobs */}
         <div style={{ padding:'16px' }}>
@@ -259,7 +316,7 @@ export default function CompaniesPage() {
       {selected && (
         <>
           <div style={{ position:'fixed', inset:0, background:'transparent', zIndex:199 }} onClick={()=>setSelected(null)} />
-          <SidePanel client={selected} reqs={reqs} onClose={()=>setSelected(null)} onEdit={openEdit} />
+          <SidePanel client={selected} reqs={reqs} onClose={()=>setSelected(null)} onEdit={openEdit} onRefetch={refetch} />
         </>
       )}
 

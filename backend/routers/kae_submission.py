@@ -430,6 +430,116 @@ class SubmitToKaeIn(BaseModel):
     manual_resume: Optional[dict] = None  # required when resume_style == 'manual': {name, designation, location, total_exp, skills, summary}
 
 
+async def _do_kae_submission(
+    tenant_id: str, application_id: str, actor: Actor,
+    resume_bytes: bytes, resume_filename: str, resume_style: str, resume_style_label: str,
+    generated_resume_id: str = None, template_id: str = None, field_values: dict = None, cc_self: bool = True,
+) -> dict:
+    """Shared submission-tracking core (2026-08-12 audit fix): resolves the
+    KAE + tracking-sheet template, builds the real cumulative tracking
+    sheet, sends the email with the GIVEN resume attachment, writes
+    candidate_submissions, bumps the application stage, and writes audit/
+    outbox. Used by both submit_to_kae() below (the 6 legacy fixed styles)
+    AND resume_generator.py's Generate & Submit (the new compositional
+    engine) — one real submission-tracking system, not two. Before this
+    fix, a resume sent via the new Resume Generator's Generate & Submit
+    button emailed the KAE directly with none of this: invisible in
+    submission history, stage never advanced, tracking-sheet sl_no never
+    incremented for it."""
+    async with db.tenant_conn(tenant_id) as conn:
+        row, auto_values = await _app_context(conn, application_id)
+        client_id = row["client_id"]
+        if not client_id:
+            raise HTTPException(400, "This requisition has no client linked — cannot resolve a KAE")
+        kae = await _resolve_kae(conn, tenant_id, client_id)
+        if not kae or not kae["email"]:
+            raise HTTPException(400, "No active KAE with an email address is assigned to this client (see KAE > Owners)")
+
+        template = None
+        if template_id:
+            template = await conn.fetchrow(
+                "SELECT * FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2", template_id, tenant_id)
+            if not template:
+                raise HTTPException(404, "Tracking sheet template not found")
+        else:
+            template = await _resolve_template(conn, tenant_id, client_id)
+        if not template:
+            raise HTTPException(400, "No tracking sheet template available — create one under Ops Settings > Templates")
+        columns = _jsonb(template["columns"], [])
+
+        prior_rows = await conn.fetch(
+            "SELECT field_values FROM candidate_submissions WHERE requisition_id=$1 ORDER BY sent_at",
+            row["requisition_id"])
+        client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
+        recruiter_email = actor.email
+
+    sl_no = len(prior_rows) + 1
+    overrides = {k: v for k, v in (field_values or {}).items() if v not in (None, "")}
+    final_values = {**auto_values, **overrides, "sl_no": str(sl_no)}
+    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    tracking_html = _build_tracking_html_table(columns, sheet_rows)
+
+    subject = f"Candidate Submission — {row['full_name']} for {row['role_title']}"
+    body_text = (
+        f"Hi {kae['full_name'] or ''},\n\n"
+        f"Please find attached the profile for {row['full_name']} against \"{row['role_title']}\""
+        f"{' (' + client_row['name'] + ')' if client_row else ''}. The tracking sheet "
+        f"({sl_no} submission{'s' if sl_no != 1 else ''} on this role so far) is below.\n\n"
+        f"Resume attached: {resume_style_label}.\n\n"
+        f"Regards,\n{actor.full_name or 'AVIIN ATS'}"
+    )
+    ext = resume_filename.rsplit(".", 1)[-1].lower()
+    subtype = "pdf" if ext == "pdf" else "vnd.openxmlformats-officedocument.wordprocessingml.document"
+    email_sent, email_error = await _send_kae_email(
+        tenant_id, kae["email"], recruiter_email if cc_self else None, subject, body_text,
+        [(resume_filename, resume_bytes, subtype)],
+        body_html_extra=tracking_html,
+    )
+
+    async with db.tenant_conn(tenant_id) as conn:
+        sub_row = await conn.fetchrow(
+            """INSERT INTO candidate_submissions
+                 (tenant_id, application_id, candidate_id, requisition_id, client_id, template_id,
+                  kae_user_id, resume_style, field_values, recipient_emails, status, error_message, sent_by,
+                  generated_resume_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *""",
+            tenant_id, application_id, row["candidate_id"], row["requisition_id"], client_id,
+            template["id"], kae["id"], resume_style, json.dumps(final_values),
+            [kae["email"]] + ([recruiter_email] if cc_self and recruiter_email and recruiter_email != kae["email"] else []),
+            "sent" if email_sent else "failed", email_error, actor.user_id, generated_resume_id,
+        )
+
+        bumped = False
+        if row["stage"] in _PRE_SUBMIT_STAGES and await is_valid_stage(conn, tenant_id, "submitted"):
+            await conn.execute("UPDATE applications SET stage='submitted', updated_at=now() WHERE id=$1", application_id)
+            bumped = True
+            await events.write_outbox(
+                conn, tenant_id, "application.stage_changed",
+                {"application_id": application_id, "from": row["stage"], "to": "submitted", "reason": "submit_to_kae"},
+                f"application.stage_changed:{application_id}:{sub_row['sent_at'].isoformat()}",
+            )
+
+        await events.write_outbox(
+            conn, tenant_id, "candidate.submitted_to_kae",
+            {"application_id": application_id, "candidate_id": str(row["candidate_id"]),
+             "kae_user_id": str(kae["id"]), "email_sent": email_sent},
+            f"candidate.submitted_to_kae:{sub_row['id']}",
+        )
+        await events.write_audit(
+            conn, tenant_id, actor.user_id, "submit_to_kae", "application", application_id,
+            before={"stage": row["stage"]},
+            after={"kae": kae["full_name"], "resume_style": resume_style, "email_sent": email_sent, "sl_no": sl_no},
+        )
+
+    out = dict(sub_row)
+    out["field_values"] = _jsonb(out["field_values"], {})
+    out["email_sent"] = email_sent
+    out["email_error"] = email_error
+    out["stage_bumped_to_submitted"] = bumped
+    out["kae_name"] = kae["full_name"]
+    return out
+
+
 @router.get("/applications/{application_id}/submit-to-kae/manual-draft")
 async def submit_to_kae_manual_draft(application_id: str, actor: Actor = Depends(get_actor)):
     """Pre-filled starting point for the "Manual editing" resume format —
@@ -448,6 +558,16 @@ async def submit_to_kae_manual_draft(application_id: str, actor: Actor = Depends
     }
 
 
+_RESUME_LABELS = {
+    "clean_generated": "contact-free clean summary",
+    "redacted_original": "redacted original (phone/email removed)",
+    "manual": "recruiter-edited summary (contact withheld)",
+    "projects_only": "projects-only summary (contact & employment history withheld)",
+    "confidential": "clean summary — current company & projects marked Confidential",
+    "anonymized": "anonymized profile — identity & employer masked",
+}
+
+
 @router.post("/applications/{application_id}/submit-to-kae")
 async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor = Depends(get_actor)):
     if body.resume_style not in _RESUME_STYLES:
@@ -456,54 +576,12 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
         raise HTTPException(400, "manual_resume is required when resume_style is 'manual'")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
-        row, auto_values = await _app_context(conn, application_id)
-        client_id = row["client_id"]
-        if not client_id:
-            raise HTTPException(400, "This requisition has no client linked — cannot resolve a KAE")
-        kae = await _resolve_kae(conn, actor.tenant_id, client_id)
-        if not kae or not kae["email"]:
-            raise HTTPException(400, "No active KAE with an email address is assigned to this client (see KAE > Owners)")
-
-        template = None
-        if body.template_id:
-            template = await conn.fetchrow(
-                "SELECT * FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2",
-                body.template_id, actor.tenant_id)
-            if not template:
-                raise HTTPException(404, "Template not found")
-        else:
-            template = await _resolve_template(conn, actor.tenant_id, client_id)
-        if not template:
-            raise HTTPException(400, "No tracking sheet template available — create one under Ops Settings > Templates")
-        columns = _jsonb(template["columns"], [])
-
-        prior_rows = await conn.fetch(
-            "SELECT field_values FROM candidate_submissions WHERE requisition_id=$1 ORDER BY sent_at",
-            row["requisition_id"])
-
-        client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
-        recruiter_email = actor.email
-
-    sl_no = len(prior_rows) + 1
-    overrides = {k: v for k, v in (body.field_values or {}).items() if v not in (None, "")}
-    final_values = {**auto_values, **overrides, "sl_no": str(sl_no)}
-
-    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
-    tracking_html = _build_tracking_html_table(columns, sheet_rows)
-
+        row, _ = await _app_context(conn, application_id)
     candidate = {
         "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
         "location": row["location"], "current_employer": row["current_employer"],
         "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
         "skills": row["skills"], "resume_text": row["resume_text"],
-    }
-    _RESUME_LABELS = {
-        "clean_generated": "contact-free clean summary",
-        "redacted_original": "redacted original (phone/email removed)",
-        "manual": "recruiter-edited summary (contact withheld)",
-        "projects_only": "projects-only summary (contact & employment history withheld)",
-        "confidential": "clean summary — current company & projects marked Confidential",
-        "anonymized": "anonymized profile — identity & employer masked",
     }
     if body.resume_style == "manual":
         resume_bytes = _build_manual_resume_pdf(body.manual_resume or {})
@@ -511,64 +589,12 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
         resume_bytes = render_resume_pdf(candidate, _STYLE_CONFIGS[body.resume_style])
 
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
-    subject = f"Candidate Submission — {candidate['full_name']} for {row['role_title']}"
-    body_text = (
-        f"Hi {kae['full_name'] or ''},\n\n"
-        f"Please find attached the profile for {candidate['full_name']} against \"{row['role_title']}\""
-        f"{' (' + client_row['name'] + ')' if client_row else ''}. The tracking sheet "
-        f"({sl_no} submission{'s' if sl_no != 1 else ''} on this role so far) is below.\n\n"
-        f"Resume attached: {_RESUME_LABELS.get(body.resume_style, body.resume_style)}.\n\n"
-        f"Regards,\n{actor.full_name or 'AVIIN ATS'}"
+    return await _do_kae_submission(
+        actor.tenant_id, application_id, actor, resume_bytes,
+        f"Resume_{safe_name}_{body.resume_style}.pdf", body.resume_style,
+        _RESUME_LABELS.get(body.resume_style, body.resume_style),
+        template_id=body.template_id, field_values=body.field_values, cc_self=body.cc_self,
     )
-    email_sent, email_error = await _send_kae_email(
-        actor.tenant_id, kae["email"], recruiter_email if body.cc_self else None, subject, body_text,
-        [
-            (f"Resume_{safe_name}_{body.resume_style}.pdf", resume_bytes, "pdf"),
-        ],
-        body_html_extra=tracking_html,
-    )
-
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        sub_row = await conn.fetchrow(
-            """INSERT INTO candidate_submissions
-                 (tenant_id, application_id, candidate_id, requisition_id, client_id, template_id,
-                  kae_user_id, resume_style, field_values, recipient_emails, status, error_message, sent_by)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *""",
-            actor.tenant_id, application_id, row["candidate_id"], row["requisition_id"], client_id,
-            template["id"], kae["id"], body.resume_style, json.dumps(final_values),
-            [kae["email"]] + ([recruiter_email] if body.cc_self and recruiter_email and recruiter_email != kae["email"] else []),
-            "sent" if email_sent else "failed", email_error, actor.user_id,
-        )
-
-        bumped = False
-        if row["stage"] in _PRE_SUBMIT_STAGES and await is_valid_stage(conn, actor.tenant_id, "submitted"):
-            await conn.execute("UPDATE applications SET stage='submitted', updated_at=now() WHERE id=$1", application_id)
-            bumped = True
-            await events.write_outbox(
-                conn, actor.tenant_id, "application.stage_changed",
-                {"application_id": application_id, "from": row["stage"], "to": "submitted", "reason": "submit_to_kae"},
-                f"application.stage_changed:{application_id}:{sub_row['sent_at'].isoformat()}",
-            )
-
-        await events.write_outbox(
-            conn, actor.tenant_id, "candidate.submitted_to_kae",
-            {"application_id": application_id, "candidate_id": str(row["candidate_id"]),
-             "kae_user_id": str(kae["id"]), "email_sent": email_sent},
-            f"candidate.submitted_to_kae:{sub_row['id']}",
-        )
-        await events.write_audit(
-            conn, actor.tenant_id, actor.user_id, "submit_to_kae", "application", application_id,
-            before={"stage": row["stage"]},
-            after={"kae": kae["full_name"], "resume_style": body.resume_style, "email_sent": email_sent, "sl_no": sl_no},
-        )
-
-    out = dict(sub_row)
-    out["field_values"] = _jsonb(out["field_values"], {})
-    out["email_sent"] = email_sent
-    out["email_error"] = email_error
-    out["stage_bumped_to_submitted"] = bumped
-    out["kae_name"] = kae["full_name"]
-    return out
 
 
 @router.get("/applications/{application_id}/submissions")

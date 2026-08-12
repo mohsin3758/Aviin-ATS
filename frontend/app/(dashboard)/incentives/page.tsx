@@ -16,6 +16,7 @@ export default function IncentivesPage() {
   const { data: scorecards, refetch: refetchSc } = useFetch<any[]>(`/incentives/scorecard${qs}`);
   const { data: bank, refetch: refetchBank } = useFetch<any[]>('/incentives/bank');
   const { data: loyalty, refetch: refetchLoyalty } = useFetch<any[]>('/incentives/loyalty');
+  const { data: advKpis, refetch: refetchAdv } = useFetch<any[]>(`/incentives/advanced-kpis${qs}`);
   const { data: usersRaw } = useFetch<any[]>('/users?is_active=true');
   const users = usersRaw || [];
   const MONTHS=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -50,7 +51,7 @@ export default function IncentivesPage() {
           <div key={label} className="stat-card"><div className="stat-icon" style={{background:bg}}>{icon}</div><div className="stat-value" style={{color}}>{value}</div><div className="stat-label">{label}</div></div>
         ))}
       </div>
-      <div className="tabs">{[['scorecards','🎯 KPI Scorecards'],['bank','🏦 Retention Bank'],['loyalty','🎁 Loyalty Milestones']].map(([k,l])=><button key={k} className={`tab ${tab===k?'active':''}`} onClick={()=>setTab(k)}>{l}</button>)}</div>
+      <div className="tabs">{[['scorecards','🎯 KPI Scorecards'],['bank','🏦 Retention Bank'],['loyalty','🎁 Loyalty Milestones'],['advanced','📈 Advanced KPIs']].map(([k,l])=><button key={k} className={`tab ${tab===k?'active':''}`} onClick={()=>setTab(k)}>{l}</button>)}</div>
       {tab==='scorecards' && (
         <div className="space-y-4">
           <NewScorecardForm users={users} month={month} year={year} onCreated={refetchSc} />
@@ -107,6 +108,34 @@ export default function IncentivesPage() {
                 {!loyalty?.length&&<tr><td colSpan={7} className="text-center py-8" style={{color:'var(--gray-400)'}}>No loyalty milestones yet — seed one above</td></tr>}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+      {tab==='advanced' && (
+        <div className="space-y-4">
+          <NewAdvancedKpiForm users={users} month={month} year={year} onCreated={refetchAdv} />
+          <div className="card overflow-hidden">
+            <div className="card-header"><h3>Advanced Quality KPIs — {MONTHS[month]} {year}</h3><span className="badge badge-purple">10 quality metrics</span></div>
+            <div style={{overflowX:'auto'}}>
+            <table className="data-table"><thead><tr><th>Recruiter</th><th>1st Sub (hrs)</th><th>Sub. Accept %</th><th>Interview Ratio</th><th>Offer Ratio</th><th>Joining Ratio</th><th>Offer Drop %</th><th>No-Show %</th><th>Cand. Sat.</th><th>Client Sat.</th><th>90d Retention %</th></tr></thead>
+              <tbody>{(advKpis||[]).map((k:any)=>(
+                <tr key={k.id}>
+                  <td className="font-medium text-sm">{k.full_name}</td>
+                  <td className="text-sm">{k.time_to_first_sub_hrs ?? '—'}</td>
+                  <td className="text-sm">{k.submission_acceptance_pct!=null?`${k.submission_acceptance_pct}%`:'—'}</td>
+                  <td className="text-sm">{k.interview_ratio ?? '—'}</td>
+                  <td className="text-sm">{k.offer_ratio ?? '—'}</td>
+                  <td className="text-sm">{k.joining_ratio ?? '—'}</td>
+                  <td className="text-sm" style={{color:k.offer_drop_rate>20?'var(--red)':undefined}}>{k.offer_drop_rate!=null?`${k.offer_drop_rate}%`:'—'}</td>
+                  <td className="text-sm" style={{color:k.no_show_pct>10?'var(--red)':undefined}}>{k.no_show_pct!=null?`${k.no_show_pct}%`:'—'}</td>
+                  <td className="text-sm">{k.candidate_satisfaction ?? '—'}</td>
+                  <td className="text-sm">{k.client_satisfaction ?? '—'}</td>
+                  <td className="text-sm">{k.retention_90day_pct!=null?`${k.retention_90day_pct}%`:'—'}</td>
+                </tr>))}
+                {!advKpis?.length&&<tr><td colSpan={11} className="text-center py-8" style={{color:'var(--gray-400)'}}>No advanced KPIs recorded for this period — add one above</td></tr>}
+              </tbody>
+            </table>
+            </div>
           </div>
         </div>
       )}
@@ -198,6 +227,75 @@ function NumField({ label, value, onChange }: { label: string; value: string; on
     <div>
       <label className="block text-[10px] font-semibold text-gray-400 mb-1 uppercase">{label}</label>
       <input type="number" value={value} onChange={e => onChange(e.target.value)} style={{ ...input, width: 90 }} />
+    </div>
+  );
+}
+
+function NewAdvancedKpiForm({ users, month, year, onCreated }: { users: any[]; month: number; year: number; onCreated: () => void }) {
+  const [userId, setUserId] = useState('');
+  const [firstSub, setFirstSub] = useState('');
+  const [subAccept, setSubAccept] = useState('');
+  const [interviewR, setInterviewR] = useState('');
+  const [offerR, setOfferR] = useState('');
+  const [joiningR, setJoiningR] = useState('');
+  const [offerDrop, setOfferDrop] = useState('');
+  const [noShow, setNoShow] = useState('');
+  const [candSat, setCandSat] = useState('');
+  const [clientSat, setClientSat] = useState('');
+  const [retention90, setRetention90] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const num = (v: string) => (v === '' ? null : parseFloat(v));
+
+  async function submit() {
+    if (!userId) return;
+    setBusy(true); setErr('');
+    try {
+      await apiFetch('/incentives/advanced-kpis', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: userId, period_month: month, period_year: year,
+          time_to_first_sub_hrs: num(firstSub), submission_acceptance_pct: num(subAccept),
+          interview_ratio: num(interviewR), offer_ratio: num(offerR), joining_ratio: num(joiningR),
+          offer_drop_rate: num(offerDrop), no_show_pct: num(noShow),
+          candidate_satisfaction: num(candSat), client_satisfaction: num(clientSat),
+          retention_90day_pct: num(retention90),
+        }),
+      });
+      setUserId(''); setFirstSub(''); setSubAccept(''); setInterviewR(''); setOfferR(''); setJoiningR('');
+      setOfferDrop(''); setNoShow(''); setCandSat(''); setClientSat(''); setRetention90('');
+      onCreated();
+    } catch (e: any) { setErr(e.message || 'Failed to save advanced KPIs'); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      <div className="flex flex-wrap items-end gap-3">
+        <div>
+          <label className="block text-[10px] font-semibold text-gray-400 mb-1 uppercase">Recruiter</label>
+          <select value={userId} onChange={e => setUserId(e.target.value)} style={{ ...input, minWidth: 200 }}>
+            <option value="">Select…</option>
+            {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+          </select>
+        </div>
+        <NumField label="1st Sub (hrs)" value={firstSub} onChange={setFirstSub} />
+        <NumField label="Sub. Accept %" value={subAccept} onChange={setSubAccept} />
+        <NumField label="Interview Ratio" value={interviewR} onChange={setInterviewR} />
+        <NumField label="Offer Ratio" value={offerR} onChange={setOfferR} />
+        <NumField label="Joining Ratio" value={joiningR} onChange={setJoiningR} />
+        <NumField label="Offer Drop %" value={offerDrop} onChange={setOfferDrop} />
+        <NumField label="No-Show %" value={noShow} onChange={setNoShow} />
+        <NumField label="Cand. Sat." value={candSat} onChange={setCandSat} />
+        <NumField label="Client Sat." value={clientSat} onChange={setClientSat} />
+        <NumField label="90d Retention %" value={retention90} onChange={setRetention90} />
+        <button onClick={submit} disabled={!userId || busy} className={`${smallBtn} bg-[--color-primary]`} style={{ padding: '7px 14px' }}>
+          <Plus className="h-3 w-3 inline mr-1" /> {busy ? 'Saving…' : 'Save Advanced KPIs'}
+        </button>
+      </div>
+      <div className="text-xs mt-2" style={{color:'var(--gray-400)'}}>Leave a field blank to keep its existing value for this recruiter/period — only fields you enter are updated (upsert).</div>
+      {err && <div className="text-xs text-red-600 mt-2">{err}</div>}
     </div>
   );
 }

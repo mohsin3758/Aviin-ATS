@@ -420,7 +420,26 @@ async def match_recruiters_for_requisition(
 async def assign_requisition(requisition_id: str, actor: Actor = Depends(get_actor)):
     """T0/T1: auto-assign the top-ranked recruiter via assign_with_explanation()
     (sql/04_phase3_ai_engine.sql). Not HITL-gated - only "reassigned" is in
-    HARD RULE #10, not the initial "assigned"."""
+    HARD RULE #10, not the initial "assigned".
+
+    REAL BUG FIX (2026-08-12 resume/recruiter audit): this had no role
+    check at all — a plain recruiter could call it to reassign OTHER
+    recruiters to any requisition, unlike /assignments (assignments.py),
+    which already got this same gate in an earlier pass. Same bar as
+    every other assignment-mutating endpoint in this codebase.
+
+    First attempt at this fix used Depends(require_role("admin","manager"))
+    directly, which also rejected actor.role is None — the trusted-internal/
+    automation path (n8n, x-tenant-id header only, no JWT) — breaking a real,
+    pre-existing automated caller (caught by the S2 regression test, not by
+    manual review). require_role() is documented to always fail anonymous
+    callers by design, correct for genuinely human-only HITL actions, but
+    wrong here since this endpoint isn't HITL-gated at all. Switched to the
+    same inline exemption pattern already established in intelligence.py's
+    account-manager gate: role=None is trusted-internal, not "not admin/
+    manager", so it's exempt rather than blocked."""
+    if actor.role is not None and actor.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Requires role in ('admin', 'manager')")
     async with db.tenant_conn(actor.tenant_id) as conn:
         try:
             row = await conn.fetchrow("SELECT * FROM assign_with_explanation($1)", requisition_id)

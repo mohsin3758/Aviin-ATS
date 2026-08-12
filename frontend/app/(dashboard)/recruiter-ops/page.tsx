@@ -61,12 +61,30 @@ function GradeBadge({ grade }: { grade: string | null | undefined }) {
 // (Workforce Intelligence, 2026-08-11). The daily rollup job runs at
 // 02:30 IST for the *previous* day, so "today" itself is served live
 // from recruiter_activity_events directly, not the aggregate table.
+// recruiter_productivity_hourly/weekly (2026-08-11) were computed and
+// never surfaced — this toggle reuses the same BarChart against whichever
+// granularity's real rollup the recruiter picks, rather than a 3rd
+// duplicated chart block.
+const GRANULARITY_ENDPOINT: Record<string, string> = {
+  hourly: '/recruiter/activity/hourly?hours=48',
+  daily: '/recruiter/activity/trends?days=14',
+  weekly: '/recruiter/activity/weekly?weeks=12',
+};
+function granLabel(g: string, iso: string) {
+  if (g === 'hourly') return iso?.slice(11, 16);
+  return iso?.slice(0, 10);
+}
+
 function ActivityTab() {
   const { data: today } = useFetch<any>('/recruiter/activity/today');
-  const { data: trendData } = useFetch<any>('/recruiter/activity/trends?days=14');
+  const [gran, setGran] = useState<'hourly' | 'daily' | 'weekly'>('daily');
+  const { data: trendData } = useFetch<any>(GRANULARITY_ENDPOINT[gran]);
+  const { data: slaRows } = useFetch<any[]>('/recruiter/sla-tracking?days=30');
+  const [slaBreachedOnly, setSlaBreachedOnly] = useState(false);
   const t = today?.today || {};
   const score = today?.score;
-  const trends = (trendData?.trends || []).map((r: any) => ({ ...r, period_start: r.period_start?.slice(0, 10) }));
+  const trends = (trendData?.trends || []).map((r: any) => ({ ...r, period_start: granLabel(gran, r.period_start) }));
+  const slaFiltered = slaBreachedOnly ? (slaRows || []).filter((r: any) => r.breached === true || (!r.first_response_at && r.elapsed_hours > (r.sla_target_hours || 48))) : (slaRows || []);
 
   const stat = (label: string, value: any) => (
     <div style={{ ...card, textAlign: 'center' }}>
@@ -101,12 +119,73 @@ function ActivityTab() {
       </div>
 
       <div style={card}>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Candidates sourced — last 14 days</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Candidates sourced — {gran}</div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {(['hourly', 'daily', 'weekly'] as const).map(g => (
+              <button key={g} onClick={() => setGran(g)}
+                style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6, border: '1px solid #E2E8F0', cursor: 'pointer',
+                  background: gran === g ? '#0F172A' : 'white', color: gran === g ? 'white' : '#64748B', fontWeight: 600 }}>
+                {g[0].toUpperCase() + g.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
         <BarChart rows={trends} keyX="period_start" keyY="candidates_sourced" />
       </div>
       <div style={card}>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Submissions — last 14 days</div>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Submissions — {gran}</div>
         <BarChart rows={trends} keyX="period_start" keyY="candidates_submitted" color="#10B981" />
+      </div>
+
+      <div style={card}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>First-response SLA — my sourced candidates (last 30 days)</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#64748B', cursor: 'pointer' }}>
+            <input type="checkbox" checked={slaBreachedOnly} onChange={e => setSlaBreachedOnly(e.target.checked)} />
+            Breached only
+          </label>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: '#64748B', fontSize: 10, textTransform: 'uppercase' }}>
+                <th style={{ padding: '6px 8px' }}>Candidate</th>
+                <th style={{ padding: '6px 8px' }}>Sourced</th>
+                <th style={{ padding: '6px 8px' }}>First Response</th>
+                <th style={{ padding: '6px 8px' }}>Target (hrs)</th>
+                <th style={{ padding: '6px 8px' }}>Elapsed (hrs)</th>
+                <th style={{ padding: '6px 8px' }}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {slaFiltered.map((r: any) => {
+                const stillOpen = !r.first_response_at;
+                const overdue = stillOpen && r.elapsed_hours > (r.sla_target_hours || 48);
+                const breached = r.breached === true || overdue;
+                return (
+                  <tr key={r.id} style={{ borderTop: '1px solid #F1F5F9' }}>
+                    <td style={{ padding: '8px' }}>{r.candidate_name}</td>
+                    <td style={{ padding: '8px' }}>{new Date(r.sourced_at).toLocaleString()}</td>
+                    <td style={{ padding: '8px' }}>{r.first_response_at ? new Date(r.first_response_at).toLocaleString() : (stillOpen ? '— still open' : '—')}</td>
+                    <td style={{ padding: '8px' }}>{r.sla_target_hours}</td>
+                    <td style={{ padding: '8px' }}>{Number(r.elapsed_hours).toFixed(1)}</td>
+                    <td style={{ padding: '8px' }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                        background: breached ? '#fef2f2' : (stillOpen ? '#fffbeb' : '#f0fdf4'),
+                        color: breached ? '#dc2626' : (stillOpen ? '#b45309' : '#15803d') }}>
+                        {breached ? 'Breached' : stillOpen ? 'Pending' : 'Met'}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!slaFiltered.length && (
+                <tr><td colSpan={6} style={{ padding: 16, textAlign: 'center', color: '#94A3B8' }}>No sourced candidates in this window.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -121,11 +200,14 @@ function LeaderboardTab() {
     setCanView(['admin', 'super_admin', 'manager'].includes(role));
   }, []);
   const { data: rows, loading } = useFetch<any[]>(canView ? '/manager/activity-leaderboard' : null);
+  const [slaBreachedOnly, setSlaBreachedOnly] = useState(true);
+  const { data: slaRows } = useFetch<any[]>(canView ? `/manager/sla-tracking?days=30&breached_only=${slaBreachedOnly}` : null);
 
   if (!canView) {
     return <div style={{ ...card, textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>Team Leaderboard is visible to managers and admins.</div>;
   }
   return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
     <div style={card}>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Team activity leaderboard (today / this week)</div>
       {loading && <p style={{ fontSize: 12, color: '#94A3B8' }}>Loading…</p>}
@@ -160,6 +242,56 @@ function LeaderboardTab() {
           </tbody>
         </table>
       </div>
+    </div>
+    <div style={card}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Team first-response SLA (last 30 days)</div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#64748B', cursor: 'pointer' }}>
+          <input type="checkbox" checked={slaBreachedOnly} onChange={e => setSlaBreachedOnly(e.target.checked)} />
+          Breached / overdue only
+        </label>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ textAlign: 'left', color: '#64748B', fontSize: 10, textTransform: 'uppercase' }}>
+              <th style={{ padding: '6px 8px' }}>Recruiter</th>
+              <th style={{ padding: '6px 8px' }}>Candidate</th>
+              <th style={{ padding: '6px 8px' }}>Sourced</th>
+              <th style={{ padding: '6px 8px' }}>Target (hrs)</th>
+              <th style={{ padding: '6px 8px' }}>Elapsed (hrs)</th>
+              <th style={{ padding: '6px 8px' }}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(slaRows || []).map((r: any) => {
+              const stillOpen = !r.first_response_at;
+              const overdue = stillOpen && r.elapsed_hours > (r.sla_target_hours || 48);
+              const breached = r.breached === true || overdue;
+              return (
+                <tr key={r.id} style={{ borderTop: '1px solid #F1F5F9' }}>
+                  <td style={{ padding: '8px' }}>{r.recruiter_name}</td>
+                  <td style={{ padding: '8px' }}>{r.candidate_name}</td>
+                  <td style={{ padding: '8px' }}>{new Date(r.sourced_at).toLocaleString()}</td>
+                  <td style={{ padding: '8px' }}>{r.sla_target_hours}</td>
+                  <td style={{ padding: '8px' }}>{Number(r.elapsed_hours).toFixed(1)}</td>
+                  <td style={{ padding: '8px' }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                      background: breached ? '#fef2f2' : (stillOpen ? '#fffbeb' : '#f0fdf4'),
+                      color: breached ? '#dc2626' : (stillOpen ? '#b45309' : '#15803d') }}>
+                      {breached ? 'Breached' : stillOpen ? 'Pending' : 'Met'}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+            {!(slaRows || []).length && (
+              <tr><td colSpan={6} style={{ padding: 16, textAlign: 'center', color: '#94A3B8' }}>{slaBreachedOnly ? 'No breaches — everyone is within SLA.' : 'No sourced candidates in this window.'}</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
     </div>
   );
 }
@@ -373,6 +505,16 @@ function AutoAssignTab() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, any>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // REAL BUG FIX (2026-08-12 audit): POST /requisitions/{id}/assign had no
+  // role check at all — a plain recruiter could reassign OTHER recruiters
+  // to any requisition. Fixed server-side (require_role admin/manager);
+  // this mirrors that here so the button doesn't invite a 403, matching
+  // the same deferred-mount canManage pattern TargetsTab already uses.
+  const [canManage, setCanManage] = useState(false);
+  useEffect(() => {
+    const role = getTokenPayload()?.role || '';
+    setCanManage(['admin', 'super_admin', 'manager'].includes(role));
+  }, []);
 
   const activeReqIds = new Set((assignments || []).filter((a: any) => a.status === 'active').map((a: any) => a.requisition_id));
   const unassigned = (reqs || []).filter((r: any) => !activeReqIds.has(r.id) && !results[r.id]);
@@ -398,6 +540,11 @@ function AutoAssignTab() {
         <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>
           Auto-Assign picks the top-ranked recruiter via <code>assign_with_explanation()</code> (skill match + capacity), same as the button on each requisition's detail page — surfaced here so nothing needing a recruiter goes unnoticed.
         </p>
+        {!canManage && (
+          <div style={{ fontSize: 12, color: '#92400E', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, padding: '8px 10px', marginBottom: 12 }}>
+            Assigning recruiters to requisitions is an admin/manager action — you can see the queue below, but the Auto-Assign button is disabled for your role.
+          </div>
+        )}
         {loading && <div style={{ fontSize: 12, color: '#94A3B8' }}>Loading…</div>}
         {!loading && !unassigned.length && (
           <div style={{ fontSize: 12, color: '#16A34A', display: 'flex', alignItems: 'center', gap: 6 }}>✓ Every open requisition has an active recruiter assigned.</div>
@@ -409,8 +556,9 @@ function AutoAssignTab() {
               <div style={{ color: '#64748B' }}>{r.location || 'Remote'} · {r.positions_count} opening{r.positions_count > 1 ? 's' : ''}</div>
               {errors[r.id] && <div style={{ color: '#DC2626', marginTop: 4 }}>{errors[r.id]}</div>}
             </div>
-            <button onClick={() => autoAssign(r.id)} disabled={busyId === r.id}
-              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: busyId === r.id ? 'default' : 'pointer', flexShrink: 0 }}>
+            <button onClick={() => autoAssign(r.id)} disabled={busyId === r.id || !canManage}
+              title={!canManage ? 'Admin/manager only' : undefined}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 8, border: '1px solid #C7D2FE', background: !canManage ? '#F1F5F9' : '#EEF2FF', fontSize: 11, fontWeight: 700, color: !canManage ? '#94A3B8' : '#4338CA', cursor: busyId === r.id || !canManage ? 'default' : 'pointer', flexShrink: 0 }}>
               <Sparkles size={12} /> {busyId === r.id ? 'Assigning…' : 'Auto-Assign (AI)'}
             </button>
           </div>

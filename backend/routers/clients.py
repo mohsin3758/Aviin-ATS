@@ -41,7 +41,8 @@ async def list_clients(include_inactive: bool = False, actor: Actor = Depends(re
     async with db.tenant_conn(actor.tenant_id) as conn:
         where = "" if include_inactive else "WHERE is_active IS NOT FALSE"
         rows = await conn.fetch(
-            f"SELECT id, name, industry, priority_tier, is_active, created_at FROM clients {where} ORDER BY name")
+            f"SELECT id, name, industry, priority_tier, is_active, created_at, default_resume_template_id "
+            f"FROM clients {where} ORDER BY name")
         return [dict(r) for r in rows]
 
 

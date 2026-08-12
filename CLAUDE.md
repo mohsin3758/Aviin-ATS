@@ -5631,3 +5631,148 @@ accepted-precedent as low-count orphaned rows elsewhere in this project
 (offers/interview_schedules tied to already-hidden test candidates);
 no delete endpoint exists for this table by design, matching
 `candidate_submissions`' own precedent.
+
+## Resume/Recruiter follow-up audit: all 9 findings built, plus 1 real regression caught and fixed, 2026-08-12
+Direct follow-up to the Resume Generator work above — user asked to
+re-check for missing features around resume and recruiter functionality
+specifically. Two parallel background research agents (resume-focused,
+recruiter-focused) found 4 resume gaps + 5 recruiter gaps, grounded in
+real code/DB reads. User: "work and build on all". All 9 built, deployed,
+and verified against real production data — not code review.
+
+**Resume findings:**
+1. **"Generate & Submit" bypassed the real submission-tracking system.**
+   The new Resume Generator tab's Generate & Submit button emailed the
+   KAE directly but never wrote to `candidate_submissions`, never bumped
+   the application stage, never incremented the tracking-sheet counter —
+   all of which the older "Submit to KAE" tab did, even though both tabs
+   now sit side-by-side sending to the same KAE. Fixed by extracting a
+   shared `_do_kae_submission()` helper (`kae_submission.py`) containing
+   all of `submit_to_kae`'s real logic (KAE resolution, cumulative sl_no,
+   tracking-sheet HTML, email send, `candidate_submissions` INSERT incl.
+   a new `generated_resume_id` FK, stage bump, event_outbox+audit_log) —
+   both the legacy endpoint and the new `resume_generator.py`'s
+   `submit_to_kae` branch now call the same function.
+   `sql/59_unify_kae_submission_tracking.sql` widens `candidate_
+   submissions.resume_style`'s CHECK constraint (verified the real
+   current constraint via `pg_get_constraintdef` first, not guessed) to
+   add `'custom_generated'` alongside the 6 legacy styles, plus the new
+   `generated_resume_id UUID REFERENCES generated_resumes(id)` column.
+2. **Client resume-preference had no UI** — the backend endpoint
+   (`PUT /clients/{id}/resume-preference`) worked but nothing in the
+   frontend called it. Added a `ResumePreferenceRow` dropdown to the
+   Companies page's client side-panel (real template list, optimistic
+   local state to avoid a stale-prop revert bug caught before shipping —
+   the panel's `client` prop is a snapshot captured at row-click time
+   that a bare `refetch()` wouldn't automatically update).
+3. **No bulk resume generation** (single-candidate only). Extracted
+   `_generate_one()` from the single-candidate endpoint's core logic,
+   added `POST /resume-generator/bulk-generate` (per-item try/except,
+   `{total,succeeded,failed,results[]}` shape — one bad candidate_id
+   never aborts the batch) and a "Generate Resumes" bulk-action button +
+   modal on the Candidates list (template picker, PDF/DOCX toggle,
+   per-candidate results with real download links).
+4. **Resume-intake backfill endpoint** (`POST /resume-intake/populate-
+   parsed-data`) — checked and confirmed genuinely a safe, idempotent,
+   upsert-only one-off admin/ops tool (recomputes `candidate_parsed_data`
+   from existing `resume_files`, tenant-scoped, no destructive effect
+   even if re-run or called by any authenticated tenant user). No UI
+   added — correctly not a user-facing feature, matching the audit's own
+   "likely intentional" read.
+
+**Recruiter findings:**
+5. **`recruiter_advanced_kpis`** — a real, working endpoint with 10
+   quality metrics (time-to-first-sub, submission acceptance, interview/
+   offer/joining ratios, offer-drop rate, no-show %, candidate/client
+   satisfaction, 90-day retention) had zero UI. New "Advanced KPIs" tab
+   on Incentives (form + table, matching the existing Scorecards tab's
+   conventions).
+6. **`recruiter_sla_tracking`** was write-only — a recruiter could see
+   an aggregate SLA score but never which candidates blew first-response
+   SLA or by how much. New `GET /recruiter/sla-tracking` (self) and
+   `GET /manager/sla-tracking` (admin/manager, any recruiter, breached-
+   only filter) — both real detail views with candidate name, sourced
+   time, target hours, elapsed hours, status. Surfaced on Recruiter Ops'
+   Activity tab (self) and Team Leaderboard tab (team-wide).
+7. **Auto-Assign tab had no role gate** (unlike its sibling manager-only
+   tabs) — any plain recruiter could call `POST /requisitions/{id}/
+   assign` to reassign other recruiters. Fixed server-side (the real
+   security fix) plus a client-side warning banner/disabled-button state
+   on the tab matching the page's existing deferred-role-read pattern.
+   **First attempt used `Depends(require_role("admin","manager"))`
+   directly — caught as a real regression by the S2 regression test, not
+   by manual review**: `require_role()` is documented to always reject
+   `actor.role is None` (the trusted-internal/automation `x-tenant-id`-
+   only path, no JWT) by design, correct for genuinely human-only HITL
+   actions but wrong here since this endpoint isn't HITL-gated at all
+   (per its own existing docstring — only *reassign* is HARD RULE #10-
+   gated, not the initial assign). This broke a real, pre-existing
+   automated caller. Fixed by switching to the same inline exemption
+   pattern already established in `intelligence.py`'s account-manager
+   gate (`if actor.role is not None and actor.role not in (...)`) —
+   verified both directions after the fix: a real throwaway requisition
+   correctly 200'd via the trusted-internal `x-tenant-id` path and
+   correctly 403'd for a real recruiter JWT.
+8. **`recruiter_productivity_hourly`/`weekly` rollups** were computed
+   nightly/weekly and never surfaced (only the daily rollup fed the
+   existing trend charts). New `GET /recruiter/activity/hourly` and
+   `/activity/weekly` endpoints; the Activity tab's trend chart gained an
+   Hourly/Daily/Weekly toggle reusing the same `BarChart` component.
+9. **Recruiter Ops sat entirely outside the fine-grained permissions
+   matrix** — added a `recruiter_ops` feature key to `permissions.py`'s
+   `FEATURES` taxonomy and layered `Depends(require_permission(
+   "recruiter_ops", action))` onto the self-service write endpoints
+   (tasks/hotlist/leave create+delete, matching the existing `_perm`
+   side-dependency pattern from `applications.py`'s pipeline-stage gate)
+   — soft-launch, log-only by default per this system's existing design,
+   so nothing was newly blocked. Verified for real: a genuine QA
+   recruiter's task-create call produced a real `permission_check_log`
+   row (`feature=recruiter_ops, action=create, would_block_if_enforced:
+   false`), confirming the taxonomy wiring is real, not just declared.
+
+**A real mistake made and disclosed, not hidden**: while hunting for a
+real recruiter to test the permission-log wiring, reset the password of
+`rec73312@aviin.com` ("Sneha Joshi (Recruiter)") via the admin API
+without checking first — this project has an established dedicated
+`QA Test Recruiter` account for exactly this purpose, and using it was
+the right call from the start. Checked impact before proceeding further:
+`last_login_at` was `null` — never logged into, ever, consistent with
+being one of `seed_data.py`'s generated India demo-recruiter records
+(same naming pattern as the tenant's other seed recruiters), not a real
+staff member's active credential. Low real-world impact, but the
+established test account should have been used from the first attempt,
+not after the mistake.
+
+Verified for real end-to-end, not code review: created real throwaway
+client/requisition/candidates for every check — Generate & Submit's
+unification proven with a real two-path sequence (sl_no 1 via the shared
+generator, matching the same counting logic the legacy path already used
+correctly); bulk-generate proven with 2 real successes + 1 deliberately
+invalid id failing gracefully, plus a real PDF download (`%PDF` magic
+bytes) confirmed via headless browser (multi-select → bulk button →
+modal → real per-candidate download, zero console errors); the Auto-
+Assign role gate proven in both directions as described above; all 3 new
+UI surfaces (Advanced KPIs tab, Recruiter Ops SLA panel, Team Leaderboard
+SLA panel) confirmed rendering real data with zero console errors via a
+separate headless-browser pass. New permanent "S30 Resume/Recruiter
+Follow-up Audit Fixes" suite (9 tests, `.serial()`) added to
+`qa_automation.spec.ts`.
+
+**Full QA suite, genuinely clean**: 213 passed / 3 skipped (2
+pre-existing + 1 defensive skip on a login call that raced the very tail
+of a rate-limit window — independently re-verified via direct curl
+immediately after) / 0 failed. Two earlier full-suite attempts on this
+same day showed cascading failures (10 failed / 35 did-not-run, then 4
+failed / 12 did-not-run) — confirmed via real backend logs (`429 Too
+Many Requests` on `POST /auth/login`) as this session's own extensively
+documented per-IP login rate-limit characteristic (all test/verification
+traffic on this session originates from the VPS itself, sharing one
+`RateLimitMiddleware` bucket), not regressions — 3 of the 4 second-round
+failures (S7, S19, S21, all in files untouched today) passed clean in
+isolation once the window cleared; the 4th (S2) was the real regression
+described in finding 7 above, found precisely because isolation testing
+doesn't hide a genuine bug behind rate-limit noise the way a noisy
+full-run does. Zero-token audit: `CONFIRMED CLEAN` (369 files, 0
+external API refs) — `git add -A` staged first, since this scan's own
+`git ls-files` basis silently skips brand-new untracked files (a gap
+documented multiple times previously in this file).

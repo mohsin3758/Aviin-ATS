@@ -124,6 +124,90 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
   );
 }
 
+// REAL GAP FIX (2026-08-12 audit): Resume Generator was single-candidate
+// only. Deliberately scoped tight — one template applied to the whole
+// batch, no per-candidate live preview (that would mean N preview calls
+// and a much bigger UI), matching what the audit finding actually named.
+function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClose:()=>void}) {
+  const {data:templates} = useFetch<any[]>('/resume-generator/templates');
+  const [templateId,setTemplateId] = useState('');
+  const [outputFormat,setOutputFormat] = useState<'pdf'|'docx'>('pdf');
+  const [generating,setGenerating] = useState(false);
+  const [result,setResult] = useState<any>(null);
+
+  async function run() {
+    if (!templateId) { alert('Select a resume format'); return; }
+    setGenerating(true);
+    try {
+      const r = await apiFetch('/resume-generator/bulk-generate', {
+        method:'POST', body:JSON.stringify({ candidate_ids:candidateIds, template_id:templateId, output_format:outputFormat }),
+      });
+      setResult(r);
+    } catch(e:any) { alert(e?.message||'Bulk generation failed'); }
+    finally { setGenerating(false); }
+  }
+
+  async function download(genId:string, ext:string) {
+    const resp = await fetch(`${API}/resume-generator/${genId}/download`, { headers: authHeaders() });
+    if (!resp.ok) { alert('Download failed: '+resp.status); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=`resume.${ext}`; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+  }
+
+  const OV:any={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'};
+  return (
+    <div style={OV} onClick={onClose}>
+      <div style={{background:'white',borderRadius:'16px',padding:'28px',width:'100%',maxWidth:'480px',maxHeight:'85vh',overflowY:'auto',boxShadow:'0 20px 60px rgba(0,0,0,0.25)'}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
+          <h2 style={{fontSize:'16px',fontWeight:'700',color:'#0f172a',margin:0}}>Generate Resumes for {candidateIds.length} Candidate{candidateIds.length>1?'s':''}</h2>
+          <button onClick={onClose} style={{border:'none',background:'none',cursor:'pointer',color:'#94a3b8',padding:'4px'}}><X size={18}/></button>
+        </div>
+        {result ? (
+          <div>
+            <div style={{textAlign:'center',padding:'12px 0 20px'}}>
+              <div style={{fontSize:'32px',marginBottom:'8px'}}>{result.failed===0?'✅':'⚠️'}</div>
+              <p style={{fontSize:'14px',fontWeight:'600',color:result.failed===0?'#16a34a':'#d97706'}}>{result.succeeded} generated, {result.failed} failed</p>
+            </div>
+            <div style={{maxHeight:'260px',overflowY:'auto',border:'1px solid #e2e8f0',borderRadius:'8px'}}>
+              {result.results.map((r:any,i:number)=>(
+                <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',borderBottom:i<result.results.length-1?'1px solid #f1f5f9':'none',fontSize:'12px'}}>
+                  <span style={{color:r.status==='completed'?'#374151':'#dc2626'}}>{r.status==='completed'?'Generated':`Failed: ${r.error||'unknown'}`}</span>
+                  {r.status==='completed' && (
+                    <button onClick={()=>download(r.generated_resume_id, outputFormat)} style={{border:'none',background:'none',color:'#1e40af',cursor:'pointer',display:'flex',alignItems:'center',gap:'4px',fontSize:'11px',fontWeight:'600'}}><Download size={12}/>Download</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',marginTop:'16px'}}>
+              <button onClick={onClose} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Close</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Resume Format</label>
+            <select value={templateId} onChange={e=>setTemplateId(e.target.value)} style={{width:'100%',padding:'10px 12px',borderRadius:'8px',border:'1px solid #e2e8f0',fontSize:'13px',outline:'none',marginBottom:'14px'}}>
+              <option value="">-- Choose a format --</option>
+              {(templates||[]).map((t:any)=><option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Output</label>
+            <div style={{display:'flex',gap:'8px',marginBottom:'20px'}}>
+              {(['pdf','docx'] as const).map(f=>(
+                <button key={f} onClick={()=>setOutputFormat(f)} style={{padding:'6px 14px',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:outputFormat===f?'1.5px solid #1e40af':'1px solid #e2e8f0',background:outputFormat===f?'#eff6ff':'white',color:outputFormat===f?'#1e40af':'#475569'}}>{f.toUpperCase()}</button>
+              ))}
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:'10px'}}>
+              <button onClick={onClose} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Cancel</button>
+              <button onClick={run} disabled={generating||!templateId} style={{padding:'9px 18px',borderRadius:'8px',border:'none',background:generating||!templateId?'#94a3b8':'#7c3aed',color:'white',cursor:generating||!templateId?'not-allowed':'pointer',fontSize:'13px',fontWeight:'600'}}>{generating?'Generating...':`Generate ${candidateIds.length} Resume${candidateIds.length>1?'s':''}`}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Quick-View Drawer ─────────────────────────────────────────────────────────
 function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChanged}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void;stageMap:Record<string,{bg:string;color:string;label:string}>;allTags:any[];onTagsChanged:()=>void}) {
   const {data:apps} = useFetch<any>(`/candidates/${candidate.id}/applications`);
@@ -540,6 +624,7 @@ export default function CandidatesPage() {
   // selection + modals
   const [selected,setSelected] = useState<Set<string>>(new Set());
   const [bulkAssignOpen,setBulkAssignOpen] = useState(false);
+  const [bulkResumeGenOpen,setBulkResumeGenOpen] = useState(false);
   const [showDups,setShowDups] = useState(false);
   const [showBulkCV,setShowBulkCV] = useState(false);
 
@@ -993,6 +1078,7 @@ export default function CandidatesPage() {
           <span style={{fontSize:'13px',fontWeight:'700',color:'white'}}>{selected.size} selected</span>
           <div style={{width:'1px',height:'20px',background:'rgba(255,255,255,0.2)'}}/>
           <button onClick={()=>setBulkAssignOpen(true)} style={{display:'flex',alignItems:'center',gap:'6px',padding:'7px 14px',borderRadius:'8px',border:'none',background:'#1e40af',color:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600'}}><Users size={13}/>Add to Pipeline</button>
+          <button onClick={()=>setBulkResumeGenOpen(true)} style={{display:'flex',alignItems:'center',gap:'6px',padding:'7px 14px',borderRadius:'8px',border:'none',background:'#7c3aed',color:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600'}}><FileText size={13}/>Generate Resumes</button>
           <button onClick={handleBulkDelete} style={{display:'flex',alignItems:'center',gap:'6px',padding:'7px 14px',borderRadius:'8px',border:'none',background:'#dc2626',color:'white',cursor:'pointer',fontSize:'12px',fontWeight:'600'}}><Trash2 size={13}/>Delete {selected.size}</button>
           <button onClick={()=>setSelected(new Set())} style={{display:'flex',alignItems:'center',gap:'4px',padding:'7px 10px',borderRadius:'8px',border:'1px solid rgba(255,255,255,0.2)',background:'transparent',color:'rgba(255,255,255,0.7)',cursor:'pointer',fontSize:'12px'}}><X size={13}/>Clear</button>
         </div>
@@ -1012,6 +1098,7 @@ export default function CandidatesPage() {
 
       {/* ── Bulk Assign modal ─────────────────────────────────────────────── */}
       {bulkAssignOpen && <BulkAssignModal candidateIds={Array.from(selected)} onClose={()=>setBulkAssignOpen(false)} onDone={()=>setSelected(new Set())}/>}
+      {bulkResumeGenOpen && <BulkResumeGenModal candidateIds={Array.from(selected)} onClose={()=>setBulkResumeGenOpen(false)}/>}
 
       {/* ── Add / Edit modal ─────────────────────────────────────────────── */}
       <Modal open={showModal} onClose={()=>setShowModal(false)} title={editId?'Edit Candidate':'Add New Candidate'} subtitle="Fill in candidate details" size="lg"

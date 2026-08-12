@@ -251,6 +251,50 @@ async def activity_trends(days: int = 30, actor: Actor = Depends(get_actor)):
     return {"trends": [dict(r) for r in rows]}
 
 
+# recruiter_productivity_hourly/weekly (2026-08-11, Workforce Intelligence)
+# were computed nightly/weekly and never surfaced anywhere — only the
+# _daily_ rollup fed the existing trend charts above. Same self-view
+# convention as /activity/trends.
+@router.get("/activity/hourly")
+async def activity_hourly(hours: int = 48, actor: Actor = Depends(get_actor)):
+    """Real hourly productivity trend for the logged-in recruiter over the
+    last N hours (default 48), from recruiter_productivity_hourly."""
+    uid = actor.user_id
+    if uid is None:
+        return {"trends": []}
+    hours = max(1, min(hours, 168))
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT period_start, candidates_sourced, candidates_screened, candidates_submitted,
+                   interviews_completed, offers_generated, offers_accepted, placements,
+                   active_mins, idle_mins, productivity_pct
+            FROM recruiter_productivity_hourly
+            WHERE tenant_id=$1 AND recruiter_id=$2 AND period_start >= now() - ($3 || ' hours')::interval
+            ORDER BY period_start ASC
+        """, actor.tenant_id, uid, str(hours))
+    return {"trends": [dict(r) for r in rows]}
+
+
+@router.get("/activity/weekly")
+async def activity_weekly(weeks: int = 12, actor: Actor = Depends(get_actor)):
+    """Real weekly productivity trend for the logged-in recruiter over the
+    last N weeks (default 12), from recruiter_productivity_weekly."""
+    uid = actor.user_id
+    if uid is None:
+        return {"trends": []}
+    weeks = max(1, min(weeks, 52))
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT period_start, candidates_sourced, candidates_screened, candidates_submitted,
+                   interviews_completed, offers_generated, offers_accepted, placements,
+                   active_mins, idle_mins, productivity_pct
+            FROM recruiter_productivity_weekly
+            WHERE tenant_id=$1 AND recruiter_id=$2 AND period_start >= CURRENT_DATE - ($3::int * 7)
+            ORDER BY period_start ASC
+        """, actor.tenant_id, uid, weeks)
+    return {"trends": [dict(r) for r in rows]}
+
+
 @manager_router.get("/activity-leaderboard")
 async def activity_leaderboard(actor: Actor = Depends(require_role("admin", "manager"))):
     """Team activity leaderboard — reads v_recruiter_activity_summary,
@@ -363,4 +407,47 @@ async def my_risk_history(weeks: int = 8, actor: Actor = Depends(get_actor)):
             """SELECT * FROM recruiter_risk_scores WHERE tenant_id=$1 AND recruiter_id=$2
                ORDER BY period_start DESC LIMIT $3""",
             actor.tenant_id, actor.user_id, weeks)
+    return [dict(r) for r in rows]
+
+
+# recruiter_sla_tracking (2026-08-11, Workforce Intelligence) was write-only
+# until this pass (2026-08-12 audit) — the daily performance-score job
+# reads it to compute an aggregate SLA percentage, but nothing ever
+# surfaced which *specific* candidates blew first-response SLA, or by how
+# much. Same self/manager split as risk-scores above: a recruiter sees
+# their own breaches, a manager/admin sees anyone's.
+@router.get("/sla-tracking")
+async def my_sla_tracking(breached_only: bool = False, days: int = 30,
+                           actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        q = """SELECT t.*, c.full_name AS candidate_name,
+                      EXTRACT(EPOCH FROM (COALESCE(t.first_response_at, now()) - t.sourced_at)) / 3600.0 AS elapsed_hours
+               FROM recruiter_sla_tracking t
+               JOIN candidates c ON c.id = t.candidate_id
+               WHERE t.tenant_id=$1 AND t.recruiter_id=$2 AND t.sourced_at >= now() - ($3 || ' days')::interval"""
+        params = [actor.tenant_id, actor.user_id, str(days)]
+        if breached_only:
+            q += " AND (t.breached IS TRUE OR (t.first_response_at IS NULL AND now() > t.sourced_at + (t.sla_target_hours || ' hours')::interval))"
+        q += " ORDER BY t.sourced_at DESC"
+        rows = await conn.fetch(q, *params)
+    return [dict(r) for r in rows]
+
+
+@manager_router.get("/sla-tracking")
+async def team_sla_tracking(recruiter_id: str | None = None, breached_only: bool = False,
+                             days: int = 30, actor: Actor = Depends(require_role("admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        q = """SELECT t.*, c.full_name AS candidate_name, u.full_name AS recruiter_name,
+                      EXTRACT(EPOCH FROM (COALESCE(t.first_response_at, now()) - t.sourced_at)) / 3600.0 AS elapsed_hours
+               FROM recruiter_sla_tracking t
+               JOIN candidates c ON c.id = t.candidate_id
+               JOIN users u ON u.id = t.recruiter_id
+               WHERE t.tenant_id=$1 AND t.sourced_at >= now() - ($2 || ' days')::interval"""
+        params = [actor.tenant_id, str(days)]
+        if recruiter_id:
+            params.append(recruiter_id); q += f" AND t.recruiter_id=${len(params)}"
+        if breached_only:
+            q += " AND (t.breached IS TRUE OR (t.first_response_at IS NULL AND now() > t.sourced_at + (t.sla_target_hours || ' hours')::interval))"
+        q += " ORDER BY t.sourced_at DESC"
+        rows = await conn.fetch(q, *params)
     return [dict(r) for r in rows]
