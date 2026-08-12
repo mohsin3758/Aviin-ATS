@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { ResumeGeneratorModal } from '@/components/ResumeGeneratorModal';
 import { authHeaders, API } from '@/lib/auth';
 import {
   Search, Plus, X, RotateCcw, ChevronDown, MapPin, Users, Briefcase,
@@ -628,7 +629,8 @@ function PipelineInner() {
             refreshStats();
           }}
           onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
-          drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES} />
+          drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES}
+          requisitionId={selectedJobId} clientName={selectedJob?.client_name} />
       )}
 
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
@@ -751,7 +753,7 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart, selec
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages, requisitionId, clientName }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -806,6 +808,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
               { key: 'nda', icon: <FileSignature size={12} />, label: 'NDA' },
               { key: 'kae', icon: <Send size={12} />, label: 'Submit to KAE' },
+              { key: 'resume-gen', icon: <FileText size={12} />, label: 'Generate Resume' },
               { key: 'call-letter', icon: <Calendar size={12} />, label: 'Call Letter' },
               { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes', count: Array.isArray(app.app_notes) ? app.app_notes.length : 0 },
               { key: 'scorecards', icon: <Star size={12} />, label: 'Scorecards' },
@@ -827,6 +830,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
           {drawerTab === 'profile' && <ProfileTab app={app} apiUrl={API_URL} />}
           {drawerTab === 'nda' && <NdaTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'kae' && <SubmitKaeTab appId={app.id} showToast={showToast} onSubmitted={onSubmittedToKae} />}
+          {drawerTab === 'resume-gen' && <ResumeGenTab candidateId={app.candidate_id} candidateName={app.candidate_name} requisitionId={requisitionId} clientName={clientName} />}
           {drawerTab === 'call-letter' && <CallLetterTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'notes' && <NotesTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'scorecards' && <ScorecardsTab appId={app.id} showToast={showToast} />}
@@ -1192,6 +1196,36 @@ function CallLetterTab({ appId, showToast }: any) {
           <Send size={13} /> {busy === 'send' ? 'Sending…' : sendEmail ? 'Generate & Send' : 'Generate'}
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── Generate Resume Tab (opens the shared ResumeGeneratorModal with real
+// job/client context — same engine Submit to KAE's own resume formats
+// now call under the hood, but with the full compositional config: editable
+// company replacement, per-field contact toggles, project focus, and
+// Generate & Submit straight to the assigned KAE) ──────────────────────────
+function ResumeGenTab({ candidateId, candidateName, requisitionId, clientName }: any) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ padding: '20px 16px', textAlign: 'center' }}>
+      <FileText size={28} style={{ color: '#7c3aed', marginBottom: 10 }} />
+      <p style={{ fontSize: 12.5, color: '#64748b', marginBottom: 16, lineHeight: 1.5 }}>
+        Generate a privacy-controlled, company-replaced, or project-focused resume
+        version for {candidateName || 'this candidate'}{clientName ? ` — for ${clientName}` : ''}.
+        The original resume is never modified.
+      </p>
+      <button onClick={() => setOpen(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 18px', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+        <FileText size={13} /> Open Resume Generator
+      </button>
+      {open && candidateId && (
+        <ResumeGeneratorModal
+          candidate={{ id: candidateId, full_name: candidateName }}
+          requisitionId={requisitionId}
+          clientName={clientName}
+          onClose={() => setOpen(false)}
+        />
+      )}
     </div>
   );
 }

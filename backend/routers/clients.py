@@ -63,6 +63,31 @@ async def update_client_tier(client_id: str, body: ClientTierIn, actor: Actor = 
     return dict(row)
 
 
+class ClientResumePreferenceIn(BaseModel):
+    default_resume_template_id: Optional[str] = None
+
+
+@router.put("/clients/{client_id}/resume-preference")
+async def update_client_resume_preference(client_id: str, body: ClientResumePreferenceIn, actor: Actor = Depends(require_permission("companies", "update"))):
+    """Which resume format this client prefers by default — feeds the
+    Resume Generator's auto-recommendation (GET /resume-generator/
+    candidates/{id}/recommend, spec 52.9)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        if body.default_resume_template_id:
+            valid = await conn.fetchval(
+                "SELECT 1 FROM resume_templates WHERE id=$1 AND tenant_id=$2",
+                body.default_resume_template_id, actor.tenant_id)
+            if not valid:
+                raise HTTPException(400, "Unknown resume template")
+        row = await conn.fetchrow(
+            "UPDATE clients SET default_resume_template_id=$1 WHERE id=$2 RETURNING id, name, default_resume_template_id",
+            body.default_resume_template_id, client_id,
+        )
+        if not row:
+            raise HTTPException(404, "Client not found")
+    return dict(row)
+
+
 @router.post("/clients", status_code=201)
 async def create_client(body: ClientIn, actor: Actor = Depends(require_permission("companies", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:

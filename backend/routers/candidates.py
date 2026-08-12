@@ -543,7 +543,7 @@ async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get
     near-duplicate PDF builder."""
     from fastapi.responses import StreamingResponse
     import io as _io, re as _re
-    from routers.kae_submission import _build_clean_resume_pdf
+    from services.resume_formatting import render_resume_pdf
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
@@ -552,7 +552,10 @@ async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get
             candidate_id, actor.tenant_id)
     if not row:
         raise HTTPException(404, "Candidate not found")
-    pdf_bytes = _build_clean_resume_pdf(row)
+    pdf_bytes = render_resume_pdf(dict(row), {
+        "name_format": "full", "show_mobile": False, "show_email": False, "show_location": True,
+        "company_mode": "original", "project_mode": "include",
+    })
     safe_name = _re.sub(r"[^A-Za-z0-9_-]+", "_", row["full_name"] or "candidate")
     return StreamingResponse(
         _io.BytesIO(pdf_bytes), media_type="application/pdf",

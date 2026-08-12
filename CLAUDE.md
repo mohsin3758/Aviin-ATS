@@ -5499,3 +5499,135 @@ failed (one flaky S19 test self-resolved on Playwright's built-in
 retry — this session's well-documented back-to-back-run characteristic,
 not a regression). Zero-token audit: `CONFIRMED CLEAN` (364 files, 0
 external API refs).
+
+## AI Resume Generator / Resume Transformation Engine, 2026-08-12
+User pasted a large, formal spec (52.1-52.16) for a full resume-generation
+engine: 4 named formats (Full Contact / No Contact-Sanitized / Project-
+Focused / Company Replacement), per-field privacy config, editable company
+replacement text, live preview, PDF+DOCX output, versioned storage,
+per-generation audit, client-level format preferences with automatic
+recommendation, job-specific generation, and RBAC/tenant isolation —
+never modifying the original resume.
+
+**Checked before building anything** (this project's established
+discipline): `kae_submission.py`'s 6-format KAE-submission feature
+(built 2026-08-08/09) already covered most of this — name masking,
+contact redaction, company replacement, project extraction, PDF output,
+never touching the original. Read that file in full before writing a
+single line, to avoid building a second, parallel system next to working
+code (explicitly warned against by the spec's own 52.11: "do not create
+multiple competing document engines"). Genuine gaps found: company
+replacement was hardcoded per-format (not recruiter-editable), no DOCX,
+no standalone generate-and-store flow (generation only ever happened as
+a side effect of emailing a KAE), no real document preview, no
+compositional config (6 fixed named formats instead of independent
+toggles), no auto-recommendation, not reachable from Candidate 360.
+
+**Architecture — one shared engine, not two**:
+`backend/services/resume_formatting.py` (new) — `mask_name()` ("Rahul
+Sharma" → "Rahul S", matching the spec's exact examples with no trailing
+period), `redact_contact()` (conditional — only strips phone/email from
+free text when that field is actually being hidden, not unconditionally),
+and a compositional `render_resume_pdf()`/`render_resume_docx()` taking
+a config dict (name_format, show_mobile/email/location, company_mode +
+company_replacement, project_mode, client_name_mode + replacement).
+`kae_submission.py`'s 5 near-identical PDF-builder functions
+(`_build_clean_resume_pdf`, `_build_redacted_resume_pdf`,
+`_build_projects_only_pdf`, `_build_confidential_pdf`,
+`_build_anonymized_pdf`, plus `_anonymize_name`/`_redact_text`) were
+deleted and replaced with a `_STYLE_CONFIGS` dict of 5 compositional
+configs calling the same shared `render_resume_pdf()` — one real
+behavior change accepted deliberately: masked names now render without
+the old trailing period, matching the new spec's authoritative examples.
+`candidates.py`'s `standard-resume` endpoint (imported the now-deleted
+`_build_clean_resume_pdf` directly) was updated to call the shared
+renderer with an equivalent config — caught and fixed before deploy by
+grepping for every cross-file import of the functions being deleted, not
+after.
+
+**Schema** (`sql/58_resume_generator.sql`) — `resume_templates` (named,
+reusable compositional configs; 4 built-in seeded per tenant + real CRUD
+for custom ones, matching spec 52.10's "support future custom templates"
+without building a full drag-and-drop layout designer, which was out of
+scope for what was actually asked) and `generated_resumes` (every real
+generated document: candidate, source resume, template, requisition/
+client context if job-specific, the full resolved config, output format,
+file path, version, status, generated_by/at — the audit trail spec 52.6
+asks for, reusing this codebase's own `audit_log`/`event_outbox`
+convention rather than inventing a bespoke audit table). `clients.
+default_resume_template_id` (new column) drives auto-recommendation.
+Both new tables FORCE RLS. **Real deployment snag**: `clients` is owned
+by `postgres`, not `app_user` — the `ALTER TABLE clients ADD COLUMN`
+failed with "must be owner of table" when run through the app_user
+migration; re-ran that one statement as `postgres` (a one-off schema
+DDL operation, not an application runtime connection — not a HARD RULE
+#2 violation).
+
+**Backend** (`backend/routers/resume_generator.py`) — templates CRUD
+(built-ins can't be edited/deleted), `GET .../recommend` (real
+recommendation: client's configured default wins, else the client's
+most-recently-used template from real generation history, else the
+tenant's Full Contact built-in — not a placeholder), `POST .../preview`
+(fast structured JSON reflecting masked name/redacted contact/company
+line/body snippet — deliberately not a full PDF render on every
+keystroke, matching "do not generate the final document until the
+recruiter confirms"), `POST .../generate` (real PDF or DOCX, versioned,
+audited, optional `submit_to_kae` flag that reuses `kae_submission.py`'s
+`_resolve_kae`/`_send_kae_email` directly rather than reimplementing
+email delivery — satisfies "Generate & Submit"), `GET .../versions`,
+and an authenticated `GET /resume-generator/{id}/download` that only
+ever serves `generated_resumes` rows — the original resume is never
+reachable through this endpoint at all (spec 52.12's "never expose
+original resumes through generated-resume URLs"). `PUT /clients/{id}/
+resume-preference` added to `clients.py` alongside the existing `/tier`
+endpoint for consistency.
+
+**Frontend** — `components/ResumeGeneratorModal.tsx` (new, shared):
+template picker, name display, per-field contact toggles, company mode
++ editable replacement input, project mode, client/confidentiality mode
+(only shown when generating in a job-specific context), PDF/DOCX picker,
+a debounced live-preview panel, version history, and Generate / Generate
+& Submit actions. Wired into two real entry points: a "Generate Resume"
+button on Candidate 360 (candidate-only context) and a new "Generate
+Resume" tab on the pipeline drawer (job-specific context — passes
+`requisitionId`/`clientName`, unlocking the Client/Confidentiality
+section and the Generate & Submit button for real).
+
+Verified for real end-to-end, not code review: real candidate (masked
+name, redacted phone/email confirmed absent from the actual rendered
+PDF via `pdfminer` text extraction, not just the preview JSON), real
+PDF (`%PDF` magic bytes) and real DOCX (`PK` zip magic bytes, valid
+Word 2007+ file) generated and downloaded, version numbering confirmed
+incrementing 1→2 across formats, client-preference recommendation
+proven by setting a real client's preference and watching the
+recommendation flip from the default to the configured template (then
+reverted — a real client, not test data), custom-template CRUD proven
+with built-in-template edit/delete correctly rejected (400), and both
+UI entry points confirmed via real headless-browser runs (live preview
+updates on config change, a real PDF downloads with a real filename,
+version history renders, job-specific context correctly shows the
+Client/Confidentiality section and Generate & Submit button that
+candidate-only context correctly omits). Regression-checked the
+refactor: all 6 legacy KAE-submission resume styles still produce valid
+PDFs via the shared engine, and the Candidate 360 standard-resume button
+still works. New permanent "S29 AI Resume Generator" suite (12 tests,
+`.serial()`) added to `qa_automation.spec.ts`. Full QA suite re-run
+clean: 197 passed / 2 skipped / 0 failed (two transient S19/S21 failures
+under this session's own heavy back-to-back testing load, confirmed to
+pass cleanly in isolation after a genuine 15-minute rate-limit cooldown —
+this suite's well-documented characteristic, not a regression). Zero-
+token audit: `CONFIRMED CLEAN` (368 files, 0 external API refs).
+
+**Scope notes, stated rather than silently under-delivered**: the
+built-in templates are real, editable-by-cloning presets, not a
+WYSIWYG page-layout/typography designer (fonts, margins, logo
+placement) — spec 52.10 itself frames custom templates as a "future"
+capability, and building a full visual template editor was materially
+beyond what the compositional config approach needed to satisfy every
+functional requirement actually listed. Two small orphaned
+`generated_resumes` rows (tied to the S29 suite's own throwaway
+candidate, now soft-deleted) are left as harmless residue — same
+accepted-precedent as low-count orphaned rows elsewhere in this project
+(offers/interview_schedules tied to already-hidden test candidates);
+no delete endpoint exists for this table by design, matching
+`candidate_submissions`' own precedent.

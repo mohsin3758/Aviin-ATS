@@ -68,6 +68,7 @@ from routers import sla_predictions
 from routers import field_attendance
 from routers import shift_scheduling
 from routers import kae_submission
+from routers import resume_generator
 from routers import call_letters
 
 # GAP features (1-10) — job-distribution and bgv-api were retired (see
@@ -310,6 +311,7 @@ app.include_router(ops_gaps.agency_public_router)
 app.include_router(device_monitoring.router)
 app.include_router(sla_predictions.router)
 app.include_router(kae_submission.router)
+app.include_router(resume_generator.router)
 app.include_router(call_letters.router)
 
 

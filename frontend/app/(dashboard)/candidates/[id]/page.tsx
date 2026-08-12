@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
+import { ResumeGeneratorModal } from '@/components/ResumeGeneratorModal';
 import {
   ArrowLeft, Mail, Phone, MessageCircle, Briefcase,
   Star, FileText, History, CheckCircle, Clock, AlertCircle,
@@ -1501,6 +1502,7 @@ export default function CandidateProfilePage() {
   const [editOpen, setEditOpen] = useState(false);
   const [emailOpen, setEmailOpen] = useState(false);
   const [waOpen, setWaOpen] = useState(false);
+  const [resumeGenOpen, setResumeGenOpen] = useState(false);
   const [statusLinkOpen, setStatusLinkOpen] = useState(false);
   const [statusLink, setStatusLink] = useState('');
   const [statusLinkLoading, setStatusLinkLoading] = useState(false);
@@ -1629,6 +1631,12 @@ export default function CandidateProfilePage() {
                 style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
                   border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#0f766e',whiteSpace:'nowrap'}}>
                 <Download size={13}/> Standard Resume (PDF)
+              </button>
+              <button onClick={() => setResumeGenOpen(true)}
+                title="Generate a privacy-controlled, company-replaced, or project-focused resume version — the original is never modified"
+                style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
+                  border:'none',background:'#7c3aed',color:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',whiteSpace:'nowrap'}}>
+                <FileText size={13}/> Generate Resume
               </button>
             </div>
           </div>
@@ -1897,6 +1905,9 @@ export default function CandidateProfilePage() {
       )}
       {waOpen && candidate && (
         <WhatsAppModal candidate={candidate} onClose={() => setWaOpen(false)} />
+      )}
+      {resumeGenOpen && candidate && (
+        <ResumeGeneratorModal candidate={candidate} onClose={() => setResumeGenOpen(false)} />
       )}
     </div>
   );
