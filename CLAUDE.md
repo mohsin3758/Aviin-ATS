@@ -5862,3 +5862,59 @@ this table's own established convention, so they remain visible as
 "Inactive" rows on the Users page, which is the intended state for a
 `Settings` page that deliberately shows deactivated accounts (unlike
 Candidates/Requisitions lists, which hide soft-deleted rows by default).
+
+## Resume Inbox: filter/drawer state lost on back-navigation, 2026-08-16
+User reported that opening a candidate profile from Resume Inbox (e.g.
+filtered to a specific source like "WhatsApp Inbound") and navigating
+back landed on the default "All" filter with nothing selected — losing
+their place entirely. Investigated before building: found two compounding
+real bugs, not one.
+
+1. **The Detail Drawer's "View in ATS" link navigated in the SAME
+   browser tab.** Every other outbound candidate/JD/pipeline link in this
+   exact file (`near_dup` link, JD-match link, both pipeline links)
+   already used `target="_blank" rel="noreferrer"` — "View in ATS" was
+   the one inconsistent exception, meaning it was the one link that
+   actually left the Resume Inbox page. Fixed by adding the same
+   `target="_blank"` used by every sibling link.
+2. **`statusFilter`/`sourceFilter`/the open drawer item were plain
+   component `useState`, with zero URL sync** — unlike this same page's
+   own pre-existing `jobFilter`, which already synced to `?req=`. Any
+   same-tab navigation away and back (browser Back, not just the one link
+   above) would remount the page from scratch with every filter reset to
+   its default and the drawer closed. Fixed by extending the exact same
+   sync pattern `jobFilter` already established: `statusFilter` ->
+   `?status=`, `sourceFilter` -> `?source=`, and the open drawer item's id
+   -> `?item=` (restored once the real queue data has loaded, via a
+   `useRef` guard so it only fires once and doesn't reopen after the user
+   explicitly closes it on a later `reloadQueue()`).
+
+Added `data-testid`s (`resume-inbox-status-{key}`, `resume-inbox-source-
+{job_board}`, `resume-inbox-row-{id}`, `resume-inbox-drawer` with a
+`data-item-id` attribute) — the page had none before, small and additive,
+matching the same "give the test a real hook" precedent used repeatedly
+elsewhere in this project (`requisition-list`, `kanban-board`, etc.).
+
+Verified for real against production, not code review: a real headless-
+browser pass confirmed clicking a real "WhatsApp Inbound" source chip +
+"Auto-Accepted" status filter updates the URL to `?source=whatsapp&
+status=auto_accepted`; opening a real row (a genuine production
+candidate, Uzair Shaikh) added `&item=<id>`; clicking "View in ATS"
+opened a real new tab to `/candidates/<id>` while the original tab's URL
+and open drawer stayed **completely unchanged** (byte-identical URL
+before/after); and a full page reload of that same URL correctly
+re-rendered both the source chip and status button in their selected
+state and re-opened the same drawer item automatically — not just present
+in the URL, visually confirmed via screenshot. New permanent "S32 Resume
+Inbox: filter + drawer state survives navigation" suite (5 tests) added
+to `qa_automation.spec.ts`, working against whatever real queue items
+exist at test-run time (no direct creation endpoint exists for
+`resume_files`, matching this project's established "test against real
+discovered data" pattern used elsewhere, e.g. S23's placement lookup).
+
+Full QA suite re-run clean: 222 passed / 2 skipped / 0 failed (1 flaky,
+unrelated `S19` bulk-CSV-ownership test that failed once then passed on
+retry — confirmed via a real 429 in the backend logs during that run,
+the same well-documented per-IP login rate-limit characteristic, not a
+regression from this fix). Zero-token audit: `CONFIRMED CLEAN` (370
+files, 0 external API refs).

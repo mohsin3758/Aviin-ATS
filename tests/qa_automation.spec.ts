@@ -3267,3 +3267,80 @@ test.describe.serial('S31 User Management: Invite Fix + Delete', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// S32 (2026-08-16): user reported that opening a candidate profile from
+// Resume Inbox (e.g. filtered to a specific source like "WhatsApp
+// Inbound") and navigating back landed on the default "All" filter with
+// nothing selected — losing their place entirely. Root cause: status/
+// source filters and the open detail-drawer item were plain component
+// state with zero URL sync (unlike the page's own pre-existing jobFilter,
+// which already synced to ?req=), and the drawer's "View in ATS" link
+// navigated in the SAME tab (every sibling candidate/JD link in this
+// exact file already used target="_blank" except this one). Fixed both:
+// status/source/item now sync to ?status=/?source=/?item=, and "View in
+// ATS" opens in a new tab so the common case never navigates away at all.
+test.describe.serial('S32 Resume Inbox: filter + drawer state survives navigation', () => {
+  let anyItemId: string;
+  let itemWithCandidateId: string | null = null;
+
+  test('setup: find real queue items to test against (no direct creation API for resume_files exists)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/resume-intake/queue?status=all&limit=50`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const items = (await r.json()).items || [];
+    if (!items.length) return test.skip();
+    anyItemId = items[0].id;
+    itemWithCandidateId = items.find((i: any) => i.candidate_id)?.id || null;
+  });
+
+  test('selecting a status filter updates ?status= in the URL', async ({ page }) => {
+    if (!anyItemId) return test.skip();
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/resume-inbox');
+    await page.getByTestId('resume-inbox-status-needs_review').click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('status')).toBe('needs_review');
+    expect(errors).toHaveLength(0);
+  });
+
+  test('opening a row sets ?item= and the drawer renders with a matching data-item-id', async ({ page }) => {
+    if (!anyItemId) return test.skip();
+    await page.goto('/resume-inbox');
+    const row = page.getByTestId(`resume-inbox-row-${anyItemId}`);
+    await expect(row).toBeVisible({ timeout: 15000 });
+    await row.click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('item')).toBe(anyItemId);
+    const drawer = page.getByTestId('resume-inbox-drawer');
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveAttribute('data-item-id', anyItemId);
+  });
+
+  test('a full page reload of the same URL restores the same drawer item (not the default view)', async ({ page }) => {
+    if (!anyItemId) return test.skip();
+    await page.goto(`/resume-inbox?item=${anyItemId}`);
+    const drawer = page.getByTestId('resume-inbox-drawer');
+    await expect(drawer).toBeVisible({ timeout: 15000 });
+    await expect(drawer).toHaveAttribute('data-item-id', anyItemId);
+  });
+
+  test('"View in ATS" opens in a new tab; the original Resume Inbox tab and its drawer are untouched', async ({ page, context }) => {
+    if (!itemWithCandidateId) return test.skip();
+    await page.goto(`/resume-inbox?item=${itemWithCandidateId}`);
+    const drawer = page.getByTestId('resume-inbox-drawer');
+    await expect(drawer).toBeVisible({ timeout: 15000 });
+    const link = drawer.getByRole('link', { name: /View in ATS/i });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute('target', '_blank');
+
+    const urlBefore = page.url();
+    const [newPage] = await Promise.all([context.waitForEvent('page'), link.click()]);
+    await newPage.waitForLoadState('domcontentloaded');
+    expect(newPage.url()).toContain('/candidates/');
+    await newPage.close();
+
+    // The original tab must be completely unaffected by the new-tab click.
+    expect(page.url()).toBe(urlBefore);
+    await expect(drawer).toBeVisible();
+  });
+});

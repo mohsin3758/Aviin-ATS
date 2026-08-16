@@ -1,5 +1,5 @@
 'use client';
-import { useState, useCallback, useMemo, useEffect, Suspense } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { authHeaders } from '@/lib/auth';
@@ -214,7 +214,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end' }} onClick={onClose}>
-      <div style={{ width: 480, maxWidth: '96vw', height: '100%', background: '#fff', boxShadow: '-4px 0 24px rgba(0,0,0,0.15)', overflowY: 'auto', padding: 24 }} onClick={e => e.stopPropagation()}>
+      <div data-testid="resume-inbox-drawer" data-item-id={item.id} style={{ width: 480, maxWidth: '96vw', height: '100%', background: '#fff', boxShadow: '-4px 0 24px rgba(0,0,0,0.15)', overflowY: 'auto', padding: 24 }} onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
           <div>
@@ -359,7 +359,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
 
         {/* Actions */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-          {item.candidate_id && <a href={`/candidates/${item.candidate_id}`} style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#1e40af', color: '#fff', borderRadius: 8, fontSize: 13, fontWeight: 700, textDecoration: 'none' }}><User size={13} /> View in ATS</a>}
+          {item.candidate_id && <a href={`/candidates/${item.candidate_id}`} target="_blank" rel="noreferrer" style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#1e40af', color: '#fff', borderRadius: 8, fontSize: 13, fontWeight: 700, textDecoration: 'none' }}><User size={13} /> View in ATS</a>}
           <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fff', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Download size={13} /> Download Resume File</button>
           <button onClick={onEdit} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Edit3 size={13} /> Edit & Approve</button>
           <button onClick={onApprove} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#059669', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><CheckCircle size={13} /> Quick Approve</button>
@@ -462,9 +462,39 @@ function ResumeInboxPageInner() {
 
   // Sync jobFilter with ?req= URL param
   useEffect(() => { const r = _sp?.get('req') || ''; if (r !== jobFilter) setJobFilter(r); }, [_sp]);
+
+  // Real bug fix (2026-08-16): status/source filters and the open detail
+  // drawer were plain component state with no URL sync — opening a
+  // candidate profile from here (or any other same-tab navigation away)
+  // and hitting Back reset the page to the default "All" filter with
+  // nothing selected, losing exactly where the recruiter was. Mirrors
+  // jobFilter's own existing ?req= sync pattern so Back genuinely
+  // restores the same filter bar and the same open item, not just this
+  // one "View in ATS" link (which now also opens in a new tab below, so
+  // the common case never even navigates away in the first place).
+  const setUrlParam = (key: string, value: string) => {
+    if (typeof window === 'undefined') return;
+    const u = new URL(window.location.href);
+    if (value) u.searchParams.set(key, value); else u.searchParams.delete(key);
+    window.history.replaceState({}, '', u.toString());
+  };
+  // Read status/source/item from the URL once on mount only — after that,
+  // these filters are the source of truth (same one-way sync direction
+  // jobFilter already uses), so a later param removal from clearing a
+  // filter doesn't get immediately re-read back in.
+  useEffect(() => {
+    const st = _sp?.get('status'); if (st) setStatusFilter(st);
+    const sr = _sp?.get('source'); if (sr) setSourceFilter(sr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [restoreItemId] = useState<string>(() => _sp?.get('item') || '');
+  const updateStatusFilter = (v: string) => { setStatusFilter(v); setUrlParam('status', v === 'all' ? '' : v); };
+  const updateSourceFilter = (v: string) => { setSourceFilter(v); setUrlParam('source', v); };
+
   const [search, setSearch] = useState('');
   const [processing, setProcessing] = useState(false);
-  const [selected, setSelected] = useState<ResumeItem | null>(null);
+  const [selected, setSelectedRaw] = useState<ResumeItem | null>(null);
+  const setSelected = (item: ResumeItem | null) => { setSelectedRaw(item); setUrlParam('item', item?.id || ''); };
   const [editItem, setEditItem] = useState<ResumeItem | null>(null);
   const [toast, setToast] = useState('');
   const [toastOk, setToastOk] = useState(true);
@@ -553,6 +583,19 @@ function ResumeInboxPageInner() {
 
   const selectAll = () => { const all = items.map(r => r.id); setSelectedIds(prev => prev.size === all.length ? new Set() : new Set(all)); };
 
+  // Re-open the same detail drawer item a ?item= URL param points at,
+  // once the queue has actually loaded — e.g. arriving back here via
+  // Back after "View in ATS", or a reload/bookmark of a deep link. Only
+  // ever does this once: after that, closing the drawer (setSelected(null))
+  // should stay closed even as reloadQueue() re-fires on approve/reject.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current || !restoreItemId || !items.length) return;
+    const match = items.find(r => r.id === restoreItemId);
+    if (match) setSelectedRaw(match);
+    restoredRef.current = true;
+  }, [items, restoreItemId]);
+
   const today = stats?.today || {};
   const bySrc: any[] = stats?.by_source || [];
 
@@ -591,8 +634,8 @@ function ResumeInboxPageInner() {
         <div style={{ background: '#fff', borderRadius: 12, padding: '12px 14px', marginBottom: 14, boxShadow: '0 1px 4px rgba(0,0,0,0.07)' }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 8 }}>SOURCES — LAST 7 DAYS</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button onClick={() => setSourceFilter('')} style={{ padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: !sourceFilter ? '#1e40af' : '#f1f5f9', color: !sourceFilter ? '#fff' : '#374151', border: '1px solid ' + (!sourceFilter ? '#1e40af' : '#e2e8f0') }}>All</button>
-            {bySrc.map(s => <button key={s.job_board} onClick={() => setSourceFilter(sourceFilter === s.job_board ? '' : s.job_board)} style={{ padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: sourceFilter === s.job_board ? (SOURCE_COLORS[s.job_board] || '#1e40af') : '#f1f5f9', color: sourceFilter === s.job_board ? '#fff' : '#374151', border: '1px solid ' + (sourceFilter === s.job_board ? 'transparent' : '#e2e8f0') }}><b>{s.total}</b> {s.source}</button>)}
+            <button data-testid="resume-inbox-source-all" onClick={() => updateSourceFilter('')} style={{ padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: !sourceFilter ? '#1e40af' : '#f1f5f9', color: !sourceFilter ? '#fff' : '#374151', border: '1px solid ' + (!sourceFilter ? '#1e40af' : '#e2e8f0') }}>All</button>
+            {bySrc.map(s => <button key={s.job_board} data-testid={`resume-inbox-source-${s.job_board}`} onClick={() => updateSourceFilter(sourceFilter === s.job_board ? '' : s.job_board)} style={{ padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: sourceFilter === s.job_board ? (SOURCE_COLORS[s.job_board] || '#1e40af') : '#f1f5f9', color: sourceFilter === s.job_board ? '#fff' : '#374151', border: '1px solid ' + (sourceFilter === s.job_board ? 'transparent' : '#e2e8f0') }}><b>{s.total}</b> {s.source}</button>)}
           </div>
         </div>
       )}
@@ -604,7 +647,7 @@ function ResumeInboxPageInner() {
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name, email, file, subject…" style={{ width: '100%', padding: '8px 12px 8px 30px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, background: '#fff', boxSizing: 'border-box' }} />
         </div>
 
-        {['all', 'auto_accepted', 'needs_review', 'low_confidence', 'approved', 'rejected'].map(s => <button key={s} onClick={() => setStatusFilter(s)} style={{ padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: statusFilter === s ? '#1e40af' : '#fff', color: statusFilter === s ? '#fff' : '#64748b', border: '1px solid ' + (statusFilter === s ? '#1e40af' : '#e2e8f0'), textTransform: 'capitalize', whiteSpace: 'nowrap' }}>{s === 'auto_accepted' ? 'Auto-Accepted' : s === 'needs_review' ? 'Review Needed' : s === 'low_confidence' ? 'Manual Entry' : s}</button>)}
+        {['all', 'auto_accepted', 'needs_review', 'low_confidence', 'approved', 'rejected'].map(s => <button key={s} data-testid={`resume-inbox-status-${s}`} onClick={() => updateStatusFilter(s)} style={{ padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: statusFilter === s ? '#1e40af' : '#fff', color: statusFilter === s ? '#fff' : '#64748b', border: '1px solid ' + (statusFilter === s ? '#1e40af' : '#e2e8f0'), textTransform: 'capitalize', whiteSpace: 'nowrap' }}>{s === 'auto_accepted' ? 'Auto-Accepted' : s === 'needs_review' ? 'Review Needed' : s === 'low_confidence' ? 'Manual Entry' : s}</button>)}
 
         <div style={{ display:'flex', alignItems:'center', gap:6 }}>
         <select value={jobFilter} onChange={e => { setJobFilter(e.target.value); if (typeof window !== 'undefined') { const u = new URL(window.location.href); if (e.target.value) u.searchParams.set('req', e.target.value); else u.searchParams.delete('req'); window.history.replaceState({}, '', u.toString()); }}} style={{ padding: '8px 12px', border: `1px solid ${jobFilter ? '#7c3aed' : '#e2e8f0'}`, borderRadius: 8, fontSize: 13, background: jobFilter ? '#faf5ff' : '#fff', cursor: 'pointer', minWidth: 140, fontWeight: jobFilter ? 700 : 400, color: jobFilter ? '#7c3aed' : undefined }}>
@@ -667,7 +710,7 @@ function ResumeInboxPageInner() {
                   const matchScore = r.jd_match_score ?? r.parsed_data?.jd_match_score;
                   const nearDup = r.parsed_data?.near_dup;
                   return (
-                    <tr key={r.id} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', background: selectedIds.has(r.id) ? '#eff6ff' : i % 2 === 0 ? '#fff' : '#fafafa' }}
+                    <tr key={r.id} data-testid={`resume-inbox-row-${r.id}`} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', background: selectedIds.has(r.id) ? '#eff6ff' : i % 2 === 0 ? '#fff' : '#fafafa' }}
                       onMouseEnter={e => { if (!selectedIds.has(r.id)) (e.currentTarget as HTMLElement).style.background = '#f0f7ff'; }}
                       onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = selectedIds.has(r.id) ? '#eff6ff' : i % 2 === 0 ? '#fff' : '#fafafa'; }}>
                       <td style={{ padding: '10px 8px' }} onClick={e => { e.stopPropagation(); toggleSelect(r.id); }}><input type="checkbox" checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} style={{ cursor: 'pointer' }} /></td>
