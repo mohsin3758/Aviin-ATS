@@ -6008,3 +6008,100 @@ failure correlated with 10-12 real confirmed 429s in the backend logs
 during that exact run, the same extensively-documented per-IP
 characteristic, not a regression). Zero-token audit: `CONFIRMED CLEAN`
 (370 files, 0 external API refs).
+
+## Feature-level permissions: 12 broad modules -> 73 individual features across 11 groups, 2026-08-17
+User asked for permissions to work at the level of every individual
+feature/page, not just ~12 broad modules — e.g. under Communication,
+WhatsApp Bot / WhatsApp Stage Notifications / WhatsApp Setup / Email
+Templates should each be independently grantable, with a per-module
+"All" option alongside per-feature selection. Given the size (a genuine
+multi-file redesign with real design decisions — taxonomy shape, "All"
+semantics, enforcement scope), went through plan mode before writing
+any code, per this project's own established discipline for non-trivial
+changes.
+
+**Key research finding that shaped the whole design**: the real,
+complete feature list already existed as structured data —
+`frontend/components/layout/Sidebar.tsx`'s `NAV_GROUPS` has 11 groups
+and 72 unique real page hrefs, and its group names/items matched the
+user's own examples almost verbatim (their "Core Features" list is
+literally the sidebar's CORE group verbatim). Used this as the taxonomy
+source of truth rather than inventing a separate list — every group/
+feature in the new permission matrix is a real page a user can actually
+navigate to.
+
+**Scope decision, asked directly rather than assumed**: backend
+`require_permission()` enforcement was (and still is) wired into only
+11 routers covering 12 of the ~73 features — the other ~60 have real
+pages with zero permission check on their API routes at all. Asked the
+user whether this pass should also wire real blocking enforcement into
+all ~60 remaining routers (a much larger, riskier change) — they picked
+**taxonomy + UI only**, matching this project's own established soft-
+launch philosophy: expand what an admin can configure and see logged
+now, block later once usage is reviewed. Enforcement wiring into the
+remaining ~60 features is a real, explicit, separate follow-up — not
+silently done, not silently skipped.
+
+**Backend** (`backend/permissions.py`) — replaced the flat `FEATURES:
+list[tuple[str,str]]` (12 entries) with `FEATURE_GROUPS: list[tuple[
+group_id, group_label, [(feature_key, feature_label), ...]]]` (11
+groups, 73 features), then `FEATURES = [f for _,_,feats in
+FEATURE_GROUPS for f in feats]` — a flattened view so `check_permission()`
+/`require_permission()`/`get_role_permissions()` needed **zero** changes,
+since they only ever consume the bare flat feature-key string. Critically,
+**all 12 pre-existing keys kept their exact original string** (`candidates`,
+`companies`, `requisitions`, `pipeline`, `applications`, `analytics`,
+`incentives`, `kae`, `collections`, `account_pl`, `bu_tracker`,
+`recruiter_ops`) — verified via a direct grep of every real
+`require_permission(...)` call site across 11 routers before touching
+anything, so none of those already-wired gates could silently break.
+`GET /roles/features` (`backend/routers/users.py`) gained a `groups`
+field in its response (kept the pre-existing flat `features` field too,
+zero cost, avoids touching any other consumer). `PUT /roles/{id}/
+permissions` needed no changes at all — it already stores an arbitrary
+`{feature: [actions]}` dict verbatim, so a larger dict just flows
+through unchanged.
+
+**Frontend** (`settings/permissions/page.tsx`) — the single flat
+feature×action table became 11 collapsible group sections (default
+collapsed — 73 rows across 11 tables all open at once would be
+unwieldy), each showing a live "(N/M granted)" count in its header and
+a per-group **"All"** toggle button that sets every feature in that
+group to `['*']` (full wildcard access, reusing the exact wildcard
+convention `check_permission()` already understood) or clears them all
+— one bulk edit to the same `draft` state the existing per-cell
+`toggleAction`/`hasAction` logic already manages, still requires the
+existing Save button to persist (no new API call, no new concept).
+Added `data-testid`s (`perm-group-{id}`, `perm-group-all-{id}`,
+`perm-feature-{key}`) since the page had none before.
+
+Verified for real against production, not code review: `GET /roles/
+features` confirmed 11 groups / 73 features with Core's 12 and
+Communication's exact 8 named features matching the user's own request
+verbatim; flipped enforcement ON briefly and confirmed the real QA Test
+Recruiter fixture (candidates: create/read/update, no delete) still
+correctly 403'd on `DELETE /candidates/{id}` and 200'd on `GET
+/candidates` — proving the restructure didn't silently break the one
+already-enforced gate anyone would actually hit — then flipped
+enforcement back OFF immediately (production stays soft-launch). Real
+headless-browser pass confirmed all 11 group sections render collapsed
+with correct counts, Core expands to the exact 12 named features,
+Communication expands to the exact 8 named features, the "All" toggle
+visibly flips to "✓ All" and grants every feature in the group, Save
+persists it (confirmed via a real reload + re-fetch, not just local
+state), and toggling back off + saving again correctly reverts — using
+the real "Account Director" role for this live click-through (0
+residual state left afterward, confirmed by reading the role back).
+Separately verified the API-level round-trip with a different, genuinely
+zero-user role (`sourcing_specialist`, `user_count:0` — chosen
+specifically so no real person's access was ever transiently affected)
+for a scripted before/after/restore cycle. New permanent "S34
+Feature-Level Permissions" suite (4 tests) added to
+`qa_automation.spec.ts`.
+
+Full QA suite: 229 passed / 2 skipped / 1 flaky (an unrelated `S21`
+Device Monitoring test, confirmed resolved on Playwright's own retry and
+correlated with exactly 1 real 429 in the backend logs during that run —
+the same well-documented per-IP login rate-limit characteristic, not a
+regression). Zero-token audit: `CONFIRMED CLEAN` (370 files, 0 external
+API refs).

@@ -3430,3 +3430,122 @@ test.describe.serial('S33 Users & Roles: hide-inactive default + no more S19 lea
     expect(leaked).toHaveLength(0);
   });
 });
+
+// S34 (2026-08-17): user asked for individual feature-level permissions
+// under each department/module instead of ~12 broad module-level grants
+// — e.g. Communication needed WhatsApp Bot/WhatsApp Stage Notifications/
+// WhatsApp Setup/Email Templates each independently selectable, plus a
+// per-module "All" option. Expanded permissions.py's FEATURES (flat, 12
+// entries) into FEATURE_GROUPS (11 groups, 73 real features mirroring
+// the sidebar's own NAV_GROUPS 1:1) while keeping the 12 pre-existing
+// feature keys byte-identical, since 11 routers already call
+// require_permission() with those exact strings.
+test.describe.serial('S34 Feature-Level Permissions', () => {
+  const SOURCING_SPECIALIST_ID = '5d525270-3e05-4f5d-8c13-9f3aae18d648'; // user_count: 0, safe to touch
+  let originalPermissions: Record<string, string[]>;
+
+  test.afterAll(async ({ request }) => {
+    if (!originalPermissions) return;
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    await request.put(`${API}/roles/${SOURCING_SPECIALIST_ID}/permissions`, {
+      headers: auth, data: { permissions: originalPermissions },
+    }).catch(() => {});
+  });
+
+  test('GET /roles/features returns 11 groups, 73 features, and the exact Core/Communication feature sets named in the request', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/roles/features`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    expect(body.groups).toHaveLength(11);
+    expect(body.features).toHaveLength(73);
+
+    const core = body.groups.find((g: any) => g.id === 'core');
+    const coreLabels = core.features.map((f: any) => f.label);
+    for (const label of ['Dashboard', 'Candidates', 'Companies', 'Jobs / Requisitions', 'Pipeline (Kanban)',
+      'Pipeline Velocity', 'Duplicate Candidates', 'Recruiter Ops', 'Device Monitoring', 'Field Attendance', 'Shift Scheduling']) {
+      expect(coreLabels).toContain(label);
+    }
+
+    const comm = body.groups.find((g: any) => g.id === 'communication');
+    const commLabels = comm.features.map((f: any) => f.label);
+    expect(commLabels).toEqual(['Email Communication', 'WhatsApp Bot', 'WhatsApp Stage Notifications',
+      'WhatsApp Setup', 'SMS Notifications', 'Automations', 'Nurture Sequences', 'Integrations']);
+
+    // The 12 keys already consumed by a real require_permission() call
+    // elsewhere in the backend must keep their exact original string.
+    const allKeys = body.features.map((f: any) => f.key);
+    for (const key of ['candidates', 'companies', 'requisitions', 'pipeline', 'applications', 'analytics',
+      'incentives', 'kae', 'collections', 'account_pl', 'bu_tracker', 'recruiter_ops']) {
+      expect(allKeys).toContain(key);
+    }
+  });
+
+  test('a real permissions save/reload round-trip on a newly-added feature key (device_monitoring)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const before = await (await request.get(`${API}/roles`, { headers: auth })).json();
+    const role = before.find((r: any) => r.id === SOURCING_SPECIALIST_ID);
+    expect(role).toBeTruthy();
+    expect(role.user_count).toBe(0); // confirms this is genuinely safe to mutate
+    originalPermissions = role.permissions;
+
+    const updated = { ...originalPermissions, device_monitoring: ['read'] };
+    const save = await request.put(`${API}/roles/${SOURCING_SPECIALIST_ID}/permissions`, {
+      headers: auth, data: { permissions: updated },
+    });
+    expect(save.ok()).toBeTruthy();
+
+    const after = await (await request.get(`${API}/roles`, { headers: auth })).json();
+    const roleAfter = after.find((r: any) => r.id === SOURCING_SPECIALIST_ID);
+    expect(roleAfter.permissions.device_monitoring).toEqual(['read']);
+    // Pre-existing grants on this role must survive the update untouched.
+    expect(roleAfter.permissions.pipeline).toEqual(originalPermissions.pipeline);
+    expect(roleAfter.permissions.candidates).toEqual(originalPermissions.candidates);
+  });
+
+  test('existing enforcement gate (candidates feature) still resolves correctly after the FEATURES restructure', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const before = await (await request.get(`${API}/roles/enforcement`, { headers: auth })).json();
+    try {
+      await request.put(`${API}/roles/enforcement`, { headers: auth, data: { enabled: true } });
+      const recLogin = await request.post(`${API}/auth/login`, { data: { email: 'qa_test_1782053776@aviinjobs.com', password: 'QaTemp12345!' } });
+      const recAuth = { 'Authorization': `Bearer ${(await recLogin.json()).access_token}` };
+      // QA Test Recruiter has candidates:create/read/update but not delete.
+      const del = await request.delete(`${API}/candidates/00000000-0000-0000-0000-000000000000`, { headers: recAuth });
+      expect(del.status()).toBe(403);
+      const read = await request.get(`${API}/candidates?limit=1`, { headers: recAuth });
+      expect(read.ok()).toBeTruthy();
+    } finally {
+      await request.put(`${API}/roles/enforcement`, { headers: auth, data: { enabled: before.enabled } });
+    }
+  });
+
+  test('Settings > Permissions page renders 11 collapsible groups; a group\'s "All" toggle grants every feature in it', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/settings/permissions');
+    await expect(page.getByTestId('perm-group-core')).toBeVisible({ timeout: 15000 });
+    for (const id of ['core', 'ai', 'recruitment', 'analytics', 'finance', 'incentives', 'bgv', 'communication', 'vendors', 'settings', 'my_account']) {
+      await expect(page.getByTestId(`perm-group-${id}`)).toBeVisible();
+    }
+
+    await page.getByTestId('perm-group-communication').click();
+    await expect(page.getByTestId('perm-feature-whatsapp_bot')).toBeVisible({ timeout: 10000 });
+
+    await page.getByTestId('perm-group-all-communication').click();
+    await expect(page.getByTestId('perm-group-all-communication')).toHaveText(/✓ All/);
+    // Every checkbox in every row of the now-expanded communication group should be checked.
+    const commRows = page.getByTestId('perm-feature-whatsapp_setup');
+    await expect(commRows.locator('button svg')).toHaveCount(5); // 5 actions, all checked = 5 check icons
+
+    // Toggle back off — leaves this role's real state unchanged (afterAll also restores it independently).
+    await page.getByTestId('perm-group-all-communication').click();
+    await expect(page.getByTestId('perm-group-all-communication')).not.toHaveText(/✓ All/);
+    expect(errors).toHaveLength(0);
+  });
+});

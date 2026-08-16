@@ -17,6 +17,14 @@ FEATURES below is the taxonomy shown in the admin matrix — it's larger
 than the set of routes currently gated (see each router for where
 require_permission() is actually applied); features not yet gated by
 any route are still editable in the UI, they just aren't enforced yet.
+
+2026-08-17: expanded from 12 broad modules to ~73 individual features,
+grouped to mirror the sidebar's own NAV_GROUPS (frontend/components/
+layout/Sidebar.tsx) 1:1 — every group/feature here is a real page, not
+invented. The 12 keys already wired into a real require_permission()
+call elsewhere in the backend (see the list below) keep their exact
+original key string so those existing gates are untouched by this
+expansion; only the label/grouping changed for a few of them.
 """
 import json
 from typing import Optional
@@ -26,21 +34,121 @@ from fastapi import Depends, HTTPException, Request
 import db
 from deps import Actor, get_actor
 
-# (key, label) — order here is the order the admin matrix renders in.
-FEATURES: list[tuple[str, str]] = [
-    ("candidates", "Candidates"),
-    ("companies", "Companies"),
-    ("requisitions", "Jobs / Requisitions"),
-    ("pipeline", "Pipeline (Kanban)"),
-    ("applications", "Applications"),
-    ("analytics", "Analytics & Reporting"),
-    ("incentives", "Incentives"),
-    ("kae", "KAE / Account Ownership"),
-    ("collections", "Collections"),
-    ("account_pl", "Account P&L"),
-    ("bu_tracker", "BU Tracker"),
-    ("recruiter_ops", "Recruiter Ops (Tasks/Targets/Hotlist/Leave)"),
+# (group_id, group_label, [(feature_key, feature_label), ...]) — order
+# here is the order the admin matrix renders in. Feature keys marked
+# "existing" below are the 12 already consumed by a real
+# require_permission(feature, action) call in another router — renaming
+# any of them would silently break that gate, so they keep their exact
+# original string:
+#   account_pl -> account_pl.py; collections -> account_pl.py;
+#   bu_tracker -> account_pl.py; analytics -> analytics.py, p36_p42.py(x2);
+#   applications -> applications.py; pipeline -> applications.py,
+#   p36_p42.py, pipeline_p2.py(x2), requisitions.py; candidates ->
+#   candidates.py(x4); companies -> clients.py(x5); incentives ->
+#   incentives.py(x2); kae -> kae.py; recruiter_ops -> recruiter_ops.py(x7);
+#   requisitions -> requisitions.py(x4).
+FEATURE_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
+    ("core", "Core Features", [
+        ("dashboard", "Dashboard"),
+        ("candidates", "Candidates"),
+        ("companies", "Companies"),
+        ("requisitions", "Jobs / Requisitions"),
+        ("pipeline", "Pipeline (Kanban)"),
+        ("applications", "Applications"),
+        ("pipeline_velocity", "Pipeline Velocity"),
+        ("duplicates", "Duplicate Candidates"),
+        ("recruiter_ops", "Recruiter Ops"),
+        ("device_monitoring", "Device Monitoring"),
+        ("field_attendance", "Field Attendance"),
+        ("shift_scheduling", "Shift Scheduling"),
+    ]),
+    ("ai", "AI & Intelligence", [
+        ("ai_intelligence", "AI Intelligence"),
+        ("ai_tools", "AI Tools"),
+        ("predictive_hiring", "Predictive Hiring"),
+    ]),
+    ("recruitment", "Recruitment", [
+        ("resume_inbox", "Resume Inbox"),
+        ("interviews", "Interviews"),
+        ("calendar", "Calendar"),
+        ("video_screening", "Video Screening"),
+        ("offer_engine", "Offer Engine"),
+        ("nda_documents", "NDA Documents"),
+        ("jd_templates", "JD Templates"),
+        ("email_templates", "Email Templates"),
+        ("question_bank", "Question Bank"),
+        ("reference_checks", "Reference Checks"),
+        ("submittals", "Submittals"),
+        ("job_board", "Job Board"),
+        ("job_sharing", "Job Sharing"),
+        ("career_page", "Career Page"),
+        ("onboarding", "Onboarding"),
+        ("candidate_engagement", "Candidate Engagement"),
+        ("captured_profiles", "Captured Profiles"),
+    ]),
+    ("analytics", "Analytics", [
+        ("analytics", "Analytics"),
+        ("reports", "Reports"),
+        ("sla_dashboard", "SLA Dashboard"),
+        ("revenue_forecast", "Revenue Forecast"),
+        ("client_health", "Client Health"),
+        ("clients_packs", "Clients & Packs"),
+        ("headcount_plan", "Headcount Plan"),
+        ("war_room", "War Room"),
+        ("report_builder", "Report Builder"),
+    ]),
+    ("finance", "Finance", [
+        ("erp_finance", "ERP / Finance"),
+        ("account_pl", "Account P&L"),
+        ("collections", "Collections"),
+        ("bu_tracker", "BU Tracker"),
+        ("ceo_dashboard", "CEO Dashboard"),
+        ("compliance_pf_esi_tds", "PF/ESI/TDS"),
+        ("salary_benchmark", "Salary Benchmark"),
+    ]),
+    ("incentives", "Incentives & KAE", [
+        ("incentives", "Incentives"),
+        ("kae", "KAE Module"),
+    ]),
+    ("bgv", "BGV & Compliance", [
+        ("bgv_checks", "BGV Checks"),
+        ("audit_log", "Audit Log"),
+    ]),
+    ("communication", "Communication", [
+        ("email_communication", "Email Communication"),
+        ("whatsapp_bot", "WhatsApp Bot"),
+        ("whatsapp_stage_notifications", "WhatsApp Stage Notifications"),
+        ("whatsapp_setup", "WhatsApp Setup"),
+        ("sms_notifications", "SMS Notifications"),
+        ("automations", "Automations"),
+        ("nurture_sequences", "Nurture Sequences"),
+        ("integrations", "Integrations"),
+    ]),
+    ("vendors", "Vendors", [
+        ("vendor_analytics", "Vendor Analytics"),
+        ("agency_portal", "Agency Portal"),
+    ]),
+    ("settings", "Settings", [
+        ("users_roles", "Users & Roles"),
+        ("permissions_settings", "Permissions"),
+        ("pipeline_stages", "Pipeline Stages"),
+        ("company_email_smtp", "Company Email (SMTP)"),
+        ("email_signatures", "Email Signatures"),
+        ("security_2fa", "Security / 2FA"),
+        ("skills_taxonomy", "Skills Taxonomy"),
+        ("themes", "Themes"),
+        ("ops_settings", "Ops Settings"),
+    ]),
+    ("my_account", "My Account", [
+        ("my_email_accounts", "My Email Accounts"),
+        ("my_profile", "My Profile"),
+    ]),
 ]
+
+# Flattened (key, label) view — every consumer that only cares about a
+# bare feature key (check_permission, require_permission callers, the
+# admin matrix's legacy "features" field) keeps working unchanged.
+FEATURES: list[tuple[str, str]] = [f for _, _, feats in FEATURE_GROUPS for f in feats]
 ACTIONS: list[str] = ["create", "read", "update", "delete", "export"]
 _FEATURE_KEYS = {f[0] for f in FEATURES}
 

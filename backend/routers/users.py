@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 import db
 from deps import Actor, get_actor, require_role
-from permissions import FEATURES, ACTIONS
+from permissions import FEATURES, FEATURE_GROUPS, ACTIONS
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -399,7 +399,19 @@ class PermissionsUpdate(BaseModel):
 
 @roles_router.get("/features", tags=["permissions"])
 async def list_permission_features(actor: Actor=Depends(get_actor)):
-    return {"features": [{"key": k, "label": lbl} for k, lbl in FEATURES], "actions": ACTIONS}
+    """2026-08-17: feature-level permissions — groups mirrors the
+    sidebar's own NAV_GROUPS so every group/feature here is a real page,
+    not invented (see permissions.py's FEATURE_GROUPS). `features` is
+    kept as a flat list too for any consumer that only wants the bare
+    key/label pairs (matches the pre-existing response shape)."""
+    return {
+        "groups": [
+            {"id": gid, "label": glabel, "features": [{"key": k, "label": l} for k, l in feats]}
+            for gid, glabel, feats in FEATURE_GROUPS
+        ],
+        "features": [{"key": k, "label": lbl} for k, lbl in FEATURES],
+        "actions": ACTIONS,
+    }
 
 
 class EnforcementUpdate(BaseModel):
