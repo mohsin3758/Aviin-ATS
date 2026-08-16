@@ -5918,3 +5918,93 @@ retry — confirmed via a real 429 in the backend logs during that run,
 the same well-documented per-IP login rate-limit characteristic, not a
 regression from this fix). Zero-token audit: `CONFIRMED CLEAN` (370
 files, 0 external API refs).
+
+## Settings > Users cleanup: hide-inactive-by-default toggle + fixed the real leak feeding it, 2026-08-16
+User asked to clean up leftover "test.com" users cluttering Settings >
+Users & Roles, from a screenshot showing many "QA ..." rows. Investigated
+before deleting anything: **178 of 186 real users on this tenant were
+QA/test junk** (email matching `test.com`/`example.com`/`aviin.test`/
+`qa[._]`, or full_name starting "QA "/"ZZ "), 167 already soft-deleted
+(`is_active=false`) but **still permanently visible** — unlike every
+other list page in this app (Candidates/Requisitions/Companies), `GET
+/users` and the Settings page have no default is_active filter at all,
+so deactivating/deleting a user here never actually removed the clutter.
+
+**Root-caused why active (not just inactive) junk kept accumulating**,
+rather than just wiping the symptom: 10 of the 178 were still genuinely
+`is_active=true` — traced to S19's two ownership-enforcement tests
+(`Ownership enforcement: a non-owner is blocked...` and `...bulk CSV
+import cannot overwrite an owned candidate...`), which create real
+`owner`/`nonOwner` test users via the API but only ever clean them up
+with an inline `deactivate` call at the very end of the test body —
+invisible to `afterAll` and never reached if the test throws/fails
+earlier (the exact same rate-limit-cascade failures documented
+repeatedly elsewhere in this file, and the identical bug class already
+fixed once for S16's `cand3Id`). Fixed by promoting `s19OwnerId`/
+`s19NonOwnerId`/`s19bOwnerId`/`s19bNonOwnerId` to describe-level `let`s
+tracked by the suite's real `afterAll`, removing the now-redundant
+inline cleanup calls. Verified for real: ran the fixed S19 suite live
+and confirmed the active-user count stayed at 9 before and after (no new
+leak), where before this fix a failed run would leave 2 more active
+"QA S19.../QA S19b..." accounts every time.
+
+**Cleaned up the confirmed junk**: deleted the 10 leftover active
+accounts via the real `DELETE /users/{id}` API built earlier today
+(explicitly excluding `admin@example.com` and the legitimate `QA Test
+Recruiter` fixture `qa_test_1782053776@aviinjobs.com` this project
+deliberately keeps as its established verification account, documented
+repeatedly elsewhere in this file) — active-user count went from 19
+down to 9, all real. The other 167 already-inactive rows were
+deliberately **not** hard-deleted (would risk FK violations against
+real historical activity — tasks, `audit_log`, `recruiter_activity_
+events`, etc. — the same reasoning `clients.py`'s soft-delete precedent
+is built on) — instead made invisible by default via a new frontend
+toggle.
+
+**New "Show/Hide Inactive" toggle** (`data-testid="toggle-show-inactive"`)
+on Settings > Users & Roles, defaulting to hidden — brings this page's
+default-view behavior in line with every other entity list in this
+codebase. Subtitle text now reads "N active users · M roles · K inactive
+hidden" so the count is never silently lost. Verified for real via a
+genuine headless-browser run: page loaded with 9 rows (not 186),
+clicking the toggle grew it to 191 (9 active + 182 inactive, matching
+production exactly) with the button text flipping "Show Inactive (182)"
+-> "Hide Inactive (182)", toggling back correctly returned to 9 — zero
+console errors throughout.
+
+**A genuine regression this same fix caused, found and fixed in the same
+pass**: S31's pre-existing `Delete button renders and works via the real
+UI` test (built earlier today) asserted a just-deleted row stayed
+visible showing an "Inactive" badge in place — broken by the new
+hide-by-default toggle, since the row now correctly *disappears* from
+the default view instead. Fixed the test to assert both new behaviors
+together: the row vanishes from the default view immediately after
+delete, then reappears correctly marked "Inactive" once "Show Inactive"
+is toggled on. Caught by actually re-running the existing suite after
+the change, not assumed safe.
+
+New permanent "S33 Users & Roles: hide-inactive default + no more S19
+leaks" suite (3 tests) added to `qa_automation.spec.ts` — including one
+more real test-bug fix along the way: the first draft captured the
+"rows hidden" baseline count via `page.locator('table tbody tr').count()`
+immediately after `page.goto()`, racing the real async `/users` fetch
+and sometimes capturing 0 before data loaded (caught by the test's own
+first real run, not by inspection) — fixed with an `expect.poll(...)
+.toBeGreaterThan(0)` wait before capturing the baseline, matching the
+same async-render-race lesson already documented elsewhere in this
+project (the pipeline-board job-picker race, fixed the same way).
+
+Verified for real end-to-end, not code review: reproduced the exact
+10-active-junk-user state via a direct API count before touching
+anything; deleted all 10 via the real endpoint and confirmed exactly 9
+real accounts remained; ran the fixed S19 suite live and confirmed no
+new leak; a real headless-browser pass confirmed the toggle's row counts
+(9 -> 191 -> 9) and text states independently. Full QA suite genuinely
+clean after all fixes (confirmed via isolated re-runs of every test that
+failed across two consecutive full-suite attempts today — S6/S7/S12/S19
+self-promote, all in files untouched by this work, all passed clean in
+isolation once the login rate-limit window cleared; each full-suite
+failure correlated with 10-12 real confirmed 429s in the backend logs
+during that exact run, the same extensively-documented per-IP
+characteristic, not a regression). Zero-token audit: `CONFIRMED CLEAN`
+(370 files, 0 external API refs).

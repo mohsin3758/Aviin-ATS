@@ -1827,6 +1827,20 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
   let reqId: string;
   let candId: string;
   let recruiterId: string;
+  // Real bug fix (2026-08-16): the two "Ownership enforcement" tests
+  // below created owner/nonOwner test users as test-local `const`s and
+  // only cleaned them up with an inline deactivate call at the very end
+  // of the test body — invisible to afterAll and never reached if the
+  // test threw/failed earlier (the exact same rate-limit-cascade failures
+  // documented repeatedly elsewhere in this file). This leaked "QA S19
+  // Owner"/"QA S19 NonOwner"/"QA S19b Owner"/"QA S19b NonOwner" as
+  // permanently-active users across many runs — confirmed live: 10 real
+  // leftover active accounts found on production. Promoted to
+  // describe-level `let`s, same fix already applied to S16's cand3Id.
+  let s19OwnerId: string;
+  let s19NonOwnerId: string;
+  let s19bOwnerId: string;
+  let s19bNonOwnerId: string;
 
   test.afterAll(async ({ request }) => {
     const token = await getApiToken(request);
@@ -1834,6 +1848,10 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
     if (recruiterId) await request.patch(`${API}/users/${recruiterId}/deactivate`, { headers: auth }).catch(() => {});
+    if (s19OwnerId) await request.patch(`${API}/users/${s19OwnerId}/deactivate`, { headers: auth }).catch(() => {});
+    if (s19NonOwnerId) await request.patch(`${API}/users/${s19NonOwnerId}/deactivate`, { headers: auth }).catch(() => {});
+    if (s19bOwnerId) await request.patch(`${API}/users/${s19bOwnerId}/deactivate`, { headers: auth }).catch(() => {});
+    if (s19bNonOwnerId) await request.patch(`${API}/users/${s19bNonOwnerId}/deactivate`, { headers: auth }).catch(() => {});
   });
 
   test('RBAC: a plain recruiter cannot self-promote to admin or deactivate another user', async ({ request }) => {
@@ -1863,6 +1881,7 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
     reqId = (await rReq.json()).id;
     const owner = await request.post(`${API}/users`, { headers: auth, data: { email: `qa.s19.owner.${stamp}@test.com`, full_name: 'QA S19 Owner', role: 'recruiter', password: 'TestPass123!' } });
     const ownerId = (await owner.json()).id;
+    s19OwnerId = ownerId;
     const ownerLogin = await request.post(`${API}/auth/login`, { data: { email: `qa.s19.owner.${stamp}@test.com`, password: 'TestPass123!' } });
     const ownerToken = (await ownerLogin.json()).access_token;
 
@@ -1885,6 +1904,7 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
     // Real non-owner recruiter (not admin) must be blocked.
     const nonOwner = await request.post(`${API}/users`, { headers: auth, data: { email: `qa.s19.nonowner.${stamp}@test.com`, full_name: 'QA S19 NonOwner', role: 'recruiter', password: 'TestPass123!' } });
     const nonOwnerId = (await nonOwner.json()).id;
+    s19NonOwnerId = nonOwnerId;
     const nonOwnerLogin = await request.post(`${API}/auth/login`, { data: { email: `qa.s19.nonowner.${stamp}@test.com`, password: 'TestPass123!' } });
     const nonOwnerRealToken = (await nonOwnerLogin.json()).access_token;
     const blocked = await request.patch(`${API}/applications/${appId}/stage`, {
@@ -1894,9 +1914,6 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
     expect(blocked.status()).toBe(403);
     const blockedBody = await blocked.json();
     expect(blockedBody.detail.detail).toContain('Candidate Already Owned');
-
-    await request.patch(`${API}/users/${ownerId}/deactivate`, { headers: auth }).catch(() => {});
-    await request.patch(`${API}/users/${nonOwnerId}/deactivate`, { headers: auth }).catch(() => {});
   });
 
   // 2026-08-11 follow-up: rule 11 of the ownership spec ("resume upload
@@ -1912,12 +1929,14 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
 
     const owner = await request.post(`${API}/users`, { headers: auth, data: { email: `qa.s19b.owner.${stamp}@test.com`, full_name: 'QA S19b Owner', role: 'recruiter', password: 'TestPass123!' } });
     const ownerId = (await owner.json()).id;
+    s19bOwnerId = ownerId;
     const ownerLogin = await request.post(`${API}/auth/login`, { data: { email: `qa.s19b.owner.${stamp}@test.com`, password: 'TestPass123!' } });
     const ownerToken = (await ownerLogin.json()).access_token;
     const ownerAuth = { 'Authorization': `Bearer ${ownerToken}`, 'Content-Type': 'application/json' };
 
     const nonOwner = await request.post(`${API}/users`, { headers: auth, data: { email: `qa.s19b.nonowner.${stamp}@test.com`, full_name: 'QA S19b NonOwner', role: 'recruiter', password: 'TestPass123!' } });
     const nonOwnerId = (await nonOwner.json()).id;
+    s19bNonOwnerId = nonOwnerId;
     const nonOwnerLogin = await request.post(`${API}/auth/login`, { data: { email: `qa.s19b.nonowner.${stamp}@test.com`, password: 'TestPass123!' } });
     const nonOwnerToken = (await nonOwnerLogin.json()).access_token;
 
@@ -1955,9 +1974,6 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
     const ownerImportBody = await ownerImport.json();
     expect(ownerImportBody.skipped_owned).toBe(0);
     expect(ownerImportBody.updated).toBe(1);
-
-    await request.patch(`${API}/users/${ownerId}/deactivate`, { headers: auth }).catch(() => {});
-    await request.patch(`${API}/users/${nonOwnerId}/deactivate`, { headers: auth }).catch(() => {});
   });
 
   test('Job Board: a pending-approval requisition is hidden from public listing and apply', async ({ request }) => {
@@ -3263,7 +3279,17 @@ test.describe.serial('S31 User Management: Invite Fix + Delete', () => {
 
     page.once('dialog', d => d.accept());
     await row.getByTitle('Delete user').click();
-    await expect(row.getByText('Inactive')).toBeVisible({ timeout: 15000 });
+    // Real bug fix (2026-08-16): Settings > Users now hides inactive
+    // users by default (see S33) — a just-deleted row correctly
+    // disappears from view instead of staying visible with an "Inactive"
+    // badge, which is what this test originally asserted before that
+    // toggle existed. Verify both halves: the row is gone from the
+    // default view, then reappears correctly marked "Inactive" once
+    // "Show Inactive" is toggled on.
+    await expect(row).not.toBeVisible({ timeout: 15000 });
+    await page.getByTestId('toggle-show-inactive').click();
+    await expect(row).toBeVisible({ timeout: 15000 });
+    await expect(row.getByText('Inactive')).toBeVisible();
     expect(errors).toHaveLength(0);
   });
 });
@@ -3342,5 +3368,65 @@ test.describe.serial('S32 Resume Inbox: filter + drawer state survives navigatio
     // The original tab must be completely unaffected by the new-tab click.
     expect(page.url()).toBe(urlBefore);
     await expect(drawer).toBeVisible();
+  });
+});
+
+// S33 (2026-08-16): user asked to clean up leftover QA test users
+// cluttering Settings > Users & Roles. Found and fixed the root cause
+// alongside the cleanup: unlike every other list page in this app,
+// Users had no default hide-inactive filter at all, so 177 of 186 real
+// users on this tenant (mostly QA test-suite leftovers) sat permanently
+// visible. Also root-caused why active (not just inactive) junk kept
+// accumulating: S19's two ownership tests tracked owner/nonOwner users
+// as test-local consts, invisible to afterAll, cleaned up only by an
+// inline call at the very end of the test body — never reached if the
+// test failed earlier (the same rate-limit-cascade class documented
+// repeatedly elsewhere in this file). Both fixed; this suite guards both.
+test.describe.serial('S33 Users & Roles: hide-inactive default + no more S19 leaks', () => {
+  test('GET /users still returns everyone (API is unfiltered by design — the hide is a frontend default, not a data change)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/users`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const users = await r.json();
+    expect(users.some((u: any) => u.is_active === false)).toBeTruthy();
+  });
+
+  test('Settings > Users page hides inactive users by default and the toggle reveals/hides them', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/settings/users');
+    // Wait for the real async /users fetch to actually land, not just the
+    // toggle button existing — its "Show Inactive" text renders even
+    // before data loads (inactiveCount defaults to 0), so a bare text
+    // wait doesn't guarantee the table has real rows yet, a race caught
+    // by this test's own first attempt (baseline captured as 0).
+    await expect.poll(async () => page.locator('table tbody tr').count(), { timeout: 15000 }).toBeGreaterThan(0);
+    await expect(page.getByTestId('toggle-show-inactive')).toHaveText(/Show Inactive/i);
+
+    const rowsHidden = await page.locator('table tbody tr').count();
+
+    await page.getByTestId('toggle-show-inactive').click();
+    await expect(page.getByTestId('toggle-show-inactive')).toHaveText(/Hide Inactive/i);
+    await expect.poll(async () => page.locator('table tbody tr').count()).toBeGreaterThan(rowsHidden);
+
+    await page.getByTestId('toggle-show-inactive').click();
+    await expect(page.getByTestId('toggle-show-inactive')).toHaveText(/Show Inactive/i);
+    await expect.poll(async () => page.locator('table tbody tr').count()).toBe(rowsHidden);
+    expect(errors).toHaveLength(0);
+  });
+
+  test('S19 ownership tests no longer leak active users (regression guard for the afterAll fix)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const before = await (await request.get(`${API}/users?is_active=true`, { headers: auth })).json();
+
+    // Run just the two previously-leaking S19 sub-flows worth of logic
+    // isn't practical to re-invoke from here (they live in a separate
+    // describe block) — instead assert directly that no email matching
+    // the old leak pattern (qa.s19*.owner/nonowner@test.com) is active,
+    // which is the actual bug signature that was found live.
+    const leaked = before.filter((u: any) => /^qa\.s19b?\.(owner|nonowner)\./.test(u.email || ''));
+    expect(leaked).toHaveLength(0);
   });
 });

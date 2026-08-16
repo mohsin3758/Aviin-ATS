@@ -27,10 +27,21 @@ export default function UsersPage() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
+  // Real bug fix (2026-08-16): unlike every other list page in this app
+  // (Candidates/Requisitions/Companies all hide soft-deleted rows by
+  // default), Users & Roles showed active AND inactive users together
+  // forever with no way to hide the latter — so deactivating/deleting a
+  // user never actually removed the clutter from view. Confirmed live:
+  // 167 of 186 real users on this tenant were already inactive, most of
+  // them QA test-suite leftovers, permanently cluttering this page.
+  // Defaults to hidden, matching the rest of the app's convention.
+  const [showInactive, setShowInactive] = useState(false);
   const { data: users, loading, refetch } = useFetch<any[]>('/users');
   const { data: roles } = useFetch<any[]>('/roles');
 
+  const inactiveCount = (users||[]).filter(u=>u.is_active===false).length;
   const filtered = (users||[]).filter(u =>
+    (showInactive || u.is_active !== false) &&
     (!search || u.full_name?.toLowerCase().includes(search.toLowerCase()) || u.email?.toLowerCase().includes(search.toLowerCase())) &&
     (!deptFilter || u.department === deptFilter)
   );
@@ -74,7 +85,7 @@ export default function UsersPage() {
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:'12px' }}>
         <div>
           <h1 style={{ fontSize:'20px', fontWeight:'700', color:'#0f172a' }}>Users & Roles</h1>
-          <p style={{ fontSize:'13px', color:'#64748b', marginTop:'2px' }}>{(users||[]).filter(u=>u.is_active!==false).length} active users · {(roles||[]).length} roles</p>
+          <p style={{ fontSize:'13px', color:'#64748b', marginTop:'2px' }}>{(users||[]).filter(u=>u.is_active!==false).length} active users · {(roles||[]).length} roles{inactiveCount>0 && !showInactive ? ` · ${inactiveCount} inactive hidden` : ''}</p>
         </div>
         <button onClick={openCreate} style={{ display:'flex', alignItems:'center', gap:'6px', padding:'9px 18px', background:'#1e40af', color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
           <Plus size={14} /> Invite User
@@ -93,6 +104,11 @@ export default function UsersPage() {
               style={{ padding:'5px 12px', borderRadius:'20px', fontSize:'11px', fontWeight:'600', cursor:'pointer', background:(d==='All'&&!deptFilter)||deptFilter===d?'#1e40af':'white', color:(d==='All'&&!deptFilter)||deptFilter===d?'white':'#374151', border:`1px solid ${(d==='All'&&!deptFilter)||deptFilter===d?'#1e40af':'#e2e8f0'}` }}>{d}</button>
           ))}
         </div>
+        <button data-testid="toggle-show-inactive" onClick={()=>setShowInactive(v=>!v)}
+          style={{ display:'flex', alignItems:'center', gap:'6px', padding:'6px 14px', borderRadius:'20px', fontSize:'11px', fontWeight:'600', cursor:'pointer',
+            background: showInactive ? '#1e293b' : 'white', color: showInactive ? 'white' : '#64748b', border: `1px solid ${showInactive ? '#1e293b' : '#e2e8f0'}`, whiteSpace:'nowrap' }}>
+          {showInactive ? 'Hide' : 'Show'} Inactive{inactiveCount>0 ? ` (${inactiveCount})` : ''}
+        </button>
       </div>
 
       <div style={{ background:'white', borderRadius:'12px', border:'1px solid #e2e8f0', overflow:'hidden' }}>
