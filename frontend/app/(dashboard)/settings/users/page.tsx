@@ -60,6 +60,12 @@ export default function UsersPage() {
     try { await apiFetch(`/users/${u.id}/${u.is_active!==false?'deactivate':'activate'}`, {method:'PATCH'}); refetch(); } catch {}
   };
 
+  const handleDelete = async (u:any) => {
+    if (!confirm(`Delete ${u.full_name}? This deactivates their account (same as Deactivate) and they will no longer be able to log in or be assigned new work. This can be undone by an admin later if needed.`)) return;
+    try { await apiFetch(`/users/${u.id}`, {method:'DELETE'}); refetch(); }
+    catch(e:any) { alert(e.message||'Failed to delete user'); }
+  };
+
   const inputStyle = { width:'100%', border:'1px solid #e2e8f0', borderRadius:'8px', padding:'9px 12px', fontSize:'13px', outline:'none', color:'#1e293b', background:'white', boxSizing:'border-box' as const };
   const depts = [...new Set((users||[]).map(u=>u.department).filter(Boolean))];
 
@@ -131,6 +137,9 @@ export default function UsersPage() {
                       <button onClick={()=>openEdit(u)} style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #e2e8f0', background:'#f8fafc', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}><Edit size={12} style={{ color:'#64748b' }} /></button>
                       <button onClick={()=>toggleActive(u)} title={u.is_active!==false?'Deactivate':'Activate'} style={{ width:'28px', height:'28px', borderRadius:'6px', border:`1px solid ${u.is_active!==false?'#fee2e2':'#d1fae5'}`, background:u.is_active!==false?'#fef2f2':'#f0fdf4', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
                         {u.is_active!==false?<UserX size={12} style={{ color:'#ef4444' }} />:<UserCheck size={12} style={{ color:'#059669' }} />}
+                      </button>
+                      <button onClick={()=>handleDelete(u)} title="Delete user" style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #fee2e2', background:'#fef2f2', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
+                        <Trash2 size={12} style={{ color:'#ef4444' }} />
                       </button>
                     </div>
                   </td>

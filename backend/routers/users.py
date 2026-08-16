@@ -99,6 +99,16 @@ async def update_me(body: dict, actor: Actor = Depends(get_actor)):
 
 @router.post("")
 async def create_user(body: UserCreate, actor: Actor = Depends(require_role("admin", "manager"))):
+    # Defensive: reporting_to is a UUID FK — an empty string (a "no
+    # selection" default some caller forgot to convert to null, same bug
+    # class documented repeatedly elsewhere in this project) crashes
+    # asyncpg's ::uuid cast with a raw DataError instead of a clean 400.
+    # The frontend already converts '' -> null before sending, but the
+    # backend shouldn't depend on every caller remembering that.
+    if body.reporting_to == "":
+        body.reporting_to = None
+    if body.joining_date == "":
+        body.joining_date = None
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Check email uniqueness
         exists = await conn.fetchval(
@@ -196,6 +206,11 @@ async def get_user(user_id: str, actor: Actor = Depends(get_actor)):
 
 @router.put("/{user_id}")
 async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(require_role("admin", "manager"))):
+    # Same empty-string-to-UUID/date cast defensive fix as create_user.
+    if body.reporting_to == "":
+        body.reporting_to = None
+    if body.joining_date == "":
+        body.joining_date = None
     async with db.tenant_conn(actor.tenant_id) as conn:
         if body.role:
             valid = await conn.fetchval(
@@ -266,6 +281,29 @@ async def activate_user(user_id: str, actor: Actor = Depends(require_role("admin
         if not row:
             raise HTTPException(404, "User not found")
     return dict(row)
+
+
+@router.delete("/{user_id}")
+async def delete_user(user_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
+    """Soft-delete (is_active=false) — same real DELETE-verb-backed-by-
+    soft-delete convention already established for clients.py (a genuine
+    hard DELETE on a user would throw FK violations against every real
+    row referencing them — created_by, assigned_recruiter_id, audit_log
+    actor, etc. — the exact bug class already found and fixed once for
+    clients). Functionally the same effect as PATCH .../deactivate, just
+    exposed under the verb an admin naturally reaches for when they mean
+    "remove this person" (the frontend's Trash icon/confirm-dialog flow,
+    previously imported but never wired to anything)."""
+    if user_id == actor.user_id:
+        raise HTTPException(400, "Cannot delete yourself")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            UPDATE users SET is_active=false WHERE id=$1 AND tenant_id=$2
+            RETURNING id, email, full_name, is_active
+        """, user_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "User not found")
+    return {"ok": True, "deleted": dict(row)}
 
 
 @router.get("/stats/summary")

@@ -3171,3 +3171,99 @@ test.describe.serial('S30 Resume/Recruiter Follow-up Audit Fixes', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// S31 (2026-08-16): user reported "Invite New User Failed" + asked for a
+// real Delete option on Settings > Users & Roles. Root-caused two real,
+// separate bugs rather than assuming one: (1) POST/PUT /users crashed
+// with a raw 500 (asyncpg ::uuid cast on an empty-string reporting_to —
+// the frontend already guards this with `|| null`, but the backend
+// shouldn't rely on every caller remembering that), and (2) the second
+// tenant ("Beta Tech Staffing") had ZERO role_definitions rows at all,
+// so every invite on that tenant unconditionally 400'd "Role not found"
+// regardless of which role was picked — closed via
+// sql/60_backfill_role_definitions_for_empty_tenants.sql. Also added a
+// genuine DELETE /users/{id} (soft-delete, same convention as
+// clients.py) and wired the previously-imported-but-unused Trash2 icon
+// to it on the frontend.
+test.describe.serial('S31 User Management: Invite Fix + Delete', () => {
+  const stamp = Date.now();
+  let userId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (userId) await request.delete(`${API}/users/${userId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('invite with reporting_to="" (the exact original crash) now succeeds, not a 500', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const r = await request.post(`${API}/users`, {
+      headers: auth,
+      data: {
+        email: `qa.s31.${stamp}@test.com`, full_name: `QA S31 Invite Test ${stamp}`, role: 'recruiter',
+        department: 'Delivery', designation: '', phone: '', employee_id: '', location: '',
+        capacity_weekly: 40, password: 'Welcome@2026', reporting_to: '',
+      },
+    });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    userId = body.id;
+    expect(body.email).toBe(`qa.s31.${stamp}@test.com`);
+  });
+
+  test('second tenant (Beta Tech Staffing) now has a real, complete role catalog', async ({ request }) => {
+    // No login available for this tenant's real admin from this suite —
+    // verified via the trusted-internal x-tenant-id path against the
+    // read-only /users list (create_user itself is admin/manager-gated
+    // and rejects the anonymous path by design, so this checks the same
+    // underlying role_definitions table the invite flow depends on).
+    const BETA_TID = '539f4aea-646e-4816-a2f6-b476fed0bc51';
+    const r = await request.get(`${API}/roles`, { headers: { 'x-tenant-id': BETA_TID } });
+    expect(r.ok()).toBeTruthy();
+    const roles = await r.json();
+    expect(roles.length).toBeGreaterThanOrEqual(20);
+    expect(roles.some((rl: any) => rl.role_code === 'recruiter')).toBeTruthy();
+  });
+
+  test('DELETE /users/{id} soft-deletes; self-delete is blocked', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+
+    const del = await request.delete(`${API}/users/${userId}`, { headers: auth });
+    expect(del.ok()).toBeTruthy();
+    const delBody = await del.json();
+    expect(delBody.deleted.is_active).toBe(false);
+
+    const check = await request.get(`${API}/users/${userId}`, { headers: auth });
+    expect((await check.json()).is_active).toBe(false);
+
+    const me = await (await request.get(`${API}/users?is_active=true`, { headers: auth })).json();
+    const admin = me.find((u: any) => u.email === 'admin@example.com');
+    const selfDelete = await request.delete(`${API}/users/${admin.id}`, { headers: auth });
+    expect(selfDelete.status()).toBe(400);
+  });
+
+  test('Users & Roles page: Delete button renders and works via the real UI', async ({ page, request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const uiStamp = Date.now();
+    const created = await (await request.post(`${API}/users`, {
+      headers: auth,
+      data: { email: `qa.s31.ui.${uiStamp}@test.com`, full_name: `QA S31 UI Delete ${uiStamp}`, role: 'recruiter', reporting_to: '' },
+    })).json();
+
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/settings/users');
+    await page.getByPlaceholder(/Search by name or email/i).fill(`QA S31 UI Delete ${uiStamp}`);
+    const row = page.locator('tr', { hasText: `QA S31 UI Delete ${uiStamp}` });
+    await expect(row).toBeVisible({ timeout: 15000 });
+    await expect(row.getByTitle('Delete user')).toBeVisible();
+
+    page.once('dialog', d => d.accept());
+    await row.getByTitle('Delete user').click();
+    await expect(row.getByText('Inactive')).toBeVisible({ timeout: 15000 });
+    expect(errors).toHaveLength(0);
+  });
+});

@@ -5776,3 +5776,89 @@ full-run does. Zero-token audit: `CONFIRMED CLEAN` (369 files, 0
 external API refs) — `git add -A` staged first, since this scan's own
 `git ls-files` basis silently skips brand-new untracked files (a gap
 documented multiple times previously in this file).
+
+## User Delete option + Invite New User Failed — 2 real bugs found and fixed, 2026-08-16
+User asked for a Delete option on Settings > Users & Roles and reported
+"Invite New User Failed." Checked before building: `Trash2` was already
+imported in `settings/users/page.tsx` but never used anywhere — a strong
+signal a Delete button was planned but never wired up — and no
+`DELETE /users/{id}` endpoint existed at all (only `PATCH .../deactivate`/
+`.../activate`). Reproduced the invite failure for real against
+production rather than guessing at the cause, and found **two separate,
+genuine bugs**, not one:
+
+1. **`POST`/`PUT /users` crashed with a raw 500** — `reporting_to` is a
+   UUID FK; sending it as a literal empty string (the "no selection"
+   default) crashes asyncpg's `::uuid` cast
+   (`invalid UUID '': length must be between 32..36 characters, got 0`),
+   the exact same bug class documented dozens of times elsewhere in this
+   project. The frontend's `handleSave` already converts `'' -> null`
+   before sending (`payload.reporting_to = payload.reporting_to || null`),
+   so the current UI flow shouldn't hit this in the common case — but
+   relying solely on a frontend guard for this is fragile (any other
+   caller, a future regression, or a direct API integration would hit it
+   immediately). Fixed defensively in the backend: both `create_user` and
+   `update_user` now coerce `reporting_to`/`joining_date` from `''` to
+   `None` before the query runs, so the crash is structurally impossible
+   regardless of what any caller sends. Verified for real: the exact
+   original payload (`reporting_to:""`) now returns 200, not 500.
+2. **The second tenant ("Beta Tech Staffing") had ZERO `role_definitions`
+   rows at all** — meaning every single invite attempt on that tenant
+   unconditionally 400'd `"Role '<role>' not found"`, regardless of which
+   of the 17 roles the frontend's dropdown offered. No committed
+   migration anywhere in `sql/*.sql` ever populated `role_definitions`
+   for any tenant — the real 28-role catalog (correct, non-default
+   `permissions` JSONB per role, real `job_visibility_scope` overrides on
+   `account_director`/`technical_recruiter`) existed only for the primary
+   "Acme Staffing India" tenant, populated by hand at some point outside
+   version control — the same schema-drift/second-tenant-missed-a-fixup
+   pattern documented repeatedly elsewhere in this project's history.
+   `sql/60_backfill_role_definitions_for_empty_tenants.sql` — deliberately
+   generic, not a one-off patch: for every tenant with zero
+   `role_definitions` rows, copies the full real role catalog from
+   whichever tenant has the most complete set, so any *future* tenant
+   created with no roles self-heals the same way, not just this one
+   instance found today. Run as `postgres` (table owned by `postgres`,
+   FORCE RLS, same cross-tenant-seed pattern used repeatedly elsewhere).
+   Verified via the exact SQL query `create_user` itself runs
+   (`role_code='recruiter' AND is_active`) — now returns a real row for
+   the previously-broken tenant; a real admin login for that tenant
+   wasn't available to test the full HTTP round-trip (the one active user
+   there, `beta.admin@example.com`, doesn't use the same seed default
+   password as the primary tenant, and resetting a real account's
+   password without checking first is exactly the mistake flagged and
+   corrected earlier in this project's history — not repeated here).
+
+**New `DELETE /users/{user_id}`** — soft-delete (`is_active=false`), same
+real-DELETE-verb-backed-by-soft-delete convention already established for
+`clients.py` (a genuine hard `DELETE` would throw FK violations against
+every real row referencing a user — `created_by`, `assigned_recruiter_id`,
+`audit_log` actor, etc. — the identical bug class already found and fixed
+once for `clients`). Self-delete blocked, matching the existing
+`deactivate_user`'s own guard. Frontend: a real Delete (trash-can) button
+now sits in the Actions column next to Edit/Deactivate, with a confirm
+dialog explaining it's the same effect as Deactivate — wiring the
+previously-dead `Trash2` import to something real rather than inventing a
+new, materially different "hard remove" concept that would contradict this
+codebase's consistent soft-delete convention everywhere else.
+
+Verified for real end-to-end, not code review: reproduced the original
+500 via a direct API call before touching any code, confirmed it's fixed
+post-deploy with the identical payload, confirmed the role-catalog
+backfill via direct SQL against the real previously-broken tenant, and
+confirmed the new DELETE endpoint (soft-deletes, self-delete blocked,
+`is_active` flips correctly) via real API calls. Real headless-browser
+verification confirmed both flows through the actual UI: the Delete
+button renders as a 3rd action-column icon and its confirm-dialog +
+soft-delete round-trip works end-to-end; a real Invite User submission
+with "Reports To" left on "— None —" (the exact previously-crashing path)
+now returns 200 with zero console errors, where it used to 500. New
+permanent "S31 User Management: Invite Fix + Delete" suite (4 tests)
+added to `qa_automation.spec.ts`. All throwaway test users created during
+verification (both via direct API and via the real UI) were soft-deleted
+through the very Delete endpoint/button being verified, leaving no active
+residue — the DELETE gives no hard-removal option by design, matching
+this table's own established convention, so they remain visible as
+"Inactive" rows on the Users page, which is the intended state for a
+`Settings` page that deliberately shows deactivated accounts (unlike
+Candidates/Requisitions lists, which hide soft-deleted rows by default).
