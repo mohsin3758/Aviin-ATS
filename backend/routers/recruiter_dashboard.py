@@ -149,18 +149,33 @@ async def my_day(actor: Actor = Depends(get_actor)):
     today_end = today_start + timedelta(days=1)
 
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # REAL BUG FIX (2026-08-17): recruiter_tasks has no direct
+        # candidate_id (only a denormalized candidate_name text + an
+        # optional application_id) — a task created when a candidate
+        # moved to an interview stage stayed in "My Day" forever even
+        # after that candidate was later soft-deleted, since nothing
+        # here ever checked whether the underlying candidate still
+        # existed. Tasks with no application_id (not tied to a specific
+        # candidate) are unaffected by this filter.
         tasks_due = await conn.fetch(
-            """SELECT id, task_type, title, priority, due_at, candidate_name, req_title, requisition_id, application_id
-               FROM recruiter_tasks
-               WHERE recruiter_id = $1 AND status IN ('pending','in_progress')
-                 AND (due_at IS NULL OR due_at < $2)
-               ORDER BY (due_at IS NULL), due_at ASC,
-                        CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+            """SELECT t.id, t.task_type, t.title, t.priority, t.due_at, t.candidate_name, t.req_title, t.requisition_id, t.application_id
+               FROM recruiter_tasks t
+               LEFT JOIN applications a ON a.id = t.application_id
+               LEFT JOIN candidates c ON c.id = a.candidate_id
+               WHERE t.recruiter_id = $1 AND t.status IN ('pending','in_progress')
+                 AND (t.due_at IS NULL OR t.due_at < $2)
+                 AND (t.application_id IS NULL OR c.is_active IS NOT FALSE)
+               ORDER BY (t.due_at IS NULL), t.due_at ASC,
+                        CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1
                                       WHEN 'medium' THEN 2 ELSE 3 END
                LIMIT 20""",
             uid, today_end,
         )
 
+        # REAL BUG FIX (2026-08-17): both interviews_today and stale below
+        # had the same missing is_active filter as tasks_due above — a
+        # soft-deleted candidate's interview or stale-application card
+        # kept showing on My Day indefinitely.
         interviews_today = await conn.fetch(
             """SELECT i.id, i.scheduled_at, i.duration_mins, i.mode, i.status, i.interview_type,
                       c.full_name AS candidate_name, r.title AS req_title,
@@ -169,7 +184,7 @@ async def my_day(actor: Actor = Depends(get_actor)):
                JOIN candidates c ON c.id = i.candidate_id
                LEFT JOIN requisitions r ON r.id = i.requisition_id
                LEFT JOIN applications a ON a.id = i.application_id
-               WHERE i.tenant_id = $2
+               WHERE i.tenant_id = $2 AND c.is_active IS NOT FALSE
                  AND (i.interviewer_id = $1 OR a.assigned_recruiter_id = $1)
                  AND i.scheduled_at >= $3 AND i.scheduled_at < $4
                  AND i.status NOT IN ('cancelled', 'completed')
@@ -185,7 +200,7 @@ async def my_day(actor: Actor = Depends(get_actor)):
                FROM applications a
                JOIN candidates c ON c.id = a.candidate_id
                LEFT JOIN requisitions r ON r.id = a.requisition_id
-               WHERE a.tenant_id = $1 AND a.assigned_recruiter_id = $2
+               WHERE a.tenant_id = $1 AND a.assigned_recruiter_id = $2 AND c.is_active IS NOT FALSE
                  AND a.stage NOT IN ('placed', 'rejected', 'hold')
                  AND a.updated_at < now() - interval '3 days'
                ORDER BY a.updated_at ASC

@@ -15,6 +15,55 @@ router = APIRouter(prefix="/predictions", tags=["predictions"])
 # ── Lazy model cache ─────────────────────────────────────
 _model_cache: dict = {}
 
+
+async def _upsert_prediction(conn, tenant_id: str, candidate_id: str, requisition_id: Optional[str],
+                              placement_prob: float, offer_drop_prob: float, grade: str,
+                              features_json: Optional[str], model_version: str):
+    """REAL BUG FIX (2026-08-17): placement_predictions' real unique
+    constraint is (tenant_id, candidate_id, requisition_id) — but SQL
+    treats every NULL requisition_id as distinct from every other NULL,
+    so `ON CONFLICT (tenant_id,candidate_id,requisition_id)` never
+    matched for the very common "predict without a specific job" case
+    (both the single-predict and bulk-predict UI actions call this with
+    no requisition_id). Every repeat call for the same candidate created
+    a brand-new row instead of updating the existing one — confirmed
+    live: one real candidate had accumulated 11 near-identical rows,
+    another 6, purely from clicking "Run Bulk Predictions" more than
+    once. Requires a matching partial unique index
+    (sql/61_prediction_dedup.sql) for the NULL-requisition ON CONFLICT
+    target to be valid.
+    """
+    if requisition_id:
+        await conn.execute("""
+            INSERT INTO placement_predictions
+              (tenant_id,candidate_id,requisition_id,placement_prob,offer_drop_prob,
+               predicted_grade,features,model_version)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
+            ON CONFLICT (tenant_id,candidate_id,requisition_id) DO UPDATE SET
+              placement_prob=EXCLUDED.placement_prob,
+              offer_drop_prob=EXCLUDED.offer_drop_prob,
+              predicted_grade=EXCLUDED.predicted_grade,
+              features=COALESCE(EXCLUDED.features, placement_predictions.features),
+              model_version=EXCLUDED.model_version,
+              predicted_at=now()
+        """, tenant_id, candidate_id, requisition_id, placement_prob, offer_drop_prob, grade,
+             features_json, model_version)
+    else:
+        await conn.execute("""
+            INSERT INTO placement_predictions
+              (tenant_id,candidate_id,requisition_id,placement_prob,offer_drop_prob,
+               predicted_grade,features,model_version)
+            VALUES ($1,$2,NULL,$3,$4,$5,$6::jsonb,$7)
+            ON CONFLICT (tenant_id,candidate_id) WHERE requisition_id IS NULL DO UPDATE SET
+              placement_prob=EXCLUDED.placement_prob,
+              offer_drop_prob=EXCLUDED.offer_drop_prob,
+              predicted_grade=EXCLUDED.predicted_grade,
+              features=COALESCE(EXCLUDED.features, placement_predictions.features),
+              model_version=EXCLUDED.model_version,
+              predicted_at=now()
+        """, tenant_id, candidate_id, placement_prob, offer_drop_prob, grade,
+             features_json, model_version)
+
 def _build_features(candidate: dict, scores: dict) -> list[float]:
     """Build feature vector from candidate + intelligence data."""
     exp_yr      = (candidate.get("total_exp_mo") or 0) / 12
@@ -128,24 +177,16 @@ async def predict_one(body: PredictRequest, actor: Actor=Depends(get_actor)):
     grade = ('A+' if placement_prob >= 0.8 else 'A' if placement_prob >= 0.65
              else 'B' if placement_prob >= 0.5 else 'C' if placement_prob >= 0.35 else 'D')
 
+    model_version = "v1-logistic" if (model and scaler) else "v1-rule"
+    features_json = json.dumps({"features": features, "model": model_note})
     async with db.tenant_conn(actor.tenant_id) as conn:
+        await _upsert_prediction(conn, actor.tenant_id, body.candidate_id, body.requisition_id,
+                                  placement_prob, offer_drop_prob, grade, features_json, model_version)
         row = await conn.fetchrow("""
-            INSERT INTO placement_predictions
-              (tenant_id,candidate_id,requisition_id,placement_prob,offer_drop_prob,
-               predicted_grade,features,model_version)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
-            ON CONFLICT (tenant_id,candidate_id,requisition_id) DO UPDATE SET
-              placement_prob=EXCLUDED.placement_prob,
-              offer_drop_prob=EXCLUDED.offer_drop_prob,
-              predicted_grade=EXCLUDED.predicted_grade,
-              features=EXCLUDED.features,
-              model_version=EXCLUDED.model_version,
-              predicted_at=now()
-            RETURNING *
-        """, actor.tenant_id, body.candidate_id, body.requisition_id,
-             placement_prob, offer_drop_prob, grade,
-             json.dumps({"features": features, "model": model_note}),
-             "v1-logistic" if (model and scaler) else "v1-rule")
+            SELECT * FROM placement_predictions
+            WHERE tenant_id=$1 AND candidate_id=$2
+              AND ($3::uuid IS NULL AND requisition_id IS NULL OR requisition_id=$3::uuid)
+        """, actor.tenant_id, body.candidate_id, body.requisition_id)
     return dict(row)
 
 
@@ -194,18 +235,9 @@ async def bulk_predict(body: BulkPredictRequest, actor: Actor=Depends(get_actor)
             drop_prob = max(0.0, 1.0 - prob - 0.2)
             grade = ('A+' if prob >= 0.8 else 'A' if prob >= 0.65
                      else 'B' if prob >= 0.5 else 'C' if prob >= 0.35 else 'D')
-            await conn.execute("""
-                INSERT INTO placement_predictions
-                  (tenant_id,candidate_id,requisition_id,placement_prob,
-                   offer_drop_prob,predicted_grade,model_version)
-                VALUES ($1,$2,$3,$4,$5,$6,$7)
-                ON CONFLICT (tenant_id,candidate_id,requisition_id) DO UPDATE SET
-                  placement_prob=EXCLUDED.placement_prob,
-                  predicted_grade=EXCLUDED.predicted_grade,
-                  predicted_at=now()
-            """, actor.tenant_id, cand["id"], body.requisition_id,
-                 prob, drop_prob, grade,
-                 "v1-logistic" if (model and scaler) else "v1-rule")
+            await _upsert_prediction(conn, actor.tenant_id, str(cand["id"]), body.requisition_id,
+                                      prob, drop_prob, grade, "{}",
+                                      "v1-logistic" if (model and scaler) else "v1-rule")
             results.append({"candidate_id": str(cand["id"]), "placement_prob": prob, "grade": grade})
 
     results.sort(key=lambda x: x["placement_prob"], reverse=True)
@@ -215,12 +247,16 @@ async def bulk_predict(body: BulkPredictRequest, actor: Actor=Depends(get_actor)
 
 @router.get("")
 async def list_predictions(actor: Actor=Depends(get_actor)):
+    # REAL BUG FIX (2026-08-17): no is_active filter — a soft-deleted
+    # candidate's stale prediction rows (one per requisition they were
+    # ever scored against) kept showing on this real, recruiter-facing
+    # list forever.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT pp.*, ca.full_name
             FROM placement_predictions pp
             JOIN candidates ca ON ca.id=pp.candidate_id
-            WHERE pp.tenant_id=$1
+            WHERE pp.tenant_id=$1 AND ca.is_active IS NOT FALSE
             ORDER BY pp.placement_prob DESC
         """, actor.tenant_id)
     return [dict(r) for r in rows]
@@ -241,13 +277,19 @@ async def record_outcome(pred_id: str, body: OutcomeUpdate, actor: Actor=Depends
 
 @router.get("/stats")
 async def prediction_stats(actor: Actor=Depends(get_actor)):
+    # REAL BUG FIX (2026-08-17): same missing is_active filter as the
+    # list endpoint above, in a second, separate query — the "Total
+    # Predictions" KPI card kept counting soft-deleted candidates'
+    # stale rows even after the list itself was fixed.
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT COUNT(*) AS total_predictions,
-                   ROUND(AVG(placement_prob)*100,1) AS avg_placement_prob,
-                   COUNT(*) FILTER (WHERE predicted_grade IN ('A+','A')) AS high_confidence,
-                   COUNT(*) FILTER (WHERE offer_drop_prob > 0.3) AS offer_drop_risk,
-                   COUNT(*) FILTER (WHERE actual_outcome IS NOT NULL) AS outcomes_recorded
-            FROM placement_predictions WHERE tenant_id=$1
+                   ROUND(AVG(pp.placement_prob)*100,1) AS avg_placement_prob,
+                   COUNT(*) FILTER (WHERE pp.predicted_grade IN ('A+','A')) AS high_confidence,
+                   COUNT(*) FILTER (WHERE pp.offer_drop_prob > 0.3) AS offer_drop_risk,
+                   COUNT(*) FILTER (WHERE pp.actual_outcome IS NOT NULL) AS outcomes_recorded
+            FROM placement_predictions pp
+            JOIN candidates ca ON ca.id = pp.candidate_id
+            WHERE pp.tenant_id=$1 AND ca.is_active IS NOT FALSE
         """, actor.tenant_id)
     return dict(row)

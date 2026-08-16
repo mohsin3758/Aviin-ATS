@@ -234,7 +234,15 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
 
 @auto_interview_router.get("/list")
 async def list_interviews(actor: Actor = Depends(get_actor)):
-    """List all scheduled interviews with candidate details."""
+    """List all scheduled interviews with candidate details.
+
+    REAL BUG FIX (2026-08-17): no is_active filter — this is the
+    endpoint the real Interviews page actually calls (a separate,
+    differently-named list_interviews() in p23_p27.py's GET /interviews
+    was fixed first but has no real frontend caller). Soft-deleted
+    candidates' interview rows, some with future scheduled dates, kept
+    showing here indefinitely.
+    """
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT s.id, s.application_id, s.scheduled_at, s.duration_mins,
@@ -247,7 +255,7 @@ async def list_interviews(actor: Actor = Depends(get_actor)):
             JOIN candidates c ON c.id=s.candidate_id
             LEFT JOIN requisitions r ON r.id=s.requisition_id
             LEFT JOIN calendar_events ce ON ce.interview_id=s.id AND ce.tenant_id=s.tenant_id
-            WHERE s.tenant_id=$1
+            WHERE s.tenant_id=$1 AND c.is_active IS NOT FALSE
             ORDER BY s.scheduled_at DESC LIMIT 100
         """, actor.tenant_id)
         return [{

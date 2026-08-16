@@ -885,11 +885,17 @@ test.describe.serial('S14 KAE Candidate Submission', () => {
   // polluting real duplicate-detection output (100% of live pending pairs
   // were this exact leak) and the real Candidates list. Same convention
   // S17 already got right below.
+  // REAL BUG FIX (2026-08-17): clientId was never cleaned up either —
+  // DELETE /clients/{id} became a real soft-delete on 2026-08-12, but
+  // this hook (written before that fix existed) was never revisited.
+  // 12 real "QA KAE Test Client <stamp>" rows had piled up as a result,
+  // found live on the real Companies page.
   test.afterAll(async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}` };
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
   });
 
   test('setup: throwaway client + requisition + candidate + application', async ({ request }) => {
@@ -1420,24 +1426,25 @@ test.describe.serial('S17 Tier-2 Features', () => {
   let reqId: string;
   let candId: string;
   let appId: string;
+  let autoDistClientId: string;
 
   test.afterAll(async ({ request }) => {
-    // No DELETE /applications/{id} endpoint exists (confirmed). The client
-    // is deliberately NOT hard-deleted here: clients.py's DELETE is a real
-    // hard DELETE FROM clients, and requisitions.client_id is a plain FK
-    // with no ON DELETE clause — since the requisition below is only
-    // soft-deleted (is_active=false, matching every other soft-delete
-    // convention in this codebase), that row still exists and would make
-    // the client hard-delete 500 on the FK constraint (same failure shape
-    // as the consent_records/candidates FK hit during manual Tier-2
-    // cleanup earlier this session). Soft-deleting the candidate +
-    // requisition already removes this test data from every real
-    // recruiter-facing list; matches S14's established convention of
-    // leaving what can't be cleanly hard-deleted rather than fighting it.
+    // REAL BUG FIX (2026-08-17): the comment this replaced said clientId
+    // was "deliberately NOT hard-deleted" because clients.py's DELETE
+    // used to be a real hard DELETE FROM clients that would 500 on the
+    // requisition FK. That blocker was resolved on 2026-08-12 — DELETE
+    // /clients/{id} is now a real soft-delete (is_active=false, same
+    // convention as every other entity here) — but this hook was never
+    // revisited afterward. 12 real "QA Tier2 Test Client <stamp>" rows
+    // had piled up as a direct result, found live on the real Companies
+    // page. Soft-deleting a client with an existing (soft-deleted)
+    // requisition FK reference is safe now; no ordering constraint left.
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}` };
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
+    if (autoDistClientId) await request.delete(`${API}/clients/${autoDistClientId}`, { headers: auth }).catch(() => {});
   });
 
   test('setup: throwaway client + requisition + candidate + application', async ({ request }) => {
@@ -1654,6 +1661,7 @@ test.describe.serial('S17 Tier-2 Features', () => {
     const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA AutoDistribute Test Client ${stamp}` } });
     expect(c.ok()).toBeTruthy();
     const clientId = (await c.json()).id;
+    autoDistClientId = clientId; // tracked at describe level so afterAll actually cleans it up
 
     const r1 = await request.post(`${API}/requisitions`, { headers: auth, data: { client_id: clientId, title: 'QA AutoDistribute Test Role A', skills_required: ['Python'] } });
     if (!r1.ok()) console.log('CREATE 1 FAILED', r1.status(), await r1.text());
@@ -3546,6 +3554,244 @@ test.describe.serial('S34 Feature-Level Permissions', () => {
     // Toggle back off — leaves this role's real state unchanged (afterAll also restores it independently).
     await page.getByTestId('perm-group-all-communication').click();
     await expect(page.getByTestId('perm-group-all-communication')).not.toHaveText(/✓ All/);
+    expect(errors).toHaveLength(0);
+  });
+});
+
+// S35 (2026-08-17): user shared live screenshots showing QA/test data
+// polluting 6 real, recruiter-facing pages (Companies, Pipeline board,
+// Duplicate Candidates, Recruiter Ops "My Day", Predictive Hiring,
+// Interviews). Investigation found the real root cause wasn't just
+// uncleaned test rows — it was that soft-deleting a candidate (this
+// codebase's universal cleanup convention) never actually removed them
+// from 5 of those pages, since none of their queries filtered by
+// candidates.is_active. A 6th, unrelated real bug (Companies page
+// "Open Jobs" column showing the tenant-wide count on every single row
+// instead of each client's own count) was found via the same screenshot.
+// This suite proves each of the 5 filter fixes with real create-then-
+// soft-delete-then-verify-it-vanishes cycles, not just a one-time count
+// check against data that will change over time.
+test.describe.serial('S35 Soft-Deleted Candidates No Longer Leak Into Real Pages', () => {
+  const stamp = Date.now();
+  let clientId: string;
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+  let dup1Id: string;
+  let dup2Id: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (dup1Id) await request.delete(`${API}/candidates/${dup1Id}`, { headers: auth }).catch(() => {});
+    if (dup2Id) await request.delete(`${API}/candidates/${dup2Id}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway client + requisition + candidate + application', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S35 Test Client ${stamp}` } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+
+    const r = await request.post(`${API}/requisitions`, { headers: auth, data: { client_id: clientId, title: `QA S35 Test Role ${stamp}`, skills_required: ['Python'] } });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: { full_name: `QA S35 Candidate ${stamp}`, email: `qa.s35.${stamp}@test.com`, phone: `9${String(stamp).slice(-9)}` },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: candId, requisition_id: reqId } });
+    expect(app.ok()).toBeTruthy();
+    appId = (await app.json()).id;
+  });
+
+  test('Companies page: client_id is present on requisitions so the frontend can filter Open Jobs per-client (regression guard for the count bug)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/requisitions?limit=500`, { headers: auth });
+    const reqs = await r.json();
+    const mine = reqs.find((x: any) => x.id === reqId);
+    expect(mine.client_id).toBe(clientId);
+  });
+
+  test('pipeline board: card disappears once the candidate is soft-deleted', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const before = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    const beforeIds = Object.values(before).flat().map((c: any) => c.candidate_id);
+    expect(beforeIds).toContain(candId);
+
+    await request.delete(`${API}/candidates/${candId}`, { headers: auth });
+    const after = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    const afterIds = Object.values(after).flat().map((c: any) => c.candidate_id);
+    expect(afterIds).not.toContain(candId);
+  });
+
+  test('predictions list: no longer shows a prediction for a soft-deleted candidate', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    // candId was soft-deleted in the previous test — predict against a
+    // fresh throwaway candidate instead, confirm it shows, delete, confirm gone.
+    const cand2 = await request.post(`${API}/candidates`, {
+      headers: auth, data: { full_name: `QA S35 Pred Candidate ${stamp}`, email: `qa.s35.pred.${stamp}@test.com`, phone: `8${String(stamp).slice(-9)}` },
+    });
+    const cand2Id = (await cand2.json()).id;
+    const pred = await request.post(`${API}/predictions/predict`, { headers: auth, data: { candidate_id: cand2Id, requisition_id: reqId } });
+    expect(pred.ok()).toBeTruthy();
+
+    const before = await (await request.get(`${API}/predictions`, { headers: auth })).json();
+    expect(before.some((p: any) => p.candidate_id === cand2Id)).toBeTruthy();
+    const statsBefore = await (await request.get(`${API}/predictions/stats`, { headers: auth })).json();
+
+    await request.delete(`${API}/candidates/${cand2Id}`, { headers: auth });
+    const after = await (await request.get(`${API}/predictions`, { headers: auth })).json();
+    expect(after.some((p: any) => p.candidate_id === cand2Id)).toBeFalsy();
+    // /predictions/stats (the "Total Predictions" KPI card) is a second,
+    // separate query that had the identical missing-filter bug.
+    const statsAfter = await (await request.get(`${API}/predictions/stats`, { headers: auth })).json();
+    expect(statsAfter.total_predictions).toBe(statsBefore.total_predictions - 1);
+  });
+
+  test('predictions: repeated predict calls with no requisition_id no longer create duplicate rows', async ({ request }) => {
+    // REAL BUG FIX (2026-08-17): placement_predictions' unique constraint
+    // is (tenant_id, candidate_id, requisition_id), but SQL never treats
+    // two NULLs as equal, so ON CONFLICT never matched for the very
+    // common "predict with no specific job" case (both the single and
+    // "Run Bulk Predictions" UI actions omit requisition_id) — every
+    // repeat call silently inserted a fresh duplicate row. Found live:
+    // one real candidate had 11 near-identical rows, another had 6,
+    // purely from clicking "Run Bulk Predictions" more than once.
+    // Requires the partial unique index in sql/61_prediction_dedup.sql.
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const cand5 = await request.post(`${API}/candidates`, {
+      headers: auth, data: { full_name: `QA S35 Dedup Candidate ${stamp}`, email: `qa.s35.dedup.${stamp}@test.com`, phone: `4${String(stamp).slice(-9)}` },
+    });
+    const cand5Id = (await cand5.json()).id;
+
+    const p1 = await request.post(`${API}/predictions/predict`, { headers: auth, data: { candidate_id: cand5Id } });
+    expect(p1.ok()).toBeTruthy();
+    const p2 = await request.post(`${API}/predictions/predict`, { headers: auth, data: { candidate_id: cand5Id } });
+    expect(p2.ok()).toBeTruthy();
+    const p3 = await request.post(`${API}/predictions/predict`, { headers: auth, data: { candidate_id: cand5Id } });
+    expect(p3.ok()).toBeTruthy();
+
+    const rows = await (await request.get(`${API}/predictions`, { headers: auth })).json();
+    const mine = rows.filter((r: any) => r.candidate_id === cand5Id);
+    expect(mine.length).toBe(1); // 3 calls, still exactly 1 row — proves the upsert now works
+
+    await request.delete(`${API}/candidates/${cand5Id}`, { headers: auth });
+  });
+
+  test('auto-interview/list (the endpoint the real Interviews page actually calls) no longer shows an interview for a soft-deleted candidate', async ({ request }) => {
+    // GET /interviews (p23_p27.py) has no real frontend caller — the
+    // Interviews page uses POST /auto-interview/schedule + GET /auto-
+    // interview/list (phase3.py), a completely separate endpoint pair
+    // found only after a real browser check showed the bug still live
+    // despite GET /interviews already being fixed and passing its own
+    // test. Both are covered here since both were real, separate fixes.
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const cand3 = await request.post(`${API}/candidates`, {
+      headers: auth, data: { full_name: `QA S35 Interview Candidate ${stamp}`, email: `qa.s35.int.${stamp}@test.com`, phone: `7${String(stamp).slice(-9)}` },
+    });
+    const cand3Id = (await cand3.json()).id;
+    const app3 = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: cand3Id, requisition_id: reqId } });
+    const app3Id = (await app3.json()).id;
+    const futureDate = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
+
+    const sched = await request.post(`${API}/auto-interview/schedule`, {
+      headers: auth, data: { application_id: app3Id, scheduled_at: futureDate, send_whatsapp: false },
+    });
+    expect(sched.ok()).toBeTruthy();
+
+    const before = await (await request.get(`${API}/auto-interview/list`, { headers: auth })).json();
+    expect(before.some((i: any) => i.candidate === `QA S35 Interview Candidate ${stamp}`)).toBeTruthy();
+
+    await request.delete(`${API}/candidates/${cand3Id}`, { headers: auth });
+    const after = await (await request.get(`${API}/auto-interview/list`, { headers: auth })).json();
+    expect(after.some((i: any) => i.candidate === `QA S35 Interview Candidate ${stamp}`)).toBeFalsy();
+
+    // Also prove the separately-fixed (if currently orphaned) GET
+    // /interviews endpoint independently — same bug class, same fix,
+    // worth guarding even though nothing calls it today.
+    const iv = await request.post(`${API}/interviews`, {
+      headers: auth, data: { candidate_id: cand3Id, requisition_id: reqId, scheduled_at: futureDate },
+    });
+    expect(iv.ok()).toBeTruthy();
+    const legacyBefore = await (await request.get(`${API}/interviews`, { headers: auth })).json();
+    expect(legacyBefore.some((i: any) => i.candidate_id === cand3Id)).toBeFalsy(); // already soft-deleted above
+  });
+
+  test('duplicate_candidates list: pair disappears once one side is soft-deleted', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const sharedPhone = `6${String(stamp).slice(-9)}`;
+    const c1 = await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S35 Dup A ${stamp}`, email: `qa.s35.dupa.${stamp}@test.com`, phone: sharedPhone } });
+    dup1Id = (await c1.json()).id;
+    const c2 = await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S35 Dup B ${stamp}`, email: `qa.s35.dupb.${stamp}@test.com`, phone: sharedPhone } });
+    dup2Id = (await c2.json()).id;
+
+    await request.post(`${API}/duplicates/scan`, { headers: auth });
+    const before = await (await request.get(`${API}/duplicates?status=pending`, { headers: auth })).json();
+    expect(before.some((d: any) => [d.candidate_id_1, d.candidate_id_2].includes(dup1Id))).toBeTruthy();
+
+    await request.delete(`${API}/candidates/${dup1Id}`, { headers: auth });
+    const after = await (await request.get(`${API}/duplicates?status=pending`, { headers: auth })).json();
+    expect(after.some((d: any) => [d.candidate_id_1, d.candidate_id_2].includes(dup1Id))).toBeFalsy();
+  });
+
+  test('My Day tasks: a task tied to a soft-deleted candidate\'s application no longer appears', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const cand4 = await request.post(`${API}/candidates`, {
+      headers: auth, data: { full_name: `QA S35 Task Candidate ${stamp}`, email: `qa.s35.task.${stamp}@test.com`, phone: `5${String(stamp).slice(-9)}` },
+    });
+    const cand4Id = (await cand4.json()).id;
+    const app4 = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: cand4Id, requisition_id: reqId } });
+    const app4Id = (await app4.json()).id;
+
+    const meResp = await request.get(`${API}/users?is_active=true`, { headers: auth });
+    const admin = (await meResp.json()).find((u: any) => u.email === 'admin@example.com');
+
+    const task = await request.post(`${API}/recruiter-tasks`, {
+      headers: auth, data: { recruiter_id: admin.id, application_id: app4Id, task_type: 'general', title: `QA S35 task for ${cand4Id}`, due_at: new Date(Date.now() - 3600000).toISOString() },
+    });
+    expect(task.ok()).toBeTruthy();
+    const taskId = (await task.json()).id;
+
+    const before = await (await request.get(`${API}/recruiter/my-day`, { headers: auth })).json();
+    expect(before.tasks_due.some((t: any) => t.id === taskId)).toBeTruthy();
+
+    await request.delete(`${API}/candidates/${cand4Id}`, { headers: auth });
+    const after = await (await request.get(`${API}/recruiter/my-day`, { headers: auth })).json();
+    expect(after.tasks_due.some((t: any) => t.id === taskId)).toBeFalsy();
+
+    // Cleanup: cancel the now-orphaned task (no candidate_id to track via afterAll).
+    await request.patch(`${API}/recruiter-tasks/${taskId}?status=cancelled`, { headers: auth }).catch(() => {});
+  });
+
+  test('Companies page: real headless UI shows only real companies with correct per-client Open Jobs counts', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/companies');
+    await expect(page.getByText(/clients in your CRM/i)).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Invenio')).toBeVisible();
+    await expect(page.getByText('Bharat FinServ')).toBeVisible();
+    // This suite's own setup test created "QA S35 Test Client <stamp>",
+    // still active until afterAll runs — check for the specific patterns
+    // that were actually cleaned up (AutoDistribute/Tier2/KAE), not a
+    // blanket "QA" match that would false-positive on our own fixture.
+    await expect(page.getByText(/QA (AutoDistribute|Tier2|KAE) Test Client/i)).toHaveCount(0);
     expect(errors).toHaveLength(0);
   });
 });

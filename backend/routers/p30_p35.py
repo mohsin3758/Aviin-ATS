@@ -311,6 +311,12 @@ async def list_duplicates(status: Optional[str]='pending', actor: Actor=Depends(
     # two different emails plus a "phone" badge with no way to actually
     # see the shared value before merging. Now returns both phones so the
     # UI can render whichever field actually matched (dc.match_field).
+    #
+    # REAL BUG FIX (2026-08-17): the scan itself (scan_duplicates above)
+    # already correctly only pairs still-active candidates, but this list
+    # query never filtered by is_active — a pair detected while both
+    # candidates were active stayed in "Pending" forever even after one
+    # or both got soft-deleted, with nothing left to actually merge.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT dc.*, c1.full_name AS name1, c1.email AS email1, c1.phone AS phone1,
@@ -319,6 +325,7 @@ async def list_duplicates(status: Optional[str]='pending', actor: Actor=Depends(
             JOIN candidates c1 ON c1.id=dc.candidate_id_1
             JOIN candidates c2 ON c2.id=dc.candidate_id_2
             WHERE dc.tenant_id=$1 AND ($2::text IS NULL OR dc.status=$2)
+              AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
             ORDER BY dc.detected_at DESC
         """, actor.tenant_id, status)
     return [dict(r) for r in rows]

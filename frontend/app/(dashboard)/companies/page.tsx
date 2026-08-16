@@ -73,6 +73,11 @@ function ResumePreferenceRow({ client, onSaved }: { client: any; onSaved: () => 
 }
 
 function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
+  // REAL BUG FIX (2026-08-17): reqs is the full tenant-wide requisitions
+  // list — was never filtered to this specific client, so every client's
+  // drawer showed the same "Open Jobs" count and job cards as every
+  // other client's.
+  const openReqs = (reqs||[]).filter((r:any)=>r.status==='open' && r.client_id===client.id);
   return (
     <div style={{
       position:'fixed', right:0, top:0, height:'100vh', width:'400px',
@@ -131,10 +136,10 @@ function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'12px' }}>
             <div style={{ fontSize:'11px', fontWeight:'600', textTransform:'uppercase', letterSpacing:'0.06em', color:'#94a3b8' }}>Open Jobs</div>
             <span style={{ fontSize:'11px', fontWeight:'700', background:'#eff6ff', color:'#1e40af', padding:'2px 8px', borderRadius:'10px' }}>
-              {reqs?.filter((r:any)=>r.status==='open').length||0}
+              {openReqs.length}
             </span>
           </div>
-          {(reqs||[]).filter((r:any)=>r.status==='open').slice(0,4).map((r:any) => (
+          {openReqs.slice(0,4).map((r:any) => (
             <div key={r.id} style={{ padding:'10px 12px', background:'#f8fafc', borderRadius:'8px', marginBottom:'6px', border:'1px solid #e2e8f0' }}>
               <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
                 <div>
@@ -150,7 +155,7 @@ function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
               </div>
             </div>
           ))}
-          {!(reqs||[]).filter((r:any)=>r.status==='open').length && (
+          {!openReqs.length && (
             <div style={{ textAlign:'center', padding:'20px', color:'#94a3b8', fontSize:'12px' }}>No open jobs for this client</div>
           )}
         </div>
@@ -248,7 +253,10 @@ export default function CompaniesPage() {
               </thead>
               <tbody>
                 {filtered.map((cl:any) => {
-                  const openJobs = (reqs||[]).filter((r:any)=>r.status==='open').length;
+                  // REAL BUG FIX (2026-08-17): was counting every open
+                  // requisition tenant-wide, not this client's — every
+                  // row in the table showed the identical wrong number.
+                  const openJobs = (reqs||[]).filter((r:any)=>r.status==='open' && r.client_id===cl.id).length;
                   return (
                     <tr key={cl.id} onClick={()=>setSelected(cl)}
                       style={{ borderBottom:'1px solid #f1f5f9', cursor:'pointer', transition:'background 0.1s' }}

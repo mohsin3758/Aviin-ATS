@@ -277,6 +277,13 @@ async def submission_usage(requisition_id: str, actor: Actor = Depends(get_actor
 
 @router.get("/{requisition_id}/pipeline")
 async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(require_permission("pipeline", "read"))):
+    # REAL BUG FIX (2026-08-17): this JOIN had no is_active filter on
+    # candidates at all — soft-deleting a candidate (the established
+    # cleanup convention everywhere in this codebase) never removed their
+    # card from a real Kanban board; the application row just kept
+    # rendering forever with a "ghost" candidate. Found via a live
+    # screenshot showing QA test candidates still on a real client's
+    # board weeks after being soft-deleted.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             """SELECT a.id, a.candidate_id, c.full_name AS candidate_name,
@@ -298,7 +305,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                    WHERE rf.candidate_id = c.id AND rf.tenant_id = a.tenant_id
                    ORDER BY rf.created_at DESC LIMIT 1
                ) rf ON true
-               WHERE a.requisition_id = $1
+               WHERE a.requisition_id = $1 AND c.is_active IS NOT FALSE
                ORDER BY a.board_rank ASC NULLS LAST, a.updated_at DESC""",
             requisition_id,
         )

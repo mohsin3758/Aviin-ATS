@@ -6105,3 +6105,168 @@ correlated with exactly 1 real 429 in the backend logs during that run —
 the same well-documented per-IP login rate-limit characteristic, not a
 regression). Zero-token audit: `CONFIRMED CLEAN` (370 files, 0 external
 API refs).
+
+## "Go deep and delete all test/QA data" — 6 real filter bugs, a real Companies-page bug, 3 leaking test suites, and a separate real prediction-duplication bug, 2026-08-17
+User shared 7 live screenshots of real, recruiter-facing pages showing
+extensive QA/test pollution (Companies, Pipeline board, Duplicate
+Candidates, Recruiter Ops "My Day", Predictive Hiring, Interviews,
+Resume Inbox) and asked why, demanding a deep investigation and full
+cleanup. Investigated every page named rather than deleting blindly —
+found the real story was more serious than uncleaned rows: soft-deleting
+a candidate (this codebase's universal cleanup convention, used
+extensively throughout this project's history) had never actually
+removed them from 5 of those pages, because none of their queries
+filtered by `candidates.is_active`. A 6th, unrelated real bug (wrong
+per-client counts on Companies) and a 7th, genuinely separate ongoing
+data-quality bug (real prediction-row duplication, unrelated to test
+data) were found via the same dig.
+
+**1. The core bug, found in 6 real endpoints — soft-deleted candidates
+never actually disappeared:**
+- `GET /requisitions/{id}/pipeline` (`requisitions.py`) — the Kanban
+  board. A soft-deleted candidate's application card stayed on a real
+  client's board forever. Verified on the exact requisition from the
+  user's own screenshot (Invenio SAP ABAP Developer): 24 cards → 19,
+  zero QA/test ghosts remaining.
+- `GET /duplicates` (`p30_p35.py`) — the scan itself (`POST /duplicates/
+  scan`) already correctly filtered to active-only candidates, but the
+  *list* endpoint never did, so a pair detected while both candidates
+  were active stayed in "Pending" forever after either got soft-deleted,
+  with nothing left to actually merge. 63 pairs → 0 pending.
+- `recruiter_dashboard.py`'s `my_day()` — **three separate queries in
+  the same function** had the identical gap: `tasks_due` (20 fake
+  "Coordinate L1 interview: QA Tier0 Test..." tasks on a real recruiter's
+  daily queue), `interviews_today`, and `stale` ("Candidates needing
+  action" — 15 QA-junk candidates found only via a live browser re-check
+  after the first fix, since it only covered `tasks_due`). All three
+  fixed together; My Day now genuinely shows "Nothing needs your
+  attention" when nothing does.
+- `GET /predictions` + `GET /predictions/stats` (`predictions.py`) — two
+  separate queries, the list and the "Total Predictions" KPI card. 457
+  → 17 rows once real duplicate cleanup (see #5) was also applied.
+- `GET /interviews` (`p23_p27.py`) — fixed first, its own regression
+  test passed... but a live headless-browser re-check showed the real
+  Interviews page **still broken** (26 items, "QA Test Applicant" still
+  visible). Root cause: `GET /interviews` has **zero real frontend
+  caller** — the actual Interview Scheduler page calls a completely
+  different, separately-implemented endpoint, `GET /auto-interview/list`
+  (`phase3.py`), with its own independent, unfiltered query. Fixed that
+  one too (10 real interviews remain, 0 QA/test). This is the clearest
+  example in today's work of why "the test passed" isn't the same as
+  "the real page is fixed" — the first fix was correct but aimed at
+  dead code, only caught by testing the actual live page a second time.
+
+**2. A separate, unrelated real bug found via the same screenshot**:
+Companies page (`companies/page.tsx`) showed **the same tenant-wide
+open-requisition count on every single client row** instead of each
+client's own — `const openJobs = reqs.filter(r=>r.status==='open').
+length` inside the per-row `.map()`, with no `client_id` filter at all.
+Present in two places: the main table row AND the SidePanel detail
+drawer's own separate "Open Jobs" section (same missing filter, second
+instance). Fixed both by filtering on `r.client_id===cl.id`/`client.id`.
+Verified via real browser click-through post-fix: 3 real clients now
+show 3 genuinely different counts (1, 0, 2), not one repeated number.
+
+**3. Root-caused why active (not just inactive) client junk kept
+accumulating** — 3 leaking Playwright suites, not just uncleaned rows:
+S14's setup test and S17's *two* separate client-creating tests
+(`setup`, and the later `auto-distribute on open` test using its own
+local, untracked `clientId`) all created real throwaway clients but
+never cleaned them up. Traced S17's specifically to a **stale comment**:
+"clientId is deliberately NOT hard-deleted here: clients.py's DELETE is
+a real hard DELETE FROM clients" — true when that comment was written,
+but `DELETE /clients/{id}` became a real soft-delete on 2026-08-12 (see
+that date's own entry), and this `afterAll` hook was simply never
+revisited afterward. All 3 fixed: `clientId` (and a new
+`autoDistClientId`) tracked at describe level, added to `afterAll`.
+
+**4. Bulk cleanup of confirmed junk, via real APIs only:**
+- **36 of 39 "active" clients were QA/test junk** (`QA AutoDistribute
+  Test Client <stamp>` ×12, `QA KAE Test Client <stamp>` ×12, `QA Tier2
+  Test Client <stamp>` ×12 — matching the 3 leaking suites above
+  exactly). Confirmed each had **zero real requisitions attached**
+  before deleting. Soft-deleted all 36 via the real `DELETE /clients/
+  {id}` API — down to exactly 3 real clients: Invenio, Bharat FinServ,
+  TechNova Solutions.
+- **Corrected a wrong assumption made mid-investigation**: initially
+  read 65 "Mail Delivery System" candidates as active junk needing
+  cleanup — direct verification (`GROUP BY is_active`) showed all 65
+  were **already** soft-deleted (`is_active=false`) from the 2026-08-12
+  bounce-email classifier fix (see that date's entry) — no candidate
+  cleanup was actually needed. The reason they were still *visible* in
+  the user's screenshot was different: Resume Inbox renders straight
+  from `resume_files`, independent of the linked candidate's active
+  state. The real fix was **70 pre-Aug-12-fix legacy `resume_files`
+  rows**, misleadingly still labeled `auto_accepted`/`needs_review` —
+  re-labeled to `rejected` via the real `POST /resume-intake/{id}/
+  reject` endpoint (confirmed zero new bounce rows created since
+  Aug 12 — the fix itself was never broken, just never retroactively
+  applied to what it caught before it existed).
+
+**5. A genuinely separate, real, ongoing production bug — found via the
+same investigation but unrelated to test data**: the Predictions page
+showed real candidates ("Vidyashree Katgi" ×11, "Sneha Reddy" ×6) with
+identical repeated rows. `placement_predictions`' real unique constraint
+is `(tenant_id, candidate_id, requisition_id)` — but standard SQL never
+treats two `NULL`s as equal, so `ON CONFLICT (...) DO UPDATE` silently
+never matched whenever `requisition_id` was `NULL` — the common case,
+since both the single-predict and "Run Bulk Predictions" UI actions omit
+it. Every repeat click for the same candidate inserted a fresh duplicate
+row instead of updating the existing one. The two real candidates'
+duplicate timestamps (2026-08-07 through 2026-08-08, spread across the
+day) confirm this was genuine, repeated real usage of "Run Bulk
+Predictions," not a one-time glitch. Fixed with
+`sql/61_prediction_dedup.sql` — a **partial** unique index
+(`ON placement_predictions (tenant_id, candidate_id) WHERE
+requisition_id IS NULL`, the standard PostgreSQL way to make NULL behave
+as "one value" for exactly this case) plus a new shared
+`_upsert_prediction()` helper in `predictions.py` used by both
+`predict_one` and `bulk_predict` (previously two separate, duplicated
+inline `INSERT..ON CONFLICT` blocks) that branches its `ON CONFLICT`
+target on whether a real `requisition_id` was given. The migration also
+did a one-time cleanup of the duplicates this bug had already produced
+(kept the most-recently-predicted row per candidate, deleted the rest —
+451 rows). Verified the fix genuinely holds, not just that the count
+dropped: called `predict` 3 times in a row for the same fresh throwaway
+candidate and confirmed exactly 1 row exists, not 3.
+
+**6. New permanent "S35 Soft-Deleted Candidates No Longer Leak Into Real
+Pages" suite** (9 tests) added to `qa_automation.spec.ts` — deliberately
+built as real create-then-soft-delete-then-verify-it-vanishes cycles for
+every one of the 5 filtered endpoints (pipeline board, predictions list,
+predictions stats, `auto-interview/list`, duplicates, My Day tasks) plus
+the predictions-dedup fix and the Companies per-client count fix, not
+one-time count snapshots that would go stale as the real dataset changes.
+**A real test-authoring bug caught and fixed along the way**: the
+suite's own final "no QA test clients visible" assertion initially
+collided with its own still-active throwaway fixture client (created in
+`setup`, only cleaned up in `afterAll`, so still present during the
+mid-suite UI check) — fixed by narrowing the regex to the exact patterns
+that were actually cleaned up (`AutoDistribute|Tier2|KAE`) rather than a
+blanket `QA` match that would always false-positive against the suite's
+own fixture.
+
+**7. One incidental fix found while re-verifying #5**: the established
+`QA Test Recruiter` fixture account (`qa_test_1782053776@aviinjobs.com`,
+used across many suites this project's history as the standard non-admin
+test login) had somehow become deactivated (`is_active=false`) at some
+point during today's heavy back-to-back testing — login was failing with
+a generic 401, easy to mistake for the well-documented rate-limit
+pattern until direct DB inspection showed the real cause. Reactivated
+via the real `PATCH /users/{id}/activate` API; confirmed login works
+again.
+
+Verified for real end-to-end throughout, not code review: every filter
+fix confirmed via direct before/after API counts against real production
+data, the pipeline-board and Companies-page fixes confirmed against the
+exact records from the user's own screenshots, and multiple real
+headless-browser passes — including the one that caught the `/interviews`
+fix as incomplete, which is exactly why a second, corrected round of
+browser verification mattered here rather than trusting the first
+green test. Final full QA suite: all real failures across several
+back-to-back full runs today traced to confirmed 429s in the backend
+logs (this session's own extensive testing volume) or the deactivated
+fixture account above — every one of them, plus this batch's own new
+S35 suite, passed cleanly once re-run in isolation outside the rate-limit
+window. Zero-token audit: `CONFIRMED CLEAN` (371 files, 0 external API
+refs).

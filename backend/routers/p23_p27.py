@@ -229,6 +229,9 @@ class InterviewIn(BaseModel):
 async def list_interviews(candidate_id: Optional[str]=None,
                            status: Optional[str]=None,
                            actor: Actor=Depends(get_actor)):
+    # REAL BUG FIX (2026-08-17): no is_active filter — soft-deleted
+    # candidates' old (and sometimes still-future-dated) interview rows
+    # kept appearing on this real, recruiter-facing list forever.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT i.*, c.full_name AS candidate_name, c.email AS candidate_email,
@@ -238,7 +241,7 @@ async def list_interviews(candidate_id: Optional[str]=None,
             JOIN candidates c ON c.id=i.candidate_id
             LEFT JOIN users u ON u.id=i.interviewer_id
             LEFT JOIN requisitions r ON r.id=i.requisition_id
-            WHERE i.tenant_id=$1
+            WHERE i.tenant_id=$1 AND c.is_active IS NOT FALSE
               AND ($2::text IS NULL OR i.candidate_id::text=$2)
               AND ($3::text IS NULL OR i.status=$3)
             ORDER BY i.scheduled_at DESC
