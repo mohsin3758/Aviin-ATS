@@ -6731,3 +6731,29 @@ active clients genuinely have zero real collection/invoice records
 right now, so the honest totals are all 0 — confirmed this is accurate
 reality, not a fix regression, by checking real Finance ERP data
 (1 real active contractor, correct ₹15,000/mo billing) stayed intact.
+
+## Full QA suite run after rounds 5-8, one real (data, not code) fix
+## found, 2026-08-17
+Ran the full Playwright suite for the first time since round 5. Result:
+226 passed / 3 failed / 1 flaky / 3 skipped / 12 did not run. Checked
+each failure against real evidence rather than assuming — 2 of 3 (S35
+and S36 setup tests) were confirmed via backend logs as the
+well-documented login rate-limit cascade (real 429s during the run)
+and passed cleanly on an isolated re-run once the window cleared, no
+code involved.
+
+The 3rd (S34 "existing enforcement gate") did NOT clear on the first
+isolated re-run — investigated for real rather than dismissed. Root
+cause: the established `QA Test Recruiter` fixture account
+(`qa_test_1782053776@aviinjobs.com`, used deliberately throughout this
+project's history for exactly this kind of non-admin permission
+verification, not throwaway test data) was `is_active=false` — the
+same account, same symptom, already documented once before earlier in
+this project's history. Reactivated via the real `PATCH /users/{id}/
+activate` API; confirmed with a direct login (200) and confirmed the
+underlying permission-gate logic itself is correct (the test passed
+once a valid token was available). No code change was needed — this
+was purely a data-state issue, not a regression from any of today's
+fixes.
+
+Zero-token audit: `CONFIRMED CLEAN` (372 files, 0 external API refs).
