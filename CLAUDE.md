@@ -6598,3 +6598,34 @@ ad-hoc scripts flagged in round 3 as unread, and no full QA-suite
 regression run was done after this round's fixes (rate-limit budget was
 spent on live-data verification instead) — a future session should run
 the full suite once before further changes land on top of this round.
+
+## Round 6 same day: Analytics & Reporting's headline KPI cards were
+## wildly inflated by the same missing is_active filter, 2026-08-17
+User pointed at `/analytics` showing "721 Open Jobs" and "2,607 Total
+Candidates" — both obviously wrong given everything found earlier
+today. Confirmed directly: 719 of 722 `status='open'` requisitions were
+already soft-deleted (mostly the QA S19/S29/S30/AutoDistribute/KAE/
+Tier2 test-suite batches), leaving only 2-3 real open roles; ~1800 of
+2607 candidates were the same soft-deleted QA/demo pile documented all
+day. The Hiring Funnel's "Screened: 420 (108%)" — mathematically odd
+since it exceeded "Sourced" — was a direct symptom of the same gap
+(fake candidates entering at different funnel stages, non-uniformly).
+
+Fixed 5 queries across 2 files, all missing an `is_active` (or
+candidate-join `is_active`) filter: `GET /reports/dashboard-summary`
+(`p36_p42.py` — open_reqs, total_reqs, total_apps, total_placements,
+total_candidates, all 5 in one query), `GET /analytics/hiring-funnel`,
+`GET /analytics/stage-velocity` (both open_reqs and the stage_counts/
+applications join), `GET /analytics/source-breakdown`, and
+`GET /analytics/time-to-hire` (all 3 of its sub-queries — overall,
+by-requisition, monthly-trend). Verified with real before/after
+numbers: Open Jobs 721→2, Total Candidates 2607→796, Total
+Applications 1281→386.
+
+Not touched: the Hiring Funnel still shows Screened (195) exceeding
+Sourced (166) even after the fake-data fix — checked and concluded this
+reflects a genuine characteristic of how real candidates enter this
+tenant's pipeline (some real intake paths land directly at "screened"
+without a separately recorded "sourced" transition), not a data-quality
+bug — out of scope for this cleanup pass, which was about removing fake/
+demo/QA rows, not redesigning funnel-stage semantics.
