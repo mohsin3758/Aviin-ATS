@@ -6757,3 +6757,30 @@ was purely a data-state issue, not a regression from any of today's
 fixes.
 
 Zero-token audit: `CONFIRMED CLEAN` (372 files, 0 external API refs).
+
+## Round 9 same day: KAE module (Account Ownership), 2026-08-18
+User asked to check `/kae` for the same pattern. Same bug, this time on
+`client_owners` (fake clients, not fake users — the user-side join was
+already clean, 0 leak, confirmed with a live query before assuming):
+`GET /kae/owners` (Owners tab), `/kae/owners/by-client/{id}`,
+`/kae/visibility`, `/kae/scorecard`, `/kae/retention`, `/kae/summary`
+(the `total_clients_with_kae`/`total_kae_assignments` counts), and the
+`v_kae_summary` view (Leaderboard tab, `accounts_owned` count) all
+missing an `is_active` check on the joined `clients`/`users` rows. 172
+`client_owners` rows pointed at soft-deleted QA/test/demo clients.
+
+One real fix-writing mistake caught before deploy, not after: the
+first `v_kae_summary` edit added `LEFT JOIN clients cl ON cl.id =
+co.client_id AND cl.is_active IS NOT FALSE` but left `COUNT(co.id)` for
+`accounts_owned` — a LEFT JOIN keeps `co.id` non-null even when the
+`clients` join condition fails to match, so the count wouldn't
+actually have been filtered at all. Caught by re-reading the query
+logic before shipping it, not by a failed test; fixed by counting
+`cl.id` instead (null exactly when the client didn't qualify).
+
+Verified with real API calls after deploying: Owners/Visibility/
+Leaderboard/Summary all now correctly return empty/zero — this tenant
+has genuinely made zero real KAE account-ownership assignments yet
+(confirmed `account_visibility` has 0 rows total, unrelated to the
+fix, before concluding the empty result was correct and not another
+bug).
