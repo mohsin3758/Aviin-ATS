@@ -410,7 +410,7 @@ async def list_intelligence(
             LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id = ca.id AND cpd.tenant_id = ca.tenant_id
             LEFT JOIN requisitions r ON r.id = cs.requisition_id
             LEFT JOIN clients cl ON cl.id = r.client_id
-            WHERE cs.tenant_id = $1
+            WHERE cs.tenant_id = $1 AND ca.is_active IS NOT FALSE
               AND ($2::numeric IS NULL OR cs.readiness_index >= $2)
               AND ($3::text IS NULL OR cs.readiness_grade = $3)
               AND ($4::uuid IS NULL OR cs.requisition_id = $4)

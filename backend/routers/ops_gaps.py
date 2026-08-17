@@ -171,7 +171,8 @@ async def list_submittals(actor: Actor = Depends(get_actor)):
                JOIN applications a ON a.id = s.application_id
                JOIN candidates c ON c.id = a.candidate_id
                JOIN requisitions r ON r.id = a.requisition_id
-               WHERE s.tenant_id=$1 ORDER BY s.submitted_at DESC""",
+               WHERE s.tenant_id=$1 AND c.is_active IS NOT FALSE
+               ORDER BY s.submitted_at DESC""",
             actor.tenant_id,
         )
     return [dict(r) for r in rows]

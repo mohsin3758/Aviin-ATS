@@ -209,7 +209,7 @@ async def list_compliance(month: Optional[int]=None, year: Optional[int]=None,
             SELECT cr.*, c.full_name AS candidate_name
             FROM compliance_records cr
             JOIN candidates c ON c.id=cr.candidate_id
-            WHERE cr.tenant_id=$1
+            WHERE cr.tenant_id=$1 AND c.is_active IS NOT FALSE
               AND ($2::int IS NULL OR cr.month=$2)
               AND ($3::int IS NULL OR cr.year=$3)
             ORDER BY cr.year DESC, cr.month DESC, c.full_name

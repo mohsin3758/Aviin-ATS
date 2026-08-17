@@ -131,7 +131,7 @@ async def list_applications(
                    FROM applications a
                    JOIN candidates c ON c.id = a.candidate_id
                    JOIN requisitions r ON r.id = a.requisition_id
-                   WHERE a.stage = $1
+                   WHERE a.stage = $1 AND c.is_active IS NOT FALSE
                    ORDER BY a.created_at DESC LIMIT $2""",
                 stage, limit)
         else:
@@ -142,6 +142,7 @@ async def list_applications(
                    FROM applications a
                    JOIN candidates c ON c.id = a.candidate_id
                    JOIN requisitions r ON r.id = a.requisition_id
+                   WHERE c.is_active IS NOT FALSE
                    ORDER BY a.created_at DESC LIMIT $1""",
                 limit)
     return [dict(r) for r in rows]

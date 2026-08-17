@@ -935,7 +935,7 @@ async def req_stage_counts(actor: Actor = Depends(get_actor)):
         inbox_rows = await conn.fetch("""
             SELECT r.id::text AS req_id, COUNT(c.id) AS inbox_count
             FROM requisitions r
-            LEFT JOIN candidates c ON c.matched_requisition_id = r.id AND c.tenant_id = r.tenant_id
+            LEFT JOIN candidates c ON c.matched_requisition_id = r.id AND c.tenant_id = r.tenant_id AND c.is_active IS NOT FALSE
             WHERE r.tenant_id = $1 AND r.status = 'open'
             GROUP BY r.id
         """, actor.tenant_id)

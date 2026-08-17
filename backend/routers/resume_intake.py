@@ -61,7 +61,9 @@ async def intake_queue(
     actor: Actor = Depends(get_actor)
 ):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        conditions = ['rf.tenant_id=$1']
+        # (candidate_id may be NULL — a resume not yet linked to a
+        # candidate must still show up for review)
+        conditions = ['rf.tenant_id=$1', '(rf.candidate_id IS NULL OR c.is_active IS NOT FALSE)']
         params = [actor.tenant_id]
         p = 2
         if status == 'all':
@@ -101,7 +103,8 @@ async def intake_queue(
             *params, limit, offset)
 
         total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM resume_files rf WHERE {where}", *params)
+            f"SELECT COUNT(*) FROM resume_files rf LEFT JOIN candidates c ON c.id=rf.candidate_id WHERE {where}",
+            *params)
 
     items = []
     for r in rows:

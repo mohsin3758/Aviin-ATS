@@ -84,7 +84,7 @@ async def nps_status(actor: Actor = Depends(get_actor)):
         recent = await conn.fetch(
             """SELECT n.nps_score, n.what_went_well, n.what_could_improve, n.submitted_at, c.full_name
                FROM candidate_nps n JOIN candidates c ON c.id = n.candidate_id
-               WHERE n.tenant_id=$1 AND n.submitted_at IS NOT NULL
+               WHERE n.tenant_id=$1 AND n.submitted_at IS NOT NULL AND c.is_active IS NOT FALSE
                ORDER BY n.submitted_at DESC LIMIT 20""",
             actor.tenant_id,
         )
@@ -247,7 +247,7 @@ class RefcheckIn(BaseModel):
 
 @refcheck_router.get("")
 async def refcheck_list(candidate_id: Optional[str] = None, actor: Actor = Depends(get_actor)):
-    conditions = ["rc.tenant_id=$1"]
+    conditions = ["rc.tenant_id=$1", "c.is_active IS NOT FALSE"]
     params: list = [actor.tenant_id]
     if candidate_id:
         params.append(candidate_id)

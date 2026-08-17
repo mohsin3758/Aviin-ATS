@@ -102,7 +102,7 @@ async def search_placements(q: str = "", actor: Actor = Depends(get_actor)):
                FROM placements p
                JOIN candidates c ON c.id=p.candidate_id
                LEFT JOIN clients cl ON cl.id=p.client_id
-               WHERE p.tenant_id=$1 AND (c.full_name ILIKE $2 OR cl.name ILIKE $2)
+               WHERE p.tenant_id=$1 AND c.is_active IS NOT FALSE AND (c.full_name ILIKE $2 OR cl.name ILIKE $2)
                ORDER BY p.start_date DESC LIMIT 25""",
             actor.tenant_id, f"%{q}%")
     return [dict(r) for r in rows]
@@ -207,7 +207,7 @@ async def list_attendance_records(
                JOIN candidates c ON c.id=ca.candidate_id
                JOIN placements p ON p.id=ca.placement_id
                LEFT JOIN clients cl ON cl.id=p.client_id
-               WHERE ca.tenant_id=$1"""
+               WHERE ca.tenant_id=$1 AND c.is_active IS NOT FALSE"""
         params = [actor.tenant_id]
         if placement_id:
             params.append(placement_id); q += f" AND ca.placement_id=${len(params)}"

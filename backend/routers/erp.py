@@ -120,7 +120,7 @@ class TimesheetApprove(BaseModel):
 
 @router.get("/timesheets")
 async def list_timesheets(status: Optional[str] = None, actor: Actor = Depends(_FINANCE_ROLES)):
-    where = "WHERE t.tenant_id = $1"
+    where = "WHERE t.tenant_id = $1 AND c.is_active IS NOT FALSE"
     params: list = [actor.tenant_id]
     if status:
         params.append(status)
@@ -519,7 +519,7 @@ async def list_payslips(run_id: str, actor: Actor = Depends(_FINANCE_ROLES)):
                       ps.hours_worked, ps.pay_rate
                FROM payslips ps
                JOIN candidates c ON c.id = ps.candidate_id
-               WHERE ps.payroll_run_id = $1
+               WHERE ps.payroll_run_id = $1 AND c.is_active IS NOT FALSE
                ORDER BY c.full_name""",
             run_id,
         )

@@ -193,7 +193,7 @@ async def list_hotlist(actor: Actor = Depends(get_actor)):
         rows = await conn.fetch(
             """SELECT h.*, c.full_name, c.email, c.phone
                FROM hotlist h JOIN candidates c ON c.id = h.candidate_id
-               WHERE h.tenant_id = $1
+               WHERE h.tenant_id = $1 AND c.is_active IS NOT FALSE
                ORDER BY h.available_from NULLS LAST, h.created_at DESC""",
             actor.tenant_id,
         )

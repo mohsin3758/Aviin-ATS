@@ -81,7 +81,7 @@ async def list_all_bgv_checks(
                       bc.candidate_id, c.full_name AS candidate_name
                FROM bgv_checks bc
                JOIN candidates c ON c.id = bc.candidate_id
-               WHERE ($1::text IS NULL OR bc.status = $1)
+               WHERE c.is_active IS NOT FALSE AND ($1::text IS NULL OR bc.status = $1)
                ORDER BY bc.created_at DESC
                LIMIT $2""",
             status, limit,

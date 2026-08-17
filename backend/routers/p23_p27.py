@@ -658,6 +658,7 @@ async def public_shortlist(token: str):
             LEFT JOIN candidate_scores cs ON cs.candidate_id=c.id AND cs.tenant_id=c.tenant_id
             LEFT JOIN client_feedback cf ON cf.application_id=a.id
             WHERE a.requisition_id=$1 AND a.tenant_id=$2 AND a.stage <> 'rejected'
+              AND c.is_active IS NOT FALSE
             ORDER BY cs.readiness_index DESC NULLS LAST
         """, req_id, tenant_id)
     return {
