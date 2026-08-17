@@ -6712,3 +6712,22 @@ Not run this round: a full QA-suite regression pass (rate-limit budget
 spent on live verification of each fix instead, matching the pattern
 of earlier rounds today) — still an open item for a future session,
 now compounding across rounds 5-7.
+
+## Round 8 same day: Finance ERP + Collections & Invoicing, 2026-08-17
+User showed Finance ERP (Contractors/Timesheets — already correct
+thanks to round 5's fixes, real "Nikhil Joshi/Globex Manufacturing
+India" data) and Collections & Invoicing, which was showing
+₹98,50,000 total invoiced / ₹70,50,000 collected / ₹28,00,000
+outstanding built entirely from fake records ("Final Test", "QA Client
+Ltd" ×3, "QA Client Review Corp" ×3) plus the pre-existing corrupted-
+client_id "Infosys BPM" row flagged in round 7.
+
+Same bug, 3 more places: `v_collection_aging` (view, no join to
+`clients` at all), `GET /collections/summary` (queried
+`collection_records` raw, no join either), and `GET /erp/invoices`
+(had a `clients` join but no `is_active` check — 0 current leak, fixed
+defensively for consistency anyway). Fixed all 3; this tenant's 4 real
+active clients genuinely have zero real collection/invoice records
+right now, so the honest totals are all 0 — confirmed this is accurate
+reality, not a fix regression, by checking real Finance ERP data
+(1 real active contractor, correct ₹15,000/mo billing) stayed intact.
