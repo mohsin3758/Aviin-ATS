@@ -57,7 +57,12 @@ TECH_SKILLS = {
     'SAP FICO': ['sap fico', 'sap fi', 'sap co', 'fi/co', 'fico', 'financial accounting',
                  's/4hana finance', 'sap finance'],
     'SAP SD': ['sap sd', 'sales distribution', 'order to cash', 'o2c'],
-    'SAP MM': ['sap mm', 'materials management', 'procurement', 'sap procurement'],
+    # REAL BUG FIX (2026-08-18): 'materials management'/'procurement' alone
+    # are generic engineering/business terms, not SAP-specific -- they
+    # false-matched non-IT resumes (e.g. EPC/piping engineers who use
+    # "procurement" in its plain-English sense). Kept only the aliases
+    # that actually name the SAP module.
+    'SAP MM': ['sap mm', 'sap materials management', 'sap procurement'],
     'SAP PP': ['sap pp', 'production planning', 'mrp'],
     'SAP PM': ['sap pm', 'plant maintenance'],
     'SAP QM': ['sap qm', 'quality management'],
@@ -124,7 +129,10 @@ TECH_SKILLS = {
     'Kubernetes': ['kubernetes', 'k8s', 'helm', 'kubectl'],
     'Terraform': ['terraform', 'infrastructure as code', 'iac'],
     'Ansible': ['ansible'],
-    'Jenkins': ['jenkins', 'ci/cd', 'pipeline'],
+    # REAL BUG FIX (2026-08-18): bare 'pipeline' isn't Jenkins-specific --
+    # it false-matched pipeline engineers, sales pipelines, data
+    # pipelines, etc. 'CI/CD pipeline' together is still safely specific.
+    'Jenkins': ['jenkins', 'ci/cd', 'ci/cd pipeline', 'jenkins pipeline'],
     'Git': ['git', 'github', 'gitlab', 'bitbucket', 'version control'],
     'Linux': ['linux', 'unix', 'ubuntu', 'centos', 'rhel', 'red hat'],
     'Nginx': ['nginx', 'apache'],
@@ -149,7 +157,15 @@ TECH_SKILLS = {
     'Django': ['django'],
     'Flask': ['flask'],
     'FastAPI': ['fastapi', 'fast api'],
-    'Spring': ['spring', 'spring boot', 'spring mvc', 'spring framework'],
+    # REAL BUG FIX (2026-08-18): the bare 'spring' alias matched "spring
+    # hanger" (a real piping-engineering term for a thermal-expansion
+    # pipe support), spring water, the season, etc. Just removing it
+    # from the alias list wasn't enough -- the canonical key itself gets
+    # auto-registered as a matchable keyword too (see _SKILL_LOOKUP
+    # below), so a bare canonical name of "Spring" reintroduced the same
+    # false positive. Renamed the canonical key to the specific,
+    # unambiguous "Spring Boot".
+    'Spring Boot': ['spring boot', 'spring mvc', 'spring framework', 'springframework'],
 
     # Testing
     'Selenium': ['selenium', 'automation testing', 'test automation'],
@@ -159,7 +175,12 @@ TECH_SKILLS = {
     'Agile': ['agile', 'scrum', 'kanban', 'sprint'],
     'DevOps': ['devops', 'devsecops'],
     'Microservices': ['microservices', 'micro services', 'service mesh'],
-    'REST': ['rest', 'restful', 'api', 'rest api', 'web services'],
+    # REAL BUG FIX (2026-08-18): same class of bug as Spring Boot above --
+    # bare 'rest'/'api' are ordinary English/generic tech words ("...and
+    # the rest of the team"), and the bare canonical name "REST" would
+    # have reintroduced the same false positive via auto-registration
+    # even with the generic aliases removed. Renamed to "REST API".
+    'REST API': ['restful', 'rest api', 'restful api', 'web services'],
     'GraphQL': ['graphql'],
 }
 
@@ -643,6 +664,57 @@ def extract_projects_section(text: str) -> Optional[str]:
             break
     section = rest[:end].strip()
     return section[:3000] if section else None
+
+
+_SUMMARY_HEADING_RE = re.compile(
+    r'^\s*(?:professional|career|executive)?\s*(?:summary|profile|objective)\s*:?\s*$',
+    re.I | re.M)
+
+_LEADING_NAME_LINES_RE = re.compile(
+    r'^\s*(?:[A-Z][A-Za-z.\'\-]*\s*){1,6}\s*\n+'   # a name-like line (1-6 capitalized words)
+    r'(?:[^\n]{0,120}\n+){0,2}?'                     # up to 2 more short lines (title/tagline)
+    , re.M)
+
+
+def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
+    """Isolate just the narrative summary paragraph, the same way
+    extract_projects_section() isolates Projects -- REAL BUG FIX
+    (2026-08-18): the Resume Generator used to render the *entire* raw
+    resume_text (name, title, its own "PROFESSIONAL SUMMARY" heading,
+    and everything after) as the body under a template-rendered
+    "PROFESSIONAL SUMMARY" heading, producing a visibly duplicated
+    name/title/heading block on every generated resume. Finds a
+    standalone Summary/Profile/Objective heading and captures until the
+    next recognized section header. If no such heading exists, falls
+    back to stripping just the leading name/title lines (not guessing
+    at a summary boundary) so at least the duplication is gone, even
+    for resumes with no explicit Summary section."""
+    if not text:
+        return None
+    m = _SUMMARY_HEADING_RE.search(text)
+    if m:
+        start = m.end()
+        rest = text[start:]
+        end = len(rest)
+        for line_m in re.finditer(r'^\s*([A-Za-z][A-Za-z /&\-]{2,40})\s*:?\s*$', rest, re.M):
+            candidate = line_m.group(1).strip().lower()
+            if candidate in SECTION_HEADERS and candidate not in ('summary', 'professional summary',
+                                                                    'career summary', 'objective',
+                                                                    'career objective', 'profile summary',
+                                                                    'executive summary'):
+                end = line_m.start()
+                break
+        section = rest[:end].strip()
+        if section:
+            return section[:3000]
+    # No explicit heading -- strip the leading name (+ up to 2 short
+    # title/tagline lines) so the raw text isn't re-echoed verbatim.
+    stripped = text
+    if full_name:
+        name_re = re.compile(r'^\s*' + re.escape(full_name) + r'\s*\n+', re.I | re.M)
+        stripped = name_re.sub('', stripped, count=1)
+    stripped = _LEADING_NAME_LINES_RE.sub('', stripped, count=1).strip()
+    return stripped[:3000] if stripped else None
 
 
 def calc_confidence(parsed: dict) -> float:

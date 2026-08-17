@@ -78,7 +78,7 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
     the Projects section (falls back to the full summary with a note if the
     resume has no distinct Projects heading); 'hide' omits the narrative
     entirely; 'include' is the normal full extracted text."""
-    from services.improved_parser import extract_projects_section
+    from services.improved_parser import extract_projects_section, extract_summary_section
 
     resume_text = candidate.get("resume_text") or ""
     if config["project_mode"] == "hide":
@@ -91,8 +91,13 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
         heading = "PROJECTS"
         raw = projects
     else:
+        # REAL BUG FIX (2026-08-18): this used to be `raw = resume_text`
+        # -- the *entire* raw document, including its own embedded name/
+        # title/"PROFESSIONAL SUMMARY" heading -- rendered under a
+        # second, template-added "PROFESSIONAL SUMMARY" heading. Every
+        # generated resume showed the candidate's name and title twice.
         heading = "PROFESSIONAL SUMMARY"
-        raw = resume_text
+        raw = extract_summary_section(resume_text, candidate.get("full_name") or "") or ""
 
     text = redact_contact(raw, candidate, not config["show_mobile"], not config["show_email"])
     full_name = candidate.get("full_name") or ""
