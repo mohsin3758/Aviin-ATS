@@ -9,6 +9,7 @@ import uuid
 from deps import get_actor, Actor
 from permissions import require_permission
 import db
+import events
 
 try:
     from reportlab.lib.pagesizes import A4
@@ -352,7 +353,21 @@ async def delete_client(client_id: str, actor: Actor = Depends(require_permissio
     # clicking Delete on a real client with any job history has always
     # silently done nothing. Switched to the same is_active soft-delete
     # convention every other entity in this codebase already uses.
+    #
+    # REAL BUG FIX (2026-08-17): this endpoint wrote zero audit_log
+    # entry - 4 real clients (Invenio, Bharat FinServ, TechNova
+    # Solutions, Globex Manufacturing India) turned up deactivated
+    # TWICE in one day with no way to trace who/what called this, since
+    # this is the only code path in the whole backend that ever writes
+    # clients.is_active. Logging now so a third occurrence is traceable.
     async with db.tenant_conn(actor.tenant_id) as conn:
+        client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
         result = await conn.execute("UPDATE clients SET is_active=false WHERE id=$1", client_id)
+        if result != "UPDATE 0" and client_row:
+            await events.write_audit(
+                conn, actor.tenant_id, actor.user_id, "delete", "client", client_id,
+                before={"name": client_row["name"], "is_active": True},
+                after={"is_active": False},
+            )
         if result == "UPDATE 0":
             raise HTTPException(404, "Client not found")

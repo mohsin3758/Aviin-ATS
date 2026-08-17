@@ -52,7 +52,9 @@ async def _training_rows(conn, tenant_id: str):
                   MIN(a.updated_at) AS filled_at
            FROM requisitions r
            JOIN applications a ON a.requisition_id = r.id AND a.tenant_id = r.tenant_id
+           JOIN candidates c ON c.id = a.candidate_id
            WHERE r.tenant_id = $1 AND a.stage IN ('placed', 'offer_accepted')
+             AND r.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
            GROUP BY r.id""",
         tenant_id,
     )
@@ -124,7 +126,7 @@ async def forecast(actor: Actor = Depends(get_actor)):
         open_reqs = await conn.fetch(
             """SELECT id, title, skills_required, positions_count, priority, work_mode,
                       experience_min, experience_max, created_at
-               FROM requisitions WHERE tenant_id=$1 AND status='open'""",
+               FROM requisitions WHERE tenant_id=$1 AND status='open' AND is_active IS NOT FALSE""",
             actor.tenant_id,
         )
 

@@ -333,7 +333,8 @@ JOIN requisitions r ON r.id = p.requisition_id
 LEFT JOIN clients cl ON cl.id = p.client_id
 WHERE p.status IN ('active', 'ending_soon')
   AND p.end_date IS NOT NULL
-  AND p.end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '21 days';
+  AND p.end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '21 days'
+  AND c.is_active IS NOT FALSE;
 
 -- v_agency_funnel — applications -> submittals -> offers -> placements per client
 CREATE OR REPLACE VIEW v_agency_funnel
@@ -353,6 +354,7 @@ LEFT JOIN applications a ON a.requisition_id = r.id
 LEFT JOIN submittals s ON s.application_id = a.id
 LEFT JOIN offers o ON o.application_id = a.id
 LEFT JOIN placements pl ON pl.requisition_id = r.id
+WHERE cl.is_active IS NOT FALSE
 GROUP BY cl.tenant_id, cl.id, cl.name;
 
 -- v_recruiter_capacity — active assignment load vs. capacity_weekly
@@ -380,12 +382,13 @@ WITH (security_invoker = true) AS
 WITH demand AS (
   SELECT r.tenant_id, s AS skill, count(*) AS demand_count
   FROM requisitions r, unnest(r.skills_required) AS s
-  WHERE r.status = 'open'
+  WHERE r.status = 'open' AND r.is_active IS NOT FALSE
   GROUP BY r.tenant_id, s
 ),
 supply AS (
   SELECT c.tenant_id, s AS skill, count(*) AS supply_count
   FROM candidates c, unnest(c.skills) AS s
+  WHERE c.is_active IS NOT FALSE
   GROUP BY c.tenant_id, s
 )
 SELECT

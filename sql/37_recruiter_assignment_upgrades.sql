@@ -101,7 +101,11 @@ AS $$
     FROM requisitions r
     LEFT JOIN cfg ON true
     LEFT JOIN clients cl ON cl.id = r.client_id
-    WHERE r.status = 'open'
+    -- REAL BUG FIX (2026-08-17): no r.is_active filter -- 719+ soft-
+    -- deleted QA/test/demo requisitions were counted as real SLA
+    -- breaches on the T5 War Room's Operational Alerts and the SLA
+    -- Tracking page's "Total Reqs"/"SLA Breached" cards.
+    WHERE r.status = 'open' AND r.is_active IS NOT FALSE
   )
   SELECT e.id, e.title, e.client_id, e.effective_sla_hours,
          ROUND(EXTRACT(EPOCH FROM (now() - e.created_at)) / 3600, 1),

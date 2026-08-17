@@ -148,16 +148,26 @@ CREATE OR REPLACE VIEW v_sla_dashboard AS
    FROM requisitions r
      LEFT JOIN applications a ON a.requisition_id = r.id AND a.tenant_id = r.tenant_id
      LEFT JOIN sla_tracking st ON st.requisition_id = r.id AND st.tenant_id = r.tenant_id
+  -- REAL BUG FIX (2026-08-17): no r.is_active filter -- 719+ soft-
+  -- deleted QA/test/demo requisitions inflated "Total Reqs"/"SLA
+  -- Breached"/"Stale" on the real SLA Tracking page from 3 real rows
+  -- to 742.
+  WHERE r.is_active IS NOT FALSE
   GROUP BY r.id, r.tenant_id, r.title, r.created_at, r.status, st.time_to_first_sub_hrs, st.time_to_fill_days, st.sla_target_days, st.sla_breached;
 
+-- REAL BUG FIX (2026-08-17): no candidate is_active filter -- soft-
+-- deleted QA/test/demo applications inflated every stage's real count
+-- (Rejected/Offer/etc.) on the real Reports > Pipeline Velocity tab.
 CREATE OR REPLACE VIEW v_pipeline_velocity AS
- SELECT tenant_id,
-    stage,
+ SELECT a.tenant_id,
+    a.stage,
     count(*) AS count,
-    round(avg(EXTRACT(epoch FROM now() - updated_at) / 86400::numeric), 1) AS avg_days_in_stage,
-    count(*) FILTER (WHERE (EXTRACT(epoch FROM now() - updated_at) / 86400::numeric) > 7::numeric) AS stale_count
+    round(avg(EXTRACT(epoch FROM now() - a.updated_at) / 86400::numeric), 1) AS avg_days_in_stage,
+    count(*) FILTER (WHERE (EXTRACT(epoch FROM now() - a.updated_at) / 86400::numeric) > 7::numeric) AS stale_count
    FROM applications a
-  GROUP BY tenant_id, stage;
+   JOIN candidates c ON c.id = a.candidate_id
+  WHERE c.is_active IS NOT FALSE
+  GROUP BY a.tenant_id, a.stage;
 
 CREATE OR REPLACE VIEW v_monthly_billing AS
  SELECT p.tenant_id,

@@ -58,7 +58,7 @@ async def recruiter_performance(month: Optional[int]=None, year: Optional[int]=N
             LEFT JOIN recruiter_kpi_scores k ON k.user_id=u.id AND k.tenant_id=u.tenant_id
                 AND ($1::int IS NULL OR k.period_month=$1)
                 AND ($2::int IS NULL OR k.period_year=$2)
-            WHERE u.tenant_id=$3
+            WHERE u.tenant_id=$3 AND u.is_active IS NOT FALSE
             GROUP BY u.id, u.full_name, u.email, k.total_score, k.grade, k.calculated_incentive
             ORDER BY placements DESC, conversion_rate DESC
         """, month, year, actor.tenant_id)
@@ -77,7 +77,8 @@ async def client_revenue(actor: Actor=Depends(get_actor)):
                 COALESCE(SUM(ap.delivery_pool),0) AS delivery_pool,
                 0 AS open_positions
             FROM account_pl ap
-            WHERE ap.tenant_id=$1
+            JOIN clients cl ON cl.id = ap.client_id
+            WHERE ap.tenant_id=$1 AND cl.is_active IS NOT FALSE
             GROUP BY ap.client_name
             ORDER BY total_revenue DESC
         """, actor.tenant_id)
@@ -253,11 +254,13 @@ async def compute_health_scores(actor: Actor=Depends(get_actor)):
     """Compute health scores for all clients — zero-token rule engine."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         clients = await conn.fetch("""
-            SELECT DISTINCT COALESCE(client_name,'Unknown') AS client_name
-            FROM account_pl WHERE tenant_id=$1 AND client_name IS NOT NULL
+            SELECT DISTINCT COALESCE(ap.client_name,'Unknown') AS client_name
+            FROM account_pl ap JOIN clients cl ON cl.id = ap.client_id
+            WHERE ap.tenant_id=$1 AND ap.client_name IS NOT NULL AND cl.is_active IS NOT FALSE
             UNION
-            SELECT DISTINCT COALESCE(client_name,'Unknown') AS client_name
-            FROM collection_records WHERE tenant_id=$1 AND client_name IS NOT NULL
+            SELECT DISTINCT COALESCE(cr.client_name,'Unknown') AS client_name
+            FROM collection_records cr JOIN clients cl ON cl.id = cr.client_id
+            WHERE cr.tenant_id=$1 AND cr.client_name IS NOT NULL AND cl.is_active IS NOT FALSE
         """, actor.tenant_id)
         results = []
         for row in clients:
