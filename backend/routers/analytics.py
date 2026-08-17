@@ -63,7 +63,12 @@ async def active_placements(actor: Actor = Depends(get_actor)):
 async def hiring_funnel(actor: Actor = Depends(require_permission("analytics", "read"))):
     """Count of applications per stage + stage-to-stage conversion rates."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("SELECT stage, COUNT(*) AS cnt FROM applications GROUP BY stage")
+        rows = await conn.fetch("""
+            SELECT a.stage, COUNT(*) AS cnt FROM applications a
+            JOIN candidates c ON c.id = a.candidate_id
+            WHERE c.is_active IS NOT FALSE
+            GROUP BY a.stage
+        """)
         # Stages are tenant-configurable and can include custom rounds
         # (this tenant has a real l3_interview) — the previous hardcoded
         # FUNNEL list silently dropped any custom stage from the funnel
@@ -109,6 +114,7 @@ async def source_breakdown(actor: Actor = Depends(get_actor)):
                 COUNT(DISTINCT a.id) FILTER (WHERE a.stage = 'rejected') AS rejected
             FROM candidates c
             LEFT JOIN applications a ON a.candidate_id = c.id
+            WHERE c.is_active IS NOT FALSE
             GROUP BY COALESCE(c.source, 'unknown')
             ORDER BY total_candidates DESC
         """)
@@ -128,12 +134,14 @@ async def time_to_hire(days: int = 90, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         overall = await conn.fetchrow("""
             SELECT
-                ROUND(AVG(EXTRACT(EPOCH FROM (updated_at - created_at))/86400)::numeric, 1)
+                ROUND(AVG(EXTRACT(EPOCH FROM (a.updated_at - a.created_at))/86400)::numeric, 1)
                     AS avg_days_to_hire,
                 COUNT(*) AS total_placed
-            FROM applications
-            WHERE stage IN ('placed','offer_accepted')
-              AND updated_at >= now() - ($1 || ' days')::interval
+            FROM applications a
+            JOIN candidates c ON c.id = a.candidate_id
+            WHERE a.stage IN ('placed','offer_accepted')
+              AND c.is_active IS NOT FALSE
+              AND a.updated_at >= now() - ($1 || ' days')::interval
         """, str(days))
 
         by_req = await conn.fetch("""
@@ -143,7 +151,9 @@ async def time_to_hire(days: int = 90, actor: Actor = Depends(get_actor)):
                        AS avg_days
             FROM applications a
             JOIN requisitions r ON r.id = a.requisition_id
+            JOIN candidates c ON c.id = a.candidate_id
             WHERE a.stage IN ('placed','offer_accepted')
+              AND c.is_active IS NOT FALSE
               AND a.updated_at >= now() - ($1 || ' days')::interval
             GROUP BY r.id, r.title
             ORDER BY placed_count DESC
@@ -152,13 +162,15 @@ async def time_to_hire(days: int = 90, actor: Actor = Depends(get_actor)):
 
         monthly = await conn.fetch("""
             SELECT
-                TO_CHAR(updated_at, 'YYYY-MM') AS month,
+                TO_CHAR(a.updated_at, 'YYYY-MM') AS month,
                 COUNT(*) AS placements,
-                ROUND(AVG(EXTRACT(EPOCH FROM (updated_at - created_at))/86400)::numeric,1) AS avg_days
-            FROM applications
-            WHERE stage IN ('placed','offer_accepted')
-              AND updated_at >= now() - '12 months'::interval
-            GROUP BY TO_CHAR(updated_at, 'YYYY-MM')
+                ROUND(AVG(EXTRACT(EPOCH FROM (a.updated_at - a.created_at))/86400)::numeric,1) AS avg_days
+            FROM applications a
+            JOIN candidates c ON c.id = a.candidate_id
+            WHERE a.stage IN ('placed','offer_accepted')
+              AND c.is_active IS NOT FALSE
+              AND a.updated_at >= now() - '12 months'::interval
+            GROUP BY TO_CHAR(a.updated_at, 'YYYY-MM')
             ORDER BY month
         """)
 
@@ -177,13 +189,15 @@ async def stage_velocity(actor: Actor = Depends(get_actor)):
     """Current pending count per stage + open reqs summary."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         stage_counts = await conn.fetch("""
-            SELECT stage, COUNT(*) AS count
-            FROM applications
-            WHERE stage NOT IN ('placed','rejected','offer_accepted')
-            GROUP BY stage
+            SELECT a.stage, COUNT(*) AS count
+            FROM applications a
+            JOIN candidates c ON c.id = a.candidate_id
+            WHERE a.stage NOT IN ('placed','rejected','offer_accepted')
+              AND c.is_active IS NOT FALSE
+            GROUP BY a.stage
         """)
         open_reqs = await conn.fetchval(
-            "SELECT COUNT(*) FROM requisitions WHERE status='open'")
+            "SELECT COUNT(*) FROM requisitions WHERE status='open' AND is_active IS NOT FALSE")
         interviews_today = await conn.fetchval("""
             SELECT COUNT(*) FROM interview_schedules
             WHERE status='scheduled'

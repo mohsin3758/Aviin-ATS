@@ -87,13 +87,19 @@ async def client_revenue(actor: Actor=Depends(get_actor)):
 async def dashboard_summary(actor: Actor=Depends(get_actor)):
     """Single call for executive reporting dashboard."""
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # REAL BUG FIX (2026-08-17): none of these 5 counts filtered
+        # is_active -- 719 of 722 "open" requisitions and ~1800 of 2607
+        # "candidates" were soft-deleted QA/test/demo rows, wildly
+        # inflating the real Analytics dashboard's headline KPI cards.
         pipeline = await conn.fetchrow("""
             SELECT
-                COUNT(*) FILTER (WHERE status='open') AS open_reqs,
-                COUNT(*) AS total_reqs,
-                (SELECT COUNT(*) FROM applications WHERE tenant_id=$1) AS total_apps,
-                (SELECT COUNT(*) FROM placements WHERE tenant_id=$1) AS total_placements,
-                (SELECT COUNT(*) FROM candidates WHERE tenant_id=$1) AS total_candidates
+                COUNT(*) FILTER (WHERE status='open' AND is_active IS NOT FALSE) AS open_reqs,
+                COUNT(*) FILTER (WHERE is_active IS NOT FALSE) AS total_reqs,
+                (SELECT COUNT(*) FROM applications a JOIN candidates c ON c.id=a.candidate_id
+                 WHERE a.tenant_id=$1 AND c.is_active IS NOT FALSE) AS total_apps,
+                (SELECT COUNT(*) FROM placements p JOIN candidates c ON c.id=p.candidate_id
+                 WHERE p.tenant_id=$1 AND c.is_active IS NOT FALSE) AS total_placements,
+                (SELECT COUNT(*) FROM candidates WHERE tenant_id=$1 AND is_active IS NOT FALSE) AS total_candidates
             FROM requisitions WHERE tenant_id=$1
         """, actor.tenant_id)
         kpi = await conn.fetchrow("""
