@@ -6629,3 +6629,86 @@ tenant's pipeline (some real intake paths land directly at "screened"
 without a separately recorded "sourced" transition), not a data-quality
 bug — out of scope for this cleanup pass, which was about removing fake/
 demo/QA rows, not redesigning funnel-stage semantics.
+
+## Round 7 same day: Reports/Client Health/Headcount/War Room/SLA pages
+## — same bug, plus a real client mass-deactivation happening a SECOND
+## time with no traceable cause, 2026-08-17
+User showed 9 more live screenshots — `/analytics` confirming round 6's
+fix worked, then `/reports` (Recruiter Leaderboard full of "QA S19
+Recruiter"/"QA S31 UI Delete"/etc. with all-zero stats, Client Revenue
+showing "QA Analyst Test Corp"/"QA Client Ltd"/"QA Test Client"/"Fix
+Test PL" as if real), `/client-health` (same fake clients with computed
+health scores), `/headcount` (a "TEST"/"Test Client" row mixed into
+real FY2026-27 budget planning), and `/command-center` (T5 War Room's
+Operational Alerts mixing real breaches with "QA S2 Regression Test
+Role"/"QA Automation Engineer") — and asked for the same cleanup.
+
+Same root cause, this time hitting `requisitions` and `clients`
+(not just `candidates`), across 10 more endpoints/views/functions:
+- `reports/recruiter-performance` (`p36_p42.py`) — `FROM users u` with
+  no `is_active` filter; the "Top Recruiters" leaderboard.
+- `reports/client-revenue` (`p36_p42.py`) — `account_pl` has a real
+  `client_id` FK; joined to `clients` and filtered.
+- `compute_health_scores()` (`p36_p42.py`, Client Health's "Recompute")
+  — pulled distinct client names from `account_pl`/`collection_records`
+  with no active check; fixed, plus deleted the 4 stale precomputed
+  fake rows directly (`client_health_scores` has no `client_id`, just a
+  denormalized name, so no live filter is possible on the read side).
+- `v_pipeline_velocity` — no candidate-join at all; Reports' Pipeline
+  Velocity tab numbers now match the already-fixed Hiring Funnel
+  (Offer 7→5, etc.) instead of contradicting it.
+- `v_sla_dashboard` — no `r.is_active` filter; SLA Tracking's "Total
+  Reqs" 742→2, "SLA Breached" down to the 2 real breaches.
+- `find_sla_breaches()` and `find_stalled_assignments()` (DB functions
+  backing `GET /alerts`, the War Room's Operational Alerts) — neither
+  filtered `r.is_active`/`u.is_active`. The second had **zero committed
+  migration anywhere** (pure schema drift, same pattern found
+  repeatedly this project) — backfilled with the fix already applied
+  in a new `sql/62_stale_data_analytics_fixes.sql` rather than
+  committing the broken version first. Alerts: 21→2.
+- `sla-predictions/forecast` and its `_training_rows()` — open-req
+  listing and the regression model's own training data both missing
+  the filter (the latter meaning the model itself had been quietly
+  trained partly on fake data).
+- `v_redeployment_queue`, `v_agency_funnel`, `v_skill_gap` (the
+  remaining 3 War Room analytics views) — same gap on the
+  candidates/requisitions/clients driving tables.
+- `headcount_plans`' one fake "TEST"/"Test Client" row — no `client_id`
+  FK at all (freeform text), so no query fix was possible; deleted
+  directly (no delete endpoint exists for this table).
+
+**A real, separate, pre-existing data bug found, not fixed**: the
+"Infosys BPM" `account_pl`/`collection_records` rows (the one
+real-looking name in Client Revenue) turned out to have `client_id`
+literally set to the *tenant_id*, not any row in `clients` — and no
+client named "Infosys BPM" exists in `clients` at all. This predates
+today's session and there's no safe way to infer which real client (if
+any) this revenue was meant to be attributed to from the data alone —
+flagged honestly rather than guessed at or silently hidden by the
+is_active fix.
+
+**The 4 real clients (Invenio, Bharat FinServ, TechNova Solutions,
+Globex Manufacturing India) turned up deactivated again** — the second
+time in one day, this time with zero playwright/test-suite activity in
+between to blame. Root cause still not found (no trigger on `clients`,
+no scheduler job touches it, and `delete_client()` — the only code path
+in the entire backend that writes `clients.is_active` — requires an
+authenticated, permission-gated, single-client-at-a-time call with no
+bulk/wildcard variant anywhere). Restored the 4 clients again. Since
+the endpoint wrote zero audit trail, fixed that gap directly: `DELETE
+/clients/{client_id}` now writes a real `audit_log` row via the
+existing shared `events.write_audit()` helper (already used elsewhere
+in this codebase, e.g. HITL offer/reassignment actions) — a genuine,
+lasting fix regardless of whether the original cause is ever found,
+since a third occurrence will now be traceable through the database
+itself rather than lost to the next `docker compose up -d --build`
+wiping container logs.
+
+Also cleaned up 2 throwaway artifacts created during this session's own
+verification work: a "Debug Test" user and a "Debug Test Client XYZ"
+client, both soft-deleted via the real APIs.
+
+Not run this round: a full QA-suite regression pass (rate-limit budget
+spent on live verification of each fix instead, matching the pattern
+of earlier rounds today) — still an open item for a future session,
+now compounding across rounds 5-7.
