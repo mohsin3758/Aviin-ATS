@@ -6513,3 +6513,88 @@ any of them — `fix_stages.py`, `sync_all.py`, `sync_missing.py` in
 particular, by name — is the actual, still-latent source of the client
 mass-deactivation found in this round). No code was changed in this
 round; the fix was entirely a data restoration.
+
+## Round 5 same day: Calendar, Onboarding, NDA, Offer Engine, and 13 more
+## pages found leaking fake/soft-deleted candidates via the same bug
+User pointed at 5 more live screenshots (Calendar, Interview Engine,
+Offer Engine, NDA Documents, Onboarding) plus the sidebar's 11-group
+navigation and asked for the same check across every remaining feature
+area. Confirmed the Interview Engine/Calendar fix from round 3 already
+worked (down to the real 5/4 entries) — then found the same missing-
+`is_active`-on-candidates-join bug in 4 more real, live pages:
+
+- **`GET /calendar`** — 23 of 27 events tied to inactive/fake candidates
+  (including "Kiran Kumar"/"Arjun Sharma" from the June ad-hoc-script
+  batch). Fixed by joining `interview_schedules -> applications ->
+  candidates`; deleted the 23 orphaned rows directly (no delete endpoint
+  exists for `calendar_events`).
+- **`GET /onboarding`** — all 30 "in progress" rows were `QA S19 Onboard
+  Candidate ...` test-suite residue tied to already-soft-deleted
+  candidates; the 31st was "Arjun Sharma" (same fake batch). Fixed; list
+  now correctly empty (no real onboarding in progress right now).
+- **`GET /nda`** (NDA Documents page) — several entries including
+  "QA Test Candidate", "Rajesh Kumar SAP Test", and a garbled
+  "Prepared For: Management Review" (a resume-mis-parse artifact, not a
+  real name) were all already-soft-deleted candidates still shown.
+  Fixed; down to the 5 real signatories.
+- **`GET /auto-offer/list`** (Offer Engine's AI Generated tab) — same
+  gap. Fixed; down to the 3 real candidates.
+
+**A systematic background sweep** of all 93 `JOIN candidates`
+occurrences across the whole backend (same methodology as the earlier
+`JOIN users` sweep) found **21 confirmed real gaps** with live non-zero
+leak counts and real frontend callers. Applied judgment per finding
+rather than blindly filtering every one — the same "operational list vs.
+historical record" distinction established earlier today for
+`audit_log`/placements-export:
+
+**Fixed (13 — operational/management lists, correctly hide fake/inactive
+noise)**: Submittals, Field Attendance (placements-search + records),
+Companies' per-client submission pack, BGV Checks, ERP timesheets +
+payslips, the public Client Portal shortlist (`GET /client-portal/view/
+{token}` — the most important of these, since it's the one page a real
+client sees with no login), the core Applications list, Compliance
+records, the requisition mini-pipeline's inbox count, Hotlist, NPS
+"recent responses", Reference Checks, Resume Inbox queue (candidate_id
+is nullable there — preserved unlinked-resume rows explicitly rather
+than dropping them), and AI Candidate Intelligence (`/intelligence`,
+the exact page from the user's own screenshot — dropped from 627 rows
+to 68, confirmed zero remaining `@aviintest.com` entries).
+
+**Deliberately left unfiltered (4 — real historical records, matching
+today's established audit_log/placements-export precedent)**:
+`communications/inbox` (candidate_messages threads), `communications/
+imap-messages` (the raw ATS Inbox — checked its composition directly:
+alongside confirmed junk like "Mail Delivery System" bounces, most of
+the 1033 flagged rows are genuinely real candidate names like "Shweta
+Suryawanshi" and "Bhaskara N" whose accounts were later deactivated for
+unrelated reasons — hiding the email because of that would erase real
+correspondence history, not correct it), `pipeline/audit` (the Pipeline
+Velocity movement log — same reasoning as `audit_log`), and
+`export/placements` (already decided in round 4, unaffected by this
+round beyond the fix below).
+
+**Root cause found for the "Nikhil Joshi" pattern showing up
+everywhere**: 4 of the 21 findings (field-attendance x2, ERP timesheets,
+ERP payslips) traced entirely to one candidate — "Nikhil Joshi", already
+confirmed multiple times earlier today as genuinely real (a real active
+placement, real GPS attendance history, real payroll) but sitting at
+`is_active=false` for no discernible reason predating this session.
+Rather than special-casing every downstream query to work around one
+wrongly-deactivated real candidate, reactivated him directly
+(`is_active=true`) — checked first that his placement's own status is
+still `active` with no completion/end signal that would explain an
+intentional deactivation. This alone resolved 4 of the 21 findings with
+zero code change; the defensive `is_active` filter was still added to
+those 2 files anyway, matching every other fix today.
+
+All 13 code fixes deployed, backend rebuilt, and verified with real
+before/after API counts (not code review) before committing. Two
+commits: one for Calendar/Onboarding/NDA/Offers, one for the 13-file
+batch. Both pushed to GitHub and synced to local.
+
+**Still open, not addressed in this round**: the same ~11 untracked
+ad-hoc scripts flagged in round 3 as unread, and no full QA-suite
+regression run was done after this round's fixes (rate-limit budget was
+spent on live-data verification instead) — a future session should run
+the full suite once before further changes land on top of this round.
