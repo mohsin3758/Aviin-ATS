@@ -219,15 +219,21 @@ async def update_collection(coll_id: str, body: CollectionIn, actor: Actor=Depen
 @coll_router.get("/summary")
 async def collections_summary(actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # REAL BUG FIX (2026-08-17): queried collection_records directly
+        # with no clients.is_active check -- ~9 fake QA/test collection
+        # records inflated every headline card on the Collections &
+        # Invoicing page. Same fix as v_collection_aging.
         row = await conn.fetchrow("""
             SELECT COUNT(*) AS total_invoices,
-                   COALESCE(SUM(invoice_amount),0) AS total_invoiced,
-                   COALESCE(SUM(collected_amount),0) AS total_collected,
-                   COALESCE(SUM(outstanding_amount),0) AS total_outstanding,
-                   COUNT(*) FILTER (WHERE status='overdue') AS overdue_count,
-                   COALESCE(SUM(invoice_amount) FILTER (WHERE status='overdue'),0) AS overdue_amount,
-                   COUNT(*) FILTER (WHERE aging_days > 90) AS beyond_90d
-            FROM collection_records
+                   COALESCE(SUM(cr.invoice_amount),0) AS total_invoiced,
+                   COALESCE(SUM(cr.collected_amount),0) AS total_collected,
+                   COALESCE(SUM(cr.outstanding_amount),0) AS total_outstanding,
+                   COUNT(*) FILTER (WHERE cr.status='overdue') AS overdue_count,
+                   COALESCE(SUM(cr.invoice_amount) FILTER (WHERE cr.status='overdue'),0) AS overdue_amount,
+                   COUNT(*) FILTER (WHERE cr.aging_days > 90) AS beyond_90d
+            FROM collection_records cr
+            JOIN clients cl ON cl.id = cr.client_id
+            WHERE cl.is_active IS NOT FALSE
         """)
     return dict(row)
 

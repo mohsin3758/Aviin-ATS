@@ -243,7 +243,7 @@ async def list_invoices(status: Optional[str] = None, actor: Actor = Depends(_FI
                        i.paid_at, cl.name AS client_name
                 FROM invoices i
                 JOIN clients cl ON cl.id = i.client_id
-                WHERE i.tenant_id = $1 {where}
+                WHERE i.tenant_id = $1 AND cl.is_active IS NOT FALSE {where}
                 ORDER BY i.invoice_date DESC""",
             *params,
         )

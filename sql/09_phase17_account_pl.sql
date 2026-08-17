@@ -217,6 +217,10 @@ SELECT ap.*,
 FROM account_pl ap;
 GRANT SELECT ON v_account_pl TO app_user;
 
+-- REAL BUG FIX (2026-08-17): no clients.is_active filter -- soft-
+-- deleted QA/test/demo collection records inflated every card on the
+-- real Collections & Invoicing page (Total Invoiced/Collected/
+-- Outstanding) with fake money.
 CREATE OR REPLACE VIEW v_collection_aging
 WITH (security_invoker = true) AS
 SELECT cr.*,
@@ -226,7 +230,9 @@ SELECT cr.*,
          WHEN cr.aging_days <= 90 THEN '61-90d'
          ELSE '90d+'
     END AS aging_bucket
-FROM collection_records cr;
+FROM collection_records cr
+JOIN clients cl ON cl.id = cr.client_id
+WHERE cl.is_active IS NOT FALSE;
 GRANT SELECT ON v_collection_aging TO app_user;
 
 SELECT 'P17 migration complete' AS result;
