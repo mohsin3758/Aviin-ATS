@@ -51,7 +51,9 @@ async def list_owners(client_id: Optional[str]=None, actor: Actor=Depends(get_ac
             SELECT co.*, u.full_name, u.email
             FROM client_owners co
             JOIN users u ON u.id=co.user_id
-            WHERE co.is_active=true AND ($1::text IS NULL OR co.client_id::text=$1)
+            JOIN clients cl ON cl.id=co.client_id
+            WHERE co.is_active=true AND u.is_active IS NOT FALSE AND cl.is_active IS NOT FALSE
+              AND ($1::text IS NULL OR co.client_id::text=$1)
             ORDER BY co.assigned_at DESC
         """, client_id)
     return [dict(r) for r in rows]
@@ -99,6 +101,7 @@ async def get_client_owners(client_id: str, actor: Actor=Depends(get_actor)):
             LEFT JOIN kae_client_retention kr
                    ON kr.user_id=co.user_id AND kr.client_id=co.client_id AND kr.tenant_id=co.tenant_id
             WHERE co.tenant_id=$1 AND co.client_id::text=$2 AND co.is_active
+              AND u.is_active IS NOT FALSE
             ORDER BY co.owner_type, co.assigned_at
         """, actor.tenant_id, client_id)
     return {"client_id": client_id, "owners": [dict(r) for r in rows],
@@ -110,6 +113,7 @@ async def list_visibility(actor: Actor=Depends(get_actor)):
         rows = await conn.fetch("""
             SELECT av.*, u.full_name, u.email FROM account_visibility av
             JOIN users u ON u.id=av.user_id
+            WHERE u.is_active IS NOT FALSE
             ORDER BY av.visibility_lvl DESC, u.full_name
         """)
     return [dict(r) for r in rows]
@@ -147,7 +151,8 @@ async def list_kae_scorecards(month: Optional[int]=None, year: Optional[int]=Non
         rows = await conn.fetch("""
             SELECT k.*, u.full_name, u.email FROM kae_kpi_scores k
             JOIN users u ON u.id=k.user_id
-            WHERE ($1::int IS NULL OR k.period_month=$1)
+            WHERE u.is_active IS NOT FALSE
+              AND ($1::int IS NULL OR k.period_month=$1)
               AND ($2::int IS NULL OR k.period_year=$2)
             ORDER BY k.period_year DESC, k.period_month DESC, u.full_name
         """, month, year)
@@ -227,7 +232,8 @@ async def list_kae_retention(user_id: Optional[str]=None, actor: Actor=Depends(g
                    kae_retention_bonus(kr.months_served) AS current_bonus
             FROM kae_client_retention kr
             JOIN users u ON u.id=kr.user_id
-            WHERE ($1::text IS NULL OR kr.user_id::text=$1)
+            WHERE u.is_active IS NOT FALSE
+              AND ($1::text IS NULL OR kr.user_id::text=$1)
             ORDER BY kr.months_served DESC
         """, user_id)
     return [dict(r) for r in rows]
@@ -259,9 +265,11 @@ async def kae_summary(month: Optional[int]=None, year: Optional[int]=None,
             WHERE ($1::int IS NULL OR period_month=$1) AND ($2::int IS NULL OR period_year=$2)
         """, month, year)
         own = await conn.fetchrow("""
-            SELECT COUNT(DISTINCT client_id) AS total_clients_with_kae,
-                   COUNT(*) FILTER (WHERE owner_type='kae') AS total_kae_assignments
-            FROM client_owners WHERE is_active
+            SELECT COUNT(DISTINCT co.client_id) AS total_clients_with_kae,
+                   COUNT(*) FILTER (WHERE co.owner_type='kae') AS total_kae_assignments
+            FROM client_owners co
+            JOIN clients cl ON cl.id=co.client_id
+            WHERE co.is_active AND cl.is_active IS NOT FALSE
         """)
     return {**dict(stats), **dict(own)}
 

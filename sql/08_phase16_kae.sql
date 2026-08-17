@@ -231,6 +231,10 @@ CREATE POLICY rls_kae_ret ON kae_client_retention
     USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
 GRANT ALL ON kae_client_retention TO app_user;
 
+-- REAL BUG FIX (2026-08-18): no u.is_active filter, and
+-- "accounts_owned" counted client_owners rows pointing at soft-deleted
+-- QA/test/demo clients (172 such rows found live) -- inflating the
+-- real KAE Leaderboard tab.
 CREATE OR REPLACE VIEW v_kae_summary
 WITH (security_invoker = true) AS
 SELECT k.user_id, k.tenant_id, u.full_name,
@@ -239,10 +243,12 @@ SELECT k.user_id, k.tenant_id, u.full_name,
     COALESCE(SUM(k.total_incentive),0) AS total_incentive,
     COALESCE(SUM(k.collection_actual),0) AS total_collected,
     COALESCE(SUM(k.revenue_actual),0)  AS total_revenue,
-    COUNT(co.id)                       AS accounts_owned
+    COUNT(cl.id)                       AS accounts_owned
 FROM kae_kpi_scores k
 JOIN users u ON u.id = k.user_id
 LEFT JOIN client_owners co ON co.user_id=k.user_id AND co.tenant_id=k.tenant_id AND co.is_active
+LEFT JOIN clients cl ON cl.id = co.client_id AND cl.is_active IS NOT FALSE
+WHERE u.is_active IS NOT FALSE
 GROUP BY k.user_id, k.tenant_id, u.full_name;
 
 GRANT SELECT ON v_kae_summary TO app_user;
