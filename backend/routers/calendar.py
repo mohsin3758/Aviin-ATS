@@ -118,9 +118,24 @@ async def from_interview(interview_id: str, actor: Actor = Depends(get_actor)):
 
 @router.get("")
 async def list_events(actor: Actor = Depends(get_actor)):
+    # REAL BUG FIX (2026-08-17): no filter at all for the candidate behind
+    # the linked interview -- soft-deleting a candidate (this codebase's
+    # universal cleanup convention) never removed their calendar event,
+    # so a downloadable-.ics "New Event"-style page stayed full of fake/
+    # QA-test interviews forever. Every real calendar_events row (via
+    # POST /calendar/from-interview) carries an interview_id; joined
+    # through to the candidate the same way the pipeline board/My Day/
+    # predictions fixes earlier today did.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT id,title,start_at,end_at,status,attendees FROM calendar_events WHERE tenant_id=$1 ORDER BY start_at DESC LIMIT 50",
+            """SELECT ce.id, ce.title, ce.start_at, ce.end_at, ce.status, ce.attendees
+               FROM calendar_events ce
+               LEFT JOIN interview_schedules i ON i.id = ce.interview_id
+               LEFT JOIN applications a ON a.id = i.application_id
+               LEFT JOIN candidates c ON c.id = a.candidate_id
+               WHERE ce.tenant_id=$1
+                 AND (ce.interview_id IS NULL OR c.is_active IS NOT FALSE)
+               ORDER BY ce.start_at DESC LIMIT 50""",
             actor.tenant_id)
     return [dict(r) for r in rows]
 
