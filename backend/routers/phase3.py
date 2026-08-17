@@ -447,7 +447,7 @@ async def list_offers(actor: Actor = Depends(get_actor)):
             JOIN applications a ON a.id=o.application_id
             JOIN candidates c ON c.id=a.candidate_id
             LEFT JOIN requisitions r ON r.id=a.requisition_id
-            WHERE o.tenant_id=$1
+            WHERE o.tenant_id=$1 AND c.is_active IS NOT FALSE
             ORDER BY o.created_at DESC LIMIT 100
         """, actor.tenant_id)
         return [{

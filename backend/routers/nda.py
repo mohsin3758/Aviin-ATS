@@ -470,7 +470,8 @@ async def list_nda_documents(status: Optional[str] = None, actor: Actor = Depend
                JOIN applications a ON a.id = nd.application_id
                JOIN candidates c ON c.id = a.candidate_id
                JOIN requisitions r ON r.id = a.requisition_id
-               WHERE ($1::text IS NULL OR nd.status = $1)
+               WHERE c.is_active IS NOT FALSE
+                 AND ($1::text IS NULL OR nd.status = $1)
                ORDER BY nd.created_at DESC""",
             status,
         )

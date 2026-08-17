@@ -104,7 +104,8 @@ async def list_onboarding(status: Optional[str] = None, actor: Actor = Depends(g
                    c.phone AS candidate_phone
             FROM candidate_onboarding co
             JOIN candidates c ON c.id=co.candidate_id
-            WHERE co.tenant_id=$1 AND ($2::text IS NULL OR co.status=$2)
+            WHERE co.tenant_id=$1 AND c.is_active IS NOT FALSE
+              AND ($2::text IS NULL OR co.status=$2)
             ORDER BY co.joining_date ASC NULLS LAST, co.created_at DESC
         """, actor.tenant_id, status)
     return [_parsed(r) for r in rows]
