@@ -6449,3 +6449,67 @@ concluding no further cleanup is needed.
 
 Full QA suite and zero-token audit re-run after this round; see the
 commit for this date for the final numbers.
+
+## Round 4 same day: real production clients found mass-deactivated —
+## fixed, root cause NOT found (logs lost), flagged honestly, 2026-08-17
+While re-verifying the full suite after round 3's cleanup, a headless-
+browser test unexpectedly failed to find "Invenio" on the real Companies
+page. Investigated directly rather than assumed flaky: **every single
+client in the tenant — including the 4 confirmed-real ones (Invenio,
+Bharat FinServ, TechNova Solutions, Globex Manufacturing India) —
+was `is_active=false`**, alongside the hundreds of already-expected
+inactive QA test clients. The only active row was a throwaway "Debug
+Test Client XYZ" created moments earlier during this same investigation.
+
+**Root cause not found, disclosed honestly rather than guessed at**:
+`clients` has no `updated_at` column, so the row itself carries no
+timestamp for when this happened. `DELETE /clients/{id}`
+(`clients.py::delete_client`) writes no `audit_log`/`event_outbox` entry
+at all — confirmed by reading its actual body, not assumed. The
+backend container's current instance only started at 09:01:13 UTC today
+(recreated during one of this same day's several `docker compose up -d
+--build backend` deploys) — Docker discards a recreated container's
+prior logs, so whatever caused this happened before that restart and is
+now unrecoverable. The 12 real `DELETE /clients/...` calls visible in
+logs *since* 09:01 all match confirmed QA-test-client IDs, none of the 4
+real ones — consistent with the deactivation having happened earlier,
+not from a call happening right now. Checked the test suite's own
+`DELETE /clients/${clientId}` call sites (8 of them, across S14/S17/S29)
+for a dynamically-resolved (as opposed to self-created) client id — all
+8 use a `let clientId` the same describe block creates and tracks itself;
+none looked structurally capable of targeting a real client. No smoking
+gun found. This is reported as a genuine, unresolved incident, not
+swept under a "probably a test bug" assumption — a future session with
+fresh, unbroken logs (i.e., caught *before* the next `docker compose up
+-d --build backend`) has a real chance of tracing it that this one
+didn't.
+
+**Fixed the data regardless of not finding the cause**: restored all 4
+real clients' `is_active` to `true` via a direct, minimal SQL UPDATE
+(no reactivate endpoint exists for clients, unlike users) — verified
+immediately after that all 4 read back `is_active=true`.
+
+**The 3 test failures seen in this round's full-suite run** ("existing
+enforcement gate (candidates feature)", S35's "setup: throwaway client...",
+S36's "setup: throwaway active recruiter...") were investigated directly
+rather than assumed — confirmed via real, immediate evidence (not
+inference from a stale log window this time): a direct login attempt
+right after returned a genuine `429`, and `docker compose logs backend
+--since 3m` showed 8 real `429 Too Many Requests` responses in that
+exact window. This is the same well-documented per-IP login-rate-limit
+cascade this project has hit many times today given the sheer volume of
+manual verification + repeated full-suite runs in one session — not a
+regression from any of today's code changes. Both `POST /clients` and
+`POST /users` (the two calls these setup tests make) were independently
+confirmed working correctly via direct curl with a fresh token earlier
+in this same investigation, before the cascade started.
+
+**Not done in this round, flagged for a future session**: a genuinely
+clean, isolated re-run of S34/S35/S36 to get a passing confirmation
+(blocked by the live rate-limit window at the time this round wrapped
+up), and the still-open item from round 3 (reading the actual bodies of
+the ~12 other untracked ad-hoc scripts found at the repo root, in case
+any of them — `fix_stages.py`, `sync_all.py`, `sync_missing.py` in
+particular, by name — is the actual, still-latent source of the client
+mass-deactivation found in this round). No code was changed in this
+round; the fix was entirely a data restoration.
