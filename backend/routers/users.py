@@ -358,7 +358,7 @@ async def list_roles(department: Optional[str]=None, actor: Actor=Depends(get_ac
             SELECT rd.*,
                    COUNT(u.id) AS user_count
             FROM role_definitions rd
-            LEFT JOIN users u ON u.role=rd.role_code AND u.tenant_id=rd.tenant_id
+            LEFT JOIN users u ON u.role=rd.role_code AND u.tenant_id=rd.tenant_id AND u.is_active IS NOT FALSE
             WHERE rd.tenant_id=$1 AND rd.is_active
               AND ($2::text IS NULL OR rd.department=$2)
             GROUP BY rd.id

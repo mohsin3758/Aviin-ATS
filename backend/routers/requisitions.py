@@ -270,6 +270,7 @@ async def submission_usage(requisition_id: str, actor: Actor = Depends(get_actor
             """SELECT a.assigned_recruiter_id, u.full_name AS recruiter_name, count(*) AS used
                FROM applications a LEFT JOIN users u ON u.id = a.assigned_recruiter_id
                WHERE a.requisition_id=$1 AND a.tenant_id=$2 AND a.assigned_recruiter_id IS NOT NULL
+                 AND u.is_active IS NOT FALSE
                GROUP BY a.assigned_recruiter_id, u.full_name ORDER BY count(*) DESC""",
             requisition_id, actor.tenant_id)
     return {"limit": limit, "by_recruiter": [dict(r) for r in rows]}

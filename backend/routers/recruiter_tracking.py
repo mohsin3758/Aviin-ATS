@@ -66,7 +66,7 @@ async def get_activity(recruiter_id: str | None = None, limit: int = 50, actor: 
             f"""SELECT a.id, a.actor_user_id, u.full_name AS actor_name, a.action,
                        a.entity_type, a.entity_id, a.created_at
                 FROM audit_log a
-                JOIN users u ON u.id = a.actor_user_id
+                JOIN users u ON u.id = a.actor_user_id AND u.is_active IS NOT FALSE
                 WHERE {' AND '.join(conditions)}
                 ORDER BY a.created_at DESC
                 LIMIT ${len(params)}""",

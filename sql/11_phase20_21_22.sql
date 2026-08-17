@@ -124,6 +124,31 @@ CREATE POLICY rls_sa ON source_attribution
 GRANT ALL ON source_attribution TO app_user;
 
 -- View: per-recruiter funnel analytics
+-- REAL BUG FIX (2026-08-17): three independent bugs found via a
+-- live-data audit, the worst of which was invisible from this source
+-- file alone -- the actual live view (pulled fresh via
+-- pg_get_viewdef() before touching anything, since this file's own
+-- prior definition had already drifted from what was really deployed)
+-- joined `applications a ON a.tenant_id = u.tenant_id` with NO
+-- recruiter-scoping condition at all -- a bare tenant match, not a
+-- per-recruiter join. Every recruiter's row showed the exact same
+-- tenant-wide totals; this view has never shown real per-recruiter
+-- data since it was created. Fixed to join on
+-- a.assigned_recruiter_id = u.id, the same column every other
+-- recruiter-attribution query in this codebase already uses.
+-- (2) no u.is_active filter at all -- every soft-deleted/QA-test user
+-- (242 in production) showed up as a zero-activity row on the real
+-- Vendor Analytics > Recruiter Funnel report; fixed to match the
+-- established WHERE u.role='recruiter' AND u.is_active convention
+-- already used correctly by the sibling view v_recruiter_capacity.
+-- (3) stage='interview' / stage='hired' are not real stage values in
+-- this system (real ones are l1_interview/l2_interview/l3_interview and
+-- placed) -- the same hardcoded-stage-key bug already found and fixed in
+-- half a dozen other places in this project (recruiter-performance,
+-- hiring-funnel, v_sla_dashboard, client-portal, export/requisitions,
+-- pipeline-copilot) but never caught here since this view only ever
+-- lived in the database, invisible to a .py-file grep. interviews/
+-- sub_to_interview_pct were silently always 0 for every recruiter.
 CREATE OR REPLACE VIEW v_recruiter_funnel
 WITH (security_invoker = true) AS
 SELECT
@@ -131,19 +156,20 @@ SELECT
     u.full_name,
     u.tenant_id,
     COUNT(DISTINCT a.id)                                         AS total_submissions,
-    COUNT(DISTINCT a.id) FILTER (WHERE a.stage='interview')      AS interviews,
+    COUNT(DISTINCT a.id) FILTER (WHERE a.stage LIKE '%interview%') AS interviews,
     COUNT(DISTINCT a.id) FILTER (WHERE a.stage='offer')          AS offers,
-    COUNT(DISTINCT a.id) FILTER (WHERE a.stage='hired')          AS placements,
+    COUNT(DISTINCT a.id) FILTER (WHERE a.stage='placed')         AS placements,
     ROUND(
-        COUNT(DISTINCT a.id) FILTER (WHERE a.stage='interview')::numeric
+        COUNT(DISTINCT a.id) FILTER (WHERE a.stage LIKE '%interview%')::numeric
         / NULLIF(COUNT(DISTINCT a.id),0) * 100, 1
     )                                                            AS sub_to_interview_pct,
     ROUND(
-        COUNT(DISTINCT a.id) FILTER (WHERE a.stage='hired')::numeric
+        COUNT(DISTINCT a.id) FILTER (WHERE a.stage='placed')::numeric
         / NULLIF(COUNT(DISTINCT a.id) FILTER (WHERE a.stage='offer'),0) * 100, 1
     )                                                            AS offer_to_join_pct
 FROM users u
-LEFT JOIN applications a ON a.created_by = u.id AND a.tenant_id = u.tenant_id
+LEFT JOIN applications a ON a.assigned_recruiter_id = u.id AND a.tenant_id = u.tenant_id
+WHERE u.role = 'recruiter' AND u.is_active
 GROUP BY u.id, u.full_name, u.tenant_id;
 
 GRANT SELECT ON v_recruiter_funnel TO app_user;

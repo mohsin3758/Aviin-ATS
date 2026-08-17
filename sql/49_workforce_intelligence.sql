@@ -209,4 +209,4 @@ LEFT JOIN recruiter_productivity_weekly w
   AND w.period_start = date_trunc('week', CURRENT_DATE)::date
 LEFT JOIN recruiter_performance_scores s
   ON s.recruiter_id = u.id AND s.tenant_id = u.tenant_id AND s.score_date = CURRENT_DATE
-WHERE u.role = 'recruiter';
+WHERE u.role = 'recruiter' AND u.is_active IS NOT FALSE;

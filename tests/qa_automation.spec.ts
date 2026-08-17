@@ -2224,6 +2224,19 @@ test('S22 Requisitions view switcher: card/compact/list/table all render real da
   expect(headers).toContain('Pipeline');
   expect(await page.locator('table [title="Copy client shortlist link"]').count()).toBeGreaterThan(0);
 
+  // "Opened" column (2026-08-17): shows each requisition's real created_at
+  // date, between Status and Inbox — the field was already in the API
+  // response (requisitions.py's FIELDS), this was purely a missing
+  // frontend column.
+  expect(headers).toContain('Opened');
+  const openedIdx = headers.indexOf('Opened');
+  const firstRowOpened = page.locator('table tbody tr').first().locator('td').nth(openedIdx);
+  await expect(firstRowOpened).toBeVisible();
+  const openedText = (await firstRowOpened.textContent())?.trim() || '';
+  expect(openedText).not.toBe('');
+  expect(openedText).not.toBe('undefined');
+  expect(openedText).toMatch(/\d{4}/); // contains a real year
+
   // New filters (Client/Location/Type/Deadline) — pick a real client
   // option dynamically rather than a hardcoded name, so this stays
   // correct regardless of seed-data changes.
@@ -3792,6 +3805,110 @@ test.describe.serial('S35 Soft-Deleted Candidates No Longer Leak Into Real Pages
     // that were actually cleaned up (AutoDistribute/Tier2/KAE), not a
     // blanket "QA" match that would false-positive on our own fixture.
     await expect(page.getByText(/QA (AutoDistribute|Tier2|KAE) Test Client/i)).toHaveCount(0);
+    expect(errors).toHaveLength(0);
+  });
+});
+
+// S36: 2026-08-17 deep test/QA-data audit — a real, live screenshot showed
+// dozens of soft-deleted "QA ..."/"ZZ ..." test-fixture users still
+// appearing on the real Recruiter Ops > Team Leaderboard tab. Root cause:
+// v_recruiter_activity_summary (backs GET /manager/activity-leaderboard)
+// joined `users` with a role filter but no `is_active` filter at all. A
+// deeper sweep of every `JOIN users` in the backend found 10 more router
+// queries and 1 DB view (v_recruiter_funnel) with the identical gap, plus
+// a separate, unrelated, more serious bug found while fixing the view:
+// v_recruiter_funnel's live definition joined `applications a ON
+// a.tenant_id = u.tenant_id` with NO recruiter-scoping condition at all —
+// every recruiter's row showed the same tenant-wide totals. These tests
+// cover the two most user-visible fixes (leaderboard, incentives) plus
+// the funnel per-recruiter-scoping regression.
+test.describe.serial('S36 Deep Test/QA Data Audit — is_active Filter Fixes', () => {
+  const stamp = Date.now();
+  let recruiterId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (recruiterId) await request.delete(`${API}/users/${recruiterId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway active recruiter appears on Team Leaderboard and Incentives scorecard', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const u = await request.post(`${API}/users`, {
+      headers: auth,
+      data: { email: `qa.s36.recruiter.${stamp}@test.com`, full_name: `QA S36 Recruiter ${stamp}`, role: 'recruiter', password: 'TestPass123!' },
+    });
+    expect(u.ok()).toBeTruthy();
+    recruiterId = (await u.json()).id;
+
+    const board = await request.get(`${API}/manager/activity-leaderboard`, { headers: auth });
+    expect(board.ok()).toBeTruthy();
+    const boardRows = await board.json();
+    expect(boardRows.some((r: any) => r.recruiter_id === recruiterId)).toBeTruthy();
+
+    const sc = await request.post(`${API}/incentives/scorecard`, {
+      headers: auth,
+      data: { user_id: recruiterId, period_month: 1, period_year: 2020, joinings_score: 5, revenue_score: 5, interview_score: 5, offer_score: 5, client_sat_score: 5, ats_score: 5, contribution_margin: 10000 },
+    });
+    expect(sc.ok()).toBeTruthy();
+
+    const list = await request.get(`${API}/incentives/scorecard?month=1&year=2020`, { headers: auth });
+    expect(list.ok()).toBeTruthy();
+    const listRows = await list.json();
+    expect(listRows.some((r: any) => r.user_id === recruiterId)).toBeTruthy();
+  });
+
+  test('deactivating the recruiter removes them from Team Leaderboard, Incentives scorecard, and the KPI CSV export', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+
+    const deact = await request.patch(`${API}/users/${recruiterId}/deactivate`, { headers: auth });
+    expect(deact.ok()).toBeTruthy();
+
+    const board = await request.get(`${API}/manager/activity-leaderboard`, { headers: auth });
+    const boardRows = await board.json();
+    expect(boardRows.some((r: any) => r.recruiter_id === recruiterId)).toBeFalsy();
+
+    const list = await request.get(`${API}/incentives/scorecard?month=1&year=2020`, { headers: auth });
+    const listRows = await list.json();
+    expect(listRows.some((r: any) => r.user_id === recruiterId)).toBeFalsy();
+
+    const csv = await request.get(`${API}/export/kpi-report?month=1&year=2020`, { headers: auth });
+    expect(csv.ok()).toBeTruthy();
+    const csvText = await csv.text();
+    expect(csvText).not.toContain(`QA S36 Recruiter ${stamp}`);
+  });
+
+  test('recruiter funnel report shows per-recruiter counts, not a tenant-wide cross-join (real regression: every row used to be identical)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/vendor-analytics/recruiter-funnel`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const rows = await r.json();
+    const funnelRows = Array.isArray(rows) ? rows : (rows.funnel || rows.data || []);
+    // Real production data: this tenant has multiple active recruiters
+    // with genuinely different submission counts. If the old bare
+    // tenant-match join regressed, every row's total_submissions would
+    // be identical again.
+    if (funnelRows.length >= 2) {
+      const totals = funnelRows.map((row: any) => row.total_submissions);
+      const allIdentical = totals.every((t: number) => t === totals[0]);
+      expect(allIdentical).toBeFalsy();
+    }
+    // No soft-deleted/QA test user should ever appear in this report.
+    expect(funnelRows.some((row: any) => /^QA |^ZZ /.test(row.full_name || ''))).toBeFalsy();
+  });
+
+  test('real headless UI: Team Leaderboard shows only real active recruiters, no QA/ZZ names', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.goto('/recruiter-ops');
+    await page.getByRole('button', { name: 'Team Leaderboard' }).click();
+    await expect(page.getByText(/Team activity leaderboard/i)).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/^QA /)).toHaveCount(0);
+    await expect(page.getByText(/^ZZ /)).toHaveCount(0);
     expect(errors).toHaveLength(0);
   });
 });

@@ -6270,3 +6270,182 @@ fixture account above — every one of them, plus this batch's own new
 S35 suite, passed cleanly once re-run in isolation outside the rate-limit
 window. Zero-token audit: `CONFIRMED CLEAN` (371 files, 0 external API
 refs).
+
+## Round 2 same day: Team Leaderboard leak (missing is_active on `users`
+## joins) + a separate cross-join bug + ad-hoc gitignored demo scripts
+## found as the real root cause of recurring fake data, 2026-08-17
+Direct follow-up, same day. User showed a live screenshot of Recruiter Ops
+> Team Leaderboard with dozens of soft-deleted "QA .../ZZ ..." test-fixture
+users still visible, and asked for another deep pass across all features.
+
+**Root cause**: `v_recruiter_activity_summary` (backs `GET /manager/
+activity-leaderboard`) filtered `WHERE u.role='recruiter'` but never
+checked `u.is_active` — every soft-deleted test/QA user with role=
+recruiter (237 in production) showed up. Fixed in both
+`sql/49_workforce_intelligence.sql` and the live view. Verified: leaderboard
+went from ~20+ QA names to the real 3 active recruiters.
+
+**Widened the check**: dispatched a background agent to sweep all 51
+`JOIN users` occurrences across `backend/routers/*.py` plus every DB view
+in `sql/*.sql` for the same missing-filter pattern, verifying each against
+real live-data counts before reporting (not a blind grep-and-assume).
+Found and fixed 10 more real, live leaks:
+- `incentives.py`'s scorecard list (`GET /incentives/scorecard`) — the
+  real Incentives page table.
+- `p28_p32.py`'s `export_kpi_report` — the same underlying query,
+  independently missed on the first pass; caught by a follow-up
+  verification (curl'd the actual CSV output and found 4 QA rows still
+  present even after the sibling list endpoint was fixed) rather than
+  assumed fixed by association. Also deleted the 4 confirmed-`draft`
+  (never approved, so no `retention_bank` side effects) QA-tied
+  `recruiter_kpi_scores` rows directly via SQL — no delete endpoint
+  exists for that table, documented last resort.
+- `candidates.py`'s `owner_json` subquery — the Candidates list "Owned
+  by" badge.
+- `recruiter_dashboard.py`'s `team_sla_tracking` (manager view) and the
+  sibling self-service `my_sla_tracking` (fixed for consistency plus a
+  separately-missing `c.is_active` filter on the candidate join).
+- `recruiter_ops.py`'s `list_targets` — the Targets tab.
+- `recruiter_tracking.py`'s `get_activity` — Recruiter Ops' Team Activity
+  feed (a "what is my team doing right now" view, unlike the Audit Trail
+  below — filtering inactive actors here is correct, not a historical-
+  accuracy tradeoff).
+- `requisitions.py`'s `submission_usage` — the "X/Y submissions used"
+  per-recruiter breakdown on a requisition's detail page.
+- `users.py`'s `list_roles` — Settings > Permissions' per-role "N users"
+  headcount badges (was counting all 240+ inactive users under
+  `recruiter`).
+
+**Two findings deliberately left unfiltered, with reasoning** — not every
+`JOIN users` gap is the same bug: `p28_p32.py`'s `get_audit_log` (the real
+Audit Trail page) and `export_placements` (the Placements CSV, crediting
+whichever recruiter closed a real placement) both show real historical
+actor/recruiter names. Checked the actual affected rows before deciding:
+the audit-log case and the placements case both resolved to genuinely
+real, if since-deactivated, seed staff (`Sanya Kapoor`) — not test
+fixtures. Filtering these would make a compliance/financial record less
+accurate, not more correct, so both were left as-is. Also checked
+`p23_p27.py`'s `list_interviews` (interviewer-name join) and confirmed it
+needs no fix at all — the existing candidate-side `is_active` filter
+already fully closes real exposure (the only rows with an inactive
+interviewer were tied to already-hidden soft-deleted QA candidates).
+
+**A separate, more serious, previously-undiscovered bug**, found while
+fixing `v_recruiter_funnel` (backs `GET /vendor-analytics/recruiter-
+funnel`): pulled the view's real live definition via `pg_get_viewdef()`
+first (established project discipline — the committed migration source
+in `sql/11_phase20_21_22.sql` had already drifted from what was actually
+deployed, referencing a column, `a.created_by`, that doesn't even exist
+on `applications`) and found the *live* join was `applications a ON
+a.tenant_id = u.tenant_id` — no recruiter-scoping condition at all, a
+bare tenant match. **Every recruiter's row has shown identical tenant-
+wide totals since this view was created.** Fixed to join on
+`a.assigned_recruiter_id = u.id`, the column this entire codebase uses
+everywhere else for recruiter attribution. Verified with real numbers,
+not just "the bug is gone": three real active recruiters now show
+genuinely different `total_submissions` (10, 9, 0) where before the fix
+all three would have shown the same tenant-wide sum. Also fixed the
+identical hardcoded-wrong-stage-key bug already found and fixed half a
+dozen times elsewhere in this project, present in the same view
+(`stage='interview'`/`stage='hired'` aren't real values — fixed to
+`stage LIKE '%interview%'` / `stage='placed'`).
+
+**Concrete cleanup performed via real APIs**: 2 leftover "Status" garbage
+candidates (residue from the WhatsApp Status-broadcast bug fixed
+2026-08-12, found in the secondary "Beta Tech Staffing" tenant, whose
+seed admin account doesn't share the primary tenant's standard seed
+password — cleaned via a direct, minimal `is_active=false` UPDATE that
+mirrors exactly what the real DELETE endpoint does, as `app_user`, rather
+than guessing/resetting a real tenant admin's credentials); 114 stale
+QA-test-suite-generated `recruiter_tasks` (all titled "Coordinate L1
+interview: QA Tier0 Test <timestamp>", assigned to the real
+`admin@example.com` seed account, tied to already-soft-deleted QA
+candidates — already correctly hidden from My Day by an earlier
+same-day fix, but still existed as raw rows inflating workload/risk-score
+calculations — cancelled via the real `PATCH /recruiter-tasks/{id}?
+status=cancelled`); 130 leftover `candidate_messages` sent to `@test.com`
+addresses (reaccumulated since the 2026-08-12 cleanup of 406 similar
+rows) deleted via the real `DELETE /communications/messages/{id}` API.
+
+**New permanent "S36 Deep Test/QA Data Audit — is_active Filter Fixes"
+suite** (4 tests, `.serial()`) added to `qa_automation.spec.ts`: a
+throwaway active recruiter appearing on both the Team Leaderboard and
+Incentives scorecard while active, both correctly disappearing (plus the
+KPI CSV export) once deactivated, the recruiter-funnel per-recruiter-
+scoping regression check (asserts NOT every row has an identical
+`total_submissions` when 2+ real active recruiters exist — the concrete
+signature of the cross-join bug regressing), and a real headless-browser
+check confirming zero "QA "/"ZZ "-prefixed names render on the real Team
+Leaderboard tab. One real test-authoring bug caught and fixed by the
+suite's own first run, not an app bug: the headless-browser test's first
+attempt used `getByRole('tab', ...)` to click the Team Leaderboard tab,
+but the real markup (`recruiter-ops/page.tsx`) renders it as a plain
+`<button>` with no ARIA `role="tab"` — the failed role lookup silently
+consumed most of the test's 60s timeout budget before falling through to
+a working fallback, causing a spurious timeout. Fixed to
+`getByRole('button', {name:'Team Leaderboard'})` directly.
+
+## Round 3 same day: the real root cause of recurring fake data — ad-hoc,
+## gitignored, one-off scripts run directly against the API in June 2026
+Direct follow-up. User showed two more live screenshots — the Interview
+Engine listing repeated "Kiran Kumar"/"Arjun Sharma" interviews for the
+same role, and the AI Candidate Intelligence page (`/intelligence`)
+showing a wall of scored candidates with obviously synthetic emails
+(`@aviintest.com`) and a duplicated "ARJUN BALAKRISHNAN" entry — and
+asked for a deeper check across "demo and test, sample, fake and QA"
+data specifically (broader than the QA-test-suite-residue findings this
+whole file has documented repeatedly — this batch predates any test
+suite).
+
+**Traced to source rather than just deleting on sight**: the "Kiran
+Kumar"/"Arjun Sharma" cluster (5 candidates, shared `<name>73651@...`
+email suffix, sequential phone numbers `987654100{1-5}`, created in one
+half-second script burst on 2026-06-21) and the `@aviintest.com` cluster
+(14 more candidates, sequential phones `987650100{1-14}`, one script
+burst) both trace to **ad-hoc Python scripts sitting untracked at the
+repo root** (`~/airecruit/seed_data.py` — distinct from the real,
+committed `backend/seed_data.py` — plus `qa_seed.py`, `seed_real.py`,
+`seed_p3.py`, `chk.py`, `chk2.py`, `fix2.py`, `fix_stages.py`, `score.py`,
+`getcands.py`, `generate_pdfs.py`, `sync_all.py`, `sync_missing.py`, all
+dated late June 2026). All are deliberately excluded from git via
+`.gitignore` (`seed*.py`, `chk*.py`, `qa_*.py` patterns) — confirmed via
+`git check-ignore -v`, so these were never meant to ship or persist as
+part of the real codebase. They're plain scripts that log in via
+`/auth/login` and POST directly to the real API (`~/airecruit/
+seed_data.py`'s own `CANDS` list literally hardcodes `"email":
+"aarav.mehta@aviintest.com"` etc.) — meaning every row they created is
+completely real, live, RLS-correct application data indistinguishable
+from a genuine candidate by any schema-level signal. This is almost
+certainly *why* fake/demo data has kept resurfacing across many different
+features throughout this project's history despite repeated cleanup
+passes — the QA Playwright suite's leakage (extensively documented
+elsewhere in this file) was never the only source; a completely separate,
+untracked, one-time manual-testing script batch from the project's early
+weeks had been sitting live in production the whole time, on a domain
+(`@aviintest.com`) that doesn't even match the QA suite's own `@test.com`/
+`qa_*` conventions, so none of the many earlier `ILIKE '%test%'`/`QA %`
+sweeps in this file's history would ever have caught it.
+
+**Cleaned up 30 confirmed candidates** via the real APIs: 29 via
+`POST /candidates/bulk-delete` (the full `aviintest.com` + `73651` sets,
+soft-deleted), plus 1 more found while directly investigating the
+Intelligence page's duplicate "ARJUN BALAKRISHNAN" row — a second copy
+of the same June-23 test-batch candidate with a manually-edited,
+mismatched email (`anandraj.edited@gmail.com`, not matching the name at
+all) that was still `is_active=true` while its sibling copy
+(`arjun.bala@cloudengg.in`) was already inactive — both created minutes
+apart on 2026-06-23, deleted via `DELETE /candidates/{id}`.
+
+**Not yet exhaustively swept**: this round focused on the two specific
+screenshots shown (Interview Engine, `/intelligence`) plus the scripts'
+own hardcoded candidate lists, not a full re-audit of every table these
+12 ad-hoc scripts might have touched (`generate_pdfs.py`/`sync_all.py`/
+`sync_missing.py`/`fix_stages.py` names suggest broader reach than just
+candidate creation — e.g. `fix_stages.py` may have written directly to
+`applications.stage`). Flagged honestly as a real, still-open follow-up
+rather than claimed complete — a future pass should read each of the 12
+scripts' actual bodies (not just infer intent from filenames) before
+concluding no further cleanup is needed.
+
+Full QA suite and zero-token audit re-run after this round; see the
+commit for this date for the final numbers.

@@ -87,6 +87,7 @@ async def list_scorecards(
                    ON b.user_id = k.user_id AND b.tenant_id = k.tenant_id
             WHERE ($1::int IS NULL OR k.period_month = $1)
               AND ($2::int IS NULL OR k.period_year  = $2)
+              AND u.is_active IS NOT FALSE
             ORDER BY k.period_year DESC, k.period_month DESC, u.full_name
         """, month, year)
     return [dict(r) for r in rows]

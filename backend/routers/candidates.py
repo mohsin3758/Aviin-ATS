@@ -87,7 +87,7 @@ async def list_candidates(
                 " WHERE ctm.candidate_id=c.id) AS tags_json")
     owner_sub = ("(SELECT json_build_object('recruiter_name',u.full_name,'recruiter_email',co.recruiter_email,"
                  "'expires_at',co.ownership_expires_at,'status',co.status,'source',co.source)"
-                 " FROM candidate_ownership co JOIN users u ON u.id=co.recruiter_id"
+                 " FROM candidate_ownership co JOIN users u ON u.id=co.recruiter_id AND u.is_active IS NOT FALSE"
                  " WHERE co.candidate_id=c.id) AS owner_json")
     flds = ", ".join("c." + f.strip() for f in FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:

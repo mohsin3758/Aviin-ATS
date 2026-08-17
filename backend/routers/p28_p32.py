@@ -144,6 +144,7 @@ async def export_kpi_report(month: Optional[int]=None, year: Optional[int]=None,
             FROM recruiter_kpi_scores k
             JOIN users u ON u.id=k.user_id
             WHERE k.tenant_id=$1
+              AND u.is_active IS NOT FALSE
               AND ($2::int IS NULL OR k.period_month=$2)
               AND ($3::int IS NULL OR k.period_year=$3)
             ORDER BY k.period_year DESC, k.period_month DESC, k.total_score DESC

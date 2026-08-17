@@ -517,7 +517,7 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; on
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-            {['Title', 'Client', 'Type', 'Priority', 'Location', 'Positions', 'Status', 'Inbox', 'Pipeline', 'Deadline', 'Actions'].map((h, i) => (
+            {['Title', 'Client', 'Type', 'Priority', 'Location', 'Positions', 'Status', 'Opened', 'Inbox', 'Pipeline', 'Deadline', 'Actions'].map((h, i) => (
               <th key={i} style={{ padding: '10px 14px', textAlign: 'left', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', whiteSpace: 'nowrap' }}>{h}</th>
             ))}
           </tr>
@@ -542,6 +542,9 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; on
                 <td style={{ padding: '10px 14px', fontSize: '12px', color: '#64748b' }}>{req.location || '—'}</td>
                 <td style={{ padding: '10px 14px', fontSize: '12px', color: '#64748b' }}>{req.positions_count}</td>
                 <td style={{ padding: '10px 14px' }}><span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '10px' }}>{req.status}</span></td>
+                <td style={{ padding: '10px 14px', fontSize: '11px', color: '#64748b', whiteSpace: 'nowrap' }} title={req.created_at ? new Date(req.created_at).toLocaleString('en-IN') : undefined}>
+                  {req.created_at ? new Date(req.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
+                </td>
                 <td style={{ padding: '10px 14px' }}>
                   <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
                   {!(counts?.inbox_count > 0) && <span style={{ fontSize: '12px', color: '#94a3b8' }}>—</span>}

@@ -438,7 +438,7 @@ async def my_sla_tracking(breached_only: bool = False, days: int = 30,
         q = """SELECT t.*, c.full_name AS candidate_name,
                       EXTRACT(EPOCH FROM (COALESCE(t.first_response_at, now()) - t.sourced_at)) / 3600.0 AS elapsed_hours
                FROM recruiter_sla_tracking t
-               JOIN candidates c ON c.id = t.candidate_id
+               JOIN candidates c ON c.id = t.candidate_id AND c.is_active IS NOT FALSE
                WHERE t.tenant_id=$1 AND t.recruiter_id=$2 AND t.sourced_at >= now() - ($3 || ' days')::interval"""
         params = [actor.tenant_id, actor.user_id, str(days)]
         if breached_only:
@@ -455,8 +455,8 @@ async def team_sla_tracking(recruiter_id: str | None = None, breached_only: bool
         q = """SELECT t.*, c.full_name AS candidate_name, u.full_name AS recruiter_name,
                       EXTRACT(EPOCH FROM (COALESCE(t.first_response_at, now()) - t.sourced_at)) / 3600.0 AS elapsed_hours
                FROM recruiter_sla_tracking t
-               JOIN candidates c ON c.id = t.candidate_id
-               JOIN users u ON u.id = t.recruiter_id
+               JOIN candidates c ON c.id = t.candidate_id AND c.is_active IS NOT FALSE
+               JOIN users u ON u.id = t.recruiter_id AND u.is_active IS NOT FALSE
                WHERE t.tenant_id=$1 AND t.sourced_at >= now() - ($2 || ' days')::interval"""
         params = [actor.tenant_id, str(days)]
         if recruiter_id:

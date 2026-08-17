@@ -52,7 +52,7 @@ async def list_targets(recruiter_id: Optional[str] = None, period_year: Optional
                           AND EXTRACT(MONTH FROM a.created_at) = t.period_month
                           AND EXTRACT(YEAR FROM a.created_at) = t.period_year) AS actual_submissions
                 FROM recruiter_targets t
-                JOIN users u ON u.id = t.recruiter_id
+                JOIN users u ON u.id = t.recruiter_id AND u.is_active IS NOT FALSE
                 WHERE {' AND '.join(conditions)}
                 ORDER BY t.period_year DESC, t.period_month DESC""",
             *params,
