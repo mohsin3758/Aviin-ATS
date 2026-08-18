@@ -7829,3 +7829,58 @@ are unlikely to be affected in practice (real resumes list them early,
 well within 8000 chars), which is why this wasn't pulled into today's
 scope — but it's a real, same-shaped cap sitting in the intake pipeline
 that hasn't been checked as thoroughly as the generator side has.
+
+## KAE-submission format picker: wired in all 8 Resume Generator visual
+## themes, 2026-08-19
+Direct follow-up to yesterday's Resume Generator theme work. The 8
+visual themes built for the standalone Resume Generator never reached
+this older, still-live "Submit to KAE" path — every one of its 6 fixed
+formats (clean/redacted/manual/projects-only/confidential/anonymized)
+rendered exclusively in the Classic theme, since `_STYLE_CONFIGS` never
+set a `visual_theme` key and `render_resume_pdf()` silently fell back to
+`DEFAULT_CONFIG`'s "classic" every time.
+
+Added `visual_theme`/`logo_position` (both `Optional`, defaulting to
+unset -> classic/top_right, so any existing caller that doesn't send
+them keeps exact prior behavior) to `SubmitToKaeIn`, validated against
+the same `_VALID_THEMES`/`_VALID_LOGO_POSITIONS` the Resume Generator
+uses, merged into whichever `_STYLE_CONFIGS[resume_style]` dict is
+selected right before the `render_resume_pdf()` call. Applies to the 5
+auto-generated styles; **"Manual Editing" deliberately excluded** —
+`_build_manual_resume_pdf()` is a separate, dedicated renderer that
+never routed through the shared compositional engine to begin with, and
+its `total_exp` field is already a pre-formatted string (e.g. "5y 2m")
+incompatible with the shared renderers' `fmt_exp(int_months)` call —
+wiring it in would need a real redesign, not a one-line change, so it
+stays single-look and this is disclosed rather than silently glossed
+over. Frontend: added "Visual Layout"/"Logo Position" picker sections to
+the pipeline drawer's Submit-to-KAE tab (`pipeline/page.tsx`, the only
+real UI location for this feature — confirmed via a repo-wide grep, no
+duplicate to update), reusing the exact same `/resume-generator/
+visual-themes` and `/resume-generator/logo-position-options` endpoints
+the standalone generator's own modal already calls — not a second,
+parallel list.
+
+Verified for real end-to-end, not code review: confirmed invalid
+`visual_theme`/`logo_position` values 400 before any KAE resolution is
+even attempted; built a full real throwaway chain (client, KAE owner
+assignment, open requisition, candidate, application — this tenant
+currently has zero real KAE-client assignments, matching an earlier
+audit's finding, so a throwaway one was required) and submitted a real
+Timeline-themed, top-left-logo submission through the actual endpoint —
+completed, emailed, logged, sl_no incremented correctly. Directly called
+the exact same `_STYLE_CONFIGS`-merge + `render_resume_pdf()` code path
+the endpoint runs, rendered the result to a real page image, and visually
+confirmed the genuine Timeline styling (teal accent, colored dot marker,
+divider line) and top-left logo placement — not just "the request
+succeeded." All throwaway records cleaned up after (client, requisition,
+candidate via the real DELETE APIs; the `client_owners`/
+`candidate_submissions` rows via direct SQL, since neither has a delete
+endpoint by design, matching established precedent for those two
+tables). New coverage in the existing "S14 KAE Candidate Submission"
+suite: an API-level test proving both validation and a genuine themed
+submission (sl_no continuing correctly, not reset), and a real headless-
+browser test confirming the "VISUAL LAYOUT"/"LOGO POSITION" sections
+render in the drawer and a themed submission completes end-to-end
+through the actual UI. Full S14 (12/12) + S29 (18/18) + S30 (9/9) =
+39/39 passing. Zero-token audit: `CONFIRMED CLEAN`.

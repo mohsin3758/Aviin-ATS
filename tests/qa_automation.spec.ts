@@ -992,13 +992,46 @@ test.describe.serial('S14 KAE Candidate Submission', () => {
     expect(rows.length).toBe(2);
   });
 
-  test('drawer shows Submit to KAE tab and sends via the real UI', async ({ page }) => {
+  test('visual_theme/logo_position (2026-08-19): accepted on real submission, rejected when invalid', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const invalidTheme = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
+      headers: auth, data: { resume_style: 'clean_generated', visual_theme: 'not_a_real_theme' },
+    });
+    expect(invalidTheme.status()).toBe(400);
+
+    const invalidLogo = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
+      headers: auth, data: { resume_style: 'clean_generated', logo_position: 'bottom_center' },
+    });
+    expect(invalidLogo.status()).toBe(400);
+
+    // A real submission with a non-default theme + logo position must still
+    // succeed and log correctly (sl_no continues from the 2 API submissions
+    // above, not reset) -- this is the real regression check that the new
+    // fields don't just validate but genuinely reach render_resume_pdf.
+    const sub3 = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
+      headers: auth, data: { resume_style: 'clean_generated', visual_theme: 'timeline', logo_position: 'top_left', cc_self: false },
+    });
+    expect(sub3.ok()).toBeTruthy();
+    const body3 = await sub3.json();
+    expect(body3.status).toBe('sent');
+    expect(body3.field_values.sl_no).toBe('3');
+  });
+
+  test('drawer shows Submit to KAE tab (with real Visual Layout/Logo Position pickers) and sends via the real UI', async ({ page }) => {
     await page.goto(`${BASE}/pipeline?job=${reqId}`);
     await page.waitForSelector('[data-testid="kanban-board"]', { state: 'visible', timeout: 15000 }).catch(() => {});
     await page.click(`text=QA KaeSubmission Test ${stamp}`, { timeout: 15000 });
     await page.click('button:has-text("Submit to KAE")');
     await page.waitForSelector('[data-testid="kae-submit-panel"]', { state: 'visible', timeout: 10000 });
-    // Third submission via the real browser UI, on top of the two API ones above.
+    // Real UI check (2026-08-19): the 8 Resume Generator visual themes
+    // reaching this older KAE-submission path for the first time.
+    await expect(page.locator('[data-testid="kae-submit-panel"] >> text=VISUAL LAYOUT')).toBeVisible();
+    await expect(page.locator('[data-testid="kae-submit-panel"] >> text=LOGO POSITION')).toBeVisible();
+    await page.click('[data-testid="kae-submit-panel"] button:has-text("Elegant Serif")');
+    await page.click('[data-testid="kae-submit-panel"] button:has-text("Top Right")');
+    // Fourth submission via the real browser UI, on top of the three API ones above.
     await page.click('[data-testid="kae-submit-panel"] button:has-text("Submit to KAE")');
     await page.waitForSelector('text=/Sent to|Logged, but email failed/', { timeout: 15000 });
   });

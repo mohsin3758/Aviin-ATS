@@ -38,7 +38,7 @@ import db
 import events
 from deps import Actor, get_actor
 from routers.pipeline_stages import is_valid_stage
-from services.resume_formatting import render_resume_pdf, redact_contact, mask_name
+from services.resume_formatting import render_resume_pdf, redact_contact, mask_name, _VALID_THEMES, _VALID_LOGO_POSITIONS
 
 router = APIRouter(tags=["kae-submission"])
 
@@ -428,6 +428,22 @@ class SubmitToKaeIn(BaseModel):
     field_values: dict = {}
     cc_self: bool = True
     manual_resume: Optional[dict] = None  # required when resume_style == 'manual': {name, designation, location, total_exp, skills, summary}
+    # Real improvement (2026-08-19): the KAE-submission formats used to be
+    # rendered exclusively in the Classic visual theme (no visual_theme key
+    # was ever set in _STYLE_CONFIGS, so render_resume_pdf() always fell
+    # back to DEFAULT_CONFIG's "classic") -- the standalone Resume
+    # Generator built 2026-08-18 got 8 real visual themes, but this older,
+    # still-live submission path never gained the same variety. None here
+    # means "unspecified" -> falls back to classic/top_right, preserving
+    # exact prior behavior for any existing caller that doesn't send these.
+    # Only applies to the 5 auto-generated styles below; "manual" keeps its
+    # own dedicated, un-themed renderer (see _build_manual_resume_pdf) --
+    # it never routed through the shared compositional engine to begin
+    # with, and doing so would need a real redesign (its total_exp field
+    # is a pre-formatted string like "5y 2m", incompatible with the shared
+    # renderers' fmt_exp(int_months) call), not a one-line wire-up.
+    visual_theme: Optional[str] = None
+    logo_position: Optional[str] = None
 
 
 async def _do_kae_submission(
@@ -574,6 +590,10 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
         raise HTTPException(400, f"resume_style must be one of {', '.join(_RESUME_STYLES)}")
     if body.resume_style == "manual" and not body.manual_resume:
         raise HTTPException(400, "manual_resume is required when resume_style is 'manual'")
+    if body.visual_theme is not None and body.visual_theme not in _VALID_THEMES:
+        raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID_THEMES)}")
+    if body.logo_position is not None and body.logo_position not in _VALID_LOGO_POSITIONS:
+        raise HTTPException(400, f"logo_position must be one of {sorted(_VALID_LOGO_POSITIONS)}")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row, _ = await _app_context(conn, application_id)
@@ -586,7 +606,12 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
     if body.resume_style == "manual":
         resume_bytes = _build_manual_resume_pdf(body.manual_resume or {})
     else:
-        resume_bytes = render_resume_pdf(candidate, _STYLE_CONFIGS[body.resume_style])
+        cfg = {**_STYLE_CONFIGS[body.resume_style]}
+        if body.visual_theme:
+            cfg["visual_theme"] = body.visual_theme
+        if body.logo_position:
+            cfg["logo_position"] = body.logo_position
+        resume_bytes = render_resume_pdf(candidate, cfg)
 
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
     return await _do_kae_submission(

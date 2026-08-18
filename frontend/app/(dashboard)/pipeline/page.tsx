@@ -1234,6 +1234,18 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
   const { data: preview, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-kae/preview`);
   const { data: templates } = useFetch<any[]>('/submission-templates');
   const { data: history, refetch: refetchHistory } = useFetch<any[]>(`/applications/${appId}/submissions`);
+  // Real improvement (2026-08-19): the 8 visual themes built for the
+  // standalone Resume Generator (2026-08-18) never reached this older,
+  // still-live KAE-submission path -- every format here rendered in the
+  // Classic theme only, regardless of which content style was picked.
+  // Reuses the same real endpoints the Resume Generator modal already
+  // calls, not a duplicated list. Doesn't apply to Manual Editing, which
+  // has its own dedicated, un-themed renderer (see backend comment on
+  // SubmitToKaeIn.visual_theme for why).
+  const { data: visualThemes } = useFetch<any[]>('/resume-generator/visual-themes');
+  const { data: logoPositionOptions } = useFetch<any[]>('/resume-generator/logo-position-options');
+  const [visualTheme, setVisualTheme] = useState('classic');
+  const [logoPosition, setLogoPosition] = useState('top_right');
   const [templateId, setTemplateId] = useState('');
   const [resumeStyle, setResumeStyle] = useState('clean_generated');
   const [fields, setFields] = useState<Record<string, string>>({});
@@ -1287,6 +1299,8 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
         body: JSON.stringify({
           template_id: templateId, resume_style: resumeStyle, field_values: fields, cc_self: ccSelf,
           manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
+          visual_theme: resumeStyle !== 'manual' ? visualTheme : undefined,
+          logo_position: resumeStyle !== 'manual' ? logoPosition : undefined,
         }),
       });
       showToast(r.email_sent ? `Sent to ${r.kae_name} ✓` : `Logged, but email failed: ${r.email_error || 'SMTP error'}`, !!r.email_sent);
@@ -1346,6 +1360,33 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
           <div style={{ fontSize: 10, color: '#DC2626', marginTop: 4 }}>No extracted resume text on file for this candidate — Clean Summary is recommended instead.</div>
         )}
       </div>
+
+      {resumeStyle !== 'manual' && (
+        <div>
+          <span style={lbl}>VISUAL LAYOUT</span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {(visualThemes || []).map((t: any) => (
+              <button key={t.id} type="button" title={t.description} onClick={() => setVisualTheme(t.id)}
+                style={{ fontSize: 10.5, fontWeight: 700, padding: '5px 10px', borderRadius: 999, cursor: 'pointer',
+                  border: `1px solid ${visualTheme === t.id ? '#2563EB' : '#E2E8F0'}`,
+                  background: visualTheme === t.id ? '#2563EB' : '#fff', color: visualTheme === t.id ? '#fff' : '#475569' }}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <span style={lbl}>LOGO POSITION</span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {(logoPositionOptions || []).map((o: any) => (
+              <button key={o.id} type="button" title={o.description} onClick={() => setLogoPosition(o.id)}
+                style={{ fontSize: 10.5, fontWeight: 700, padding: '5px 10px', borderRadius: 999, cursor: 'pointer',
+                  border: `1px solid ${logoPosition === o.id ? '#2563EB' : '#E2E8F0'}`,
+                  background: logoPosition === o.id ? '#2563EB' : '#fff', color: logoPosition === o.id ? '#fff' : '#475569' }}>
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {resumeStyle === 'manual' && (
         <div>
