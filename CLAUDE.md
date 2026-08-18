@@ -6784,3 +6784,90 @@ has genuinely made zero real KAE account-ownership assignments yet
 (confirmed `account_visibility` has 0 rows total, unrelated to the
 fix, before concluding the empty result was correct and not another
 bug).
+
+## Resume Generator: 2 real bugs fixed (duplicated header, false-positive
+## skills) + a real Visual Layout picker, 2026-08-18
+User reported the Resume Generator producing broken output for a real
+piping engineer candidate: a visibly duplicated name/title/heading block
+in the Professional Summary, and fabricated skills ("SAP MM, Jenkins,
+Spring Boot, REST API") that don't appear anywhere in the resume.
+
+**Bug 1 — duplicated header block.** `_resolve_body_text()`
+(`resume_formatting.py`) rendered the *entire* raw `resume_text` —
+including the candidate's own embedded name/title/"PROFESSIONAL SUMMARY"
+heading — as the body under a second, template-added "PROFESSIONAL
+SUMMARY" heading. Fixed with a new `extract_summary_section()`
+(`improved_parser.py`), mirroring the existing `extract_projects_section()`
+pattern: finds a real Summary/Profile/Objective heading and captures
+until the next recognized section header; with no such heading, falls
+back to stripping just the leading name/title lines rather than guessing
+a boundary.
+
+**Bug 2 — false-positive skill extraction, found in two independent
+layers.** Root cause: "spring" (bare alias) matched "spring hanger
+design" (a real piping-engineering term), and the keyword-extractor
+auto-registers a skill's own canonical NAME as a matchable keyword
+regardless of its alias list — so renaming the alias alone wasn't
+enough, the canonical keys `'Spring'`/`'REST'` themselves had to become
+`'Spring Boot'`/`'REST API'`. A SEPARATE, DB-backed `skills_taxonomy`
+layer (feeding `skill_normalizer.py`'s cache) had its own independent
+copies of the same bad aliases — fixed with
+`sql/63_skill_alias_false_positive_fix.sql` + a `docker compose restart
+backend` to force the in-memory cache to reload. Verified end-to-end via
+a real generated PDF + pdfminer text extraction: the piping engineer's
+resume now shows correct (empty) skills, a real IT-skills text still
+extracts all 6 expected skills. 3 affected candidate DB records'
+`skills` columns corrected. **Known scope boundary**: 76 other candidates
+still carry the old bare 'Spring'/'REST' canonical names in stored data —
+not bulk-reprocessed in this pass.
+
+**Follow-up ask, same conversation**: a way to select a resume's visual
+layout, not just its content (the existing "Format/Template" options
+control what's shown — contact fields, redaction — not what it looks
+like). Asked the user to choose between true per-upload PDF-layout
+cloning (not feasible zero-token — no local vision/AI model exists to
+analyze an arbitrary sample's layout) and a curated set of real,
+hand-built visual themes — user picked the curated-themes approach.
+
+Added `visual_theme` as a genuinely separate config dimension from the
+existing content-composition fields (any content template can render in
+any visual theme) — `sql/64_resume_visual_themes.sql` adds the column
+(CHECK-constrained to `classic`/`modern_sidebar`/`minimal_ats`) to both
+`resume_templates` and `generated_resumes`. 3 real, distinct renderers
+built in `resume_formatting.py` for both PDF (reportlab) and DOCX
+(python-docx), dispatched from `render_resume_pdf()`/`render_resume_docx()`:
+- **Classic** (existing look, renamed to `_render_pdf_classic`/
+  `_render_docx_classic`, zero behavior change) — centered header, single
+  column, blue accent rule.
+- **Modern Sidebar** — a real 2-column layout (a reportlab `Table` for
+  PDF, a python-docx table with raw `<w:shd>` OXML cell-shading for
+  DOCX — python-docx has no first-class cell-background API) with a
+  shaded navy sidebar (contact + key skills) and a white main column
+  (name/title header + resolved summary).
+- **Minimal / ATS-Safe** — plain black text, no color, no tables,
+  left-aligned — the shape most likely to survive an automated
+  ATS text-parser on the client's own side.
+
+`GET /resume-generator/visual-themes` (new) returns the 3 real options
+for the frontend to render as selectable cards. `ResumeGeneratorModal.tsx`
+gained a "Visual Layout" picker (applied automatically when a saved
+template carries one) whose live preview panel genuinely re-renders
+per theme (a real 2-column mock for sidebar, plain black text for
+minimal) rather than showing one fixed preview shape regardless of
+selection — the same parity added to the Candidates page's bulk-generate
+modal.
+
+Verified for real, not code review: generated real PDFs for all 3 themes
+against the exact "Surendra.M" candidate from the user's own screenshot —
+distinct file sizes confirming structurally different documents, and
+pdfminer text extraction confirmed correct content (no duplication
+regression) in every theme. Verified the DOCX sidebar theme's OXML
+shading directly (`python-docx` read-back confirmed a real `1E3A5F`
+fill on the left cell, correct content split). Real headless-browser
+screenshots confirmed both new themes visually render as designed in
+the live preview (dark navy sidebar with skills bullets; plain
+left-aligned black text). Added 3 new permanent tests to the existing
+"S29 AI Resume Generator" suite (endpoint shape, real distinct-PDF
+generation + an invalid-theme 400, and a real UI picker/preview-switch
+click-through) — full S29 suite (15 tests) and the full QA suite both
+re-run clean. Zero-token audit: `CONFIRMED CLEAN`.

@@ -130,7 +130,9 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
 // and a much bigger UI), matching what the audit finding actually named.
 function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClose:()=>void}) {
   const {data:templates} = useFetch<any[]>('/resume-generator/templates');
+  const {data:visualThemes} = useFetch<any[]>('/resume-generator/visual-themes');
   const [templateId,setTemplateId] = useState('');
+  const [visualTheme,setVisualTheme] = useState<'classic'|'modern_sidebar'|'minimal_ats'>('classic');
   const [outputFormat,setOutputFormat] = useState<'pdf'|'docx'>('pdf');
   const [generating,setGenerating] = useState(false);
   const [result,setResult] = useState<any>(null);
@@ -140,7 +142,7 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
     setGenerating(true);
     try {
       const r = await apiFetch('/resume-generator/bulk-generate', {
-        method:'POST', body:JSON.stringify({ candidate_ids:candidateIds, template_id:templateId, output_format:outputFormat }),
+        method:'POST', body:JSON.stringify({ candidate_ids:candidateIds, template_id:templateId, visual_theme:visualTheme, output_format:outputFormat }),
       });
       setResult(r);
     } catch(e:any) { alert(e?.message||'Bulk generation failed'); }
@@ -191,6 +193,12 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
               <option value="">-- Choose a format --</option>
               {(templates||[]).map((t:any)=><option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
+            <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Visual Layout</label>
+            <div style={{display:'flex',gap:'8px',marginBottom:'14px',flexWrap:'wrap'}}>
+              {(visualThemes||[]).map((vt:any)=>(
+                <button key={vt.id} type="button" title={vt.description} onClick={()=>setVisualTheme(vt.id)} style={{padding:'6px 12px',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:visualTheme===vt.id?'1.5px solid #1e40af':'1px solid #e2e8f0',background:visualTheme===vt.id?'#eff6ff':'white',color:visualTheme===vt.id?'#1e40af':'#475569'}}>{vt.label}</button>
+              ))}
+            </div>
             <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Output</label>
             <div style={{display:'flex',gap:'8px',marginBottom:'20px'}}>
               {(['pdf','docx'] as const).map(f=>(

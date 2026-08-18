@@ -27,6 +27,7 @@ function OptBtn({ active, onClick, children }: { active: boolean; onClick: () =>
 
 export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onClose }: Props) {
   const { data: templates } = useFetch<any[]>('/resume-generator/templates');
+  const { data: visualThemes } = useFetch<any[]>('/resume-generator/visual-themes');
 
   const [templateId, setTemplateId] = useState('');
   const [nameFormat, setNameFormat] = useState<'full' | 'masked'>('full');
@@ -38,6 +39,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
   const [projectMode, setProjectMode] = useState<'include' | 'hide' | 'focus'>('include');
   const [clientNameMode, setClientNameMode] = useState<'show' | 'hide' | 'replace'>('hide');
   const [clientNameReplacement, setClientNameReplacement] = useState('');
+  const [visualTheme, setVisualTheme] = useState<'classic' | 'modern_sidebar' | 'minimal_ats'>('classic');
   const [outputFormat, setOutputFormat] = useState<'pdf' | 'docx'>('pdf');
 
   const [preview, setPreview] = useState<any>(null);
@@ -58,6 +60,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
     if (t.default_company_replacement) setCompanyReplacement(t.default_company_replacement);
     setProjectMode(t.project_mode);
     setClientNameMode(t.client_name_mode);
+    if (t.visual_theme) setVisualTheme(t.visual_theme);
   }
 
   // Auto-recommend a starting template once, on open (52.9) — recruiter can freely override after.
@@ -81,8 +84,9 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
     project_mode: projectMode,
     client_name_mode: clientNameMode,
     client_name_replacement: clientNameMode === 'replace' ? clientNameReplacement : undefined,
+    visual_theme: visualTheme,
     requisition_id: requisitionId || undefined,
-  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, requisitionId]);
+  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, visualTheme, requisitionId]);
 
   const runPreview = useCallback(async () => {
     setLoadingPreview(true);
@@ -180,6 +184,22 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
             </div>
 
             <div style={section}>
+              <span style={label}>Visual Layout</span>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {(visualThemes || []).map(vt => (
+                  <button key={vt.id} type="button" onClick={() => setVisualTheme(vt.id)} title={vt.description} style={{
+                    padding: '8px 12px', borderRadius: '9px', cursor: 'pointer', textAlign: 'left', maxWidth: '190px',
+                    border: visualTheme === vt.id ? '1.5px solid #1e40af' : '1px solid #e2e8f0',
+                    background: visualTheme === vt.id ? '#eff6ff' : 'white',
+                  }}>
+                    <div style={{ fontSize: '12px', fontWeight: 700, color: visualTheme === vt.id ? '#1e40af' : '#0f172a' }}>{vt.label}</div>
+                    <div style={{ fontSize: '10.5px', color: '#64748b', marginTop: '2px', lineHeight: 1.35 }}>{vt.description}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={section}>
               <span style={label}>Name Display</span>
               <div style={radioRow}>
                 <OptBtn active={nameFormat === 'full'} onClick={() => setNameFormat('full')}>Full Name</OptBtn>
@@ -247,29 +267,81 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
           <div style={{ flex: '1 1 45%', padding: '18px 22px', overflowY: 'auto', background: '#f8fafc' }}>
             <span style={label}>Live Preview {loadingPreview && <Loader2 size={11} style={{ display: 'inline', marginLeft: '4px', verticalAlign: 'middle' }} />}</span>
             {preview ? (
-              <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#0f172a' }}>
-                <div style={{ fontSize: '15px', fontWeight: 700, textAlign: 'center' }}>{preview.display_name}</div>
-                {preview.designation && <div style={{ textAlign: 'center', color: '#1e40af', fontWeight: 600, fontSize: '12px', marginBottom: '8px' }}>{preview.designation}</div>}
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', color: '#64748b', fontSize: '11.5px', marginBottom: '6px', justifyContent: 'center' }}>
-                  {preview.mobile && <span>📱 {preview.mobile}</span>}
-                  {preview.email && <span>✉️ {preview.email}</span>}
-                  {preview.location && <span>📍 {preview.location}</span>}
+              visualTheme === 'modern_sidebar' ? (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden', display: 'flex', fontSize: '12px' }}>
+                  <div style={{ background: '#1e3a5f', color: '#e8eef5', padding: '14px 12px', width: '38%', boxSizing: 'border-box' }}>
+                    <div style={{ fontSize: '9.5px', fontWeight: 700, color: '#7fb3e0', marginBottom: '5px' }}>CONTACT</div>
+                    {preview.mobile && <div style={{ marginBottom: '2px' }}>{preview.mobile}</div>}
+                    {preview.email && <div style={{ marginBottom: '2px', wordBreak: 'break-all' }}>{preview.email}</div>}
+                    {preview.location && <div style={{ marginBottom: '8px' }}>{preview.location}</div>}
+                    {preview.company && (<><div style={{ fontSize: '9.5px', fontWeight: 700, color: '#7fb3e0', marginBottom: '5px' }}>COMPANY</div><div style={{ marginBottom: '8px' }}>{preview.company}</div></>)}
+                    {!!preview.skills?.length && (
+                      <>
+                        <div style={{ fontSize: '9.5px', fontWeight: 700, color: '#7fb3e0', marginBottom: '5px' }}>KEY SKILLS</div>
+                        {preview.skills.slice(0, 10).map((s: string) => <div key={s} style={{ marginBottom: '2px' }}>• {s}</div>)}
+                      </>
+                    )}
+                  </div>
+                  <div style={{ padding: '14px 16px', flex: 1, color: '#0f172a' }}>
+                    <div style={{ fontSize: '15px', fontWeight: 700 }}>{preview.display_name}</div>
+                    {preview.designation && <div style={{ color: '#1e40af', fontWeight: 600, fontSize: '12px', marginBottom: '8px' }}>{preview.designation}</div>}
+                    {preview.body_snippet && (
+                      <div>
+                        <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>{preview.section_heading}</div>
+                        <div style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{preview.body_snippet}</div>
+                      </div>
+                    )}
+                    {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                  </div>
                 </div>
-                {preview.company && <div style={{ fontSize: '11.5px', marginBottom: '6px' }}><b>Company:</b> {preview.company}</div>}
-                {!!preview.skills?.length && (
-                  <div style={{ marginBottom: '8px' }}>
-                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>KEY SKILLS</div>
-                    <div style={{ fontSize: '11px', color: '#374151' }}>{preview.skills.join(', ')}</div>
+              ) : visualTheme === 'minimal_ats' ? (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#000' }}>
+                  <div style={{ fontSize: '14px', fontWeight: 700 }}>{preview.display_name}</div>
+                  {preview.designation && <div style={{ fontSize: '12px', marginBottom: '6px' }}>{preview.designation}</div>}
+                  <div style={{ borderTop: '1px solid #444', margin: '4px 0 8px' }} />
+                  <div style={{ fontSize: '11.5px', color: '#000', marginBottom: '6px' }}>
+                    {[preview.location, preview.mobile, preview.email].filter(Boolean).join('  |  ')}
                   </div>
-                )}
-                {preview.body_snippet && (
-                  <div>
-                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>{preview.section_heading}</div>
-                    <div style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{preview.body_snippet}</div>
+                  {preview.company && <div style={{ fontSize: '11.5px', marginBottom: '6px' }}>Current Company: {preview.company}</div>}
+                  {!!preview.skills?.length && (
+                    <div style={{ marginBottom: '8px' }}>
+                      <div style={{ fontSize: '10.5px', fontWeight: 700, marginBottom: '3px' }}>KEY SKILLS</div>
+                      <div style={{ fontSize: '11px' }}>{preview.skills.join(', ')}</div>
+                    </div>
+                  )}
+                  {preview.body_snippet && (
+                    <div>
+                      <div style={{ fontSize: '10.5px', fontWeight: 700, marginBottom: '3px' }}>{preview.section_heading}</div>
+                      <div style={{ fontSize: '11px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{preview.body_snippet}</div>
+                    </div>
+                  )}
+                  {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#444' }}>Submitted for: {preview.client_line}</div>}
+                </div>
+              ) : (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#0f172a' }}>
+                  <div style={{ fontSize: '15px', fontWeight: 700, textAlign: 'center' }}>{preview.display_name}</div>
+                  {preview.designation && <div style={{ textAlign: 'center', color: '#1e40af', fontWeight: 600, fontSize: '12px', marginBottom: '8px' }}>{preview.designation}</div>}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', color: '#64748b', fontSize: '11.5px', marginBottom: '6px', justifyContent: 'center' }}>
+                    {preview.mobile && <span>📱 {preview.mobile}</span>}
+                    {preview.email && <span>✉️ {preview.email}</span>}
+                    {preview.location && <span>📍 {preview.location}</span>}
                   </div>
-                )}
-                {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
-              </div>
+                  {preview.company && <div style={{ fontSize: '11.5px', marginBottom: '6px' }}><b>Company:</b> {preview.company}</div>}
+                  {!!preview.skills?.length && (
+                    <div style={{ marginBottom: '8px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>KEY SKILLS</div>
+                      <div style={{ fontSize: '11px', color: '#374151' }}>{preview.skills.join(', ')}</div>
+                    </div>
+                  )}
+                  {preview.body_snippet && (
+                    <div>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>{preview.section_heading}</div>
+                      <div style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{preview.body_snippet}</div>
+                    </div>
+                  )}
+                  {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                </div>
+              )
             ) : (
               <div style={{ fontSize: '12px', color: '#94a3b8' }}>Loading preview…</div>
             )}

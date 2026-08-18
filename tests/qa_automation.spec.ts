@@ -3005,6 +3005,58 @@ test.describe.serial('S29 AI Resume Generator', () => {
     await expect(page.getByRole('button', { name: /Generate Resume/i })).toBeVisible({ timeout: 15000 });
     expect(errors).toHaveLength(0);
   });
+
+  test('visual themes: endpoint returns the 3 real layouts', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/resume-generator/visual-themes`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const themes = await r.json();
+    expect(themes.map((t: any) => t.id).sort()).toEqual(['classic', 'minimal_ats', 'modern_sidebar']);
+  });
+
+  test('modern_sidebar and minimal_ats themes generate real, distinct PDFs (not silently falling back to classic)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const classic = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth, data: { template_id: noContactTplId, visual_theme: 'classic', output_format: 'pdf' },
+    });
+    const sidebar = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth, data: { template_id: noContactTplId, visual_theme: 'modern_sidebar', output_format: 'pdf' },
+    });
+    const minimal = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth, data: { template_id: noContactTplId, visual_theme: 'minimal_ats', output_format: 'pdf' },
+    });
+    expect(classic.ok() && sidebar.ok() && minimal.ok()).toBeTruthy();
+    const [cBody, sBody, mBody] = await Promise.all([classic.json(), sidebar.json(), minimal.json()]);
+    expect(cBody.visual_theme).toBe('classic');
+    expect(sBody.visual_theme).toBe('modern_sidebar');
+    expect(mBody.visual_theme).toBe('minimal_ats');
+    // Real, structurally different documents — not the same bytes 3 times.
+    expect(cBody.file_size).not.toBe(sBody.file_size);
+    expect(cBody.file_size).not.toBe(mBody.file_size);
+
+    const invalid = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth, data: { template_id: noContactTplId, visual_theme: 'not_a_real_theme', output_format: 'pdf' },
+    });
+    expect(invalid.status()).toBe(400);
+  });
+
+  test('Resume Generator modal: Visual Layout picker renders and switches the live preview', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`/candidates/${candId}`);
+    await page.getByRole('button', { name: /Generate Resume/i }).click();
+    await expect(page.getByText('Visual Layout')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: /Modern Sidebar/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Minimal \/ ATS-Safe/i })).toBeVisible();
+    await page.getByRole('button', { name: /Modern Sidebar/i }).click();
+    await expect(page.getByText('CONTACT', { exact: true }).last()).toBeVisible({ timeout: 8000 });
+    await page.getByRole('button', { name: /Minimal \/ ATS-Safe/i }).click();
+    await page.waitForTimeout(600);
+    expect(errors).toHaveLength(0);
+  });
 });
 
 // S30 (2026-08-12): follow-up "resume and recruiter" feature-gap audit —
