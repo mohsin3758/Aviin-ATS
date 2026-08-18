@@ -7456,3 +7456,65 @@ mistake caught and corrected mid-verification (ran Playwright without
 untouched by this change, immediately recognized as a test-invocation
 error rather than a regression and re-run correctly). Zero-token audit:
 `CONFIRMED CLEAN` (375 files, 0 external API refs).
+
+## Resume Generator, round 7 same day: fixed "Generated via AVIIN ATS"
+## footer text replaced with a real logo / no-branding choice, 2026-08-18
+User's exact ask (from a screenshot of the plain footer text): remove
+"Generated via AVIIN ATS" outright, keep an option with the real AVIIN
+Tech logo and an option with no branding at all.
+
+Made `footer_branding` ('logo' | 'none') a real, first-class config
+dimension — `sql/66_resume_footer_branding.sql` adds it to both
+`resume_templates` and `generated_resumes` (same pattern as
+`visual_theme`, `sql/64_resume_visual_themes.sql`), wired through every
+validation/CRUD/generate/bulk-generate site `visual_theme` already
+touches in `resume_generator.py`. New `GET /resume-generator/
+footer-branding-options`. The fixed text line is gone entirely, not
+just made optional — `footer_branding="logo"` renders the real AVIIN
+Tech logo image (`backend/assets/aviintech-logo.png`, the same asset +
+sizing convention `call_letters.py`/`offers.py` already use for real
+letters — 4.5cm there, 2.6cm here since a resume footer is a much
+smaller element), `"none"` renders nothing. The "Submitted for:
+<client>" line (job-specific context, unrelated to branding) still
+renders under either choice when a client name is configured to show.
+Two shared helpers (`_pdf_footer_flowables`/`_docx_footer` in
+`resume_formatting.py`) replace what had been 6 separate, duplicated
+inline footer blocks — PDF via reportlab's `Image` flowable, DOCX via
+python-docx's `Run.add_picture` (confirmed available in the installed
+1.2.0 version before relying on it — no prior DOCX+image precedent
+existed anywhere in this codebase to copy from).
+
+**Real risk checked and confirmed safe, not assumed**: the Modern
+Sidebar theme's whole layout is one reportlab Table row that cannot
+split across pages (the exact class of bug found and fixed earlier the
+same day) — adding an image to its footer, on top of an already-tuned
+1400-char content cap, could have reintroduced a "too large on page"
+crash. Verified directly: generated the real candidate's sidebar PDF
+with the logo AND a client-line footer together (the heaviest real
+combination) and confirmed it still completes as a clean single page
+with no overflow.
+
+Frontend: a "Footer Branding" picker (two option buttons, matching the
+existing Visual Layout picker's own convention) added to both the
+Resume Generator modal (Candidate 360 / pipeline drawer) and the
+Candidates-list bulk-generate modal, plus a small live-preview indicator
+line ("Footer: AVIIN Tech logo" / "Footer: No branding") in all 3 of the
+Resume Generator modal's preview layouts, since the structured preview
+endpoint never rendered a real image and had nothing else to show the
+choice was taking effect.
+
+Verified for real end-to-end, not code review: real PDF (classic theme)
+rendered to a page image via `pdftoppm` shows the real, correctly-
+proportioned logo with zero leftover text; a DOCX with `footer_branding:
+"none"` inspected via python-docx confirmed zero embedded image and zero
+footer paragraph text; a DOCX with `"logo"` (both classic and sidebar
+themes) confirmed a real embedded image part; an invalid value cleanly
+400s; built-in templates confirmed defaulting to `footer_branding:
+"logo"` via direct SQL. New permanent test coverage in "S29 AI Resume
+Generator" (a real API round-trip proving logo produces a larger file
+than none, a real DOCX-zip-bytes check for the embedded image part, and
+a real headless-browser click-through confirming the modal's "AVIIN Tech
+Logo"/"No Branding" buttons render) plus the existing Candidate-360
+Generate-Resume-button test extended to open the modal and check the
+same. Full S29 (16 tests) + S30 (9) + S32 (5) = 30/30 passing. Zero-token
+audit: `CONFIRMED CLEAN`.

@@ -9,6 +9,7 @@ compositional configs that call render_resume_pdf() under the hood
 that knows how to build a resume document.
 """
 import io
+import os
 import re
 from typing import Optional
 from xml.sax.saxutils import escape as _esc
@@ -123,7 +124,21 @@ DEFAULT_CONFIG = {
     "client_name_mode": "hide",     # show | hide | replace
     "client_name_replacement": None,
     "visual_theme": "classic",      # classic | modern_sidebar | minimal_ats
+    "footer_branding": "logo",      # logo | none
 }
+
+# Real improvement (2026-08-18): the footer used to be a fixed
+# "Generated via AVIIN ATS" text line on every document, with no way to
+# turn it off or replace it with the company's real logo -- the same
+# AVIIN Tech logo asset + reportlab Image-flowable pattern already
+# established for call letters/offer letters. footer_branding="logo"
+# renders it (PDF via reportlab's Image flowable, DOCX via python-docx's
+# add_picture -- both sized to the file's real 730x342 aspect ratio so it
+# never looks stretched, matching call_letters.py's own convention);
+# "none" renders no branding at all. The "Submitted for: <client>" line
+# (job-specific generation context, unrelated to branding) still renders
+# either way when a client name is configured to show.
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "aviintech-logo.png")
 
 # Real, distinct visual layouts a recruiter can pick between — separate
 # dimension from the content-composition fields above (a "Project-Focused"
@@ -142,6 +157,12 @@ VISUAL_THEMES = [
      "description": "Plain black text, no color, no tables, left-aligned. Optimized for automated resume-parsing systems."},
 ]
 _VALID_THEMES = {t["id"] for t in VISUAL_THEMES}
+
+FOOTER_BRANDING_OPTIONS = [
+    {"id": "logo", "label": "AVIIN Tech Logo", "description": "Show the company logo in the footer."},
+    {"id": "none", "label": "No Branding", "description": "No logo or branding text in the footer."},
+]
+_VALID_FOOTER_BRANDING = {o["id"] for o in FOOTER_BRANDING_OPTIONS}
 
 
 _BULLET_ONLY_LINE_RE = re.compile(r'^[ \t]*[•❖◆●○■♦\-\*][ \t]*$', re.M)
@@ -352,6 +373,50 @@ def _client_line(client_name: Optional[str], config: dict) -> Optional[str]:
     return client_name
 
 
+def _pdf_footer_flowables(cfg: dict, client_line: Optional[str], small_style) -> list:
+    """Shared footer builder for all 3 PDF renderers: the real AVIIN Tech
+    logo (footer_branding="logo") or nothing at all ("none"), plus the
+    "Submitted for: <client>" line when a client name is configured to
+    show -- independent of the branding choice."""
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Image, Paragraph, Spacer
+    flows: list = [Spacer(1, 0.5 * cm)]
+    if cfg.get("footer_branding", "logo") == "logo" and os.path.exists(LOGO_PATH):
+        logo_w = 2.6 * cm
+        logo_h = logo_w * (342 / 730)
+        img = Image(LOGO_PATH, width=logo_w, height=logo_h)
+        img.hAlign = "CENTER"
+        flows.append(img)
+    if client_line:
+        flows.append(Paragraph(_esc(f"Submitted for: {client_line}"), small_style))
+    return flows
+
+
+def _docx_footer(doc, cfg: dict, client_line: Optional[str], *, italic: bool = True,
+                  centered: bool = True, size: float = 9, color=None) -> None:
+    """DOCX analogue of _pdf_footer_flowables above -- python-docx's
+    add_picture, sized to the logo's real aspect ratio, matching the
+    reportlab Image approach used for PDF. Text style kwargs match each
+    theme's own pre-existing footer look (classic/sidebar: italic,
+    centered; minimal: plain, gray, left-aligned)."""
+    from docx.shared import Pt, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    if cfg.get("footer_branding", "logo") == "logo" and os.path.exists(LOGO_PATH):
+        logo_w = Cm(2.6)
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(LOGO_PATH, width=logo_w)
+    if client_line:
+        fp = doc.add_paragraph()
+        if centered:
+            fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fr = fp.add_run(f"Submitted for: {client_line}")
+        fr.italic = italic
+        fr.font.size = Pt(size)
+        if color is not None:
+            fr.font.color.rgb = color
+
+
 def render_resume_pdf(candidate: dict, config: dict, client_name: str = None) -> bytes:
     """Dispatches to one of VISUAL_THEMES's real renderers. All 3 use the
     exact same resolved content (_resolve_body_text/_company_line/etc) —
@@ -471,11 +536,7 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
                 story.append(Paragraph(_esc(line_text), body))
 
     client_line = _client_line(client_name, cfg)
-    story.append(Spacer(1, 0.6 * cm))
-    footer = "Generated via AVIIN ATS"
-    if client_line:
-        footer += f" — Submitted for: {client_line}"
-    story.append(Paragraph(_esc(footer), small))
+    story.extend(_pdf_footer_flowables(cfg, client_line, small))
     doc.build(story)
     return buf.getvalue()
 
@@ -574,11 +635,7 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
             else:
                 main.append(Paragraph(_esc(line_text), m_body))
     client_line = _client_line(client_name, cfg)
-    main.append(Spacer(1, 0.8 * cm))
-    footer = "Generated via AVIIN ATS"
-    if client_line:
-        footer += f" — Submitted for: {client_line}"
-    main.append(Paragraph(_esc(footer), small))
+    main.extend(_pdf_footer_flowables(cfg, client_line, small))
 
     page_w = A4[0]
     sidebar_w = page_w * 0.32
@@ -674,11 +731,7 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
                 story.append(Paragraph(_esc(line_text), body))
 
     client_line = _client_line(client_name, cfg)
-    story.append(Spacer(1, 0.6 * cm))
-    footer = "Generated via AVIIN ATS"
-    if client_line:
-        footer += f" — Submitted for: {client_line}"
-    story.append(Paragraph(_esc(footer), small))
+    story.extend(_pdf_footer_flowables(cfg, client_line, small))
     doc.build(story)
     return buf.getvalue()
 
@@ -783,14 +836,7 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
                 r.font.color.rgb = DARK
 
     client_line = _client_line(client_name, cfg)
-    footer = "Generated via AVIIN ATS"
-    if client_line:
-        footer += f" — Submitted for: {client_line}"
-    fp = doc.add_paragraph()
-    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    fr = fp.add_run(footer)
-    fr.italic = True
-    fr.font.size = Pt(9)
+    _docx_footer(doc, cfg, client_line)
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -912,14 +958,7 @@ def _render_docx_sidebar(candidate: dict, cfg: dict, client_name: str = None) ->
                 r.font.color.rgb = DARK
 
     client_line = _client_line(client_name, cfg)
-    footer = "Generated via AVIIN ATS"
-    if client_line:
-        footer += f" — Submitted for: {client_line}"
-    fp = doc.add_paragraph()
-    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    fr = fp.add_run(footer)
-    fr.italic = True
-    fr.font.size = Pt(9)
+    _docx_footer(doc, cfg, client_line)
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -1001,13 +1040,7 @@ def _render_docx_minimal(candidate: dict, cfg: dict, client_name: str = None) ->
                 r.font.color.rgb = BLACK
 
     client_line = _client_line(client_name, cfg)
-    footer = "Generated via AVIIN ATS"
-    if client_line:
-        footer += f" — Submitted for: {client_line}"
-    fp = doc.add_paragraph()
-    fr = fp.add_run(footer)
-    fr.font.size = Pt(8.5)
-    fr.font.color.rgb = GRAY
+    _docx_footer(doc, cfg, client_line, italic=False, centered=False, size=8.5, color=GRAY)
 
     buf = io.BytesIO()
     doc.save(buf)

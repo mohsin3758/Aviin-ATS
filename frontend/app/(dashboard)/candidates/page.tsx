@@ -131,8 +131,10 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
 function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClose:()=>void}) {
   const {data:templates} = useFetch<any[]>('/resume-generator/templates');
   const {data:visualThemes} = useFetch<any[]>('/resume-generator/visual-themes');
+  const {data:footerBrandingOptions} = useFetch<any[]>('/resume-generator/footer-branding-options');
   const [templateId,setTemplateId] = useState('');
   const [visualTheme,setVisualTheme] = useState<'classic'|'modern_sidebar'|'minimal_ats'>('classic');
+  const [footerBranding,setFooterBranding] = useState<'logo'|'none'>('logo');
   const [outputFormat,setOutputFormat] = useState<'pdf'|'docx'>('pdf');
   const [generating,setGenerating] = useState(false);
   const [result,setResult] = useState<any>(null);
@@ -142,7 +144,7 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
     setGenerating(true);
     try {
       const r = await apiFetch('/resume-generator/bulk-generate', {
-        method:'POST', body:JSON.stringify({ candidate_ids:candidateIds, template_id:templateId, visual_theme:visualTheme, output_format:outputFormat }),
+        method:'POST', body:JSON.stringify({ candidate_ids:candidateIds, template_id:templateId, visual_theme:visualTheme, footer_branding:footerBranding, output_format:outputFormat }),
       });
       setResult(r);
     } catch(e:any) { alert(e?.message||'Bulk generation failed'); }
@@ -197,6 +199,12 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
             <div style={{display:'flex',gap:'8px',marginBottom:'14px',flexWrap:'wrap'}}>
               {(visualThemes||[]).map((vt:any)=>(
                 <button key={vt.id} type="button" title={vt.description} onClick={()=>setVisualTheme(vt.id)} style={{padding:'6px 12px',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:visualTheme===vt.id?'1.5px solid #1e40af':'1px solid #e2e8f0',background:visualTheme===vt.id?'#eff6ff':'white',color:visualTheme===vt.id?'#1e40af':'#475569'}}>{vt.label}</button>
+              ))}
+            </div>
+            <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Footer Branding</label>
+            <div style={{display:'flex',gap:'8px',marginBottom:'14px',flexWrap:'wrap'}}>
+              {(footerBrandingOptions||[]).map((fb:any)=>(
+                <button key={fb.id} type="button" title={fb.description} onClick={()=>setFooterBranding(fb.id)} style={{padding:'6px 12px',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:footerBranding===fb.id?'1.5px solid #1e40af':'1px solid #e2e8f0',background:footerBranding===fb.id?'#eff6ff':'white',color:footerBranding===fb.id?'#1e40af':'#475569'}}>{fb.label}</button>
               ))}
             </div>
             <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Output</label>

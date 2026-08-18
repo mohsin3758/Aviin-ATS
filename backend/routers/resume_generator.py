@@ -23,6 +23,7 @@ from deps import Actor, get_actor
 from services.resume_formatting import (
     render_resume_pdf, render_resume_docx, mask_name, DEFAULT_CONFIG,
     _resolve_body_text, _company_line, _client_line, VISUAL_THEMES, _VALID_THEMES,
+    FOOTER_BRANDING_OPTIONS, _VALID_FOOTER_BRANDING,
 )
 
 router = APIRouter(prefix="/resume-generator", tags=["resume-generator"])
@@ -33,6 +34,7 @@ _CONFIG_FIELDS = (
     "name_format", "show_mobile", "show_email", "show_location",
     "company_mode", "company_replacement", "project_mode",
     "client_name_mode", "client_name_replacement", "visual_theme",
+    "footer_branding",
 )
 
 
@@ -42,6 +44,13 @@ async def list_visual_themes(actor: Actor = Depends(get_actor)):
     content-composition templates below — any content template can render
     in any of these looks)."""
     return VISUAL_THEMES
+
+
+@router.get("/footer-branding-options")
+async def list_footer_branding_options(actor: Actor = Depends(get_actor)):
+    """Real footer options: the AVIIN Tech logo, or no branding at all —
+    replaces the old fixed "Generated via AVIIN ATS" text line."""
+    return FOOTER_BRANDING_OPTIONS
 
 
 async def _load_candidate(conn, tenant_id: str, candidate_id: str) -> dict:
@@ -62,7 +71,8 @@ def _config_from_body(body: "GenerateIn | PreviewIn", template: Optional[dict]) 
     base = dict(DEFAULT_CONFIG)
     if template:
         for f in ("name_format", "show_mobile", "show_email", "show_location",
-                   "company_mode", "project_mode", "client_name_mode", "visual_theme"):
+                   "company_mode", "project_mode", "client_name_mode", "visual_theme",
+                   "footer_branding"):
             if f in template and template[f] is not None:
                 base[f] = template[f]
         # Column is named default_company_replacement on resume_templates
@@ -90,6 +100,7 @@ class TemplateIn(BaseModel):
     project_mode: str = "include"
     client_name_mode: str = "hide"
     visual_theme: str = "classic"
+    footer_branding: str = "logo"
 
 
 _VALID = {
@@ -98,6 +109,7 @@ _VALID = {
     "project_mode": {"include", "hide", "focus"},
     "client_name_mode": {"show", "hide", "replace"},
     "visual_theme": _VALID_THEMES,
+    "footer_branding": _VALID_FOOTER_BRANDING,
 }
 
 
@@ -112,6 +124,8 @@ def _validate_template_fields(body: TemplateIn):
         raise HTTPException(400, "client_name_mode must be show, hide, or replace")
     if body.visual_theme not in _VALID["visual_theme"]:
         raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID['visual_theme'])}")
+    if body.footer_branding not in _VALID["footer_branding"]:
+        raise HTTPException(400, f"footer_branding must be one of {sorted(_VALID['footer_branding'])}")
 
 
 @router.get("/templates")
@@ -130,11 +144,12 @@ async def create_template(body: TemplateIn, actor: Actor = Depends(get_actor)):
         row = await conn.fetchrow(
             """INSERT INTO resume_templates
                  (tenant_id, name, is_builtin, name_format, show_mobile, show_email, show_location,
-                  company_mode, default_company_replacement, project_mode, client_name_mode, visual_theme, created_by)
-               VALUES ($1,$2,false,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *""",
+                  company_mode, default_company_replacement, project_mode, client_name_mode, visual_theme,
+                  footer_branding, created_by)
+               VALUES ($1,$2,false,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *""",
             actor.tenant_id, body.name, body.name_format, body.show_mobile, body.show_email,
             body.show_location, body.company_mode, body.default_company_replacement,
-            body.project_mode, body.client_name_mode, body.visual_theme, actor.user_id)
+            body.project_mode, body.client_name_mode, body.visual_theme, body.footer_branding, actor.user_id)
     return dict(row)
 
 
@@ -151,11 +166,11 @@ async def update_template(template_id: str, body: TemplateIn, actor: Actor = Dep
         row = await conn.fetchrow(
             """UPDATE resume_templates SET name=$1, name_format=$2, show_mobile=$3, show_email=$4,
                  show_location=$5, company_mode=$6, default_company_replacement=$7, project_mode=$8,
-                 client_name_mode=$9, visual_theme=$10, updated_at=now()
-               WHERE id=$11 RETURNING *""",
+                 client_name_mode=$9, visual_theme=$10, footer_branding=$11, updated_at=now()
+               WHERE id=$12 RETURNING *""",
             body.name, body.name_format, body.show_mobile, body.show_email, body.show_location,
             body.company_mode, body.default_company_replacement, body.project_mode,
-            body.client_name_mode, body.visual_theme, template_id)
+            body.client_name_mode, body.visual_theme, body.footer_branding, template_id)
     return dict(row)
 
 
@@ -221,6 +236,7 @@ class PreviewIn(BaseModel):
     client_name_mode: Optional[str] = None
     client_name_replacement: Optional[str] = None
     visual_theme: Optional[str] = None
+    footer_branding: Optional[str] = None
     requisition_id: Optional[str] = None
 
 
@@ -231,6 +247,8 @@ async def preview_resume(candidate_id: str, body: PreviewIn, actor: Actor = Depe
     fields survive, the company line, and a snippet of the body text."""
     if body.visual_theme is not None and body.visual_theme not in _VALID_THEMES:
         raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID_THEMES)}")
+    if body.footer_branding is not None and body.footer_branding not in _VALID_FOOTER_BRANDING:
+        raise HTTPException(400, f"footer_branding must be one of {sorted(_VALID_FOOTER_BRANDING)}")
     async with db.tenant_conn(actor.tenant_id) as conn:
         candidate = await _load_candidate(conn, actor.tenant_id, candidate_id)
         template = None
@@ -333,13 +351,13 @@ async def _generate_one(candidate_id: str, body: "GenerateIn", actor: Actor) -> 
                  (tenant_id, candidate_id, source_resume_file_id, template_id, requisition_id, client_id,
                   template_name, name_format, display_name, show_mobile, show_email, show_location,
                   company_mode, company_replacement, project_mode, client_name_mode, client_name_replacement,
-                  visual_theme, output_format, file_path, file_size, version, generation_status, error_message, generated_by)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+                  visual_theme, footer_branding, output_format, file_path, file_size, version, generation_status, error_message, generated_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
                RETURNING *""",
             actor.tenant_id, candidate_id, source_resume_file_id, body.template_id, body.requisition_id, client_id,
             template_name, cfg["name_format"], display_name, cfg["show_mobile"], cfg["show_email"], cfg["show_location"],
             cfg["company_mode"], cfg["company_replacement"], cfg["project_mode"], cfg["client_name_mode"], cfg["client_name_replacement"],
-            cfg["visual_theme"], body.output_format, file_path, len(file_bytes), version, status, error_msg, actor.user_id,
+            cfg["visual_theme"], cfg["footer_branding"], body.output_format, file_path, len(file_bytes), version, status, error_msg, actor.user_id,
         )
         if status == "completed":
             await events.write_outbox(
@@ -364,6 +382,8 @@ async def generate_resume(candidate_id: str, body: GenerateIn, actor: Actor = De
         raise HTTPException(400, "output_format must be 'pdf' or 'docx'")
     if body.visual_theme is not None and body.visual_theme not in _VALID_THEMES:
         raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID_THEMES)}")
+    if body.footer_branding is not None and body.footer_branding not in _VALID_FOOTER_BRANDING:
+        raise HTTPException(400, f"footer_branding must be one of {sorted(_VALID_FOOTER_BRANDING)}")
 
     row, file_bytes = await _generate_one(candidate_id, body, actor)
     template_name = row["template_name"]
@@ -427,6 +447,7 @@ class BulkGenerateIn(BaseModel):
     project_mode: Optional[str] = None
     client_name_mode: Optional[str] = None
     visual_theme: Optional[str] = None
+    footer_branding: Optional[str] = None
 
 
 @router.post("/bulk-generate")
@@ -435,6 +456,8 @@ async def bulk_generate_resumes(body: BulkGenerateIn, actor: Actor = Depends(get
         raise HTTPException(400, "output_format must be 'pdf' or 'docx'")
     if body.visual_theme is not None and body.visual_theme not in _VALID_THEMES:
         raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID_THEMES)}")
+    if body.footer_branding is not None and body.footer_branding not in _VALID_FOOTER_BRANDING:
+        raise HTTPException(400, f"footer_branding must be one of {sorted(_VALID_FOOTER_BRANDING)}")
     if not body.candidate_ids:
         raise HTTPException(400, "candidate_ids must be a non-empty list")
 
@@ -442,7 +465,8 @@ async def bulk_generate_resumes(body: BulkGenerateIn, actor: Actor = Depends(get
         template_id=body.template_id, name_format=body.name_format, show_mobile=body.show_mobile,
         show_email=body.show_email, show_location=body.show_location, company_mode=body.company_mode,
         company_replacement=body.company_replacement, project_mode=body.project_mode,
-        client_name_mode=body.client_name_mode, visual_theme=body.visual_theme, output_format=body.output_format,
+        client_name_mode=body.client_name_mode, visual_theme=body.visual_theme,
+        footer_branding=body.footer_branding, output_format=body.output_format,
     )
 
     results = []

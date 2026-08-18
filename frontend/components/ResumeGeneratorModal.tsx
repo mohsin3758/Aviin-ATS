@@ -28,6 +28,7 @@ function OptBtn({ active, onClick, children }: { active: boolean; onClick: () =>
 export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onClose }: Props) {
   const { data: templates } = useFetch<any[]>('/resume-generator/templates');
   const { data: visualThemes } = useFetch<any[]>('/resume-generator/visual-themes');
+  const { data: footerBrandingOptions } = useFetch<any[]>('/resume-generator/footer-branding-options');
 
   const [templateId, setTemplateId] = useState('');
   const [nameFormat, setNameFormat] = useState<'full' | 'masked'>('full');
@@ -40,6 +41,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
   const [clientNameMode, setClientNameMode] = useState<'show' | 'hide' | 'replace'>('hide');
   const [clientNameReplacement, setClientNameReplacement] = useState('');
   const [visualTheme, setVisualTheme] = useState<'classic' | 'modern_sidebar' | 'minimal_ats'>('classic');
+  const [footerBranding, setFooterBranding] = useState<'logo' | 'none'>('logo');
   const [outputFormat, setOutputFormat] = useState<'pdf' | 'docx'>('pdf');
 
   const [preview, setPreview] = useState<any>(null);
@@ -61,6 +63,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
     setProjectMode(t.project_mode);
     setClientNameMode(t.client_name_mode);
     if (t.visual_theme) setVisualTheme(t.visual_theme);
+    if (t.footer_branding) setFooterBranding(t.footer_branding);
   }
 
   // Auto-recommend a starting template once, on open (52.9) — recruiter can freely override after.
@@ -85,8 +88,9 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
     client_name_mode: clientNameMode,
     client_name_replacement: clientNameMode === 'replace' ? clientNameReplacement : undefined,
     visual_theme: visualTheme,
+    footer_branding: footerBranding,
     requisition_id: requisitionId || undefined,
-  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, visualTheme, requisitionId]);
+  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, visualTheme, footerBranding, requisitionId]);
 
   const runPreview = useCallback(async () => {
     setLoadingPreview(true);
@@ -200,6 +204,15 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
             </div>
 
             <div style={section}>
+              <span style={label}>Footer Branding</span>
+              <div style={radioRow}>
+                {(footerBrandingOptions || []).map(fb => (
+                  <OptBtn key={fb.id} active={footerBranding === fb.id} onClick={() => setFooterBranding(fb.id)}>{fb.label}</OptBtn>
+                ))}
+              </div>
+            </div>
+
+            <div style={section}>
               <span style={label}>Name Display</span>
               <div style={radioRow}>
                 <OptBtn active={nameFormat === 'full'} onClick={() => setNameFormat('full')}>Full Name</OptBtn>
@@ -292,6 +305,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                       </div>
                     )}
                     {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                    <div style={{ marginTop: '8px', fontSize: '10px', color: '#94a3b8' }}>{footerBranding === 'logo' ? '🏢 Footer: AVIIN Tech logo' : 'Footer: No branding'}</div>
                   </div>
                 </div>
               ) : visualTheme === 'minimal_ats' ? (
@@ -316,6 +330,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                     </div>
                   )}
                   {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#444' }}>Submitted for: {preview.client_line}</div>}
+                  <div style={{ marginTop: '8px', fontSize: '10px', color: '#666' }}>{footerBranding === 'logo' ? 'Footer: AVIIN Tech logo' : 'Footer: No branding'}</div>
                 </div>
               ) : (
                 <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#0f172a' }}>
@@ -340,6 +355,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                     </div>
                   )}
                   {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                  <div style={{ marginTop: '8px', fontSize: '10px', color: '#94a3b8', textAlign: 'center' }}>{footerBranding === 'logo' ? '🏢 Footer: AVIIN Tech logo' : 'Footer: No branding'}</div>
                 </div>
               )
             ) : (
