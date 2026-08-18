@@ -7743,3 +7743,89 @@ in both formats and confirming distinct file sizes, and a dedicated
 real candidate and asserts a real file-size floor ruling out silent
 truncation. Full S29 (18) + S30 (9) + S32 (5) = 32/32 passing.
 Zero-token audit: `CONFIRMED CLEAN`.
+
+## Bulk-reprocessed stale skill data (149 candidates), found a bigger
+## real bug along the way (109 of them had historically-truncated
+## resume_text), 2026-08-19
+Direct follow-up to a scope explicitly deferred the same day the
+Spring/REST/Swift/Shell/Go false-positive skill fixes landed
+("76 other candidates still carry the old bare canonical names... not
+bulk-reprocessed in this pass"). Real count once queried was 149 active
+candidates (not 76 — that figure was a rough estimate from when the
+comment was written, before the Swift/Shell/Go renames existed yet),
+all in the one real tenant, none QA/test junk.
+
+**Real complication found during verification, before writing a single
+row**: spot-checking a few candidates against their actual stored
+`resume_text` showed 109 of the 149 (73%) were truncated to EXACTLY
+5000 characters — the historical `_clean_text()` intake-cap bug (fixed
+earlier the same day, raised to 200,000) had already destroyed the back
+half of their real resume before this specific cleanup ever started.
+Re-running the fixed skill extractor against that already-truncated
+text would have been unreliable — a "no match" for a renamed skill
+could mean either a genuine false positive OR that the real mention
+was in the truncated-off portion, no way to tell from the stored column
+alone. For those 109, a one-off script re-read the ORIGINAL resume file
+from disk (via each candidate's most recent `resume_files` row) and
+extracted fresh, complete text via the same `extract_text_from_attachment()`
+the real intake pipeline uses (including real OCR fallback for scanned
+PDFs, confirmed run live on 3 of them) — not a new extraction path, the
+existing one, just invoked directly for this purpose. `candidates.
+resume_text` was refreshed to the real full text at the same time as a
+direct fix for the same underlying bug, not scope creep — it's the data
+this whole skill check depends on being correct, and leaving it
+truncated while only fixing `skills` would have been an inconsistent,
+half-finished fix. Confirmed the real intake endpoint
+(`POST /resume-intake/{id}/reparse`) could NOT have been reused for
+this instead — checked its actual code first — `upsert_candidate()`'s
+UPDATE branch protects both `resume_text` and `skills` with "only fill
+if currently empty" logic, so it silently would have done nothing for
+any of these already-populated records.
+
+**6 of the 109 truncated candidates had no recoverable source file on
+disk at all.** Rather than guess based on incomplete evidence — especially
+risky for a pure removal, since the real mention could be sitting in the
+truncated-off portion with no way to check — these were deliberately
+excluded from the automated update and reported separately as a
+"flagged for manual review" list (Amit R, Ashish G, Dharmendra,
+HEMACHANDRA.D, Jayasree P, M Sachin — all still carrying a bare "Go"
+entry, untouched).
+
+Only the 5 specific stale entries (Go/REST/Swift/Shell/Spring) were ever
+touched per candidate — every other skill already on a record was left
+completely untouched, so this could never clobber a recruiter's manual
+edit to an unrelated skill. For each stale entry: removed it, and only
+re-added the renamed version (Go (Golang)/REST API/Swift (iOS)/Shell
+Scripting/Spring Boot) if the fixed extractor, run against the real
+complete text, genuinely still found it — never a blind rename.
+
+Verified for real before writing anything: dry-run first, spot-checked
+3 concrete cases directly against real resume text — a pure-removal
+case (Abdulrafe Ashrafi: "Go" only ever matched inside "go-live
+assistance," a genuine false positive, correctly dropped with nothing
+re-added), a removal+addition case (Harsha Narayan: "Spring"/"REST"
+correctly matched real "Spring Boot"/"RESTful APIs" mentions in context,
+correctly renamed not dropped), and a refreshed-text case (Wagish.K:
+stored text cut off mid-word at 5000 chars, "K.V.DHANBAD" while the
+real file extracted a complete, coherent 9,989-char document ending
+naturally at a real "Extra-Curricular Activities" section). Applied 143
+updates via the real `PATCH /candidates/{id}` API (not raw SQL) — 143
+succeeded, 0 failed. Confirmed after: `Spring`/`REST`/`Swift`/`Shell`
+now have zero remaining occurrences tenant-wide; the only 6 remaining
+"Go" entries are exactly the 6 deliberately-flagged, no-source-file
+candidates, confirmed by direct ID match — nothing slipped through
+uncounted. Separately confirmed zero duplicate-skill entries were
+introduced by this pass (one pre-existing, unrelated duplicate-skill
+candidate was found and left untouched — nothing in this cleanup
+touched their record, a genuinely separate, pre-existing data-quality
+issue out of scope here).
+
+Not part of this pass, flagged for a possible future one: `parse_resume_v2()`
+itself (the real production intake path, distinct from this one-off
+script) only ever scans `text[:8000]` for structured-field extraction —
+a separate cap from the `extract_summary_section()` one fixed for the
+Resume Generator's display path earlier the same day. Skills specifically
+are unlikely to be affected in practice (real resumes list them early,
+well within 8000 chars), which is why this wasn't pulled into today's
+scope — but it's a real, same-shaped cap sitting in the intake pipeline
+that hasn't been checked as thoroughly as the generator side has.
