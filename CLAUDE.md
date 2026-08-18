@@ -7292,3 +7292,63 @@ all 3 pages checked now render bold, visually matching the source
 document's own hierarchy, while the surrounding narrative bullets stay
 plain. Full "S29 AI Resume Generator" + S30 + S32 suites (29/29) re-run
 clean after this change.
+
+## Resume Generator, round 5 same day: real bullet hanging-indent +
+## whitespace-normalization fix, 2026-08-18
+User did a genuine side-by-side comparison of the generated PDF against
+the real source document (matching the discipline this whole session was
+built on) and flagged 3 concrete, real formatting gaps: bullet/dot
+spacing, alignment, and space-after-bullet. Investigated and confirmed 2
+of these as real, fixable bugs; explained the third (inline bold
+emphasis mid-sentence, e.g. bolding "RTR, PS, IM.,FM,GM." within a
+paragraph) as genuinely unrecoverable given this pipeline's plain-text
+extraction — there's no per-character formatting metadata surviving
+from the source PDF to restore, and guessing at what to bold within
+ordinary sentences would violate this project's own "never guess"
+parsing discipline.
+
+**Bug 1 — no hanging indent on bullets.** Every bulleted line was
+rendered as a single flat paragraph with a literal "• " prefix baked
+into the text and no indent styling at all -- reportlab/python-docx both
+default to flush-left wrapping, so a wrapped bullet line's second line
+fell back to the left margin instead of aligning under the bullet's own
+text, unlike the source document's real hanging-indent list formatting.
+Fixed properly, not cosmetically: added a `BULLET_LINE_RE` matcher and
+real per-theme `bullet`/`m_bullet` `ParagraphStyle`s (PDF, via
+reportlab's native `bulletText` parameter -- the correct, built-in
+mechanism for exactly this, not a hand-rolled indent hack) and switched
+all 3 DOCX renderers to Word's built-in `'List Bullet'` paragraph style
+(available by default, no custom numbering XML needed) instead of a
+manually-typed "• " prefix.
+
+**Bug 2 — uneven/excess spacing, most visible right after the bullet
+character.** Confirmed directly in the real stored resume text: PDF
+text extraction (justified-layout source documents especially) leaves
+runs of 2+ spaces between words throughout the document, not just after
+bullets ("I  worked  in  Technip  Energies", "•  Working with
+Burns..."). Added `_normalize_whitespace()`, collapsing any run of 2+
+spaces/tabs to exactly one -- applied once in `_resolve_body_text()` so
+every renderer benefits uniformly, and deliberately never touches
+newlines (real line/paragraph boundaries, not extraction noise).
+
+Verified for real, not code review: regenerated the classic-theme PDF
+for the same real candidate and rendered a page to an image again — a
+wrapped bullet item ("Material Ledger: Configured Material Ledger and
+Actual costing...") now correctly indents its second line under "Material
+Ledger" (not back to the page margin), and bullet-to-text spacing reads
+as a single clean space throughout, matching the source document's own
+list formatting. Full "S29 AI Resume Generator" + S30 + S32 suites
+(29/29) re-run clean after this change.
+
+**Note on this round's deploy**: mid-fix, the VPS became completely
+unreachable (SSH + HTTP both timing out) for roughly 20 minutes. Verified
+methodically before assuming a VPS problem: Hostinger's own panel showed
+the VPS "Running" with normal CPU/memory/traffic, and their support
+confirmed no firewall block on ports 22/80/443. Ruled out a VPS-side
+issue conclusively when even `github.com` (a completely unrelated host)
+also timed out from this session's own tool environment, while
+`google.com` kept working — pointing to an intermittent egress/DNS fault
+specific to that session's sandbox network path, not the VPS, not
+Hostinger, and (based on a live user-side re-check once it cleared)
+resolved on its own. No infrastructure was changed to fix it; deploy
+resumed normally once connectivity returned.

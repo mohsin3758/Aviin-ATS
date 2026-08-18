@@ -152,6 +152,24 @@ def _strip_bullet_only_lines(text: str) -> str:
     return _BULLET_ONLY_LINE_RE.sub('', text)
 
 
+_MULTI_SPACE_RE = re.compile(r'[ \t]{2,}')
+BULLET_LINE_RE = re.compile(r'^[ \t]*([•▪●○■♦])[ \t]*(.*)$')
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Real improvement (2026-08-18): PDF text extraction (justified-text
+    layouts especially) commonly leaves runs of 2+ spaces between words --
+    confirmed directly in a real resume's stored text ("I  worked  in
+    Technip  Energies", "•  Working with Burns..."). Rendered verbatim,
+    that's visibly uneven spacing throughout the generated document, most
+    noticeable right after a bullet character. Collapses any run of 2+
+    spaces/tabs to exactly one -- never touches newlines, which are real
+    line/paragraph boundaries, not extraction noise."""
+    if not text:
+        return text
+    return '\n'.join(_MULTI_SPACE_RE.sub(' ', line) for line in text.split('\n'))
+
+
 def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
     """Returns (section_heading, body_text) for the main narrative block,
     already redacted/masked per config. project_mode='focus' isolates just
@@ -189,6 +207,7 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
     elif employer and config["company_mode"] == "hide":
         text = re.sub(re.escape(employer), "[Company withheld]", text, flags=re.I)
     text = _strip_bullet_only_lines(text)
+    text = _normalize_whitespace(text)
     return heading, text
 
 
@@ -258,6 +277,15 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     # so it reads as emphasis, not a competing heading level against h2.
     subhead = ParagraphStyle("SubHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
     small = ParagraphStyle("Small", fontSize=9, leading=11, textColor=GRAY, fontName="Helvetica")
+    # Real improvement (2026-08-18): reportlab's `bulletText` param gives a
+    # real hanging indent -- a wrapped bullet line's second line aligns
+    # under the FIRST WORD after the bullet, not back at the left margin,
+    # matching how a real bulleted list looks (confirmed against the
+    # source document's own rendering). Rendering "• text" as one plain
+    # string with no indent (the previous approach) left wrapped lines
+    # flush left, visually indistinguishable from a new paragraph.
+    bullet = ParagraphStyle("Bullet", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica",
+                             leftIndent=14, bulletIndent=0, spaceBefore=1, spaceAfter=1)
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
     story = [
@@ -307,8 +335,15 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
         snippet = text
         for para in snippet.split("\n"):
             p = para.strip()
-            if p:
-                story.append(Paragraph(_esc(p), subhead if _is_subheading(p) else body))
+            if not p:
+                continue
+            bm = BULLET_LINE_RE.match(p)
+            if bm:
+                story.append(Paragraph(_esc(bm.group(2).strip()), bullet, bulletText=bm.group(1)))
+            elif _is_subheading(p):
+                story.append(Paragraph(_esc(p), subhead))
+            else:
+                story.append(Paragraph(_esc(p), body))
 
     client_line = _client_line(client_name, cfg)
     story.append(Spacer(1, 0.6 * cm))
@@ -353,6 +388,10 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
     # Real improvement (2026-08-18): bold in-body sub-headings, matching
     # the identical addition in _render_pdf_classic above.
     m_subhead = ParagraphStyle("MSubHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
+    # Real improvement (2026-08-18): hanging-indent bullets, matching the
+    # identical addition in _render_pdf_classic above.
+    m_bullet = ParagraphStyle("MBullet", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica",
+                               leftIndent=12, bulletIndent=0, spaceBefore=1, spaceAfter=1)
     small = ParagraphStyle("Small", fontSize=8, leading=10, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
@@ -404,8 +443,15 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
         snippet = text[:1400] + ("…" if len(text) > 1400 else "")
         for para in snippet.split("\n"):
             p = para.strip()
-            if p:
-                main.append(Paragraph(_esc(p), m_subhead if _is_subheading(p) else m_body))
+            if not p:
+                continue
+            bm = BULLET_LINE_RE.match(p)
+            if bm:
+                main.append(Paragraph(_esc(bm.group(2).strip()), m_bullet, bulletText=bm.group(1)))
+            elif _is_subheading(p):
+                main.append(Paragraph(_esc(p), m_subhead))
+            else:
+                main.append(Paragraph(_esc(p), m_body))
     client_line = _client_line(client_name, cfg)
     main.append(Spacer(1, 0.8 * cm))
     footer = "Generated via AVIIN ATS"
@@ -452,6 +498,10 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
     # Real improvement (2026-08-18): bold in-body sub-headings, matching
     # the identical addition in _render_pdf_classic above.
     subhead = ParagraphStyle("SubHead", fontSize=10, leading=14, textColor=BLACK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
+    # Real improvement (2026-08-18): hanging-indent bullets, matching the
+    # identical addition in _render_pdf_classic above.
+    bullet = ParagraphStyle("Bullet", fontSize=10, textColor=BLACK, leading=14, fontName="Helvetica",
+                             leftIndent=14, bulletIndent=0, spaceBefore=1, spaceAfter=1)
     small = ParagraphStyle("Small", fontSize=8.5, leading=10.5, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
@@ -497,8 +547,15 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
         snippet = text
         for para in snippet.split("\n"):
             p = para.strip()
-            if p:
-                story.append(Paragraph(_esc(p), subhead if _is_subheading(p) else body))
+            if not p:
+                continue
+            bm = BULLET_LINE_RE.match(p)
+            if bm:
+                story.append(Paragraph(_esc(bm.group(2).strip()), bullet, bulletText=bm.group(1)))
+            elif _is_subheading(p):
+                story.append(Paragraph(_esc(p), subhead))
+            else:
+                story.append(Paragraph(_esc(p), body))
 
     client_line = _client_line(client_name, cfg)
     story.append(Spacer(1, 0.6 * cm))
@@ -594,15 +651,25 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
         # SimpleDocTemplate/python-docx both paginate naturally across as
         # many pages as the real content needs -- no reason to
         # artificially truncate before handing it to them.
+        # Real improvement (2026-08-18): a real bulleted paragraph (Word's
+        # built-in "List Bullet" style, available by default -- no custom
+        # numbering XML needed) instead of a literal "• " prefix on a plain
+        # paragraph, which had no hanging indent -- a wrapped bullet line
+        # fell back to the left margin instead of aligning under the text.
         snippet = text
         for para in snippet.split("\n"):
             p = para.strip()
-            if p:
-                pp = doc.add_paragraph()
-                r = pp.add_run(p)
-                if _is_subheading(p):
-                    r.bold = True
-                    r.font.color.rgb = DARK
+            if not p:
+                continue
+            bm = BULLET_LINE_RE.match(p)
+            if bm:
+                doc.add_paragraph(bm.group(2).strip(), style='List Bullet')
+                continue
+            pp = doc.add_paragraph()
+            r = pp.add_run(p)
+            if _is_subheading(p):
+                r.bold = True
+                r.font.color.rgb = DARK
 
     client_line = _client_line(client_name, cfg)
     footer = "Generated via AVIIN ATS"
@@ -725,12 +792,17 @@ def _render_docx_sidebar(candidate: dict, cfg: dict, client_name: str = None) ->
         snippet = text[:2600] + ("…" if len(text) > 2600 else "")
         for para in snippet.split("\n"):
             p = para.strip()
-            if p:
-                pp = right.add_paragraph()
-                r = pp.add_run(p)
-                if _is_subheading(p):
-                    r.bold = True
-                    r.font.color.rgb = DARK
+            if not p:
+                continue
+            bm = BULLET_LINE_RE.match(p)
+            if bm:
+                right.add_paragraph(bm.group(2).strip(), style='List Bullet')
+                continue
+            pp = right.add_paragraph()
+            r = pp.add_run(p)
+            if _is_subheading(p):
+                r.bold = True
+                r.font.color.rgb = DARK
 
     client_line = _client_line(client_name, cfg)
     footer = "Generated via AVIIN ATS"
@@ -814,12 +886,17 @@ def _render_docx_minimal(candidate: dict, cfg: dict, client_name: str = None) ->
         snippet = text
         for para in snippet.split("\n"):
             p = para.strip()
-            if p:
-                pp = doc.add_paragraph()
-                r = pp.add_run(p)
-                if _is_subheading(p):
-                    r.bold = True
-                    r.font.color.rgb = BLACK
+            if not p:
+                continue
+            bm = BULLET_LINE_RE.match(p)
+            if bm:
+                doc.add_paragraph(bm.group(2).strip(), style='List Bullet')
+                continue
+            pp = doc.add_paragraph()
+            r = pp.add_run(p)
+            if _is_subheading(p):
+                r.bold = True
+                r.font.color.rgb = BLACK
 
     client_line = _client_line(client_name, cfg)
     footer = "Generated via AVIIN ATS"
