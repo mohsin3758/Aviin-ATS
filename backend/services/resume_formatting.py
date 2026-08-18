@@ -91,6 +91,24 @@ VISUAL_THEMES = [
 _VALID_THEMES = {t["id"] for t in VISUAL_THEMES}
 
 
+_BULLET_ONLY_LINE_RE = re.compile(r'^[ \t]*[•❖◆●○■♦\-\*][ \t]*$', re.M)
+
+
+def _strip_bullet_only_lines(text: str) -> str:
+    """A source PDF's own text extraction sometimes splits 'bullet' and its
+    sentence onto separate lines (a real PDF-layout artifact, not something
+    this codebase introduced) -- e.g. a lone '•' line with the actual
+    sentence appearing as its own paragraph right after. Rendered verbatim,
+    that's a visibly empty bullet point on the generated resume. Real bug
+    report (2026-08-18): a candidate's generated PDF showed two bare '•'
+    lines with nothing after them. Drops any line that is ONLY a bullet
+    character -- never touches a line that has real bullet+text together,
+    which stays exactly as-is."""
+    if not text:
+        return text
+    return _BULLET_ONLY_LINE_RE.sub('', text)
+
+
 def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
     """Returns (section_heading, body_text) for the main narrative block,
     already redacted/masked per config. project_mode='focus' isolates just
@@ -127,6 +145,7 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
         text = re.sub(re.escape(employer), config["company_replacement"], text, flags=re.I)
     elif employer and config["company_mode"] == "hide":
         text = re.sub(re.escape(employer), "[Company withheld]", text, flags=re.I)
+    text = _strip_bullet_only_lines(text)
     return heading, text
 
 

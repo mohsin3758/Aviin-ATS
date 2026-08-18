@@ -6955,3 +6955,85 @@ render correctly with zero console errors. S16 (7/7), S30 (10/10), and
 a scoped S8/S13/S1/S2 dashboard-adjacent run (19/19 total) all passed
 clean after deploying. Zero-token audit and full local/VPS commit sync
 pending in the same batch as this entry.
+
+## Resume Generator: 3 more real parsing/rendering bugs found on a real
+## resume, all fixed, 2026-08-18
+Direct follow-up to today's earlier Resume Generator work. User attached
+a real resume PDF ("Mangesh Kumar Dubey") and a screenshot of the
+generated output showing visible defects: two bare "•" bullet lines with
+nothing after them, and a sentence that read as cut off mid-way with no
+natural continuation. Investigated all three symptoms against the real
+stored data and real parser code rather than guessing — found 3 distinct
+real bugs, not one.
+
+**Bug 1 — empty bullet lines rendered verbatim.** The source PDF's own
+text extraction splits some "bullet + sentence" pairs onto separate lines
+(a real PDF-layout artifact, confirmed in the raw stored `resume_text`:
+`"...Present.\n\n•\n\n•\n\nI worked in Technip Energies..."`) — a lone
+bullet character with nothing else on its line, then the real sentence as
+its own paragraph right after with no bullet at all. The renderer
+faithfully reproduced this exactly as extracted, showing 2 empty bullet
+points. Added `_strip_bullet_only_lines()` in `resume_formatting.py`,
+called once at the end of `_resolve_body_text()` — the single choke point
+all 6 PDF/DOCX renderers already funnel through — so this fix applies
+everywhere, not per-renderer.
+
+**Bug 2 — a real, previously-unnoticed bug in my own same-day
+`extract_summary_section()` fix.** The "no explicit Summary heading"
+fallback path strips leading name/title lines via `_LEADING_NAME_LINES_RE
+.sub(text, count=1)`, anchored with `^` under `re.M` — which matches at
+the start of ANY line, not just the true start of the string. Once the
+candidate's name itself was already stripped, `.sub(count=1)` scanned
+forward and latched onto the FIRST later line anywhere in the document
+that happened to look like "1-6 capitalized words on their own line" —
+in this resume, that was a lone `"August."` sitting mid-paragraph
+(`"...to 28th\nAugust.\n\nI Worked in Toyo..."`), silently deleting just
+that one word from the middle of an otherwise-intact sentence. Fixed by
+anchoring to `\A` (absolute string start) instead of `^` — this heuristic
+now only ever strips genuine leading lines or does nothing, never a guess
+at a match found deeper in the text. Verified directly: `"August"` count
+in the raw text is 2, was 1 in the buggy output, is 2 after the fix.
+
+**Bug 3 — `extract_company_v2()`'s "working with/at X" fallback pattern
+had no boundary on its capture**, unrelated to today's earlier skill/
+summary fixes. `current_employer` was stored as `"Burns & Mcdonnell As An
+Electrical Design Engineer From 29Th"` — the regex greedily captured up
+to 60 chars of whatever followed "working with", swallowing the job
+title and start date along with the real company name. This is common
+resume phrasing ("Working with X as a Y from Z"), not a one-off. Fixed
+with a non-greedy capture + a lookahead stop at whole-word "as"/"since"/
+"from" or a comma/dash/pipe/newline/end — verified against 3 real
+phrasing variants (the buggy one, a "since 2019" variant, a comma-
+separated "TCS, Mumbai" variant) before deploying, all correct.
+
+**Also confirmed, not a new bug**: the same resume's `skills` column
+held a stale `{"SAP MM"}` — re-running today's earlier skill-extraction
+fix against this candidate's real resume text (which has zero SAP-related
+content) now correctly returns `[]`, confirming this candidate is one of
+the "76 other candidates still carrying stale skill data" explicitly
+flagged as an open scope boundary in today's earlier entry, not a live
+extraction bug. Corrected this candidate's stored `skills`/
+`current_employer` directly to match what today's fixed parser actually
+produces. Quantified the employer-field bug's broader blast radius before
+touching anything else: a targeted query for `current_employer` values
+containing role/date keywords found only 3 more candidates tenant-wide —
+checked each individually rather than bulk-correcting by pattern match:
+2 (`"Freelance React Full-Stack Developer"`, `"Aviin Tech Business
+Solutions / SAP Analytics and SAP Datasphere Developer"`) are genuinely
+legitimate self-descriptions, left untouched; 1 (`"Coreops.Ai As Pmo
+Manager (Dec'25 – 24 July)"`) was a real second instance of the same
+bug, confirmed by re-running the fixed extractor against her actual
+resume text (`"Coreops.Ai"`) before correcting her record too.
+
+Verified for real end-to-end, not code review: regenerated a real PDF for
+this exact candidate post-fix and confirmed via pdfminer — `"Current
+Company: Burns & Mcdonnell"` (clean), no `KEY SKILLS` section at all
+(correctly empty, no false SAP MM), zero bare bullet lines, and
+`"...to 28th\n\nAugust.\n\nI Worked in Toyo..."` (the previously-deleted
+word restored) — all in the same real document. A real headless-browser
+screenshot of the live preview confirmed the same visually. Full "S29 AI
+Resume Generator" suite (15/15) and S30/S32 (14/14) re-run clean — the
+`_LEADING_NAME_LINES_RE` anchor change and the bullet-stripping addition
+both sit inside functions those suites already exercise end-to-end,
+confirming no regression on the existing summary-extraction/masking/
+redaction behavior.

@@ -471,9 +471,17 @@ def extract_company_v2(text: str) -> Optional[str]:
     text_lower = text.lower()
 
     # Pattern: "Current Company: X" or "Present Employer: X"
+    # REAL BUG FIX (2026-08-18): the "working with/at X" fallback had no
+    # boundary on its capture, so a common resume phrasing like "Working
+    # with Burns & McDonnell as an Electrical design Engineer from 29th
+    # August..." swallowed the job title and start date into the company
+    # name too ("Burns & Mcdonnell As An Electrical Design Engineer From
+    # 29Th"). Non-greedy capture + a lookahead stop at "as/since/from" (as
+    # whole words) or a comma/dash/pipe/newline/end -- doesn't affect the
+    # other two labeled-field patterns, which already stop at end-of-line.
     for pat in [
         r'current\s+(?:company|employer|organization)\s*[:\-]\s*([^\n]{3,60})',
-        r'(?:working\s+(?:at|with)|employed\s+at)\s*[:\-]?\s*([^\n]{3,60})',
+        r'(?:working\s+(?:at|with)|employed\s+at)\s*[:\-]?\s*([^\n,]{3,60}?)(?=\s+(?:as|since|from)\b|[,\-–|]|\n|$)',
         r'present\s+(?:company|employer)\s*[:\-]\s*([^\n]{3,60})',
     ]:
         m = re.search(pat, text_lower)
@@ -671,9 +679,21 @@ _SUMMARY_HEADING_RE = re.compile(
     re.I | re.M)
 
 _LEADING_NAME_LINES_RE = re.compile(
-    r'^\s*(?:[A-Z][A-Za-z.\'\-]*\s*){1,6}\s*\n+'   # a name-like line (1-6 capitalized words)
-    r'(?:[^\n]{0,120}\n+){0,2}?'                     # up to 2 more short lines (title/tagline)
-    , re.M)
+    r'\A\s*(?:[A-Z][A-Za-z.\'\-]*\s*){1,6}\s*\n+'   # a name-like line (1-6 capitalized words)
+    r'(?:[^\n]{0,120}\n+){0,2}?'                      # up to 2 more short lines (title/tagline)
+)
+# REAL BUG FIX (2026-08-18): this used to anchor with `^` under re.M, which
+# matches at the start of ANY line, not just the true start of the string —
+# `.sub(count=1)` would then latch onto the FIRST short "capitalized
+# word(s) + newline" line ANYWHERE later in the document once the name
+# itself had already been stripped, not just a genuine leading title/
+# tagline. Caught on a real resume with no distinct title line after the
+# name: it silently deleted a lone "August." sitting mid-paragraph
+# ("...to 28th\nAugust.\n\nI Worked in Toyo...") because that one-word
+# capitalized line was the first thing anywhere in the text matching the
+# pattern. \A anchors to the absolute start only, so this heuristic now
+# either strips the real leading lines or does nothing — never a guess
+# at a match found deeper in the document.
 
 
 def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
