@@ -52,7 +52,17 @@ def _is_subheading(line: str) -> bool:
     low = s.lower()
     if low.startswith('employer:') or low.startswith('client:'):
         return True
-    if _SUBHEADING_ALLCAPS_RE.match(s) and any(c.isalpha() for c in s) and s.upper() == s:
+    # Real bug fix (2026-08-18): a bare single-word ALL-CAPS fragment like
+    # "SAP." was matching this branch -- confirmed directly against a real
+    # generated PDF where the tail end of a hard-wrapped sentence ("...
+    # advanced migration of\nSAP.") rendered "SAP." as its own bold,
+    # spaced-out subheading line instead of the last two words of the
+    # sentence it belongs to. Real section headings in this codebase's own
+    # convention are always multi-word ("KEY SKILLS", "DOMAIN EXPERIENCE")
+    # -- single ALL-CAPS tokens standing alone are acronyms/fragments, not
+    # headings, so this branch now requires at least two words.
+    if (_SUBHEADING_ALLCAPS_RE.match(s) and any(c.isalpha() for c in s)
+            and s.upper() == s and len(s.rstrip(':').split()) >= 2):
         return True
     return False
 
@@ -168,6 +178,120 @@ def _normalize_whitespace(text: str) -> str:
     if not text:
         return text
     return '\n'.join(_MULTI_SPACE_RE.sub(' ', line) for line in text.split('\n'))
+
+
+_SENTENCE_END_RE = re.compile(r'[.:;!?]$')
+
+
+def _merge_wrapped_lines(text: str) -> list[str]:
+    """Real fix (2026-08-18): confirmed directly against this candidate's
+    own stored resume_text that the source PDF's text extraction hard-wraps
+    long lines at a fixed character width, independent of sentence
+    boundaries -- e.g. "...Set up Network profiles and\\nsettlement
+    profiles. Configured..." is really ONE continuous sentence, split into
+    two raw newline-separated lines with no punctuation at the break.
+    Splitting purely on '\\n' (every renderer's loop, until now) treated
+    each wrapped fragment as its own paragraph -- harmless when rendered as
+    plain body text, but actively wrong once _classify_lines() (added the
+    same day) started auto-bulleting achievement-shaped lines: each
+    fragment got its OWN bullet, turning one real achievement into several
+    nonsensical ones. Reflows wrapped fragments back into logical lines
+    before any classification runs: a line only starts a new logical line
+    when it is itself a literal-bulleted or subheading line, the line
+    before it is a subheading (headings never absorb the next line), or
+    the line before it already ends in real sentence-terminal punctuation,
+    or the line before it is itself too short to plausibly be a hard-wrap
+    artifact -- otherwise it's a wrapped continuation and gets appended
+    onto the previous logical line.
+
+    Real bug caught and fixed while verifying this against the actual
+    candidate above: without a minimum-length guard, a genuinely short,
+    separate line with no trailing punctuation -- a role title
+    ("SAP S4 HANA Finance Consultant") or a short standalone bullet
+    ("Worked in Migrations") -- got wrongly absorbed into whatever
+    followed it, since it looked identical to a real wrapped fragment by
+    the punctuation rule alone. Every genuine wrapped fragment observed
+    in this document's own real hard-wrap width ran 90-115 characters;
+    60 is a conservative floor under that, so short lines stay standalone
+    while long unterminated lines still merge correctly."""
+    _WRAP_MIN_LEN = 60
+    raw = [l.strip() for l in text.split('\n') if l.strip()]
+    merged: list[str] = []
+    for line in raw:
+        starts_new = (
+            not merged
+            or bool(BULLET_LINE_RE.match(line))
+            or _is_subheading(line)
+            or _is_subheading(merged[-1])
+            or bool(_SENTENCE_END_RE.search(merged[-1]))
+            or len(merged[-1]) < _WRAP_MIN_LEN
+        )
+        if starts_new:
+            merged.append(line)
+        else:
+            merged[-1] = f"{merged[-1]} {line}"
+    return merged
+
+
+def _classify_lines(text: str) -> list[tuple[str, str]]:
+    """Real improvement (2026-08-18): many real resumes visually bullet
+    every achievement/responsibility line under a role via the SOURCE
+    PDF's own list formatting -- a layout property, not a literal
+    character in the text stream -- so plain-text extraction silently
+    drops that signal for any line that didn't happen to have a real '•'
+    character. Confirmed directly against a real resume where an entire
+    role's worth of achievement sentences ("Established internal order
+    settlements...", "Implemented EBS reconciliation...") rendered with
+    no bullet at all, reading as an undifferentiated wall of sentences,
+    while OTHER roles nearby (which happened to have literal bullets in
+    the extracted text) looked correct. Standard reverse-chronological
+    resume convention bullets every real achievement sentence under a
+    role while leaving the role's own title line and section headers
+    alone -- this function reproduces that, conservatively:
+
+    Returns [(display_text, kind), ...] where kind is 'subhead', 'bullet',
+    or 'body'. A plain (non-already-bulleted, non-subheading) line only
+    becomes an auto-bullet when ALL of: (a) we're inside a real
+    PROFESSIONAL EXPERIENCE-style block -- seen a "professional
+    experience"/"work experience"/"employment history" heading, OR a
+    real "Employer:" line (a resume-specific signal just as strong even
+    with no generic heading present); (b) it is NOT the line immediately
+    after an "Employer:"/"Client:" line (that slot is almost always the
+    role's own title, e.g. "SAP FICO Lead Constant" -- never an
+    achievement); (c) it reads like a real sentence (ends with '.' or is
+    a genuinely long line). Deliberately conservative in the same spirit
+    as _is_subheading() above -- never applied outside a real experience
+    block, so the PROFESSIONAL SUMMARY's own intro paragraph and other
+    prose stay untouched. Known, accepted limitation: this resume's own
+    source structure inconsistently places a role's title line after
+    "Employer:" for some roles and after "Client:" for others -- when a
+    title line is genuinely absent in a spot this heuristic expects one,
+    the very next real achievement line is conservatively left
+    unbulleted rather than risk a title line wrongly gaining a bullet."""
+    out: list[tuple[str, str]] = []
+    in_experience = False
+    prev_was_role_header = False
+    for p in _merge_wrapped_lines(text):
+        bm = BULLET_LINE_RE.match(p)
+        if bm:
+            out.append((bm.group(2).strip(), 'bullet'))
+            prev_was_role_header = False
+            continue
+        if _is_subheading(p):
+            normalized = p.rstrip(':').strip().lower()
+            low = p.lower()
+            is_role_header = low.startswith('employer:') or low.startswith('client:')
+            if normalized in ('professional experience', 'work experience', 'employment history') or is_role_header:
+                in_experience = True
+            out.append((p, 'subhead'))
+            prev_was_role_header = is_role_header
+            continue
+        if in_experience and not prev_was_role_header and (p.endswith('.') or len(p) > 40):
+            out.append((p, 'bullet'))
+        else:
+            out.append((p, 'body'))
+        prev_was_role_header = False
+    return out
 
 
 def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
@@ -332,18 +456,19 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
         # SimpleDocTemplate/python-docx both paginate naturally across as
         # many pages as the real content needs -- no reason to
         # artificially truncate before handing it to them.
-        snippet = text
-        for para in snippet.split("\n"):
-            p = para.strip()
-            if not p:
-                continue
-            bm = BULLET_LINE_RE.match(p)
-            if bm:
-                story.append(Paragraph(_esc(bm.group(2).strip()), bullet, bulletText=bm.group(1)))
-            elif _is_subheading(p):
-                story.append(Paragraph(_esc(p), subhead))
+        # Real improvement (2026-08-18): _classify_lines() auto-bullets real
+        # achievement sentences under a role that never had a literal bullet
+        # character in the extracted text -- a common case, since many
+        # source resumes convey their bullets as a layout property of the
+        # original document rather than a character in the text stream --
+        # in addition to preserving lines that already had a real one.
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+            elif kind == 'subhead':
+                story.append(Paragraph(_esc(line_text), subhead))
             else:
-                story.append(Paragraph(_esc(p), body))
+                story.append(Paragraph(_esc(line_text), body))
 
     client_line = _client_line(client_name, cfg)
     story.append(Spacer(1, 0.6 * cm))
@@ -441,17 +566,13 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
         # flowing resume and were deliberately left uncapped this same
         # day) -- not an attempt at true multi-page two-column pagination.
         snippet = text[:1400] + ("…" if len(text) > 1400 else "")
-        for para in snippet.split("\n"):
-            p = para.strip()
-            if not p:
-                continue
-            bm = BULLET_LINE_RE.match(p)
-            if bm:
-                main.append(Paragraph(_esc(bm.group(2).strip()), m_bullet, bulletText=bm.group(1)))
-            elif _is_subheading(p):
-                main.append(Paragraph(_esc(p), m_subhead))
+        for line_text, kind in _classify_lines(snippet):
+            if kind == 'bullet':
+                main.append(Paragraph(_esc(line_text), m_bullet, bulletText='•'))
+            elif kind == 'subhead':
+                main.append(Paragraph(_esc(line_text), m_subhead))
             else:
-                main.append(Paragraph(_esc(p), m_body))
+                main.append(Paragraph(_esc(line_text), m_body))
     client_line = _client_line(client_name, cfg)
     main.append(Spacer(1, 0.8 * cm))
     footer = "Generated via AVIIN ATS"
@@ -544,18 +665,13 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
         # SimpleDocTemplate/python-docx both paginate naturally across as
         # many pages as the real content needs -- no reason to
         # artificially truncate before handing it to them.
-        snippet = text
-        for para in snippet.split("\n"):
-            p = para.strip()
-            if not p:
-                continue
-            bm = BULLET_LINE_RE.match(p)
-            if bm:
-                story.append(Paragraph(_esc(bm.group(2).strip()), bullet, bulletText=bm.group(1)))
-            elif _is_subheading(p):
-                story.append(Paragraph(_esc(p), subhead))
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+            elif kind == 'subhead':
+                story.append(Paragraph(_esc(line_text), subhead))
             else:
-                story.append(Paragraph(_esc(p), body))
+                story.append(Paragraph(_esc(line_text), body))
 
     client_line = _client_line(client_name, cfg)
     story.append(Spacer(1, 0.6 * cm))
@@ -656,18 +772,13 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
         # numbering XML needed) instead of a literal "• " prefix on a plain
         # paragraph, which had no hanging indent -- a wrapped bullet line
         # fell back to the left margin instead of aligning under the text.
-        snippet = text
-        for para in snippet.split("\n"):
-            p = para.strip()
-            if not p:
-                continue
-            bm = BULLET_LINE_RE.match(p)
-            if bm:
-                doc.add_paragraph(bm.group(2).strip(), style='List Bullet')
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                doc.add_paragraph(line_text, style='List Bullet')
                 continue
             pp = doc.add_paragraph()
-            r = pp.add_run(p)
-            if _is_subheading(p):
+            r = pp.add_run(line_text)
+            if kind == 'subhead':
                 r.bold = True
                 r.font.color.rgb = DARK
 
@@ -790,17 +901,13 @@ def _render_docx_sidebar(candidate: dict, cfg: dict, client_name: str = None) ->
         # uncapped this same day). Keeps PDF/DOCX output consistent for
         # the same theme rather than one paginating and the other not.
         snippet = text[:2600] + ("…" if len(text) > 2600 else "")
-        for para in snippet.split("\n"):
-            p = para.strip()
-            if not p:
-                continue
-            bm = BULLET_LINE_RE.match(p)
-            if bm:
-                right.add_paragraph(bm.group(2).strip(), style='List Bullet')
+        for line_text, kind in _classify_lines(snippet):
+            if kind == 'bullet':
+                right.add_paragraph(line_text, style='List Bullet')
                 continue
             pp = right.add_paragraph()
-            r = pp.add_run(p)
-            if _is_subheading(p):
+            r = pp.add_run(line_text)
+            if kind == 'subhead':
                 r.bold = True
                 r.font.color.rgb = DARK
 
@@ -883,18 +990,13 @@ def _render_docx_minimal(candidate: dict, cfg: dict, client_name: str = None) ->
         # SimpleDocTemplate/python-docx both paginate naturally across as
         # many pages as the real content needs -- no reason to
         # artificially truncate before handing it to them.
-        snippet = text
-        for para in snippet.split("\n"):
-            p = para.strip()
-            if not p:
-                continue
-            bm = BULLET_LINE_RE.match(p)
-            if bm:
-                doc.add_paragraph(bm.group(2).strip(), style='List Bullet')
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                doc.add_paragraph(line_text, style='List Bullet')
                 continue
             pp = doc.add_paragraph()
-            r = pp.add_run(p)
-            if _is_subheading(p):
+            r = pp.add_run(line_text)
+            if kind == 'subhead':
                 r.bold = True
                 r.font.color.rgb = BLACK
 

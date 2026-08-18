@@ -7352,3 +7352,107 @@ specific to that session's sandbox network path, not the VPS, not
 Hostinger, and (based on a live user-side re-check once it cleared)
 resolved on its own. No infrastructure was changed to fix it; deploy
 resumed normally once connectivity returned.
+
+## Resume Generator, round 6 same day: full-sentence achievement lines
+## with no bullet, auto-bulleted for real — plus 2 more real bugs found
+## while verifying it, 2026-08-18
+Direct follow-up. User's exact ask, from 3 screenshots of the latest
+generated PDF: full sentences under "Employer:"/"Client:" role blocks
+("Established internal order settlements...", "Implemented EBS
+reconciliation...") rendered with no bullet symbol at all, reading as
+plain prose next to other, correctly-bulleted achievement lines in the
+same document — asked either to add a bullet before them or research
+standard resume formatting to get the bullet/dot alignment right.
+
+**Root cause**: the existing `BULLET_LINE_RE` matcher only ever detects
+and preserves a LITERAL bullet character already present in the extracted
+text. Many real source PDFs convey their bullets as a pure layout
+property of the original document (an indent + list-marker rendered by
+the PDF viewer) rather than an actual "•" character in the underlying
+text stream — confirmed directly against this candidate's real stored
+`resume_text`: an entire role's achievement block had zero literal bullet
+characters anywhere, while a neighboring role's did. No existing code
+path had any way to recover the missing signal.
+
+**Fix**: new `_classify_lines(text)` in `resume_formatting.py`, a single
+shared classifier (replacing each of the 6 renderers' own duplicated
+inline `BULLET_LINE_RE.match()` + `_is_subheading()` checks) that ALSO
+auto-bullets a plain, sentence-shaped line once inside a real
+"PROFESSIONAL EXPERIENCE"-style block (tracked via a real "Employer:"
+line or a matching section heading) — conservatively: never the line
+immediately after an "Employer:"/"Client:" line (that slot is almost
+always the role's own title, e.g. "SAP FICO Lead Constant" — never an
+achievement), and only when it reads like a real sentence (ends in '.'
+or is a genuinely long line). Verified the exact named lines from the
+user's screenshots now bullet correctly, while the SAP S4 HANA Finance
+Consultant-style title lines correctly stay unbulleted.
+
+**Bug found while verifying, not by inspection — a real, independent
+text-extraction artifact made worse by the new auto-bullet logic.**
+Checking the fix against the FULL document (not just the flagged lines)
+turned up several role blocks where one achievement sentence had been
+hard-wrapped across 2+ raw lines by the source PDF's own fixed-width
+text extraction, with no punctuation at the break (confirmed directly
+in the DB: `"...Set up Network profiles and\nsettlement profiles.
+Configured..."` is genuinely one continuous sentence split across two
+newline-separated raw lines). Before this round's fix, each fragment
+silently became its own unbulleted body paragraph — bland but harmless.
+Once auto-bulleting could apply to any sentence-shaped line, each
+fragment started getting its OWN bullet, turning one real achievement
+into 3-5 nonsensical fragments. Fixed with a new `_merge_wrapped_lines()`
+preprocessing pass, run before classification: a raw line only starts a
+new logical line if it's itself a literal-bulleted or subheading line,
+the line before it is a subheading, the line before it already ends in
+real sentence-terminal punctuation, or the line before it is too short
+(< 60 chars — every genuine wrapped fragment in this real document ran
+90-115 chars, comfortably above that floor) to plausibly be a wrap
+artifact; otherwise it's a continuation and gets appended onto the
+previous logical line.
+
+**A second real bug found by the same verification pass, not the user's
+original report**: the length-floor above was added specifically because
+an earlier version of the merge (no length check at all) wrongly glued a
+short, punctuation-less role-TITLE line ("SAP S4 HANA Finance
+Consultant") onto the achievement sentence that followed it, and
+separately glued two genuinely-separate short bullets ("Worked in
+Migrations" / "Worked in Bank configurations...") into one run-on
+sentence — both confirmed and fixed by re-testing against the real text
+before shipping, not assumed safe from the first version.
+
+**A third real bug, also found only by rendering the merged output and
+reading it, not by unit-testing the regex in isolation**: `_is_subheading`
+'s existing short-ALL-CAPS-line branch (added earlier the same day for
+real section headers like "DOMAIN EXPERIENCE") was also matching a bare
+tail-end acronym fragment like "SAP." (the last word of a hard-wrapped
+sentence, left dangling after the merge fix absorbed everything before
+it) — rendering it as its own stray bold heading line. Every real section
+heading in this codebase's own convention is multi-word ("KEY SKILLS",
+"PROFESSIONAL EXPERIENCE"); tightened the branch to require at least 2
+words, closing this without weakening real heading detection (re-verified
+"KEY SKILLS"/"PROFESSIONAL EXPERIENCE"/"DOMAIN EXPERIENCE:" all still
+match).
+
+Verified for real, not code review, at every step: a standalone Python
+harness reproducing the exact regexes/heuristics against copy-pasted real
+resume_text from the DB (not synthetic text) before touching the actual
+file, confirming both the target fix and each of the 3 bugs above and
+their resolutions; then the real deployed endpoint regenerated actual
+PDFs in all 3 visual themes (classic 8pp, modern_sidebar 1pp — its
+Table-layout page-fit constraint from an earlier round still holds,
+minimal_ats 8pp — all `generation_status:"completed"`); `pdftotext
+-layout` confirmed the exact previously-unbulleted lines from the user's
+screenshots now bullet correctly, confirmed the Wipro/Bramasol fragment
+blocks now render as single coherent bullets instead of 3-5 broken ones,
+and confirmed no stray "SAP." heading. `pdftoppm`-rendered real page
+images (visual check, not text extraction — the verification method this
+whole feature's history was missing until round 4) confirmed clean
+hanging-indent bullets, bold subheadings, and no header overlap across
+both the classic and modern_sidebar themes. Full S29 (15/15) + S30 (9/9)
++ S32 (5/5) suites re-run clean (29/29) after deploy — one invocation
+mistake caught and corrected mid-verification (ran Playwright without
+`--config=tests/playwright.config.ts`, which silently drops the real
+`baseURL` and makes every `page.goto('/relative/path')` fail with
+"Cannot navigate to invalid URL" — 3 unrelated-looking failures on pages
+untouched by this change, immediately recognized as a test-invocation
+error rather than a regression and re-run correctly). Zero-token audit:
+`CONFIRMED CLEAN` (375 files, 0 external API refs).
