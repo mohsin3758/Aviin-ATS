@@ -2794,6 +2794,7 @@ test.describe.serial('S29 AI Resume Generator', () => {
   let customTplId: string;
   let genPdfId: string;
   let longCandId: string;
+  let massiveCandId: string;
 
   test.afterAll(async ({ request }) => {
     const token = await getApiToken(request);
@@ -2801,6 +2802,7 @@ test.describe.serial('S29 AI Resume Generator', () => {
     if (customTplId) await request.delete(`${API}/resume-generator/templates/${customTplId}`, { headers: auth }).catch(() => {});
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
     if (longCandId) await request.delete(`${API}/candidates/${longCandId}`, { headers: auth }).catch(() => {});
+    if (massiveCandId) await request.delete(`${API}/candidates/${massiveCandId}`, { headers: auth }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
     if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
   });
@@ -3014,13 +3016,84 @@ test.describe.serial('S29 AI Resume Generator', () => {
     expect(errors).toHaveLength(0);
   });
 
-  test('visual themes: endpoint returns the 3 real layouts', async ({ request }) => {
+  test('visual themes: endpoint returns all 8 real layouts (3 original + 5 added 2026-08-18)', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}` };
     const r = await request.get(`${API}/resume-generator/visual-themes`, { headers: auth });
     expect(r.ok()).toBeTruthy();
     const themes = await r.json();
-    expect(themes.map((t: any) => t.id).sort()).toEqual(['classic', 'minimal_ats', 'modern_sidebar']);
+    expect(themes.map((t: any) => t.id).sort()).toEqual([
+      'classic', 'compact_grid', 'elegant_serif', 'executive_header',
+      'minimal_ats', 'modern_sidebar', 'timeline', 'two_tone_header',
+    ]);
+  });
+
+  test('5 new themes (2026-08-18): each generates a real, distinct PDF and DOCX', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const newThemes = ['executive_header', 'two_tone_header', 'timeline', 'compact_grid', 'elegant_serif'];
+    const sizes: number[] = [];
+    for (const theme of newThemes) {
+      const pdf = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+        headers: auth, data: { template_id: noContactTplId, visual_theme: theme, output_format: 'pdf' },
+      });
+      expect(pdf.ok()).toBeTruthy();
+      const pdfBody = await pdf.json();
+      expect(pdfBody.generation_status).toBe('completed');
+      expect(pdfBody.visual_theme).toBe(theme);
+      sizes.push(pdfBody.file_size);
+
+      const docx = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+        headers: auth, data: { template_id: noContactTplId, visual_theme: theme, output_format: 'docx' },
+      });
+      expect(docx.ok()).toBeTruthy();
+      expect((await docx.json()).generation_status).toBe('completed');
+    }
+    // Real, structurally different documents -- not 5 copies of the same bytes.
+    expect(new Set(sizes).size).toBe(sizes.length);
+  });
+
+  test('real 95,000+ character resume: every one of the 8 themes renders the full document with no truncation (regression for the 2026-08-18 extract_summary_section 100k-char cap)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    // Real bug found and fixed the same day this test was written: a prior
+    // fix raised extract_summary_section()'s internal safety cap from
+    // 20,000 to 100,000 chars -- generous at the time, but became the new
+    // binding limit the moment a real resume exceeded it, silently cutting
+    // every theme off mid-sentence with no error. Removed the cap entirely
+    // rather than picking another number that would eventually be hit
+    // again. Non-repetitive filler (unique index per engagement) so PDF
+    // stream compression can't hide a truncation bug.
+    const filler = Array.from({ length: 700 }, (_, i) =>
+      `Engagement ${i}: delivered SAP FICO module ${i} configuration for client account ${i} covering GL, AP, AR and cost center ${i} reporting in depth.`
+    ).join(' ');
+    const hugeText = `Massive Resume Candidate ${stamp}\nSAP Lead Consultant\n\nProfessional Summary:\n` +
+      `Experienced consultant with an exceptionally long career history.\n${filler}\n\nZZZ-END-MARKER-95K-${stamp}-ZZZ`;
+    expect(hugeText.length).toBeGreaterThan(95000);
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `Massive Resume Candidate ${stamp}`, email: `qa.s29.massive.${stamp}@test.com`,
+        phone: `9${String(stamp).slice(-9)}`, skills: ['SAP FICO'], total_exp_mo: 300,
+        resume_text: hugeText,
+      },
+    });
+    expect(cand.ok()).toBeTruthy();
+    massiveCandId = (await cand.json()).id;
+
+    const allThemes = ['classic', 'modern_sidebar', 'minimal_ats', 'executive_header', 'two_tone_header', 'timeline', 'compact_grid', 'elegant_serif'];
+    for (const theme of allThemes) {
+      const gen = await request.post(`${API}/resume-generator/candidates/${massiveCandId}/generate`, {
+        headers: auth, data: { visual_theme: theme, output_format: 'pdf' },
+      });
+      expect(gen.ok()).toBeTruthy();
+      const genBody = await gen.json();
+      expect(genBody.generation_status).toBe('completed');
+      // A real full-length render of this filler is well over 90KB; a
+      // truncated render (cut off at the old 100,000-char point, roughly
+      // 2/3 through this ~100k+ document) would be visibly smaller.
+      expect(genBody.file_size).toBeGreaterThan(60000);
+    }
   });
 
   test('modern_sidebar and minimal_ats themes generate real, distinct PDFs (not silently falling back to classic)', async ({ request }) => {

@@ -154,6 +154,24 @@ VISUAL_THEMES = [
      "description": "A shaded left sidebar for contact details and key skills, main column for the summary. A distinctive, client-facing look."},
     {"id": "minimal_ats", "label": "Minimal / ATS-Safe",
      "description": "Plain black text, no color, no tables, left-aligned. Optimized for automated resume-parsing systems."},
+    # Real improvement (2026-08-18, round 4): 5 more real, distinct layouts
+    # covering the styles seen across popular ATS-friendly and Canva-style
+    # resume builders -- each built on the same safe pattern established
+    # for the other themes today: any colored/shaded element is a small,
+    # FIXED-size header block (never grows with resume length), while the
+    # actual body always flows as plain paragraphs with no length cap, so
+    # every one of these genuinely supports a full, unbounded-length
+    # resume across as many pages as it needs.
+    {"id": "executive_header", "label": "Executive Header",
+     "description": "A bold solid-color header band with the name and title in white, plain single-column body below. A common senior/executive resume look."},
+    {"id": "two_tone_header", "label": "Two-Tone Professional",
+     "description": "Name on the left, a shaded contact panel on the right, single-column body below. A widely-used modern professional layout."},
+    {"id": "timeline", "label": "Timeline Professional",
+     "description": "Each role is marked with a colored bullet and a divider line, giving a career-timeline feel while staying fully ATS-parseable."},
+    {"id": "compact_grid", "label": "Compact Professional",
+     "description": "A skills grid strip up top and tighter body spacing -- a denser, more information-forward layout."},
+    {"id": "elegant_serif", "label": "Elegant Serif",
+     "description": "Refined serif typography with a double-rule header -- a premium, editorial look."},
 ]
 _VALID_THEMES = {t["id"] for t in VISUAL_THEMES}
 
@@ -436,19 +454,19 @@ def _docx_footer(doc, cfg: dict, client_line: Optional[str], *, italic: bool = T
             fr.font.color.rgb = color
 
 
+_PDF_RENDERERS = {}  # populated after all _render_pdf_* functions are defined, see bottom of file
+_DOCX_RENDERERS = {}  # populated after all _render_docx_* functions are defined, see bottom of file
+
+
 def render_resume_pdf(candidate: dict, config: dict, client_name: str = None) -> bytes:
-    """Dispatches to one of VISUAL_THEMES's real renderers. All 3 use the
-    exact same resolved content (_resolve_body_text/_company_line/etc) —
-    only layout, color, and typography differ."""
+    """Dispatches to one of VISUAL_THEMES's real renderers. All of them use
+    the exact same resolved content (_resolve_body_text/_company_line/etc)
+    — only layout, color, and typography differ."""
     cfg = {**DEFAULT_CONFIG, **config}
     theme = cfg.get("visual_theme") or "classic"
     if theme not in _VALID_THEMES:
         theme = "classic"
-    if theme == "modern_sidebar":
-        return _render_pdf_sidebar(candidate, cfg, client_name)
-    if theme == "minimal_ats":
-        return _render_pdf_minimal(candidate, cfg, client_name)
-    return _render_pdf_classic(candidate, cfg, client_name)
+    return _PDF_RENDERERS.get(theme, _render_pdf_classic)(candidate, cfg, client_name)
 
 
 def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
@@ -779,11 +797,7 @@ def render_resume_docx(candidate: dict, config: dict, client_name: str = None) -
     theme = cfg.get("visual_theme") or "classic"
     if theme not in _VALID_THEMES:
         theme = "classic"
-    if theme == "modern_sidebar":
-        return _render_docx_sidebar(candidate, cfg, client_name)
-    if theme == "minimal_ats":
-        return _render_docx_minimal(candidate, cfg, client_name)
-    return _render_docx_classic(candidate, cfg, client_name)
+    return _DOCX_RENDERERS.get(theme, _render_docx_classic)(candidate, cfg, client_name)
 
 
 def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
@@ -1088,3 +1102,868 @@ def _render_docx_minimal(candidate: dict, cfg: dict, client_name: str = None) ->
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+# ─────────────────────── 5 additional themes (round 4) ───────────────────────
+# Every one of these follows the same safety rule established across today's
+# earlier fixes: any colored/shaded element is a small, FIXED-size flowable
+# (a short header Table, a skills grid capped the same way the sidebar theme
+# already caps it) that never grows with resume length, while the actual
+# body always flows as plain uncapped paragraphs -- so all 5 genuinely
+# support a full, unbounded-length resume across as many pages as it needs,
+# the same guarantee the classic/minimal/sidebar themes already have.
+
+def _render_pdf_executive_header(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    """A bold solid-color header band (name + title in white) followed by a
+    plain single-column ATS-parseable body -- a common senior/executive
+    resume look."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                             topMargin=1.6 * cm, bottomMargin=2 * cm)
+    BAND = colors.HexColor("#1e3a5f")
+    PRIMARY = colors.HexColor("#1e40af")
+    DARK = colors.HexColor("#0f172a")
+    GRAY = colors.HexColor("#64748b")
+
+    h1_white = ParagraphStyle("H1W", fontSize=21, leading=25, textColor=colors.white, fontName="Helvetica-Bold")
+    sub_white = ParagraphStyle("SubW", fontSize=12, leading=15, textColor=colors.HexColor("#cbd5e1"), fontName="Helvetica", spaceBefore=2)
+    h2 = ParagraphStyle("H2", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+    subhead = ParagraphStyle("SubHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
+    bullet = ParagraphStyle("Bullet", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica",
+                             leftIndent=14, bulletIndent=0, spaceBefore=1, spaceAfter=1)
+    small = ParagraphStyle("Small", fontSize=9, leading=11, textColor=GRAY, fontName="Helvetica")
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    band_content = [Paragraph(_esc(display_name), h1_white)]
+    if candidate.get("current_designation"):
+        band_content.append(Paragraph(_esc(candidate["current_designation"]), sub_white))
+    band = Table([[band_content]], colWidths=[doc.width])
+    band.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BAND),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0.8 * cm), ("RIGHTPADDING", (0, 0), (-1, -1), 0.8 * cm),
+        ("TOPPADDING", (0, 0), (-1, -1), 0.7 * cm), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.7 * cm),
+    ]))
+
+    story = _pdf_header_logo_flowables(cfg) + [band, Spacer(1, 0.5 * cm)]
+
+    meta_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        meta_bits.append(f"<b>Mobile:</b> {_esc(candidate['phone'])}")
+    if cfg["show_email"] and candidate.get("email"):
+        meta_bits.append(f"<b>Email:</b> {_esc(candidate['email'])}")
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(f"<b>Location:</b> {_esc(candidate['location'])}")
+    if candidate.get("total_exp_mo"):
+        meta_bits.append(f"<b>Experience:</b> {_esc(fmt_exp(candidate['total_exp_mo']))}")
+    if meta_bits:
+        story.append(Paragraph(" &nbsp;&nbsp;|&nbsp;&nbsp; ".join(meta_bits), body))
+
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        story.append(Paragraph(f"<b>Current Company:</b> {_esc(company_line)}", body))
+
+    skills = candidate.get("skills") or []
+    if skills:
+        story.append(Paragraph("KEY SKILLS", h2))
+        story.append(Paragraph(_esc(", ".join(skills)), body))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        story.append(Paragraph(heading, h2))
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+            elif kind == 'subhead':
+                story.append(Paragraph(_esc(line_text), subhead))
+            else:
+                story.append(Paragraph(_esc(line_text), body))
+
+    client_line = _client_line(client_name, cfg)
+    story.extend(_pdf_footer_flowables(cfg, client_line, small))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _render_pdf_two_tone_header(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    """Name on the left, a shaded contact panel on the right, single-column
+    body below -- a widely-used modern professional layout."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                             topMargin=2 * cm, bottomMargin=2 * cm)
+    SHADE = colors.HexColor("#eff6ff")
+    PRIMARY = colors.HexColor("#1e40af")
+    DARK = colors.HexColor("#0f172a")
+    GRAY = colors.HexColor("#64748b")
+
+    h1 = ParagraphStyle("H1", fontSize=19, leading=23, textColor=DARK, fontName="Helvetica-Bold")
+    sub = ParagraphStyle("Sub", fontSize=11.5, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=2)
+    contact = ParagraphStyle("Contact", fontSize=9, leading=13, textColor=DARK, fontName="Helvetica")
+    h2 = ParagraphStyle("H2", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+    subhead = ParagraphStyle("SubHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
+    bullet = ParagraphStyle("Bullet", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica",
+                             leftIndent=14, bulletIndent=0, spaceBefore=1, spaceAfter=1)
+    small = ParagraphStyle("Small", fontSize=9, leading=11, textColor=GRAY, fontName="Helvetica")
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    left = [Paragraph(_esc(display_name), h1)]
+    if candidate.get("current_designation"):
+        left.append(Paragraph(_esc(candidate["current_designation"]), sub))
+
+    right = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        right.append(Paragraph(_esc(candidate["phone"]), contact))
+    if cfg["show_email"] and candidate.get("email"):
+        right.append(Paragraph(_esc(candidate["email"]), contact))
+    if cfg["show_location"] and candidate.get("location"):
+        right.append(Paragraph(_esc(candidate["location"]), contact))
+    if candidate.get("total_exp_mo"):
+        right.append(Paragraph(_esc(fmt_exp(candidate["total_exp_mo"])) + " experience", contact))
+    if not right:
+        right = [Paragraph("", contact)]
+
+    header_table = Table([[left, right]], colWidths=[doc.width * 0.62, doc.width * 0.38])
+    header_table.setStyle(TableStyle([
+        ("BACKGROUND", (1, 0), (1, 0), SHADE),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (0, 0), 0), ("RIGHTPADDING", (0, 0), (0, 0), 0.4 * cm),
+        ("LEFTPADDING", (1, 0), (1, 0), 0.6 * cm), ("RIGHTPADDING", (1, 0), (1, 0), 0.6 * cm),
+        ("TOPPADDING", (1, 0), (1, 0), 0.5 * cm), ("BOTTOMPADDING", (1, 0), (1, 0), 0.5 * cm),
+    ]))
+
+    story = _pdf_header_logo_flowables(cfg) + [header_table, Spacer(1, 0.3 * cm),
+                                                HRFlowable(width="100%", thickness=1.2, color=PRIMARY, spaceAfter=6)]
+
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        story.append(Paragraph(f"<b>Current Company:</b> {_esc(company_line)}", body))
+
+    skills = candidate.get("skills") or []
+    if skills:
+        story.append(Paragraph("KEY SKILLS", h2))
+        story.append(Paragraph(_esc(", ".join(skills)), body))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        story.append(Paragraph(heading, h2))
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+            elif kind == 'subhead':
+                story.append(Paragraph(_esc(line_text), subhead))
+            else:
+                story.append(Paragraph(_esc(line_text), body))
+
+    client_line = _client_line(client_name, cfg)
+    story.extend(_pdf_footer_flowables(cfg, client_line, small))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _render_pdf_timeline(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    """Each role/section heading is marked with a colored bullet and a thin
+    divider line right after it, giving a career-timeline feel while
+    staying fully single-column and ATS-parseable -- no timeline graphic is
+    tied to variable-length content, so it never risks a page-fit crash."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                             topMargin=2 * cm, bottomMargin=2 * cm)
+    ACCENT = colors.HexColor("#0d9488")
+    DARK = colors.HexColor("#0f172a")
+    GRAY = colors.HexColor("#64748b")
+
+    h1 = ParagraphStyle("H1", fontSize=18, leading=22, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=4)
+    sub = ParagraphStyle("Sub", fontSize=11, leading=14, textColor=ACCENT, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=10)
+    h2 = ParagraphStyle("H2", fontSize=11, leading=14, textColor=ACCENT, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+    # The "timeline marker" -- a colored dot bullet baked into the text
+    # (not reportlab's bulletText mechanism, since this needs a leading
+    # dot character followed by normal left-aligned text, not a hanging
+    # indent) plus a thin divider drawn right after via HRFlowable.
+    timeline_head = ParagraphStyle("TimelineHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=2)
+    bullet = ParagraphStyle("Bullet", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica",
+                             leftIndent=14, bulletIndent=0, spaceBefore=1, spaceAfter=1)
+    small = ParagraphStyle("Small", fontSize=9, leading=11, textColor=GRAY, fontName="Helvetica")
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    story = _pdf_header_logo_flowables(cfg) + [
+        Paragraph(_esc(display_name), h1),
+        Paragraph(_esc(candidate.get("current_designation") or ""), sub),
+        HRFlowable(width="100%", thickness=1.2, color=ACCENT, spaceAfter=6),
+    ]
+
+    meta_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        meta_bits.append(f"<b>Mobile:</b> {_esc(candidate['phone'])}")
+    if cfg["show_email"] and candidate.get("email"):
+        meta_bits.append(f"<b>Email:</b> {_esc(candidate['email'])}")
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(f"<b>Location:</b> {_esc(candidate['location'])}")
+    if candidate.get("total_exp_mo"):
+        meta_bits.append(f"<b>Experience:</b> {_esc(fmt_exp(candidate['total_exp_mo']))}")
+    if meta_bits:
+        story.append(Paragraph(" &nbsp;&nbsp;|&nbsp;&nbsp; ".join(meta_bits), body))
+
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        story.append(Paragraph(f"<b>Current Company:</b> {_esc(company_line)}", body))
+
+    skills = candidate.get("skills") or []
+    if skills:
+        story.append(Paragraph("KEY SKILLS", h2))
+        story.append(Paragraph(_esc(", ".join(skills)), body))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        story.append(Paragraph(heading, h2))
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+            elif kind == 'subhead':
+                story.append(Paragraph(f'<font color="#0d9488">●</font> {_esc(line_text)}', timeline_head))
+                story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cbd5e1"), spaceAfter=4))
+            else:
+                story.append(Paragraph(_esc(line_text), body))
+
+    client_line = _client_line(client_name, cfg)
+    story.extend(_pdf_footer_flowables(cfg, client_line, small))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _render_pdf_compact_grid(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    """A real skills grid (a short, fixed-size Table, capped the same way
+    the sidebar theme caps its own skill list) plus tighter body spacing --
+    a denser, more information-forward layout."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm,
+                             topMargin=1.8 * cm, bottomMargin=1.8 * cm)
+    PRIMARY = colors.HexColor("#1e40af")
+    DARK = colors.HexColor("#0f172a")
+    GRAY = colors.HexColor("#64748b")
+    CHIP_BG = colors.HexColor("#f8fafc")
+
+    h1 = ParagraphStyle("H1", fontSize=17, leading=20, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=3)
+    sub = ParagraphStyle("Sub", fontSize=10.5, leading=13, textColor=PRIMARY, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=8)
+    h2 = ParagraphStyle("H2", fontSize=10.5, leading=13, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=9, spaceAfter=4)
+    # Real "compact" difference: leading=13 (vs 15 elsewhere) -- a genuinely
+    # denser line-height, not just a label.
+    body = ParagraphStyle("Body", fontSize=9.5, textColor=DARK, leading=13, fontName="Helvetica")
+    subhead = ParagraphStyle("SubHead", fontSize=9.5, leading=13, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=1)
+    bullet = ParagraphStyle("Bullet", fontSize=9.5, textColor=DARK, leading=13, fontName="Helvetica",
+                             leftIndent=12, bulletIndent=0, spaceBefore=0.5, spaceAfter=0.5)
+    chip = ParagraphStyle("Chip", fontSize=8.5, leading=11, textColor=DARK, fontName="Helvetica", alignment=TA_CENTER)
+    small = ParagraphStyle("Small", fontSize=8.5, leading=10, textColor=GRAY, fontName="Helvetica")
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    story = _pdf_header_logo_flowables(cfg) + [Paragraph(_esc(display_name), h1)]
+    if candidate.get("current_designation"):
+        story.append(Paragraph(_esc(candidate["current_designation"]), sub))
+
+    meta_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        meta_bits.append(_esc(candidate["phone"]))
+    if cfg["show_email"] and candidate.get("email"):
+        meta_bits.append(_esc(candidate["email"]))
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(_esc(candidate["location"]))
+    if candidate.get("total_exp_mo"):
+        meta_bits.append(_esc(fmt_exp(candidate["total_exp_mo"])) + " exp")
+    if meta_bits:
+        story.append(Paragraph(" &nbsp;•&nbsp; ".join(meta_bits), ParagraphStyle("MetaCenter", parent=body, alignment=TA_CENTER)))
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        story.append(Paragraph(f"<b>Current Company:</b> {_esc(company_line)}", ParagraphStyle("CoCenter", parent=body, alignment=TA_CENTER)))
+    story.append(HRFlowable(width="100%", thickness=1, color=PRIMARY, spaceBefore=6, spaceAfter=8))
+
+    skills = (candidate.get("skills") or [])[:21]
+    if skills:
+        story.append(Paragraph("KEY SKILLS", h2))
+        cols = 3
+        rows = [skills[i:i + cols] for i in range(0, len(skills), cols)]
+        grid_data = [[Paragraph(_esc(s), chip) for s in row] + [""] * (cols - len(row)) for row in rows]
+        skills_table = Table(grid_data, colWidths=[doc.width / cols] * cols)
+        skills_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), CHIP_BG),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(skills_table)
+        story.append(Spacer(1, 0.3 * cm))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        story.append(Paragraph(heading, h2))
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+            elif kind == 'subhead':
+                story.append(Paragraph(_esc(line_text), subhead))
+            else:
+                story.append(Paragraph(_esc(line_text), body))
+
+    client_line = _client_line(client_name, cfg)
+    story.extend(_pdf_footer_flowables(cfg, client_line, small))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _render_pdf_elegant_serif(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    """Refined serif typography (reportlab's built-in Times family -- no
+    external font embedding needed) with a double-rule header -- a
+    premium, editorial look."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.6 * cm, rightMargin=2.6 * cm,
+                             topMargin=2.2 * cm, bottomMargin=2.2 * cm)
+    ACCENT = colors.HexColor("#7c2d12")
+    DARK = colors.HexColor("#1c1917")
+    GRAY = colors.HexColor("#78716c")
+
+    h1 = ParagraphStyle("H1", fontSize=22, leading=26, textColor=DARK, fontName="Times-Bold", alignment=TA_CENTER, spaceAfter=3)
+    sub = ParagraphStyle("Sub", fontSize=12, leading=15, textColor=ACCENT, fontName="Times-Italic", alignment=TA_CENTER, spaceAfter=8)
+    h2 = ParagraphStyle("H2", fontSize=12, leading=15, textColor=ACCENT, fontName="Times-Bold", spaceBefore=13, spaceAfter=6)
+    body = ParagraphStyle("Body", fontSize=10.5, textColor=DARK, leading=16, fontName="Times-Roman")
+    subhead = ParagraphStyle("SubHead", fontSize=10.5, leading=16, textColor=DARK, fontName="Times-Bold", spaceBefore=8, spaceAfter=2)
+    bullet = ParagraphStyle("Bullet", fontSize=10.5, textColor=DARK, leading=16, fontName="Times-Roman",
+                             leftIndent=15, bulletIndent=0, spaceBefore=1, spaceAfter=1)
+    small = ParagraphStyle("Small", fontSize=9, leading=11, textColor=GRAY, fontName="Times-Italic")
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    story = _pdf_header_logo_flowables(cfg) + [
+        Paragraph(_esc(display_name), h1),
+        Paragraph(_esc(candidate.get("current_designation") or ""), sub),
+        HRFlowable(width="100%", thickness=1.4, color=ACCENT, spaceAfter=1.5),
+        HRFlowable(width="100%", thickness=0.5, color=ACCENT, spaceAfter=8),
+    ]
+
+    meta_bits = []
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(f"<b>Location:</b> {_esc(candidate['location'])}")
+    if candidate.get("total_exp_mo"):
+        meta_bits.append(f"<b>Experience:</b> {_esc(fmt_exp(candidate['total_exp_mo']))}")
+    if meta_bits:
+        story.append(Paragraph(" &nbsp;&nbsp;|&nbsp;&nbsp; ".join(meta_bits), body))
+    contact_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        contact_bits.append(f"<b>Mobile:</b> {_esc(candidate['phone'])}")
+    if cfg["show_email"] and candidate.get("email"):
+        contact_bits.append(f"<b>Email:</b> {_esc(candidate['email'])}")
+    if contact_bits:
+        story.append(Paragraph(" &nbsp;&nbsp;|&nbsp;&nbsp; ".join(contact_bits), body))
+
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        story.append(Paragraph(f"<b>Current Company:</b> {_esc(company_line)}", body))
+
+    skills = candidate.get("skills") or []
+    if skills:
+        story.append(Paragraph("KEY SKILLS", h2))
+        story.append(Paragraph(_esc(", ".join(skills)), body))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        story.append(Paragraph(heading, h2))
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+            elif kind == 'subhead':
+                story.append(Paragraph(_esc(line_text), subhead))
+            else:
+                story.append(Paragraph(_esc(line_text), body))
+
+    client_line = _client_line(client_name, cfg)
+    story.extend(_pdf_footer_flowables(cfg, client_line, small))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _render_docx_executive_header(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    BAND_TEXT = RGBColor(0xff, 0xff, 0xff)
+    PRIMARY = RGBColor(0x1e, 0x40, 0xaf)
+    DARK = RGBColor(0x0f, 0x17, 0x2a)
+
+    doc = Document()
+    for section in doc.sections:
+        section.left_margin = Cm(2.2)
+        section.right_margin = Cm(2.2)
+
+    _docx_header_logo(doc, cfg)
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    band = doc.add_table(rows=1, cols=1)
+    cell = band.rows[0].cells[0]
+    _shade_cell(cell, "1E3A5F")
+    cell.paragraphs[0].text = ""
+    p = cell.paragraphs[0]
+    r = p.add_run(display_name)
+    r.bold = True
+    r.font.size = Pt(20)
+    r.font.color.rgb = BAND_TEXT
+    if candidate.get("current_designation"):
+        p2 = cell.add_paragraph()
+        r2 = p2.add_run(candidate["current_designation"])
+        r2.font.size = Pt(12)
+        r2.font.color.rgb = RGBColor(0xcb, 0xd5, 0xe1)
+    doc.add_paragraph()
+
+    meta_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        meta_bits.append(f"Mobile: {candidate['phone']}")
+    if cfg["show_email"] and candidate.get("email"):
+        meta_bits.append(f"Email: {candidate['email']}")
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(f"Location: {candidate['location']}")
+    if candidate.get("total_exp_mo"):
+        meta_bits.append(f"Experience: {fmt_exp(candidate['total_exp_mo'])}")
+    if meta_bits:
+        doc.add_paragraph(" | ".join(meta_bits))
+
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        doc.add_paragraph(f"Current Company: {company_line}")
+
+    skills = candidate.get("skills") or []
+    if skills:
+        h = doc.add_paragraph()
+        r = h.add_run("KEY SKILLS")
+        r.bold = True
+        r.font.color.rgb = PRIMARY
+        doc.add_paragraph(", ".join(skills))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        h = doc.add_paragraph()
+        r = h.add_run(heading)
+        r.bold = True
+        r.font.color.rgb = PRIMARY
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                doc.add_paragraph(line_text, style='List Bullet')
+                continue
+            pp = doc.add_paragraph()
+            r = pp.add_run(line_text)
+            if kind == 'subhead':
+                r.bold = True
+                r.font.color.rgb = DARK
+
+    client_line = _client_line(client_name, cfg)
+    _docx_footer(doc, cfg, client_line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _render_docx_two_tone_header(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+
+    PRIMARY = RGBColor(0x1e, 0x40, 0xaf)
+    DARK = RGBColor(0x0f, 0x17, 0x2a)
+
+    doc = Document()
+    _docx_header_logo(doc, cfg)
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    table = doc.add_table(rows=1, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    left, right = table.rows[0].cells
+    left.width = Cm(11.5)
+    right.width = Cm(7)
+    _shade_cell(right, "EFF6FF")
+
+    left.paragraphs[0].text = ""
+    p = left.paragraphs[0]
+    r = p.add_run(display_name)
+    r.bold = True
+    r.font.size = Pt(18)
+    r.font.color.rgb = DARK
+    if candidate.get("current_designation"):
+        p2 = left.add_paragraph()
+        r2 = p2.add_run(candidate["current_designation"])
+        r2.bold = True
+        r2.font.size = Pt(11.5)
+        r2.font.color.rgb = PRIMARY
+
+    right.paragraphs[0].text = ""
+    right_lines = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        right_lines.append(candidate["phone"])
+    if cfg["show_email"] and candidate.get("email"):
+        right_lines.append(candidate["email"])
+    if cfg["show_location"] and candidate.get("location"):
+        right_lines.append(candidate["location"])
+    if candidate.get("total_exp_mo"):
+        right_lines.append(f"{fmt_exp(candidate['total_exp_mo'])} experience")
+    if right_lines:
+        rp = right.paragraphs[0]
+        rr = rp.add_run(right_lines[0])
+        rr.font.size = Pt(9)
+        for extra in right_lines[1:]:
+            rp2 = right.add_paragraph()
+            rr2 = rp2.add_run(extra)
+            rr2.font.size = Pt(9)
+
+    doc.add_paragraph()
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        doc.add_paragraph(f"Current Company: {company_line}")
+
+    skills = candidate.get("skills") or []
+    if skills:
+        h = doc.add_paragraph()
+        r = h.add_run("KEY SKILLS")
+        r.bold = True
+        r.font.color.rgb = PRIMARY
+        doc.add_paragraph(", ".join(skills))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        h = doc.add_paragraph()
+        r = h.add_run(heading)
+        r.bold = True
+        r.font.color.rgb = PRIMARY
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                doc.add_paragraph(line_text, style='List Bullet')
+                continue
+            pp = doc.add_paragraph()
+            r = pp.add_run(line_text)
+            if kind == 'subhead':
+                r.bold = True
+                r.font.color.rgb = DARK
+
+    client_line = _client_line(client_name, cfg)
+    _docx_footer(doc, cfg, client_line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _render_docx_timeline(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    ACCENT = RGBColor(0x0d, 0x94, 0x88)
+    DARK = RGBColor(0x0f, 0x17, 0x2a)
+
+    doc = Document()
+    _docx_header_logo(doc, cfg)
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(display_name)
+    r.bold = True
+    r.font.size = Pt(17)
+    r.font.color.rgb = DARK
+    if candidate.get("current_designation"):
+        p2 = doc.add_paragraph()
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p2.add_run(candidate["current_designation"])
+        r2.bold = True
+        r2.font.size = Pt(11)
+        r2.font.color.rgb = ACCENT
+
+    meta_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        meta_bits.append(f"Mobile: {candidate['phone']}")
+    if cfg["show_email"] and candidate.get("email"):
+        meta_bits.append(f"Email: {candidate['email']}")
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(f"Location: {candidate['location']}")
+    if meta_bits:
+        doc.add_paragraph(" | ".join(meta_bits))
+
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        doc.add_paragraph(f"Current Company: {company_line}")
+
+    skills = candidate.get("skills") or []
+    if skills:
+        h = doc.add_paragraph()
+        r = h.add_run("KEY SKILLS")
+        r.bold = True
+        r.font.color.rgb = ACCENT
+        doc.add_paragraph(", ".join(skills))
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        h = doc.add_paragraph()
+        r = h.add_run(heading)
+        r.bold = True
+        r.font.color.rgb = ACCENT
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                doc.add_paragraph(line_text, style='List Bullet')
+                continue
+            pp = doc.add_paragraph()
+            if kind == 'subhead':
+                r1 = pp.add_run("● ")
+                r1.font.color.rgb = ACCENT
+                r2 = pp.add_run(line_text)
+                r2.bold = True
+                r2.font.color.rgb = DARK
+            else:
+                pp.add_run(line_text)
+
+    client_line = _client_line(client_name, cfg)
+    _docx_footer(doc, cfg, client_line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _render_docx_compact_grid(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+
+    PRIMARY = RGBColor(0x1e, 0x40, 0xaf)
+    DARK = RGBColor(0x0f, 0x17, 0x2a)
+
+    doc = Document()
+    for section in doc.sections:
+        section.left_margin = Cm(2)
+        section.right_margin = Cm(2)
+
+    _docx_header_logo(doc, cfg)
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(display_name)
+    r.bold = True
+    r.font.size = Pt(16)
+    r.font.color.rgb = DARK
+    if candidate.get("current_designation"):
+        p2 = doc.add_paragraph()
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p2.add_run(candidate["current_designation"])
+        r2.bold = True
+        r2.font.size = Pt(10.5)
+        r2.font.color.rgb = PRIMARY
+
+    meta_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        meta_bits.append(candidate["phone"])
+    if cfg["show_email"] and candidate.get("email"):
+        meta_bits.append(candidate["email"])
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(candidate["location"])
+    if meta_bits:
+        mp = doc.add_paragraph()
+        mp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        mp.add_run(" • ".join(meta_bits)).font.size = Pt(9.5)
+
+    skills = (candidate.get("skills") or [])[:21]
+    if skills:
+        h = doc.add_paragraph()
+        r = h.add_run("KEY SKILLS")
+        r.bold = True
+        r.font.color.rgb = PRIMARY
+        cols = 3
+        rows = [skills[i:i + cols] for i in range(0, len(skills), cols)]
+        table = doc.add_table(rows=len(rows), cols=cols)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for ri, row in enumerate(rows):
+            for ci in range(cols):
+                cell = table.rows[ri].cells[ci]
+                cell.text = row[ci] if ci < len(row) else ""
+                for pp in cell.paragraphs:
+                    pp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for rr in pp.runs:
+                        rr.font.size = Pt(9)
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        h = doc.add_paragraph()
+        r = h.add_run(heading)
+        r.bold = True
+        r.font.color.rgb = PRIMARY
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                bp = doc.add_paragraph(line_text, style='List Bullet')
+                for rr in bp.runs:
+                    rr.font.size = Pt(9.5)
+                continue
+            pp = doc.add_paragraph()
+            r = pp.add_run(line_text)
+            r.font.size = Pt(9.5)
+            if kind == 'subhead':
+                r.bold = True
+                r.font.color.rgb = DARK
+
+    client_line = _client_line(client_name, cfg)
+    _docx_footer(doc, cfg, client_line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _render_docx_elegant_serif(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    ACCENT = RGBColor(0x7c, 0x2d, 0x12)
+    DARK = RGBColor(0x1c, 0x19, 0x17)
+    SERIF = "Times New Roman"
+
+    doc = Document()
+    for section in doc.sections:
+        section.left_margin = Cm(2.6)
+        section.right_margin = Cm(2.6)
+
+    _docx_header_logo(doc, cfg)
+
+    display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(display_name)
+    r.bold = True
+    r.font.size = Pt(20)
+    r.font.name = SERIF
+    r.font.color.rgb = DARK
+    if candidate.get("current_designation"):
+        p2 = doc.add_paragraph()
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p2.add_run(candidate["current_designation"])
+        r2.italic = True
+        r2.font.size = Pt(12)
+        r2.font.name = SERIF
+        r2.font.color.rgb = ACCENT
+
+    meta_bits = []
+    if cfg["show_location"] and candidate.get("location"):
+        meta_bits.append(f"Location: {candidate['location']}")
+    if candidate.get("total_exp_mo"):
+        meta_bits.append(f"Experience: {fmt_exp(candidate['total_exp_mo'])}")
+    if meta_bits:
+        mp = doc.add_paragraph()
+        mp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        rr = mp.add_run(" | ".join(meta_bits))
+        rr.font.name = SERIF
+
+    contact_bits = []
+    if cfg["show_mobile"] and candidate.get("phone"):
+        contact_bits.append(f"Mobile: {candidate['phone']}")
+    if cfg["show_email"] and candidate.get("email"):
+        contact_bits.append(f"Email: {candidate['email']}")
+    if contact_bits:
+        cp = doc.add_paragraph()
+        cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        rr = cp.add_run(" | ".join(contact_bits))
+        rr.font.name = SERIF
+
+    company_line = _company_line(candidate, cfg)
+    if company_line:
+        p3 = doc.add_paragraph()
+        r3 = p3.add_run(f"Current Company: {company_line}")
+        r3.font.name = SERIF
+
+    skills = candidate.get("skills") or []
+    if skills:
+        h = doc.add_paragraph()
+        r = h.add_run("KEY SKILLS")
+        r.bold = True
+        r.font.name = SERIF
+        r.font.color.rgb = ACCENT
+        sp = doc.add_paragraph()
+        sr = sp.add_run(", ".join(skills))
+        sr.font.name = SERIF
+
+    heading, text = _resolve_body_text(candidate, cfg)
+    if text.strip():
+        h = doc.add_paragraph()
+        r = h.add_run(heading)
+        r.bold = True
+        r.font.name = SERIF
+        r.font.color.rgb = ACCENT
+        for line_text, kind in _classify_lines(text):
+            if kind == 'bullet':
+                bp = doc.add_paragraph(line_text, style='List Bullet')
+                for rr in bp.runs:
+                    rr.font.name = SERIF
+                continue
+            pp = doc.add_paragraph()
+            r = pp.add_run(line_text)
+            r.font.name = SERIF
+            if kind == 'subhead':
+                r.bold = True
+                r.font.color.rgb = DARK
+
+    client_line = _client_line(client_name, cfg)
+    _docx_footer(doc, cfg, client_line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# Populated here, after every _render_pdf_*/_render_docx_* function above is
+# defined -- referenced by name (a dict literal, not a decorator), so the
+# order this module is imported in doesn't matter, only that this line runs
+# after the function defs above it, which it does by construction.
+_PDF_RENDERERS.update({
+    "classic": _render_pdf_classic,
+    "modern_sidebar": _render_pdf_sidebar,
+    "minimal_ats": _render_pdf_minimal,
+    "executive_header": _render_pdf_executive_header,
+    "two_tone_header": _render_pdf_two_tone_header,
+    "timeline": _render_pdf_timeline,
+    "compact_grid": _render_pdf_compact_grid,
+    "elegant_serif": _render_pdf_elegant_serif,
+})
+_DOCX_RENDERERS.update({
+    "classic": _render_docx_classic,
+    "modern_sidebar": _render_docx_sidebar,
+    "minimal_ats": _render_docx_minimal,
+    "executive_header": _render_docx_executive_header,
+    "two_tone_header": _render_docx_two_tone_header,
+    "timeline": _render_docx_timeline,
+    "compact_grid": _render_docx_compact_grid,
+    "elegant_serif": _render_docx_elegant_serif,
+})

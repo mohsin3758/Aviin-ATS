@@ -25,6 +25,22 @@ function OptBtn({ active, onClick, children }: { active: boolean; onClick: () =>
   );
 }
 
+// Small logo-position indicator reused across every theme's live preview —
+// mirrors where the real document's header logo will actually render
+// (left/right/hidden), not just a caption.
+function LogoChip({ position, dark }: { position: 'top_left' | 'top_right' | 'none'; dark?: boolean }) {
+  if (position === 'none') return null;
+  return (
+    <div style={{ display: 'flex', justifyContent: position === 'top_left' ? 'flex-start' : 'flex-end', marginBottom: '6px' }}>
+      <span style={{
+        fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '6px',
+        color: dark ? '#000' : '#1e40af', background: dark ? 'transparent' : '#eff6ff',
+        border: dark ? '1px solid #444' : 'none',
+      }}>🏢 AviinTech</span>
+    </div>
+  );
+}
+
 export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onClose }: Props) {
   const { data: templates } = useFetch<any[]>('/resume-generator/templates');
   const { data: visualThemes } = useFetch<any[]>('/resume-generator/visual-themes');
@@ -40,7 +56,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
   const [projectMode, setProjectMode] = useState<'include' | 'hide' | 'focus'>('include');
   const [clientNameMode, setClientNameMode] = useState<'show' | 'hide' | 'replace'>('hide');
   const [clientNameReplacement, setClientNameReplacement] = useState('');
-  const [visualTheme, setVisualTheme] = useState<'classic' | 'modern_sidebar' | 'minimal_ats'>('classic');
+  const [visualTheme, setVisualTheme] = useState<'classic' | 'modern_sidebar' | 'minimal_ats' | 'executive_header' | 'two_tone_header' | 'timeline' | 'compact_grid' | 'elegant_serif'>('classic');
   const [logoPosition, setLogoPosition] = useState<'top_left' | 'top_right' | 'none'>('top_right');
   const [outputFormat, setOutputFormat] = useState<'pdf' | 'docx'>('pdf');
 
@@ -296,11 +312,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                     )}
                   </div>
                   <div style={{ padding: '14px 16px', flex: 1, color: '#0f172a' }}>
-                    {logoPosition !== 'none' && (
-                      <div style={{ display: 'flex', justifyContent: logoPosition === 'top_left' ? 'flex-start' : 'flex-end', marginBottom: '6px' }}>
-                        <span style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', background: '#eff6ff', padding: '2px 8px', borderRadius: '6px' }}>🏢 AviinTech</span>
-                      </div>
-                    )}
+                    <LogoChip position={logoPosition} />
                     <div style={{ fontSize: '15px', fontWeight: 700 }}>{preview.display_name}</div>
                     {preview.designation && <div style={{ color: '#1e40af', fontWeight: 600, fontSize: '12px', marginBottom: '8px' }}>{preview.designation}</div>}
                     {preview.body_snippet && (
@@ -314,11 +326,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                 </div>
               ) : visualTheme === 'minimal_ats' ? (
                 <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#000' }}>
-                  {logoPosition !== 'none' && (
-                    <div style={{ display: 'flex', justifyContent: logoPosition === 'top_left' ? 'flex-start' : 'flex-end', marginBottom: '6px' }}>
-                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#000', border: '1px solid #444', padding: '2px 8px', borderRadius: '2px' }}>🏢 AviinTech</span>
-                    </div>
-                  )}
+                  <LogoChip position={logoPosition} dark />
                   <div style={{ fontSize: '14px', fontWeight: 700 }}>{preview.display_name}</div>
                   {preview.designation && <div style={{ fontSize: '12px', marginBottom: '6px' }}>{preview.designation}</div>}
                   <div style={{ borderTop: '1px solid #444', margin: '4px 0 8px' }} />
@@ -340,13 +348,131 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                   )}
                   {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#444' }}>Submitted for: {preview.client_line}</div>}
                 </div>
-              ) : (
+              ) : visualTheme === 'executive_header' ? (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden', fontSize: '12.5px', color: '#0f172a' }}>
+                  <LogoChip position={logoPosition} />
+                  <div style={{ background: '#1e3a5f', color: 'white', padding: '14px 16px' }}>
+                    <div style={{ fontSize: '17px', fontWeight: 700 }}>{preview.display_name}</div>
+                    {preview.designation && <div style={{ fontSize: '12px', color: '#cbd5e1', marginTop: '2px' }}>{preview.designation}</div>}
+                  </div>
+                  <div style={{ padding: '14px 16px' }}>
+                    {preview.company && <div style={{ fontSize: '11.5px', marginBottom: '6px' }}><b>Current Company:</b> {preview.company}</div>}
+                    {!!preview.skills?.length && (
+                      <div style={{ marginBottom: '8px' }}>
+                        <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>KEY SKILLS</div>
+                        <div style={{ fontSize: '11px', color: '#374151' }}>{preview.skills.join(', ')}</div>
+                      </div>
+                    )}
+                    {preview.body_snippet && (
+                      <div>
+                        <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>{preview.section_heading}</div>
+                        <div style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{preview.body_snippet}</div>
+                      </div>
+                    )}
+                    {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                  </div>
+                </div>
+              ) : visualTheme === 'two_tone_header' ? (
                 <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#0f172a' }}>
-                  {logoPosition !== 'none' && (
-                    <div style={{ display: 'flex', justifyContent: logoPosition === 'top_left' ? 'flex-start' : 'flex-end', marginBottom: '6px' }}>
-                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', background: '#eff6ff', padding: '2px 8px', borderRadius: '6px' }}>🏢 AviinTech</span>
+                  <LogoChip position={logoPosition} />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+                    <div>
+                      <div style={{ fontSize: '15px', fontWeight: 700 }}>{preview.display_name}</div>
+                      {preview.designation && <div style={{ color: '#1e40af', fontWeight: 600, fontSize: '12px', marginTop: '2px' }}>{preview.designation}</div>}
+                    </div>
+                    <div style={{ background: '#eff6ff', padding: '8px 10px', borderRadius: '6px', fontSize: '10.5px', minWidth: '110px' }}>
+                      {preview.mobile && <div>{preview.mobile}</div>}
+                      {preview.email && <div style={{ wordBreak: 'break-all' }}>{preview.email}</div>}
+                      {preview.location && <div>{preview.location}</div>}
+                    </div>
+                  </div>
+                  <div style={{ borderTop: '1.5px solid #1e40af', margin: '8px 0 8px' }} />
+                  {preview.company && <div style={{ fontSize: '11.5px', marginBottom: '6px' }}><b>Current Company:</b> {preview.company}</div>}
+                  {!!preview.skills?.length && (
+                    <div style={{ marginBottom: '8px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>KEY SKILLS</div>
+                      <div style={{ fontSize: '11px', color: '#374151' }}>{preview.skills.join(', ')}</div>
                     </div>
                   )}
+                  {preview.body_snippet && (
+                    <div>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>{preview.section_heading}</div>
+                      <div style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{preview.body_snippet}</div>
+                    </div>
+                  )}
+                  {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                </div>
+              ) : visualTheme === 'timeline' ? (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#0f172a' }}>
+                  <LogoChip position={logoPosition} />
+                  <div style={{ fontSize: '15px', fontWeight: 700, textAlign: 'center' }}>{preview.display_name}</div>
+                  {preview.designation && <div style={{ textAlign: 'center', color: '#0d9488', fontWeight: 600, fontSize: '12px', marginBottom: '8px' }}>{preview.designation}</div>}
+                  <div style={{ borderTop: '1.5px solid #0d9488', margin: '4px 0 8px' }} />
+                  {preview.company && <div style={{ fontSize: '11.5px', marginBottom: '6px' }}><b>Current Company:</b> {preview.company}</div>}
+                  {!!preview.skills?.length && (
+                    <div style={{ marginBottom: '8px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#0d9488', marginBottom: '3px' }}>KEY SKILLS</div>
+                      <div style={{ fontSize: '11px', color: '#374151' }}>{preview.skills.join(', ')}</div>
+                    </div>
+                  )}
+                  {preview.body_snippet && (
+                    <div>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#0d9488', marginBottom: '3px' }}>● {preview.section_heading}</div>
+                      <div style={{ borderTop: '1px solid #cbd5e1', marginBottom: '4px' }} />
+                      <div style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{preview.body_snippet}</div>
+                    </div>
+                  )}
+                  {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                </div>
+              ) : visualTheme === 'compact_grid' ? (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px', fontSize: '11.5px', color: '#0f172a' }}>
+                  <LogoChip position={logoPosition} />
+                  <div style={{ fontSize: '14px', fontWeight: 700, textAlign: 'center' }}>{preview.display_name}</div>
+                  {preview.designation && <div style={{ textAlign: 'center', color: '#1e40af', fontWeight: 600, fontSize: '11px', marginBottom: '6px' }}>{preview.designation}</div>}
+                  <div style={{ textAlign: 'center', fontSize: '10.5px', color: '#64748b', marginBottom: '6px' }}>
+                    {[preview.location, preview.mobile, preview.email].filter(Boolean).join(' • ')}
+                  </div>
+                  <div style={{ borderTop: '1px solid #1e40af', margin: '4px 0 8px' }} />
+                  {!!preview.skills?.length && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '4px', marginBottom: '8px' }}>
+                      {preview.skills.slice(0, 9).map((s: string) => (
+                        <div key={s} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '4px', padding: '3px 5px', textAlign: 'center', fontSize: '9.5px' }}>{s}</div>
+                      ))}
+                    </div>
+                  )}
+                  {preview.body_snippet && (
+                    <div>
+                      <div style={{ fontSize: '9.5px', fontWeight: 700, color: '#1e40af', marginBottom: '3px' }}>{preview.section_heading}</div>
+                      <div style={{ fontSize: '10px', color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.3 }}>{preview.body_snippet}</div>
+                    </div>
+                  )}
+                  {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10px', color: '#94a3b8', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                </div>
+              ) : visualTheme === 'elegant_serif' ? (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#1c1917', fontFamily: 'Georgia, "Times New Roman", serif' }}>
+                  <LogoChip position={logoPosition} />
+                  <div style={{ fontSize: '17px', fontWeight: 700, textAlign: 'center' }}>{preview.display_name}</div>
+                  {preview.designation && <div style={{ textAlign: 'center', color: '#7c2d12', fontStyle: 'italic', fontSize: '12px', marginBottom: '8px' }}>{preview.designation}</div>}
+                  <div style={{ borderTop: '1.5px solid #7c2d12', margin: '2px 0 1px' }} />
+                  <div style={{ borderTop: '0.5px solid #7c2d12', margin: '1px 0 8px' }} />
+                  {preview.company && <div style={{ fontSize: '11.5px', marginBottom: '6px' }}><b>Current Company:</b> {preview.company}</div>}
+                  {!!preview.skills?.length && (
+                    <div style={{ marginBottom: '8px' }}>
+                      <div style={{ fontSize: '10.5px', fontWeight: 700, color: '#7c2d12', marginBottom: '3px' }}>KEY SKILLS</div>
+                      <div style={{ fontSize: '11px', color: '#1c1917' }}>{preview.skills.join(', ')}</div>
+                    </div>
+                  )}
+                  {preview.body_snippet && (
+                    <div>
+                      <div style={{ fontSize: '10.5px', fontWeight: 700, color: '#7c2d12', marginBottom: '3px' }}>{preview.section_heading}</div>
+                      <div style={{ fontSize: '11px', color: '#1c1917', whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>{preview.body_snippet}</div>
+                    </div>
+                  )}
+                  {preview.client_line && <div style={{ marginTop: '10px', fontSize: '10.5px', color: '#78716c', fontStyle: 'italic' }}>Submitted for: {preview.client_line}</div>}
+                </div>
+              ) : (
+                <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', fontSize: '12.5px', color: '#0f172a' }}>
+                  <LogoChip position={logoPosition} />
                   <div style={{ fontSize: '15px', fontWeight: 700, textAlign: 'center' }}>{preview.display_name}</div>
                   {preview.designation && <div style={{ textAlign: 'center', color: '#1e40af', fontWeight: 600, fontSize: '12px', marginBottom: '8px' }}>{preview.designation}</div>}
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', color: '#64748b', fontSize: '11.5px', marginBottom: '6px', justifyContent: 'center' }}>

@@ -7650,3 +7650,96 @@ multi-page sidebar render is ~60KB; a truncated single colored page
 would be well under 20KB) plus a DOCX-sidebar-with-long-content
 generation check. Full S29 (16) + S30 (9) + S32 (5) = 30/30 passing.
 Zero-token audit: `CONFIRMED CLEAN` (377 files).
+
+## Resume Generator, round 10 same day: 5 more visual themes (8 total),
+## plus a real 100k-char cap regression found via genuine 95k+ testing,
+## 2026-08-18
+User asked for more resume-template samples covering the kinds of
+layouts seen in popular ATS-friendly and Canva-style resume builders,
+explicitly required to keep working correctly on long, 95,000+ character
+resumes spanning many pages.
+
+**5 new themes added** (`sql/68_resume_extra_visual_themes.sql` widens
+both tables' `visual_theme` CHECK constraint), bringing the total from 3
+to 8 — every one reuses the exact same shared content pipeline
+(`_resolve_body_text`/`_classify_lines`/`_merge_wrapped_lines`/
+`_pdf_header_logo_flowables`/`_docx_header_logo`/`_pdf_footer_flowables`/
+`_docx_footer`) the original 3 already use, so all of today's earlier
+fixes (auto-bulleting, wrapped-line merging, bold headers, real logo
+placement) apply to the new ones automatically, not just cosmetically
+copied:
+- **Executive Header** — a solid navy header band (name/title in white)
+  over a plain single-column ATS-parseable body. A common senior/
+  executive resume look.
+- **Two-Tone Professional** — name on the left, a shaded contact panel
+  on the right, single-column body below.
+- **Timeline Professional** — every role/section heading gets a colored
+  dot marker + a thin divider line right after it, giving a real
+  career-timeline feel without any per-row Table structure tied to
+  variable-length content.
+- **Compact Professional** — a real skills grid (a short, fixed-size
+  Table, capped the same way the sidebar theme's own skill list already
+  is) plus genuinely tighter body line-spacing (13pt leading vs 15pt
+  elsewhere) — a denser, more information-forward layout.
+- **Elegant Serif** — reportlab's built-in Times family (no external
+  font embedding needed, stays zero-token/self-contained) with a
+  double-rule header — a premium, editorial look.
+
+Every one of the 5 follows the same safety rule this project established
+earlier the same day for the Modern Sidebar rebuild: any colored/shaded
+element is a small, FIXED-size flowable that never grows with resume
+length (a short header Table, a bounded skills grid), while the actual
+body always flows as plain, uncapped paragraphs — so all 8 themes now
+genuinely support a full, unbounded-length resume across as many pages
+as it needs. `render_resume_pdf`/`render_resume_docx` were refactored
+from an if/elif chain to a `_PDF_RENDERERS`/`_DOCX_RENDERERS` dict
+dispatch (populated once, after all 16 renderer functions are defined)
+— a plain if/elif chain for 8 branches was getting unwieldy, and this
+scales cleanly for any future theme addition. `resume_generator.py`
+needed zero changes — its `_VALID_THEMES` import is already dynamic.
+Frontend: extracted the 3 themes' duplicated inline logo-chip JSX into
+one shared `LogoChip` component, then added 5 more live-preview blocks
+(one per new theme) to both the Resume Generator modal and the
+Candidates-list bulk-generate modal, each a genuine visual approximation
+of its real rendered output (colored band, shaded contact box, colored
+timeline dots, skills grid, serif typography) rather than falling back
+to a generic "looks like Classic" preview.
+
+**A real, serious bug found only because the verification used a
+genuinely large 95,000+ character document, not assumed safe from the
+56,689-char test earlier the same day**: generating ALL 8 themes
+(including the already-fixed classic/sidebar/minimal ones) against a
+real 102,474-character synthetic candidate produced documents that
+silently cut off mid-sentence at the identical point regardless of
+theme, well short of the real document's end. Root-caused to
+`extract_summary_section()`'s own internal safety cap (`improved_parser.
+py`) — raised from 20,000 to 100,000 earlier the same day after an
+almost identical bug at a smaller scale, but 102,474 > 100,000 made it
+the new binding limit within the same session. Rather than raise the
+number a third time (which would just recreate the identical bug at the
+next larger real resume), removed the cap entirely — the function's own
+existing docstring already said the real intended bound is the
+storage-time safety cap in `resume_intake_service.py`, not an arbitrary
+"readable length," so the code just needed to actually match that
+stated intent. Confirmed the manual/API candidate-creation path
+(`POST /candidates`, what this test used) has no length cap of its own
+on `resume_text` at all — genuinely unbounded end to end once this fix
+landed.
+
+Verified for real end-to-end, not code review: generated all 8 themes,
+both PDF and DOCX (16 combinations), against the real 102,474-character
+candidate — every one completed successfully; before the fix, every
+single one silently truncated mid-word at the identical spot; after the
+fix, every one contains the real, unique end-of-document marker exactly
+once, confirmed via direct text extraction, not just a file-size proxy.
+Rendered real page images for all 5 new themes (page 1 of each, plus a
+deep middle page for Timeline and the genuine last page for Compact
+Grid) — all render cleanly with zero alignment, spacing, or bullet
+issues at this scale, no degradation across dozens of pages. New
+permanent test coverage in "S29 AI Resume Generator": the theme-count
+assertion widened from 3 to 8, a new test generating all 5 new themes
+in both formats and confirming distinct file sizes, and a dedicated
+95,000+ character regression test that generates all 8 themes from one
+real candidate and asserts a real file-size floor ruling out silent
+truncation. Full S29 (18) + S30 (9) + S32 (5) = 32/32 passing.
+Zero-token audit: `CONFIRMED CLEAN`.

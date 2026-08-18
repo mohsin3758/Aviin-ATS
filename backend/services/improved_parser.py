@@ -749,19 +749,25 @@ def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
     a single section and drop everything after it."""
     if not text:
         return None
-    # REAL BUG FIX (2026-08-18): a 20,000-char cap here was "generous"
-    # relative to the render pipeline's OLD 2600-char snippet truncation,
-    # but became the binding limit the moment that render-time cap was
-    # removed (same day) -- confirmed on a real 22,596-char resume where
-    # this cap silently cut off the very last (earliest, 2008) employer.
-    # No render-time cap remains downstream, so this only needs to stay
-    # under the real storage-time safety cap (200,000 chars, _clean_text()
-    # in resume_intake_service.py) -- not a "readable length" bound.
+    # REAL BUG FIX (2026-08-18): this function used to slice its result to
+    # an arbitrary length -- 20,000 chars originally, raised to 100,000
+    # once the 20,000 cap silently cut off a real resume's last employer.
+    # The 100,000 cap itself then became the binding limit the very same
+    # day, confirmed on a real 102,474-char synthetic resume where every
+    # theme (old and new) truncated mid-sentence at the identical point,
+    # nowhere near the document's real end. Raising the number again would
+    # just recreate the identical bug at the next larger real resume --
+    # removed the cap entirely instead. There is no legitimate reason for
+    # THIS function to impose its own length bound at all: no render-time
+    # cap remains downstream (removed earlier the same day, across every
+    # theme), and storage-time already has its own real safety cap
+    # (_clean_text() in resume_intake_service.py) that this text has
+    # already passed through by the time it gets here.
     m = _SUMMARY_HEADING_RE.search(text)
     if m:
         section = text[m.end():].strip()
         if section:
-            return section[:100000]
+            return section
     # No explicit heading -- strip the leading name (+ up to 2 short
     # title/tagline lines) so the raw text isn't re-echoed verbatim.
     stripped = text
@@ -769,7 +775,7 @@ def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
         name_re = re.compile(r'^\s*' + re.escape(full_name) + r'\s*\n+', re.I | re.M)
         stripped = name_re.sub('', stripped, count=1)
     stripped = _LEADING_NAME_LINES_RE.sub('', stripped, count=1).strip()
-    return stripped[:100000] if stripped else None
+    return stripped or None
 
 
 def calc_confidence(parsed: dict) -> float:

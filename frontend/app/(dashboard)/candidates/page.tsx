@@ -133,7 +133,7 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
   const {data:visualThemes} = useFetch<any[]>('/resume-generator/visual-themes');
   const {data:logoPositionOptions} = useFetch<any[]>('/resume-generator/logo-position-options');
   const [templateId,setTemplateId] = useState('');
-  const [visualTheme,setVisualTheme] = useState<'classic'|'modern_sidebar'|'minimal_ats'>('classic');
+  const [visualTheme,setVisualTheme] = useState<'classic'|'modern_sidebar'|'minimal_ats'|'executive_header'|'two_tone_header'|'timeline'|'compact_grid'|'elegant_serif'>('classic');
   const [logoPosition,setLogoPosition] = useState<'top_left'|'top_right'|'none'>('top_right');
   const [outputFormat,setOutputFormat] = useState<'pdf'|'docx'>('pdf');
   const [generating,setGenerating] = useState(false);
