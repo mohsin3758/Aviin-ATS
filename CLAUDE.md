@@ -7518,3 +7518,81 @@ Logo"/"No Branding" buttons render) plus the existing Candidate-360
 Generate-Resume-button test extended to open the modal and check the
 same. Full S29 (16 tests) + S30 (9) + S32 (5) = 30/30 passing. Zero-token
 audit: `CONFIRMED CLEAN`.
+
+## Resume Generator, round 8 same day: logo moved from footer to header,
+## real top-left/top-right placement choice, 2026-08-18
+Direct follow-up to round 7, same real request thread — user's exact ask
+from a screenshot of the bottom-centered footer logo: the logo should sit
+at the top of the document, with both left and right placement selectable.
+
+Renamed `footer_branding` ('logo'|'none', added earlier the same day) to
+`logo_position` ('top_left'|'top_right'|'none') rather than adding a
+parallel field — `sql/67_resume_logo_position.sql` renames the column on
+both `resume_templates`/`generated_resumes`, swaps the CHECK constraint,
+and migrates existing `'logo'` rows to `'top_right'`. Same rename+swap
+wired through every site `footer_branding` had just been added to in
+`resume_generator.py` (validation, template CRUD, generate/bulk-generate,
+the options endpoint — renamed `/logo-position-options`).
+
+**Real deploy bug hit and fixed live, not just documented as a risk**:
+the migration's own data-migration `UPDATE` statements silently affected
+**0 rows** when run as `app_user` — both tables have FORCE ROW LEVEL
+SECURITY, and `app_user` had no `app.tenant_id` set for this plain
+`psql < file` invocation, so RLS filtered every row out before the
+`WHERE logo_position='logo'` clause ever ran. The subsequent
+`ADD CONSTRAINT` step still validates against the real, RLS-bypassing
+truth (DDL constraint checks don't go through RLS) and failed outright:
+`check constraint "..." is violated by some row`. Confirmed the real
+data via `psql -U postgres` (272 real `generated_resumes` rows, 8
+`resume_templates` rows, all still `'logo'`) and re-ran the UPDATE +
+ADD CONSTRAINT steps as `postgres`, which bypasses RLS entirely — same
+root cause and same fix as several other cross-tenant admin operations
+documented elsewhere in this file (`send_weekly_kpi_summary`,
+`run_pipeline_auto_move`, the Round-2 KAE-tenant client seed). Amended
+the migration file itself with an explicit "MUST be run as postgres"
+comment so this doesn't get rediscovered the hard way on a future
+fresh-environment deploy.
+
+**Rendering**: PDF via reportlab's native `Image.hAlign` (`"LEFT"`/
+`"RIGHT"`) on the very first flowable — no absolute positioning needed.
+DOCX via python-docx's paragraph `alignment` on the paragraph holding the
+picture run, inserted as the first paragraph. The Modern Sidebar theme
+needed different handling from the other two: its doc margins are all 0
+(a deliberate full-bleed design for the colored sidebar block), so a
+bare Image there would sit flush against the page edge — wrapped the
+header logo in its own one-cell reportlab `Table` purely for real
+left/right padding, matching this theme's own established idiom of
+using Table cell padding instead of doc margins for spacing. DOCX
+sidebar's header logo is inserted before `doc.add_table(...)` is called,
+same ordering principle.
+
+**Real overflow risk checked before calling it done, not assumed safe**:
+stacking a header logo on top of the Modern Sidebar theme's own
+already-tuned page-fit content cap (found and fixed earlier the same
+day — this theme is one reportlab Table row that cannot split across
+pages) could have reintroduced the exact "too large on page" crash from
+round 3. Verified directly with the heaviest real case: logo + a long
+replacement client name + the theme's full 1400-char content cap
+together — generation completed cleanly, and a rendered page image
+confirmed real, comfortable margin below the content, not a near-miss.
+
+Frontend: renamed state/fetch/labels throughout (`ResumeGeneratorModal`,
+the Candidates-list bulk-generate modal) — "Logo Position" section with
+Top Left / Top Right / No Logo buttons. The live-preview indicator moved
+from a small bottom-of-panel text line to a real top-aligned chip
+("🏢 AviinTech") positioned left/right/hidden matching `logoPosition`,
+in all 3 of the modal's preview layouts — genuinely mirrors where the
+logo will actually render in the real document, not just a caption.
+
+Verified for real end-to-end, not code review: real PDFs (classic
+theme) for `top_left` and `top_right` rendered to page images via
+`pdftoppm` both show the logo correctly positioned above the name at
+the requested side; a real DOCX inspected confirmed the embedded image
+part is present for a logo position and absent for `none`; the sidebar
+overflow case above; an invalid value cleanly 400s. New/updated
+permanent test coverage in "S29 AI Resume Generator" (renamed from the
+round-7 footer test — options-endpoint shape, distinct file sizes,
+the sidebar-with-logo non-overflow regression, the DOCX image-part
+check, invalid-value 400, and the modal's real Top Left/Top Right/No
+Logo buttons via headless browser). Full S29 (16) + S30 (9) + S32 (5) =
+30/30 passing. Zero-token audit: `CONFIRMED CLEAN` (376 files).

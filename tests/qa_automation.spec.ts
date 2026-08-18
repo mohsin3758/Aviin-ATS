@@ -3000,16 +3000,17 @@ test.describe.serial('S29 AI Resume Generator', () => {
     expect(draftBody.name).toContain('Rahul Sharma');
   });
 
-  test('Candidate 360: Generate Resume button renders, modal shows real Footer Branding options', async ({ page }) => {
+  test('Candidate 360: Generate Resume button renders, modal shows real Logo Position options', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', e => errors.push(e.message));
     await page.goto(`/candidates/${candId}`);
     const genBtn = page.getByRole('button', { name: /Generate Resume/i });
     await expect(genBtn).toBeVisible({ timeout: 15000 });
     await genBtn.click();
-    await expect(page.getByText('Footer Branding')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole('button', { name: 'AVIIN Tech Logo' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'No Branding' })).toBeVisible();
+    await expect(page.getByText('Logo Position')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: 'Top Left' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Top Right' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'No Logo' })).toBeVisible();
     expect(errors).toHaveLength(0);
   });
 
@@ -3050,31 +3051,41 @@ test.describe.serial('S29 AI Resume Generator', () => {
     expect(invalid.status()).toBe(400);
   });
 
-  test('footer branding: logo vs none produce distinct real documents, no fixed text line either way', async ({ request }) => {
+  test('logo position: top_left/top_right/none, real header placement, no fixed footer text line', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-    const opts = await request.get(`${API}/resume-generator/footer-branding-options`, { headers: auth });
+    const opts = await request.get(`${API}/resume-generator/logo-position-options`, { headers: auth });
     expect(opts.ok()).toBeTruthy();
-    expect((await opts.json()).map((o: any) => o.id).sort()).toEqual(['logo', 'none']);
+    expect((await opts.json()).map((o: any) => o.id).sort()).toEqual(['none', 'top_left', 'top_right']);
 
     const withLogo = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
-      headers: auth, data: { template_id: noContactTplId, footer_branding: 'logo', output_format: 'pdf' },
+      headers: auth, data: { template_id: noContactTplId, logo_position: 'top_left', output_format: 'pdf' },
     });
-    const noBranding = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
-      headers: auth, data: { template_id: noContactTplId, footer_branding: 'none', output_format: 'pdf' },
+    const noLogo = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth, data: { template_id: noContactTplId, logo_position: 'none', output_format: 'pdf' },
     });
-    expect(withLogo.ok() && noBranding.ok()).toBeTruthy();
-    const [logoBody, noneBody] = await Promise.all([withLogo.json(), noBranding.json()]);
-    expect(logoBody.footer_branding).toBe('logo');
-    expect(noneBody.footer_branding).toBe('none');
-    // The embedded logo image genuinely adds bytes over the no-branding document.
+    expect(withLogo.ok() && noLogo.ok()).toBeTruthy();
+    const [logoBody, noneBody] = await Promise.all([withLogo.json(), noLogo.json()]);
+    expect(logoBody.logo_position).toBe('top_left');
+    expect(noneBody.logo_position).toBe('none');
+    // The embedded logo image genuinely adds bytes over the no-logo document.
     expect(logoBody.file_size).toBeGreaterThan(noneBody.file_size);
 
+    // Real regression check for the heaviest real combination found during
+    // manual verification: the modern_sidebar theme's whole layout is one
+    // reportlab Table row that cannot split across pages -- a header logo
+    // stacked on top of its own already-tuned content cap could overflow.
+    const sidebarWithLogo = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth, data: { template_id: noContactTplId, visual_theme: 'modern_sidebar', logo_position: 'top_right', output_format: 'pdf' },
+    });
+    expect(sidebarWithLogo.ok()).toBeTruthy();
+    expect((await sidebarWithLogo.json()).generation_status).toBe('completed');
+
     // DOCX with a logo genuinely embeds an image part in the zip archive;
-    // DOCX with no branding does not.
+    // DOCX with no logo does not.
     const docxLogo = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
-      headers: auth, data: { template_id: noContactTplId, footer_branding: 'logo', output_format: 'docx' },
+      headers: auth, data: { template_id: noContactTplId, logo_position: 'top_right', output_format: 'docx' },
     });
     const dl = await docxLogo.json();
     const dlDownload = await request.get(`${API}/resume-generator/${dl.id}/download`, { headers: auth });
@@ -3082,7 +3093,7 @@ test.describe.serial('S29 AI Resume Generator', () => {
     expect(dlBytes.includes('word/media/image1')).toBeTruthy();
 
     const invalid = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
-      headers: auth, data: { template_id: noContactTplId, footer_branding: 'bogus', output_format: 'pdf' },
+      headers: auth, data: { template_id: noContactTplId, logo_position: 'bottom_center', output_format: 'pdf' },
     });
     expect(invalid.status()).toBe(400);
   });

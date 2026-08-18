@@ -124,20 +124,19 @@ DEFAULT_CONFIG = {
     "client_name_mode": "hide",     # show | hide | replace
     "client_name_replacement": None,
     "visual_theme": "classic",      # classic | modern_sidebar | minimal_ats
-    "footer_branding": "logo",      # logo | none
+    "logo_position": "top_right",   # none | top_left | top_right
 }
 
-# Real improvement (2026-08-18): the footer used to be a fixed
-# "Generated via AVIIN ATS" text line on every document, with no way to
-# turn it off or replace it with the company's real logo -- the same
-# AVIIN Tech logo asset + reportlab Image-flowable pattern already
-# established for call letters/offer letters. footer_branding="logo"
-# renders it (PDF via reportlab's Image flowable, DOCX via python-docx's
-# add_picture -- both sized to the file's real 730x342 aspect ratio so it
-# never looks stretched, matching call_letters.py's own convention);
-# "none" renders no branding at all. The "Submitted for: <client>" line
-# (job-specific generation context, unrelated to branding) still renders
-# either way when a client name is configured to show.
+# Real improvement (2026-08-18, round 2): the logo was first added to the
+# document FOOTER (replacing an earlier fixed "Generated via AVIIN ATS"
+# text line) -- moved to a real page-HEADER placement per direct user
+# feedback, with a genuine left/right choice rather than one fixed spot.
+# "none" renders no logo at all. Same AVIIN Tech logo asset + sizing-by-
+# real-aspect-ratio convention already established for call letters/offer
+# letters (PDF via reportlab's Image flowable with hAlign; DOCX via
+# python-docx's Run.add_picture with the containing paragraph's
+# alignment). The "Submitted for: <client>" line (job-specific generation
+# context, unrelated to logo placement) stays in the footer, unaffected.
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "aviintech-logo.png")
 
 # Real, distinct visual layouts a recruiter can pick between — separate
@@ -158,11 +157,12 @@ VISUAL_THEMES = [
 ]
 _VALID_THEMES = {t["id"] for t in VISUAL_THEMES}
 
-FOOTER_BRANDING_OPTIONS = [
-    {"id": "logo", "label": "AVIIN Tech Logo", "description": "Show the company logo in the footer."},
-    {"id": "none", "label": "No Branding", "description": "No logo or branding text in the footer."},
+LOGO_POSITION_OPTIONS = [
+    {"id": "top_left", "label": "Top Left", "description": "AVIIN Tech logo in the header, aligned left."},
+    {"id": "top_right", "label": "Top Right", "description": "AVIIN Tech logo in the header, aligned right."},
+    {"id": "none", "label": "No Logo", "description": "No logo anywhere in the document."},
 ]
-_VALID_FOOTER_BRANDING = {o["id"] for o in FOOTER_BRANDING_OPTIONS}
+_VALID_LOGO_POSITIONS = {o["id"] for o in LOGO_POSITION_OPTIONS}
 
 
 _BULLET_ONLY_LINE_RE = re.compile(r'^[ \t]*[•❖◆●○■♦\-\*][ \t]*$', re.M)
@@ -373,39 +373,58 @@ def _client_line(client_name: Optional[str], config: dict) -> Optional[str]:
     return client_name
 
 
-def _pdf_footer_flowables(cfg: dict, client_line: Optional[str], small_style) -> list:
-    """Shared footer builder for all 3 PDF renderers: the real AVIIN Tech
-    logo (footer_branding="logo") or nothing at all ("none"), plus the
-    "Submitted for: <client>" line when a client name is configured to
-    show -- independent of the branding choice."""
+def _pdf_header_logo_flowables(cfg: dict) -> list:
+    """Real improvement (2026-08-18, round 2): the logo moved from the
+    footer to the page header per direct user feedback, with a genuine
+    left/right placement choice -- reportlab's Image flowable already
+    supports hAlign natively, so a real top-left/top-right header is just
+    the image as the very first flowable with hAlign set accordingly (no
+    absolute positioning/canvas tricks needed). Returns [] for
+    logo_position="none" or a missing asset file."""
+    pos = cfg.get("logo_position", "top_right")
+    if pos not in ("top_left", "top_right") or not os.path.exists(LOGO_PATH):
+        return []
     from reportlab.lib.units import cm
-    from reportlab.platypus import Image, Paragraph, Spacer
-    flows: list = [Spacer(1, 0.5 * cm)]
-    if cfg.get("footer_branding", "logo") == "logo" and os.path.exists(LOGO_PATH):
-        logo_w = 2.6 * cm
-        logo_h = logo_w * (342 / 730)
-        img = Image(LOGO_PATH, width=logo_w, height=logo_h)
-        img.hAlign = "CENTER"
-        flows.append(img)
-    if client_line:
-        flows.append(Paragraph(_esc(f"Submitted for: {client_line}"), small_style))
-    return flows
+    from reportlab.platypus import Image, Spacer
+    logo_w = 2.6 * cm
+    logo_h = logo_w * (342 / 730)
+    img = Image(LOGO_PATH, width=logo_w, height=logo_h)
+    img.hAlign = "LEFT" if pos == "top_left" else "RIGHT"
+    return [img, Spacer(1, 0.25 * cm)]
+
+
+def _docx_header_logo(doc, cfg: dict) -> None:
+    """DOCX analogue of _pdf_header_logo_flowables above -- python-docx
+    positions an inline picture via the containing paragraph's own
+    alignment (LEFT/RIGHT), inserted as the very first paragraph in the
+    document."""
+    pos = cfg.get("logo_position", "top_right")
+    if pos not in ("top_left", "top_right") or not os.path.exists(LOGO_PATH):
+        return
+    from docx.shared import Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT if pos == "top_left" else WD_ALIGN_PARAGRAPH.RIGHT
+    p.add_run().add_picture(LOGO_PATH, width=Cm(2.6))
+
+
+def _pdf_footer_flowables(cfg: dict, client_line: Optional[str], small_style) -> list:
+    """The footer now only ever carries the "Submitted for: <client>"
+    line (job-specific generation context) -- the logo lives in the
+    header, see _pdf_header_logo_flowables above."""
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, Spacer
+    if not client_line:
+        return []
+    return [Spacer(1, 0.5 * cm), Paragraph(_esc(f"Submitted for: {client_line}"), small_style)]
 
 
 def _docx_footer(doc, cfg: dict, client_line: Optional[str], *, italic: bool = True,
                   centered: bool = True, size: float = 9, color=None) -> None:
-    """DOCX analogue of _pdf_footer_flowables above -- python-docx's
-    add_picture, sized to the logo's real aspect ratio, matching the
-    reportlab Image approach used for PDF. Text style kwargs match each
-    theme's own pre-existing footer look (classic/sidebar: italic,
-    centered; minimal: plain, gray, left-aligned)."""
-    from docx.shared import Pt, Cm
+    """DOCX analogue of _pdf_footer_flowables above -- text-only now, the
+    logo lives in the header (_docx_header_logo)."""
+    from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    if cfg.get("footer_branding", "logo") == "logo" and os.path.exists(LOGO_PATH):
-        logo_w = Cm(2.6)
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.add_run().add_picture(LOGO_PATH, width=logo_w)
     if client_line:
         fp = doc.add_paragraph()
         if centered:
@@ -477,7 +496,7 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
                              leftIndent=14, bulletIndent=0, spaceBefore=1, spaceAfter=1)
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
-    story = [
+    story = _pdf_header_logo_flowables(cfg) + [
         Paragraph(_esc(display_name), h1),
         Paragraph(_esc(candidate.get("current_designation") or ""), sub),
         HRFlowable(width="100%", thickness=1.2, color=PRIMARY, spaceAfter=6),
@@ -649,7 +668,30 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
         ("TOPPADDING", (0, 0), (-1, 0), 0), ("BOTTOMPADDING", (0, 0), (-1, 0), 0),
         ("VALIGN", (0, 0), (-1, 0), "TOP"),
     ]))
-    doc.build([table])
+
+    # Real improvement (2026-08-18, round 2): this theme's doc margins are
+    # all 0 (a deliberate full-bleed design for the colored sidebar block)
+    # -- a bare Image flowable would sit flush against the page edge with
+    # no breathing room, so the header logo gets wrapped in its own real
+    # one-cell Table purely for real left/right padding, matching this
+    # theme's own established idiom of controlling spacing via Table
+    # padding rather than doc margins.
+    header_flows = []
+    logo_pos = cfg.get("logo_position", "top_right")
+    if logo_pos in ("top_left", "top_right") and os.path.exists(LOGO_PATH):
+        logo_w = 2.6 * cm
+        logo_h = logo_w * (342 / 730)
+        from reportlab.platypus import Image
+        logo_img = Image(LOGO_PATH, width=logo_w, height=logo_h)
+        logo_img.hAlign = "LEFT" if logo_pos == "top_left" else "RIGHT"
+        header_row = Table([[logo_img]], colWidths=[page_w])
+        header_row.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0.9 * cm), ("RIGHTPADDING", (0, 0), (-1, -1), 0.9 * cm),
+            ("TOPPADDING", (0, 0), (-1, -1), 0.6 * cm), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.3 * cm),
+        ]))
+        header_flows = [header_row]
+
+    doc.build(header_flows + [table])
     return buf.getvalue()
 
 
@@ -683,7 +725,7 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
     small = ParagraphStyle("Small", fontSize=8.5, leading=10.5, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
-    story = [Paragraph(_esc(display_name), h1)]
+    story = _pdf_header_logo_flowables(cfg) + [Paragraph(_esc(display_name), h1)]
     if candidate.get("current_designation"):
         story.append(Paragraph(_esc(candidate["current_designation"]), sub))
     story.append(HRFlowable(width="100%", thickness=0.6, color=GRAY, spaceAfter=8))
@@ -760,6 +802,8 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
 
     doc = Document()
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+
+    _docx_header_logo(doc, cfg)
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -876,6 +920,8 @@ def _render_docx_sidebar(candidate: dict, cfg: dict, client_name: str = None) ->
         section.left_margin = Cm(1)
         section.right_margin = Cm(1)
 
+    _docx_header_logo(doc, cfg)
+
     table = doc.add_table(rows=1, cols=2)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
@@ -976,6 +1022,8 @@ def _render_docx_minimal(candidate: dict, cfg: dict, client_name: str = None) ->
 
     doc = Document()
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
+
+    _docx_header_logo(doc, cfg)
 
     p = doc.add_paragraph()
     r = p.add_run(display_name)
