@@ -561,19 +561,38 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
 
 
 def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
-    """A real 2-column layout: a shaded left sidebar (contact + key skills)
-    built as a Table cell, a white main column (name/title header + the
-    resolved summary/projects body) as the other cell. reportlab Tables are
-    the standard way to get a true multi-column layout — Frames/columns on
-    SimpleDocTemplate can't independently color one column's background."""
+    """A real 2-column layout on page 1: a shaded left sidebar (contact +
+    key skills), a white main column (name/title header + the resolved
+    summary/projects body). Real fix (2026-08-18, round 3): this used to be
+    ONE reportlab Table row -- which cannot split across pages -- so any
+    resume too long for a single page silently got hard-truncated at a
+    fixed character count with a trailing "…", regardless of how much real
+    content the candidate actually had. Direct user report: this reads as
+    broken, not "intentionally condensed." Rebuilt on BaseDocTemplate with
+    two real PageTemplates instead of a single Table: page 1 keeps the
+    colored sidebar (drawn via onPage, not a Table cell background) next to
+    a main-column Frame; a FrameBreak() moves from the sidebar frame into
+    the main frame, and a NextPageTemplate('Continuation') queued right
+    after it means any content that overflows page 1's main frame flows
+    onto plain, full-width, sidebar-free continuation pages -- the same
+    "cover page then flowing content" idiom reportlab's own docs use for
+    exactly this case. No content is ever cut short and no page count is
+    capped; a short resume still renders as a clean single page, a long one
+    genuinely spans as many pages as it needs, matching how the classic and
+    minimal themes already behave."""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import cm
     from reportlab.lib import colors
-    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle)
+    from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, FrameBreak,
+                                     NextPageTemplate, Paragraph, Spacer)
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=0, rightMargin=0, topMargin=0, bottomMargin=1.2 * cm)
+    page_w, page_h = A4
+    sidebar_w = page_w * 0.32
+    main_w = page_w - sidebar_w
+    bottom_margin = 1.2 * cm
+
     SIDEBAR_BG = colors.HexColor("#1e3a5f")
     SIDEBAR_TEXT = colors.HexColor("#e8eef5")
     SIDEBAR_ACCENT = colors.HexColor("#7fb3e0")
@@ -581,27 +600,21 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
     PRIMARY = colors.HexColor("#1e40af")
     GRAY = colors.HexColor("#64748b")
 
-    # REAL BUG FIX (2026-08-18): see the identical fix + explanation in
-    # _render_pdf_classic above -- every style here missing an explicit
-    # `leading` defaulted to reportlab's fixed 12pt regardless of fontSize.
     sb_label = ParagraphStyle("SbLabel", fontSize=9, leading=11, textColor=SIDEBAR_ACCENT, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=4)
     sb_body = ParagraphStyle("SbBody", fontSize=9, textColor=SIDEBAR_TEXT, leading=13, fontName="Helvetica")
     m_name = ParagraphStyle("MName", fontSize=20, leading=24, textColor=DARK, fontName="Helvetica-Bold", spaceAfter=4)
     m_title = ParagraphStyle("MTitle", fontSize=12, leading=15, textColor=PRIMARY, fontName="Helvetica-Bold", spaceAfter=14)
     m_h2 = ParagraphStyle("MH2", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=6)
     m_body = ParagraphStyle("MBody", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
-    # Real improvement (2026-08-18): bold in-body sub-headings, matching
-    # the identical addition in _render_pdf_classic above.
     m_subhead = ParagraphStyle("MSubHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
-    # Real improvement (2026-08-18): hanging-indent bullets, matching the
-    # identical addition in _render_pdf_classic above.
     m_bullet = ParagraphStyle("MBullet", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica",
                                leftIndent=12, bulletIndent=0, spaceBefore=1, spaceAfter=1)
     small = ParagraphStyle("Small", fontSize=8, leading=10, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
 
-    # ── Sidebar cell content ──
+    # ── Sidebar frame content (page 1 only, fixed-length -- contact/skills
+    # never realistically overflow a page on their own) ──
     sidebar = [Spacer(1, 1.2 * cm)]
     sidebar.append(Paragraph("CONTACT", sb_label))
     if cfg["show_mobile"] and candidate.get("phone"):
@@ -622,31 +635,22 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
         sidebar.append(Paragraph("KEY SKILLS", sb_label))
         for s in skills[:18]:
             sidebar.append(Paragraph(f"• {_esc(s)}", sb_body))
-    sidebar.append(Spacer(1, 1 * cm))
 
-    # ── Main column content ──
-    main = [Spacer(1, 1.2 * cm), Paragraph(_esc(display_name), m_name)]
+    # ── Main column content -- real header logo (inline, not a separate
+    # Table row, since it now lives inside the flowing main frame) + name/
+    # title + the FULL resolved body, no length cap. ──
+    header_logo = _pdf_header_logo_flowables(cfg)
+    if header_logo:
+        main = [Spacer(1, 0.8 * cm)] + header_logo + [Spacer(1, 0.2 * cm)]
+    else:
+        main = [Spacer(1, 1.2 * cm)]
+    main.append(Paragraph(_esc(display_name), m_name))
     if candidate.get("current_designation"):
         main.append(Paragraph(_esc(candidate["current_designation"]), m_title))
     heading, text = _resolve_body_text(candidate, cfg)
     if text.strip():
         main.append(Paragraph(heading, m_h2))
-        # REAL BUG FIX (2026-08-18): unlike the classic/minimal themes,
-        # this theme's sidebar+main layout is ONE reportlab Table row --
-        # reportlab cannot split a single Table row across pages, so an
-        # uncapped (or insufficiently capped) body throws "too large on
-        # page N" and generation fails outright. The main column is
-        # narrower than a full-width page (~68%), so it wraps into
-        # meaningfully more lines per character than the classic theme's
-        # full-width column -- confirmed empirically that even 2600 chars
-        # still overflowed a page here; 1400 reliably fits with real
-        # header/sidebar content alongside it. A sidebar/infographic-style
-        # resume is conventionally a single-page format by design anyway
-        # (unlike the classic/minimal themes, which render a traditional
-        # flowing resume and were deliberately left uncapped this same
-        # day) -- not an attempt at true multi-page two-column pagination.
-        snippet = text[:1400] + ("…" if len(text) > 1400 else "")
-        for line_text, kind in _classify_lines(snippet):
+        for line_text, kind in _classify_lines(text):
             if kind == 'bullet':
                 main.append(Paragraph(_esc(line_text), m_bullet, bulletText='•'))
             elif kind == 'subhead':
@@ -656,42 +660,32 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
     client_line = _client_line(client_name, cfg)
     main.extend(_pdf_footer_flowables(cfg, client_line, small))
 
-    page_w = A4[0]
-    sidebar_w = page_w * 0.32
-    main_w = page_w - sidebar_w
-    table = Table([[sidebar, main]], colWidths=[sidebar_w, main_w])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, 0), SIDEBAR_BG),
-        ("BACKGROUND", (1, 0), (1, 0), colors.white),
-        ("LEFTPADDING", (0, 0), (0, 0), 0.9 * cm), ("RIGHTPADDING", (0, 0), (0, 0), 0.7 * cm),
-        ("LEFTPADDING", (1, 0), (1, 0), 1.2 * cm), ("RIGHTPADDING", (1, 0), (1, 0), 1.2 * cm),
-        ("TOPPADDING", (0, 0), (-1, 0), 0), ("BOTTOMPADDING", (0, 0), (-1, 0), 0),
-        ("VALIGN", (0, 0), (-1, 0), "TOP"),
-    ]))
+    def _draw_sidebar_bg(canvas, _doc):
+        canvas.saveState()
+        canvas.setFillColor(SIDEBAR_BG)
+        canvas.rect(0, 0, sidebar_w, page_h, fill=1, stroke=0)
+        canvas.restoreState()
 
-    # Real improvement (2026-08-18, round 2): this theme's doc margins are
-    # all 0 (a deliberate full-bleed design for the colored sidebar block)
-    # -- a bare Image flowable would sit flush against the page edge with
-    # no breathing room, so the header logo gets wrapped in its own real
-    # one-cell Table purely for real left/right padding, matching this
-    # theme's own established idiom of controlling spacing via Table
-    # padding rather than doc margins.
-    header_flows = []
-    logo_pos = cfg.get("logo_position", "top_right")
-    if logo_pos in ("top_left", "top_right") and os.path.exists(LOGO_PATH):
-        logo_w = 2.6 * cm
-        logo_h = logo_w * (342 / 730)
-        from reportlab.platypus import Image
-        logo_img = Image(LOGO_PATH, width=logo_w, height=logo_h)
-        logo_img.hAlign = "LEFT" if logo_pos == "top_left" else "RIGHT"
-        header_row = Table([[logo_img]], colWidths=[page_w])
-        header_row.setStyle(TableStyle([
-            ("LEFTPADDING", (0, 0), (-1, -1), 0.9 * cm), ("RIGHTPADDING", (0, 0), (-1, -1), 0.9 * cm),
-            ("TOPPADDING", (0, 0), (-1, -1), 0.6 * cm), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.3 * cm),
-        ]))
-        header_flows = [header_row]
+    sidebar_frame = Frame(0, 0, sidebar_w, page_h, leftPadding=0.9 * cm, rightPadding=0.7 * cm,
+                           topPadding=0, bottomPadding=0, id="sidebar", showBoundary=0)
+    main_frame = Frame(sidebar_w, bottom_margin, main_w, page_h - bottom_margin,
+                        leftPadding=1.2 * cm, rightPadding=1.2 * cm, topPadding=0, bottomPadding=0,
+                        id="main", showBoundary=0)
+    cont_frame = Frame(2.2 * cm, 2 * cm, page_w - 4.4 * cm, page_h - 4 * cm, id="cont", showBoundary=0)
 
-    doc.build(header_flows + [table])
+    doc = BaseDocTemplate(buf, pagesize=A4)
+    doc.addPageTemplates([
+        PageTemplate(id="First", frames=[sidebar_frame, main_frame], onPage=_draw_sidebar_bg),
+        PageTemplate(id="Continuation", frames=[cont_frame]),
+    ])
+
+    # Paragraph flowables wrap dynamically against whatever frame they end
+    # up rendered into -- the same m_body/m_bullet/m_subhead styles used
+    # above read correctly whether a given paragraph lands in page 1's
+    # narrower main frame or a wider continuation frame; only the wrap
+    # width changes, not the font metrics.
+    story = sidebar + [FrameBreak(), NextPageTemplate("Continuation")] + main
+    doc.build(story)
     return buf.getvalue()
 
 
@@ -986,14 +980,15 @@ def _render_docx_sidebar(candidate: dict, cfg: dict, client_name: str = None) ->
         r = h.add_run(heading)
         r.bold = True
         r.font.color.rgb = PRIMARY
-        # REAL BUG FIX (2026-08-18): kept capped, matching the PDF sidebar
-        # renderer -- a sidebar/infographic-style layout is a one-page
-        # design by convention (unlike the classic/minimal themes, which
-        # render a traditional flowing resume and were deliberately left
-        # uncapped this same day). Keeps PDF/DOCX output consistent for
-        # the same theme rather than one paginating and the other not.
-        snippet = text[:2600] + ("…" if len(text) > 2600 else "")
-        for line_text, kind in _classify_lines(snippet):
+        # REAL FIX (2026-08-18, round 3): no longer capped. Unlike a
+        # reportlab PDF Table (which cannot split a row across pages, the
+        # reason the PDF sidebar renderer was rebuilt on real multi-page
+        # Frames this same round), a python-docx table's row is allowed to
+        # break across pages in Word by default (no cantSplit set) -- so
+        # this single-row 2-column table already handles long content
+        # correctly without any special-casing, matching the PDF version's
+        # new real-pagination behavior instead of silently truncating.
+        for line_text, kind in _classify_lines(text):
             if kind == 'bullet':
                 right.add_paragraph(line_text, style='List Bullet')
                 continue

@@ -3140,14 +3140,31 @@ test.describe.serial('S29 AI Resume Generator', () => {
     // 2600-char render cap -- all fixed the same day).
     expect(classicBody.file_size).toBeGreaterThan(6000);
 
-    // The sidebar theme's 2-column Table layout cannot split across pages
-    // -- must generate successfully (not 500) against the SAME long text
-    // that would have crashed it before the 2026-08-18 per-theme cap fix.
+    // Real regression check for the 2026-08-18 round-3 rebuild: the sidebar
+    // theme used to be one reportlab Table row (can't split across pages),
+    // hard-capped at 1400 chars with a trailing "…" -- rebuilt on real
+    // BaseDocTemplate PageTemplates (colored sidebar on page 1, plain
+    // full-width continuation pages) so long content now genuinely
+    // paginates instead of truncating. A real multi-page render of this
+    // filler is ~60KB; a truncated single colored page tops out well under
+    // 20KB, so this is a real, if indirect, signal that full content
+    // rendered, not just "didn't crash."
     const sidebar = await request.post(`${API}/resume-generator/candidates/${longCandId}/generate`, {
       headers: auth, data: { visual_theme: 'modern_sidebar', output_format: 'pdf' },
     });
     expect(sidebar.ok()).toBeTruthy();
-    expect((await sidebar.json()).generation_status).toBe('completed');
+    const sidebarBody = await sidebar.json();
+    expect(sidebarBody.generation_status).toBe('completed');
+    expect(sidebarBody.file_size).toBeGreaterThan(20000);
+
+    // Same long text through the DOCX sidebar renderer -- python-docx table
+    // rows split across pages natively in Word (no cantSplit set), so this
+    // must also generate successfully with no special-casing needed.
+    const sidebarDocx = await request.post(`${API}/resume-generator/candidates/${longCandId}/generate`, {
+      headers: auth, data: { visual_theme: 'modern_sidebar', output_format: 'docx' },
+    });
+    expect(sidebarDocx.ok()).toBeTruthy();
+    expect((await sidebarDocx.json()).generation_status).toBe('completed');
   });
 });
 

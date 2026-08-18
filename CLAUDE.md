@@ -7596,3 +7596,57 @@ the sidebar-with-logo non-overflow regression, the DOCX image-part
 check, invalid-value 400, and the modal's real Top Left/Top Right/No
 Logo buttons via headless browser). Full S29 (16) + S30 (9) + S32 (5) =
 30/30 passing. Zero-token audit: `CONFIRMED CLEAN` (376 files).
+
+## Resume Generator, round 9 same day: Modern Sidebar theme genuinely
+## rebuilt to paginate instead of hard-truncating, 2026-08-18
+Direct follow-up, same real thread. User pasted a screenshot of the live
+preview and said the Modern Sidebar format was "not correct, not
+aligned, not full, and all pages generated" — pointing at the same
+"…" truncation this theme had carried since round 2 of today's earlier
+work (a deliberate design choice at the time: this theme's whole layout
+was one reportlab Table row, which cannot split across pages, so a
+1400-char cap was the only way to guarantee it wouldn't crash). Every
+other theme was already fixed to show full, real, unbounded content
+today — this was the one remaining place a real candidate's resume
+still got cut short with an ellipsis.
+
+**Real fix, not another cap adjustment**: rebuilt `_render_pdf_sidebar`
+from a `SimpleDocTemplate` + single `Table` onto a real `BaseDocTemplate`
+with two `PageTemplate`s — the standard reportlab idiom for "cover page,
+then flowing content." Page 1 keeps two `Frame`s (a colored sidebar
+frame, painted via a real `onPage` canvas callback instead of a Table
+cell background, and a main-column frame); a `FrameBreak()` moves the
+story from the sidebar frame into the main frame, and a queued
+`NextPageTemplate("Continuation")` means any content that overflows
+page 1's main frame automatically continues onto plain, full-width,
+sidebar-free pages — no length cap, no page-count cap. A short resume
+still renders as one clean page; a long one now genuinely spans as many
+pages as it needs, exactly like the classic and minimal themes already
+did. The DOCX sidebar renderer's matching 2600-char cap was removed too
+— python-docx table rows split across pages in Word natively (no
+`cantSplit` is ever set), so the cap was solving a PDF-only problem
+that never actually applied to DOCX.
+
+Also investigated, from the same screenshot, whether the CONTACT
+section's apparent emptiness was a bug — checked the real candidate's
+DB record directly and confirmed they genuinely have no stored phone/
+email/location at all, so the blank section was correct behavior on
+sparse real data, not a rendering defect. Left untouched.
+
+Verified for real end-to-end, not code review: regenerated the exact
+candidate/config from the user's screenshot — real 8-page PDF (was
+capped at 1 page with "…"), confirmed via `pdftotext` the final page
+ends on the candidate's real earliest/last employer with no truncation
+marker anywhere. Rendered 3 real page images: page 1 shows the colored
+sidebar + header logo + content flowing cleanly to the bottom margin
+(no longer stopping at an arbitrary character count); page 2 is a
+genuine plain continuation page with normal margins and zero leftover
+sidebar coloring; the final page ends the document cleanly. Confirmed
+the DOCX sidebar version with the same long content generates
+successfully and its table cells contain the real, complete text
+through the last employer. New file-size-based regression assertions
+added to the existing "dense multi-page resume" S29 test (a real
+multi-page sidebar render is ~60KB; a truncated single colored page
+would be well under 20KB) plus a DOCX-sidebar-with-long-content
+generation check. Full S29 (16) + S30 (9) + S32 (5) = 30/30 passing.
+Zero-token audit: `CONFIRMED CLEAN` (377 files).
