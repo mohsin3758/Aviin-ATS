@@ -76,17 +76,32 @@ class BulkAction(BaseModel):
 # ── KPI Metrics ───────────────────────────────────────────────────────────────
 @metrics_router.get("/metrics")
 async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_actor)):
+    # REAL BUG FIX (2026-08-18): none of these queries filtered is_active at
+    # all — the Dashboard's "Candidate Pipeline Overview" stage cards summed
+    # every application ever created, including ones tied to soft-deleted
+    # (QA/test/demo) candidates: raw applications=1313 vs. only 387 tied to
+    # a real active candidate. Same candidate-level filter convention already
+    # established in GET /analytics/hiring-funnel (candidate-only, not also
+    # requisition — a candidate's own current stage stays meaningful even if
+    # the requisition they applied to has since closed/been removed).
     async with db.tenant_conn(actor.tenant_id) as conn:
-        total      = await conn.fetchval("SELECT COUNT(*) FROM candidates") or 0
+        total      = await conn.fetchval("SELECT COUNT(*) FROM candidates WHERE is_active IS NOT FALSE") or 0
         if req_id:
             stage_rows = await conn.fetch(
-                "SELECT stage, COUNT(*) as cnt FROM applications WHERE requisition_id=$1::uuid GROUP BY stage",
+                """SELECT a.stage, COUNT(*) as cnt FROM applications a
+                   JOIN candidates c ON c.id=a.candidate_id
+                   WHERE a.requisition_id=$1::uuid AND c.is_active IS NOT FALSE GROUP BY a.stage""",
                 req_id)
             total = await conn.fetchval(
-                "SELECT COUNT(DISTINCT candidate_id) FROM applications WHERE requisition_id=$1::uuid",
+                """SELECT COUNT(DISTINCT a.candidate_id) FROM applications a
+                   JOIN candidates c ON c.id=a.candidate_id
+                   WHERE a.requisition_id=$1::uuid AND c.is_active IS NOT FALSE""",
                 req_id) or 0
         else:
-            stage_rows = await conn.fetch("SELECT stage, COUNT(*) as cnt FROM applications WHERE 1=1 GROUP BY stage")
+            stage_rows = await conn.fetch(
+                """SELECT a.stage, COUNT(*) as cnt FROM applications a
+                   JOIN candidates c ON c.id=a.candidate_id
+                   WHERE c.is_active IS NOT FALSE GROUP BY a.stage""")
 
         # Pre-seed from this tenant's live stage config (includes custom
         # stages), not the fixed STAGES list — same bug class fixed in
@@ -118,18 +133,18 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
         rev = await conn.fetchval("""
             SELECT COALESCE(SUM(c.expected_ctc),0) FROM candidates c
             JOIN applications a ON a.candidate_id=c.id
-            WHERE a.stage NOT IN ('placed','rejected')""") or 0
+            WHERE c.is_active IS NOT FALSE AND a.stage NOT IN ('placed','rejected')""") or 0
 
         stuck = await conn.fetchval("""
-            SELECT COUNT(*) FROM applications
-            WHERE stage NOT IN ('placed','rejected')
-            AND updated_at < NOW() - INTERVAL '7 days'""") or 0
+            SELECT COUNT(*) FROM applications a JOIN candidates c ON c.id=a.candidate_id
+            WHERE c.is_active IS NOT FALSE AND a.stage NOT IN ('placed','rejected')
+            AND a.updated_at < NOW() - INTERVAL '7 days'""") or 0
 
         upcoming = interview  # matches Kanban interview column(s): l1 + l2
 
         high_pri = await conn.fetchval("""
-            SELECT COUNT(*) FROM applications
-            WHERE fit_score > 0.7 AND stage NOT IN ('placed','rejected')""") or 0
+            SELECT COUNT(*) FROM applications a JOIN candidates c ON c.id=a.candidate_id
+            WHERE c.is_active IS NOT FALSE AND a.fit_score > 0.7 AND a.stage NOT IN ('placed','rejected')""") or 0
 
         return {
             "total_candidates":    int(total),

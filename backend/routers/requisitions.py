@@ -253,6 +253,17 @@ async def delete_requisition(
         row = await conn.fetchval(
             "UPDATE requisitions SET is_active=false, updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING id",
             requisition_id, actor.tenant_id)
+        if row:
+            # REAL BUG FIX (2026-08-18): archiving a requisition never
+            # resolved its recruiter's still-'active' assignment row -
+            # v_recruiter_capacity counted it as live utilization forever,
+            # inflating every recruiter's Dashboard "capacity" indefinitely.
+            # 'completed' (not deleted) - the assignment stays as a real
+            # audit-trail row, it just stops counting as ongoing work.
+            await conn.execute(
+                "UPDATE assignments SET status='completed', updated_at=now() "
+                "WHERE requisition_id=$1 AND tenant_id=$2 AND status='active'",
+                requisition_id, actor.tenant_id)
     if not row:
         raise HTTPException(404, "Requisition not found")
     return {"ok": True}

@@ -6871,3 +6871,87 @@ left-aligned black text). Added 3 new permanent tests to the existing
 generation + an invalid-theme 400, and a real UI picker/preview-switch
 click-through) — full S29 suite (15 tests) and the full QA suite both
 re-run clean. Zero-token audit: `CONFIRMED CLEAN`.
+
+## Dashboard "Recruiter Capacity" + "Candidate Pipeline Overview": 2 real
+## unfiltered-query bugs found and fixed, 2026-08-18
+User pointed at a live Dashboard screenshot: `QA Test Recruiter` (the
+project's permanent test-login fixture) showing 3/40 utilization, and
+"Candidate Pipeline Overview" showing implausibly large stage counts
+(Screened 424, Submitted 195, L1 Interview 92). Investigated both real
+questions ("why does this test account show up" and "why are these
+numbers so big") before touching anything, and found two genuinely
+separate, real bugs — not one.
+
+**Bug 1 — `v_recruiter_capacity` counted assignments regardless of
+whether the requisition they pointed at was still active.** Confirmed
+live: all 3 of `QA Test Recruiter`'s "active" assignments pointed at
+soft-deleted/closed test requisitions; `khan mer` showed 6/40 utilization
+but all 6 were stale the same way; `mohsin3786` showed 7/56 but 6 of 7
+were stale — this wasn't a QA-data-only problem, it was a structural gap
+affecting every real recruiter, since nothing in this codebase ever
+resolved an `assignments` row when its requisition was later closed or
+soft-deleted. `sql/65_recruiter_capacity_stale_assignments.sql` — a
+one-time cleanup resolves every existing stale `active` assignment to
+`completed` (not deleted — it stays as a real audit-trail row; not
+`reassigned`, which would misrepresent it as a handoff that never
+happened) — 25 rows fixed tenant-wide, not just the 3+6+6 spot-checked.
+`CREATE OR REPLACE VIEW v_recruiter_capacity` now requires
+`r.is_active IS NOT FALSE` in the same `FILTER` clause that already
+required `a.status='active'`. Also fixed `DELETE /requisitions/{id}`
+(`requisitions.py`) to resolve any of that requisition's still-`active`
+assignments to `completed` in the same request — the permanent, forward-
+looking half of the fix, so this can't silently recur every time a
+future requisition gets archived.
+
+**Bug 2 — `GET /pipeline/metrics` (backs the Dashboard's Candidate
+Pipeline Overview and the Pipeline Velocity page) had zero `is_active`
+filtering anywhere**, unlike its sibling `/analytics/hiring-funnel`
+(fixed back on 2026-08-09) — a completely separate endpoint that was
+simply never touched by that earlier sweep. Confirmed live: raw
+`applications` count was 1313, but only 387 belonged to a real active
+candidate. Fixed every query in `get_pipeline_metrics()`
+(`pipeline_p2.py`) — `total_candidates`, `by_stage` (both the tenant-wide
+and the `req_id`-scoped branch), `revenue_potential`, `stuck_candidates`,
+and `high_priority` — to join `candidates` and require
+`c.is_active IS NOT FALSE`, matching hiring-funnel's own established
+candidate-only (not also requisition-active) filtering convention
+exactly, rather than inventing a stricter definition. Also soft-deleted
+one genuinely leftover `QA S19 Candidate ...` row (a real leak from an
+earlier same-day test run that hit the well-documented login-rate-limit
+cascade before its own cleanup could run).
+
+**A real, separate finding surfaced along the way, not fixed as code**:
+`QA Test Recruiter` was found deactivated (`is_active=false`) at the
+moment of investigation — not caused by anything in this fix (nothing
+touched here writes `users.is_active`), and the exact same "this
+permanent fixture keeps going inactive under heavy same-day testing"
+pattern already documented once earlier this project. Reactivated via
+the real `PATCH /users/{id}/activate` API, matching established
+precedent (many suites depend on this account being able to log in) —
+flagged to the user rather than silently left deactivated, since leaving
+it off would have "fixed" their symptom by accident rather than by
+design.
+
+**A real test-methodology mistake caught by my own verification, not
+the app**: running S16's "requisition soft-delete" test in isolation via
+a `-g` filter produced a genuine 500 (`invalid UUID 'undefined'`) —
+looked exactly like a regression from the `DELETE /requisitions/{id}`
+edit. Traced it to the filter itself: S16 is `test.describe.serial(...)`
+(converted on 2026-08-09 specifically so a retry replays the whole
+block), and grep-filtering to just one test skips the block's own
+`setup` test that populates the shared `reqId` — nothing to do with the
+code change. Re-ran the full S16 block (7/7 passed) to confirm.
+
+Verified for real end-to-end, not code review: `GET /analytics/
+recruiter-capacity` before/after showed `khan mer`/`Beta Admin`/
+reactivated `QA Test Recruiter` all correctly at 0/40, `mohsin3786`
+correctly at 1/56 (its one real assignment, SAP ABAP Developer, untouched
+by the cleanup since that requisition is still genuinely open); `GET
+/pipeline/metrics` went from `total_candidates:799` / `screened:424` /
+`submitted:195` / `l1_interview:92` to `798` / `195` / `7` / `4` after
+the stray-candidate cleanup and the query fix; a real headless-browser
+screenshot of the live Dashboard confirmed the Recruiter Capacity bars
+render correctly with zero console errors. S16 (7/7), S30 (10/10), and
+a scoped S8/S13/S1/S2 dashboard-adjacent run (19/19 total) all passed
+clean after deploying. Zero-token audit and full local/VPS commit sync
+pending in the same batch as this entry.
