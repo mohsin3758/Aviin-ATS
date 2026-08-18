@@ -21,8 +21,19 @@ from services.improved_parser import parse_resume_v2, extract_skills_from_text, 
 
 
 def _clean_text(text: str) -> str:
-    """Remove null bytes and control characters that PostgreSQL rejects."""
-    return (text or '').replace('\x00', ' ').replace('\r', ' ')[:5000]
+    """Remove null bytes and control characters that PostgreSQL rejects.
+    REAL BUG FIX (2026-08-18): this silently truncated EVERY resume's
+    stored resume_text to 5000 chars, mid-sentence, regardless of the
+    resume's real length -- confirmed on a real 7-page, dense multi-role
+    resume where the cut landed partway through the FIRST section
+    (Professional Summary), discarding the entire Professional Experience/
+    Education/Certifications content that followed. candidates.resume_text
+    is a plain TEXT column with no DB-level size limit, so there was never
+    a real reason for this cap -- it silently loses real candidate data on
+    every dense multi-page resume, not just this one. Kept a generous
+    200,000-char safety cap (not zero) purely against a corrupted/garbage
+    file producing pathological output, not as a normal-resume limit."""
+    return (text or '').replace('\x00', ' ').replace('\r', ' ')[:200000]
 
 
 # ─── Phase 1: Source Detection ────────────────────────────────────────────────
@@ -873,11 +884,23 @@ async def process_email_for_resume(
         file_path = save_resume_file(att_data, tenant_id, fn)
         resume_text = extract_text_from_attachment(att_data, mt, fn).replace('\x00', ' ')
         body_text_clean = body_text.replace('\x00', ' ')
-        full_text = (resume_text + '\n' + body_text_clean)[:6000]
+        # REAL BUG FIX (2026-08-18): full_text used to be capped at 6000
+        # chars and that SAME capped value fed both the document classifier
+        # AND parse_resume_v2()'s real field extraction. For a dense multi-
+        # page resume, the actual "Employer: X" / experience section can sit
+        # well past 6000 chars -- confirmed live: a real 7-page SAP resume's
+        # employer field, 20000+ chars into the document, was never even
+        # seen by the parser, regardless of any regex fix, because the text
+        # feeding it had already been truncated before extraction ran.
+        # Classification only ever needs a representative sample (fast,
+        # cheap, doesn't need the whole doc); real field extraction needs
+        # the complete text.
+        full_text = resume_text + '\n' + body_text_clean
+        classify_sample = full_text[:6000]
 
         # ── Phase A: Document Classification ──────────────────────────
         # REJECT invoices, bank statements, forms BEFORE creating candidates
-        doc_result = classify_document(full_text, fn)
+        doc_result = classify_document(classify_sample, fn)
         if not doc_result.is_resume and doc_result.decision == 'REJECT':
             print(f'[DocClassifier] REJECT {doc_result.doc_class} (conf={doc_result.confidence}) {fn[:40]}')
             await conn.execute(

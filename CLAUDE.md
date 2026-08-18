@@ -7037,3 +7037,120 @@ Resume Generator" suite (15/15) and S30/S32 (14/14) re-run clean — the
 both sit inside functions those suites already exercise end-to-end,
 confirming no regression on the existing summary-extraction/masking/
 redaction behavior.
+
+## Resume Generator: severe data-loss bug found via a real 7-page resume
+## — a hardcoded 5000-char intake truncation, an over-aggressive section
+## cutoff, and 3 more false-positive skills, 2026-08-18
+Same day, direct follow-up. User attached a real 7-page, dense SAP FICO
+consultant resume and a screenshot showing the Resume Generator had
+produced almost nothing: "Company: Most recent employer not specified in
+the resume text" and only a ~150-word snippet, with the entire multi-role
+Professional Experience section (2008-2026, 8 employers) gone. This was
+categorically worse than the earlier same-day bugs — not misformatted
+content, but the near-total loss of a real resume's content. Investigated
+against the real stored data and real code rather than guessing; found
+4 distinct, compounding real bugs.
+
+**Bug 1 — a hardcoded 5000-char cap silently truncated EVERY resume's
+stored text at intake, mid-sentence, for as long as this function has
+existed.** `_clean_text()` (`resume_intake_service.py`) — its own comment
+says "Remove null bytes and control characters that PostgreSQL rejects,"
+but it also sliced `[:5000]`, with no relation to that stated purpose.
+Confirmed `candidates.resume_text` is a plain `TEXT` column with no DB-
+level size limit at all — there was never a real reason for this cap.
+This candidate's stored `resume_text` was genuinely only ~5KB (roughly
+1-2 pages) against a real 7-page document, cutting off mid-word inside
+the very first section. This is a foundational, previously-undiscovered
+bug affecting every resume over 5KB of extracted text — not rare for a
+detailed multi-page professional resume — silently losing real candidate
+data on ingestion itself, not just in downstream rendering. Widened the
+cap to 200,000 chars (a generous safety bound against a corrupted/
+garbage file, not a normal-resume limit).
+
+**Bug 2 — even setting bug 1 aside, real field EXTRACTION was separately
+capped at 6000 chars, so anything past that point was invisible to the
+parser regardless of what got stored.** `full_text` (the email-intake
+code path) fed BOTH the document classifier AND `parse_resume_v2()`'s
+real regex-based field extraction from the same 6000-char-capped string.
+For this resume, the real "Employer: Bramasol" line sits ~20,000+ chars
+into the document (after Functional Skills, Education, Certifications,
+Domain Experience) — never reachable by the parser at that cap, no matter
+how correct the extraction regex itself was. Split into two variables:
+`classify_sample` (still 6000 chars — classification only needs a
+representative excerpt) feeds the classifier; the real, uncapped
+`full_text` now feeds `parse_resume_v2()`. `parse_with_ollama()`'s own
+separate, pre-existing 3500-char prompt cap (a deliberate, reasonable
+constraint for a local small LLM's context/latency) was left untouched —
+out of scope, not broken by this fix.
+
+**Bug 3 — a real design flaw in the SAME-DAY `extract_summary_section()`
+fix from earlier today.** That fix correctly stopped the "duplicated
+name/title/heading" bug, but did so by capturing only up to the next
+recognized section header — meaning for any WELL-STRUCTURED resume (one
+with a real, distinct "Professional Summary" section followed by real
+"Professional Experience"/"Education"/"Certifications" sections), the
+generated document showed ONLY the summary paragraph and silently
+dropped everything else. The renderer has exactly one narrative body
+block and already caps it to a readable length at render time (2600
+chars) — this function's real job was always just to strip the
+duplicated leading header, never to isolate one section and discard the
+rest. Removed the section-boundary-stopping loop entirely; now returns
+everything after the heading (capped at a generous 20,000 chars, well
+above what the render-time cap will ever need).
+
+**Bug 4 — `extract_company_v2()` had no pattern for a bare "Employer:"
+field label** (only "current company:"/"present employer:"/"working at/
+with X"), which is exactly what this resume uses, once per role, newest-
+first. Added a pattern that stops before a trailing date-range colon
+(`"Employer: Bramasol: August 2025- April 2026"` -> `"Bramasol"`).
+
+**3 more false-positive skills found while verifying the above, same root
+cause as the "Spring/REST/SAP MM/Jenkins" fix earlier today (the
+canonical dict key itself gets auto-registered as a matchable keyword,
+regardless of the alias list) — each renamed, same pattern:**
+- `'Swift'` -> `'Swift (iOS)'` — matched "SWIFT" the banking wire-
+  transfer protocol (this resume: "...ACH, SWIFT, EDI, PMW, DMEE...").
+  Also narrowed the bare `'swift'` alias itself to `'swiftui'`/`'swift
+  programming'` — renaming just the alias wasn't sufficient, same lesson
+  as Spring/REST.
+- `'Shell'` -> `'Shell Scripting'` — matched "Shell" the real client name
+  ("Client: Shell, Bangalore, India"), even though the alias list itself
+  was already narrow (bash/ksh/zsh/powershell, no bare "shell").
+- `'Go'` -> `'Go (Golang)'` — matched "Go-Live" (a phrase repeated many
+  times on this project-management-heavy resume: "System Cutover
+  (Go-Live)", "Go-Live Support") — the hyphen still counts as a word
+  boundary for the matcher.
+Checked the DB-backed `skills_taxonomy` layer too (the second layer fixed
+for Spring/REST/SAP MM earlier today) — confirmed clean for all 3 (Swift
+already had only a narrow `{swiftui}` alias there, Shell/Go aren't in
+that table at all) — this round's false positives were Python-dict-only.
+
+**Flagged, not exhaustively fixed**: this is now the 7th confirmed
+instance of the same "generic-word canonical key" bug class in one day
+(Spring Boot, REST API, SAP MM, Jenkins, Shell Scripting, Swift (iOS), Go
+(Golang)). Fixed every instance actually found via real bug reports, not
+a blind audit of the full `TECH_SKILLS` dict (100+ entries) — a
+dedicated, deliberate pass auditing every canonical key for common-
+English-word collisions would close this bug class proactively rather
+than one report at a time, but wasn't undertaken in this session.
+
+Corrected this specific candidate's stored record directly, using the
+complete, real resume text from the actual attached PDF (all 7 pages) —
+`resume_text` (22,596 chars, was ~5,000), `current_employer` ("Bramasol"),
+`skills` (11 accurate entries, was `SAP FICO, SAP HANA, LSMW, Go, Project
+Management` with 2 of those already stale/false).
+
+Verified for real end-to-end, not code review: ran the exact fixed
+extraction functions directly against the complete real resume text
+before touching any database row — `company: 'Bramasol'`, a clean
+11-skill list with zero false positives, and a 20,000-char summary
+correctly containing both "Employer: Bramasol" (page 4) and "IBM India"
+(page 7, the earliest/last-listed role) in the same extracted body,
+proving the section-cutoff fix genuinely restores the full document, not
+just a bigger snippet. Regenerated a real PDF post-fix and confirmed via
+pdfminer: "Current Company: Bramasol," a clean accurate skills line, and
+"PROFESSIONAL SUMMARY" now flowing into real Experience-section content
+(3022 extracted chars, up from a ~150-word fragment). Real headless-
+browser screenshot confirmed the same visually. Full "S29 AI Resume
+Generator" + S30 + S32 suites (29/29) re-run clean after all 4 code
+changes plus the 3 skill renames.

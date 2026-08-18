@@ -90,15 +90,36 @@ TECH_SKILLS = {
     'TypeScript': ['typescript', 'ts'],
     'C#': ['c#', 'c sharp', '.net', 'asp.net', 'dotnet'],
     'C++': ['c++', 'cpp', 'c plus plus'],
-    'Go': ['golang', 'go lang'],
+    # REAL BUG FIX (2026-08-18): canonical key "Go" was auto-registered as
+    # a matchable keyword (same root cause as Spring/REST/Shell/Swift
+    # above) despite the alias list already being narrow -- false-matched
+    # "Go-Live" (a phrase repeated many times on a real SAP/project-
+    # management resume: "System Cutover (Go-Live)", "Go-Live Support")
+    # since the hyphen still counts as a word boundary. Renamed the key;
+    # alias list unchanged.
+    'Go (Golang)': ['golang', 'go lang'],
     'Rust': ['rust', 'rust lang'],
     'PHP': ['php', 'laravel', 'symfony'],
     'Ruby': ['ruby', 'ruby on rails', 'ror', 'rails'],
     'Kotlin': ['kotlin'],
-    'Swift': ['swift', 'ios'],
+    # REAL BUG FIX (2026-08-18): the alias list's bare 'swift' false-matched
+    # "SWIFT" the banking/finance wire-transfer protocol (a real resume:
+    # "...ACH, SWIFT, EDI, PMW, DMEE...") -- extremely common vocabulary on
+    # SAP/Finance/Banking resumes. Renaming just the alias wasn't enough --
+    # the canonical key "Swift" itself gets auto-registered as a matchable
+    # keyword regardless of the alias list (same root cause as the Spring/
+    # REST/Shell fixes), so the key itself had to move too. 'ios' alone
+    # still catches genuine iOS-dev mentions.
+    'Swift (iOS)': ['swiftui', 'swift programming', 'ios'],
     'R': ['r language', 'r programming', 'rstudio'],
     'Scala': ['scala', 'scala spark'],
-    'Shell': ['bash', 'shell script', 'shell scripting', 'ksh', 'zsh', 'powershell'],
+    # REAL BUG FIX (2026-08-18): the alias list here was already narrow
+    # (no bare 'shell'), but the canonical key ITSELF ("Shell") gets
+    # auto-registered as a matchable keyword regardless of its alias list
+    # -- the same root cause as the earlier same-day Spring/REST fix. On a
+    # real SAP resume, "Shell" is a CLIENT NAME (Shell Oil), not the
+    # scripting skill. Renamed to match what the alias list actually means.
+    'Shell Scripting': ['bash', 'shell script', 'shell scripting', 'ksh', 'zsh', 'powershell'],
     'SQL': ['sql', 'mysql', 'postgresql', 'pl/sql', 'plsql', 't-sql', 'tsql'],
 
     # Cloud Platforms
@@ -483,6 +504,13 @@ def extract_company_v2(text: str) -> Optional[str]:
         r'current\s+(?:company|employer|organization)\s*[:\-]\s*([^\n]{3,60})',
         r'(?:working\s+(?:at|with)|employed\s+at)\s*[:\-]?\s*([^\n,]{3,60}?)(?=\s+(?:as|since|from)\b|[,\-–|]|\n|$)',
         r'present\s+(?:company|employer)\s*[:\-]\s*([^\n]{3,60})',
+        # A bare "Employer: X" field label -- found via a real resume with
+        # a repeated "Employer: <name>: <date range>" block per role, listed
+        # newest-first; re.search finds the FIRST (= most recent) one. The
+        # capture excludes ':' so it stops before a trailing date-range
+        # colon (e.g. "Employer: Bramasol: August 2025- April 2026" ->
+        # "Bramasol", not the whole date-range tail).
+        r'\bemployer\s*[:\-]\s*([^\n:]{3,60})',
     ]:
         m = re.search(pat, text_lower)
         if m:
@@ -697,36 +725,35 @@ _LEADING_NAME_LINES_RE = re.compile(
 
 
 def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
-    """Isolate just the narrative summary paragraph, the same way
+    """Strip the duplicated leading name/title/heading block, the same way
     extract_projects_section() isolates Projects -- REAL BUG FIX
     (2026-08-18): the Resume Generator used to render the *entire* raw
     resume_text (name, title, its own "PROFESSIONAL SUMMARY" heading,
     and everything after) as the body under a template-rendered
     "PROFESSIONAL SUMMARY" heading, producing a visibly duplicated
-    name/title/heading block on every generated resume. Finds a
-    standalone Summary/Profile/Objective heading and captures until the
-    next recognized section header. If no such heading exists, falls
-    back to stripping just the leading name/title lines (not guessing
-    at a summary boundary) so at least the duplication is gone, even
-    for resumes with no explicit Summary section."""
+    name/title/heading block on every generated resume.
+
+    SECOND REAL BUG FIX (2026-08-18, same day): the first version of this
+    fix additionally stopped capturing at the next recognized section
+    header (e.g. "Professional Experience") once a Summary/Profile/
+    Objective heading was found -- correctly removing the duplication, but
+    also silently discarding the ENTIRE rest of the resume for any well-
+    structured document. Confirmed live on a real 7-page, dense multi-role
+    resume: only the opening "Professional Summary" paragraph survived in
+    the generated PDF, and the entire employment history, skills
+    breakdown, education, and certifications vanished. The renderer only
+    ever shows ONE narrative body block (no separate Experience/Education/
+    Skills sections exist in the template) and already caps it to a
+    readable length at render time (2600 chars) -- this function's real
+    job is just to strip the duplicated leading header, never to isolate
+    a single section and drop everything after it."""
     if not text:
         return None
     m = _SUMMARY_HEADING_RE.search(text)
     if m:
-        start = m.end()
-        rest = text[start:]
-        end = len(rest)
-        for line_m in re.finditer(r'^\s*([A-Za-z][A-Za-z /&\-]{2,40})\s*:?\s*$', rest, re.M):
-            candidate = line_m.group(1).strip().lower()
-            if candidate in SECTION_HEADERS and candidate not in ('summary', 'professional summary',
-                                                                    'career summary', 'objective',
-                                                                    'career objective', 'profile summary',
-                                                                    'executive summary'):
-                end = line_m.start()
-                break
-        section = rest[:end].strip()
+        section = text[m.end():].strip()
         if section:
-            return section[:3000]
+            return section[:20000]
     # No explicit heading -- strip the leading name (+ up to 2 short
     # title/tagline lines) so the raw text isn't re-echoed verbatim.
     stripped = text
@@ -734,7 +761,7 @@ def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
         name_re = re.compile(r'^\s*' + re.escape(full_name) + r'\s*\n+', re.I | re.M)
         stripped = name_re.sub('', stripped, count=1)
     stripped = _LEADING_NAME_LINES_RE.sub('', stripped, count=1).strip()
-    return stripped[:3000] if stripped else None
+    return stripped[:20000] if stripped else None
 
 
 def calc_confidence(parsed: dict) -> float:
