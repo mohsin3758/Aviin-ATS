@@ -14,6 +14,49 @@ from typing import Optional
 from xml.sax.saxutils import escape as _esc
 
 
+_SUBHEADING_ALLCAPS_RE = re.compile(r'^[A-Z0-9 &/,.\'\-]{3,55}:?$')
+
+# Local to this bolding feature only -- deliberately NOT merged into
+# improved_parser.SECTION_HEADERS, which several other parsing functions
+# (section-boundary detection, name extraction) depend on for different,
+# more consequential behavior. Common mixed-case resume sub-headings that
+# the strict ALL-CAPS heuristic below doesn't catch (e.g. "Functional
+# Skills", "Competencies:") -- found via a real resume that used exactly
+# these as bare one-line headers.
+_EXTRA_SUBHEADINGS = frozenset([
+    'competencies', 'functional skills', 'system configuration',
+    'testing and validation', 'domain experience', 'system cutover',
+    'system cutover (go-live)',
+])
+
+
+def _is_subheading(line: str) -> bool:
+    """Real improvement (2026-08-18): the body text was rendered as one
+    visually flat block, losing all the structure a real resume has --
+    bold section headers, bold "Employer:"/"Client:" lines -- confirmed
+    directly against a real generated PDF next to its own source document.
+    Flags a line for bold/emphasized rendering instead of plain body text.
+    Deliberately conservative: only lines matching this codebase's own
+    curated SECTION_HEADERS list (plus a small local supplement above), a
+    real "Employer:"/"Client:" field label, or a short genuinely ALL-CAPS
+    line (a common resume convention for section headers, e.g. "DOMAIN
+    EXPERIENCE:") -- never a guess at arbitrary emphasis within ordinary
+    sentences."""
+    from services.improved_parser import SECTION_HEADERS
+    s = line.strip()
+    if not s:
+        return False
+    normalized = s.rstrip(':').strip().lower()
+    if normalized in SECTION_HEADERS or normalized in _EXTRA_SUBHEADINGS:
+        return True
+    low = s.lower()
+    if low.startswith('employer:') or low.startswith('client:'):
+        return True
+    if _SUBHEADING_ALLCAPS_RE.match(s) and any(c.isalpha() for c in s) and s.upper() == s:
+        return True
+    return False
+
+
 def mask_name(full_name: str) -> str:
     """'Mohsin Khan' -> 'Mohsin K' (first name + first letter of last name,
     no period — matches the exact rule requested: "Rahul Sharma -> Rahul S").
@@ -210,6 +253,10 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     sub = ParagraphStyle("Sub", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=10)
     h2 = ParagraphStyle("H2", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
     body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+    # Real improvement (2026-08-18): bold in-body sub-headings (section
+    # titles, "Employer:"/"Client:" lines) -- same size/color as body text
+    # so it reads as emphasis, not a competing heading level against h2.
+    subhead = ParagraphStyle("SubHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
     small = ParagraphStyle("Small", fontSize=9, leading=11, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
@@ -259,8 +306,9 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
         # artificially truncate before handing it to them.
         snippet = text
         for para in snippet.split("\n"):
-            if para.strip():
-                story.append(Paragraph(_esc(para.strip()), body))
+            p = para.strip()
+            if p:
+                story.append(Paragraph(_esc(p), subhead if _is_subheading(p) else body))
 
     client_line = _client_line(client_name, cfg)
     story.append(Spacer(1, 0.6 * cm))
@@ -302,6 +350,9 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
     m_title = ParagraphStyle("MTitle", fontSize=12, leading=15, textColor=PRIMARY, fontName="Helvetica-Bold", spaceAfter=14)
     m_h2 = ParagraphStyle("MH2", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=6)
     m_body = ParagraphStyle("MBody", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
+    # Real improvement (2026-08-18): bold in-body sub-headings, matching
+    # the identical addition in _render_pdf_classic above.
+    m_subhead = ParagraphStyle("MSubHead", fontSize=10, leading=15, textColor=DARK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
     small = ParagraphStyle("Small", fontSize=8, leading=10, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
@@ -352,8 +403,9 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
         # day) -- not an attempt at true multi-page two-column pagination.
         snippet = text[:1400] + ("…" if len(text) > 1400 else "")
         for para in snippet.split("\n"):
-            if para.strip():
-                main.append(Paragraph(_esc(para.strip()), m_body))
+            p = para.strip()
+            if p:
+                main.append(Paragraph(_esc(p), m_subhead if _is_subheading(p) else m_body))
     client_line = _client_line(client_name, cfg)
     main.append(Spacer(1, 0.8 * cm))
     footer = "Generated via AVIIN ATS"
@@ -397,6 +449,9 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
     sub = ParagraphStyle("Sub", fontSize=11, leading=14, textColor=BLACK, fontName="Helvetica", spaceAfter=8)
     h2 = ParagraphStyle("H2", fontSize=10.5, leading=13, textColor=BLACK, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=5)
     body = ParagraphStyle("Body", fontSize=10, textColor=BLACK, leading=14, fontName="Helvetica")
+    # Real improvement (2026-08-18): bold in-body sub-headings, matching
+    # the identical addition in _render_pdf_classic above.
+    subhead = ParagraphStyle("SubHead", fontSize=10, leading=14, textColor=BLACK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=2)
     small = ParagraphStyle("Small", fontSize=8.5, leading=10.5, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
@@ -441,8 +496,9 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
         # artificially truncate before handing it to them.
         snippet = text
         for para in snippet.split("\n"):
-            if para.strip():
-                story.append(Paragraph(_esc(para.strip()), body))
+            p = para.strip()
+            if p:
+                story.append(Paragraph(_esc(p), subhead if _is_subheading(p) else body))
 
     client_line = _client_line(client_name, cfg)
     story.append(Spacer(1, 0.6 * cm))
@@ -540,8 +596,13 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
         # artificially truncate before handing it to them.
         snippet = text
         for para in snippet.split("\n"):
-            if para.strip():
-                doc.add_paragraph(para.strip())
+            p = para.strip()
+            if p:
+                pp = doc.add_paragraph()
+                r = pp.add_run(p)
+                if _is_subheading(p):
+                    r.bold = True
+                    r.font.color.rgb = DARK
 
     client_line = _client_line(client_name, cfg)
     footer = "Generated via AVIIN ATS"
@@ -663,8 +724,13 @@ def _render_docx_sidebar(candidate: dict, cfg: dict, client_name: str = None) ->
         # the same theme rather than one paginating and the other not.
         snippet = text[:2600] + ("…" if len(text) > 2600 else "")
         for para in snippet.split("\n"):
-            if para.strip():
-                right.add_paragraph(para.strip())
+            p = para.strip()
+            if p:
+                pp = right.add_paragraph()
+                r = pp.add_run(p)
+                if _is_subheading(p):
+                    r.bold = True
+                    r.font.color.rgb = DARK
 
     client_line = _client_line(client_name, cfg)
     footer = "Generated via AVIIN ATS"
@@ -747,8 +813,13 @@ def _render_docx_minimal(candidate: dict, cfg: dict, client_name: str = None) ->
         # artificially truncate before handing it to them.
         snippet = text
         for para in snippet.split("\n"):
-            if para.strip():
-                doc.add_paragraph(para.strip())
+            p = para.strip()
+            if p:
+                pp = doc.add_paragraph()
+                r = pp.add_run(p)
+                if _is_subheading(p):
+                    r.bold = True
+                    r.font.color.rgb = BLACK
 
     client_line = _client_line(client_name, cfg)
     footer = "Generated via AVIIN ATS"

@@ -7245,3 +7245,50 @@ truncation point in one shot, AND the sidebar theme must still generate
 successfully (not 500) against the exact same long text — the concrete
 regression case for the Table-overflow crash found and fixed in this
 round. Full "S29 AI Resume Generator" + S30 + S32 suites re-run clean.
+
+## Resume Generator, round 4 same day: real visual-hierarchy improvement
+## after confirming the content itself was finally correct, 2026-08-18
+User confirmed the freshly generated PDF now matched the real source
+document (8 pages, all content present, no overlap) and asked to
+"compare both, still need improve more" — a genuine polish request, not
+a new bug report. Did a real side-by-side comparison against the
+attached source rather than guessing at what to improve.
+
+**Real finding**: the generated document's body text was one visually
+flat block — every line rendered in the same plain style, with none of
+the structure a real resume has (bold section headers like "EDUCATION"/
+"PROFESSIONAL EXPERIENCE", bold "Employer:"/"Client:" lines per role).
+The source PDF visibly bolds all of these; the generated one didn't
+distinguish them from ordinary sentences at all, making an 8-page,
+8-employer career history read as one undifferentiated wall of text.
+
+Added a shared `_is_subheading(line)` helper in `resume_formatting.py`,
+applied in all 6 renderers' body-paragraph loops (bold instead of plain
+body style when true). Deliberately conservative, matching the "never
+guess" discipline used throughout this project's parsing fixes: flags a
+line only if it exactly matches (a) `improved_parser.SECTION_HEADERS`
+(the existing curated set already used elsewhere for section-boundary
+detection — reused, not duplicated), (b) a small *local* supplementary
+set for common mixed-case headers the strict set doesn't cover
+("Competencies:", "Functional Skills", etc. — found on the real
+resume) — deliberately kept separate from the shared `SECTION_HEADERS`
+constant rather than merged into it, since that set drives other, more
+consequential parsing behavior (section-boundary detection, name
+extraction) this feature has no business affecting, (c) a real
+"Employer:"/"Client:" field-label prefix, or (d) a short, genuinely
+ALL-CAPS line (a common resume convention for headers not covered by
+either set, e.g. "DOMAIN EXPERIENCE:"). Never flags ordinary sentence
+text, even ones that happen to start with a capitalized word.
+
+Verified for real, not code review: ran the exact matcher against 12
+real lines pulled from the source resume before touching the renderers
+— all 6 genuine headers/employer/client lines correctly flagged, all 6
+ordinary sentences (including ones starting with capitalized technical
+terms like "S4HANA Cloud/On Premise Implementation:") correctly left
+alone. Regenerated the real PDF and rendered a page to an image again —
+"Competencies:", "EDUCATION", "CERTIFICATIONS", "DOMAIN EXPERIENCE:",
+"PROFESSIONAL EXPERIENCE", and every "Employer:"/"Client:" line across
+all 3 pages checked now render bold, visually matching the source
+document's own hierarchy, while the surrounding narrative bullets stay
+plain. Full "S29 AI Resume Generator" + S30 + S32 suites (29/29) re-run
+clean after this change.
