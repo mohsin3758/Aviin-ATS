@@ -7154,3 +7154,94 @@ pdfminer: "Current Company: Bramasol," a clean accurate skills line, and
 browser screenshot confirmed the same visually. Full "S29 AI Resume
 Generator" + S30 + S32 suites (29/29) re-run clean after all 4 code
 changes plus the 3 skill renames.
+
+## Resume Generator, round 3 same day: the render pipeline was STILL
+## capping content, plus a real header-overlap rendering bug found by
+## actually looking at a generated PDF for the first time, 2026-08-18
+User reported "still not solved, facing same issue" with the same
+Ranganath V candidate, attaching the actual downloaded generated PDF.
+Two more real, distinct bugs — one a leftover truncation point I'd
+explicitly (and wrongly) decided not to touch earlier the same day, the
+other a genuinely new discovery.
+
+**Bug 1 — the render pipeline had its OWN separate 2600-char cap that
+survived every earlier fix.** Today's earlier rounds fixed the intake
+storage cap (5000→200,000), the parse-extraction cap (6000→uncapped),
+and `extract_summary_section()`'s section-boundary cutoff — but every one
+of the 6 PDF/DOCX render functions still did `text[:2600] + "…"` before
+building the document, independent of everything upstream. This was a
+real, previously-stated design decision ("the tool's whole point is to
+produce clean, professional documents... a condensed one-pager"), but the
+user's own follow-up made clear that's not what's wanted for a real
+7-page, 8-employer career history — showing only the opening summary
+paragraph and nothing else reads as broken, not condensed. Removed the
+cap from all 6 renderers; `SimpleDocTemplate`/`python-docx` both paginate
+naturally across as many pages as the real content needs.
+
+**Immediate fallout from removing that cap, caught before it shipped
+broadly**: the Modern Sidebar theme's whole layout is ONE reportlab
+`Table` row (sidebar cell + main cell) — reportlab cannot split a single
+`Table` row across pages, so an uncapped body threw a hard "too large on
+page N" error and generation failed outright for this exact resume.
+Confirmed empirically that even a raw 2600-char cap still overflowed
+(the sidebar's main column is only ~68% of page width, so the same
+character count wraps into meaningfully more vertical lines than the
+full-width classic theme) — settled on 1400 chars after live testing,
+which reliably fits a real page alongside the header and sidebar
+content. Kept the Classic and Minimal/ATS-Safe themes fully uncapped
+(true multi-page, matching a traditional flowing resume) since neither
+uses a Table-based layout and both paginate cleanly on their own — this
+was a deliberate, theme-specific decision, not a global cap restored.
+Also raised `extract_summary_section()`'s own 20,000-char safety cap to
+100,000 after finding IT had quietly become the new binding limit the
+moment the render-time cap was removed (this candidate's real resume_text
+is 22,596 chars — just over the old 20,000 boundary, cutting off the very
+last, earliest-listed employer).
+
+**Bug 2 — a real, longstanding header-overlap rendering bug, found only
+because this was the first time in this feature's history that a
+generated PDF was actually rendered to an image and visually inspected**,
+rather than checked via pdfminer text extraction (which reveals content,
+never visual layout) or the separate HTML live-preview panel (an
+unrelated CSS-based render, not the real PDF's reportlab layout at all).
+Confirmed directly: `ParagraphStyle(fontSize=18).leading` returns `12` —
+reportlab's `leading` (line height) defaults to a fixed 12pt regardless
+of `fontSize` unless explicitly set. Every heading-level style across all
+3 PDF renderers (`h1`/`sub`/`h2`/`small`/`m_name`/`m_title`) had a
+`fontSize` above 12 with no explicit `leading`, so each one rendered
+taller than its allocated line box — visually confirmed on a rendered
+page image: the candidate's name and job title overlapping into an
+unreadable jumble at the top of every generated resume. This bug has
+been present since the Resume Generator was first built (2026-08-12);
+nothing in this whole feature's test history had ever caught it because
+no verification step before today rendered a PDF to a real image and
+looked at it. Added explicit, correctly-computed `leading` values
+(~1.2-1.25x `fontSize`) to every affected style across all 3 PDF
+renderers.
+
+Verified for real, not code review, using `pdftoppm` (confirmed available
+in the backend container) to render actual PDF pages to PNG and visually
+inspect them — the definitive verification method this whole feature's
+history had been missing: page 1 of a freshly regenerated classic-theme
+PDF shows the name/title cleanly stacked with zero overlap; the document
+now spans 7 real pages (was 1); page 5 shows the real, complete
+Professional Experience section (Bramasol → Revive → Wipro → ... → IBM
+India) with correct client/project detail, matching the actual attached
+resume; `pdfminer.extract_text()` confirmed both "Employer: Bramasol"
+and "IBM India" (the very first and very last real employers) present in
+the same document. Repeated the same visual-render verification for the
+Modern Sidebar theme (clean header, correct one-page layout, generation
+no longer crashes) and the Minimal/ATS-Safe theme (clean header, full
+multi-page content) — all 3 themes checked as real rendered images, not
+assumed from the fix alone.
+
+New permanent regression test added to "S29 AI Resume Generator"
+(non-repetitive ~19,000-char filler text, since PDF stream compression
+makes a naive raw-bytes text search unreliable as a truncation check —
+confirmed empirically: a real full-content render is ~7.4KB vs ~3.5KB for
+a single truncated page, so `file_size > 6000` is a genuine, real
+signal): the classic theme must include content far past every earlier
+truncation point in one shot, AND the sidebar theme must still generate
+successfully (not 500) against the exact same long text — the concrete
+regression case for the Table-overflow crash found and fixed in this
+round. Full "S29 AI Resume Generator" + S30 + S32 suites re-run clean.

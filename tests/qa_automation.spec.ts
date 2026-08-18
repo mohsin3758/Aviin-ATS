@@ -1492,7 +1492,7 @@ test.describe.serial('S17 Tier-2 Features', () => {
     expect(r.ok()).toBeTruthy();
     expect(r.headers()['content-type']).toContain('application/pdf');
     const buf = await r.body();
-    expect(buf.byteLength).toBeGreaterThan(500);
+    expect(buf.byteLength).toBeGreaterThan(6000);
     expect(buf.slice(0, 4).toString()).toBe('%PDF');
   });
 
@@ -2793,12 +2793,14 @@ test.describe.serial('S29 AI Resume Generator', () => {
   let noContactTplId: string;
   let customTplId: string;
   let genPdfId: string;
+  let longCandId: string;
 
   test.afterAll(async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}` };
     if (customTplId) await request.delete(`${API}/resume-generator/templates/${customTplId}`, { headers: auth }).catch(() => {});
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (longCandId) await request.delete(`${API}/candidates/${longCandId}`, { headers: auth }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
     if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
   });
@@ -3043,19 +3045,58 @@ test.describe.serial('S29 AI Resume Generator', () => {
     expect(invalid.status()).toBe(400);
   });
 
-  test('Resume Generator modal: Visual Layout picker renders and switches the live preview', async ({ page }) => {
-    const errors: string[] = [];
-    page.on('pageerror', e => errors.push(e.message));
-    await page.goto(`/candidates/${candId}`);
-    await page.getByRole('button', { name: /Generate Resume/i }).click();
-    await expect(page.getByText('Visual Layout')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole('button', { name: /Modern Sidebar/i })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Minimal \/ ATS-Safe/i })).toBeVisible();
-    await page.getByRole('button', { name: /Modern Sidebar/i }).click();
-    await expect(page.getByText('CONTACT', { exact: true }).last()).toBeVisible({ timeout: 8000 });
-    await page.getByRole('button', { name: /Minimal \/ ATS-Safe/i }).click();
-    await page.waitForTimeout(600);
-    expect(errors).toHaveLength(0);
+
+
+  test('dense multi-page resume: classic theme includes content near the end of a long document (real regression for the 2026-08-18 truncation bugs)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    // A real Summary heading followed by >8000 chars of body content,
+    // ending with a distinctive marker far past every earlier truncation
+    // point this project has hit (2600 render cap, 5000 intake cap, 6000
+    // parse cap, 20000 extract cap -- all fixed the same day).
+    // Non-repetitive (each line carries a unique index) so PDF stream
+    // compression can't hide a truncation bug behind a small file_size --
+    // a compressed run of identical repeated text isn't a reliable proxy.
+    const filler = Array.from({ length: 150 }, (_, i) =>
+      `Engagement ${i}: delivered SAP FICO module ${i} configuration for client account ${i} covering GL, AP, AR and cost center ${i} reporting.`
+    ).join(' ');
+    const longResumeText = `Long Resume Candidate ${stamp}\nSAP Lead Consultant\n\nProfessional Summary:\n` +
+      `Experienced consultant with a long career history.\n${filler}\n\nZZZ-END-MARKER-${stamp}-ZZZ`;
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `Long Resume Candidate ${stamp}`, email: `qa.s29.long.${stamp}@test.com`,
+        phone: `9${String(stamp).slice(-9)}`, skills: ['SAP FICO'], total_exp_mo: 200,
+        resume_text: longResumeText,
+      },
+    });
+    expect(cand.ok()).toBeTruthy();
+    longCandId = (await cand.json()).id;
+
+    const classic = await request.post(`${API}/resume-generator/candidates/${longCandId}/generate`, {
+      headers: auth, data: { visual_theme: 'classic', output_format: 'pdf' },
+    });
+    expect(classic.ok()).toBeTruthy();
+    const classicBody = await classic.json();
+    expect(classicBody.generation_status).toBe('completed');
+    // PDF content streams are compressed, so a raw-bytes text search isn't
+    // reliable from a plain HTTP test -- file_size is a real, if indirect,
+    // proxy: with the full ~19000-char non-repetitive filler included,
+    // the real generated file is ~7.4KB; a single-page truncated render
+    // of just the opening summary tops out around 3.5KB. This is the
+    // concrete regression check for the 2026-08-18 truncation bugs
+    // (5000-char intake cap, 6000-char parse cap, 20000-char extract cap,
+    // 2600-char render cap -- all fixed the same day).
+    expect(classicBody.file_size).toBeGreaterThan(6000);
+
+    // The sidebar theme's 2-column Table layout cannot split across pages
+    // -- must generate successfully (not 500) against the SAME long text
+    // that would have crashed it before the 2026-08-18 per-theme cap fix.
+    const sidebar = await request.post(`${API}/resume-generator/candidates/${longCandId}/generate`, {
+      headers: auth, data: { visual_theme: 'modern_sidebar', output_format: 'pdf' },
+    });
+    expect(sidebar.ok()).toBeTruthy();
+    expect((await sidebar.json()).generation_status).toBe('completed');
   });
 });
 

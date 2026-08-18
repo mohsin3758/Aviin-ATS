@@ -749,11 +749,19 @@ def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
     a single section and drop everything after it."""
     if not text:
         return None
+    # REAL BUG FIX (2026-08-18): a 20,000-char cap here was "generous"
+    # relative to the render pipeline's OLD 2600-char snippet truncation,
+    # but became the binding limit the moment that render-time cap was
+    # removed (same day) -- confirmed on a real 22,596-char resume where
+    # this cap silently cut off the very last (earliest, 2008) employer.
+    # No render-time cap remains downstream, so this only needs to stay
+    # under the real storage-time safety cap (200,000 chars, _clean_text()
+    # in resume_intake_service.py) -- not a "readable length" bound.
     m = _SUMMARY_HEADING_RE.search(text)
     if m:
         section = text[m.end():].strip()
         if section:
-            return section[:20000]
+            return section[:100000]
     # No explicit heading -- strip the leading name (+ up to 2 short
     # title/tagline lines) so the raw text isn't re-echoed verbatim.
     stripped = text
@@ -761,7 +769,7 @@ def extract_summary_section(text: str, full_name: str = '') -> Optional[str]:
         name_re = re.compile(r'^\s*' + re.escape(full_name) + r'\s*\n+', re.I | re.M)
         stripped = name_re.sub('', stripped, count=1)
     stripped = _LEADING_NAME_LINES_RE.sub('', stripped, count=1).strip()
-    return stripped[:20000] if stripped else None
+    return stripped[:100000] if stripped else None
 
 
 def calc_confidence(parsed: dict) -> float:

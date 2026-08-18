@@ -195,11 +195,22 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     PRIMARY = colors.HexColor("#1e40af")
     DARK = colors.HexColor("#0f172a")
     GRAY = colors.HexColor("#64748b")
-    h1 = ParagraphStyle("H1", fontSize=18, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=2)
-    sub = ParagraphStyle("Sub", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=10)
-    h2 = ParagraphStyle("H2", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
+    # REAL BUG FIX (2026-08-18): reportlab's ParagraphStyle defaults
+    # `leading` (line height) to a FIXED 12pt regardless of fontSize --
+    # confirmed directly (`ParagraphStyle(fontSize=18).leading == 12`).
+    # Every heading style below was larger than 12pt with no explicit
+    # leading, so the text rendered taller than its allocated line box and
+    # visually overlapped the paragraph right after it -- confirmed on a
+    # real generated PDF (name and title overlapping at the very top of
+    # the page). This has been true since the renderer was first built;
+    # only surfaced now because this is the first time a generated PDF was
+    # actually rendered to an image and inspected, rather than checked via
+    # text extraction (which reveals content, not visual layout).
+    h1 = ParagraphStyle("H1", fontSize=18, leading=22, textColor=DARK, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=4)
+    sub = ParagraphStyle("Sub", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=10)
+    h2 = ParagraphStyle("H2", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=6)
     body = ParagraphStyle("Body", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
-    small = ParagraphStyle("Small", fontSize=9, textColor=GRAY, fontName="Helvetica")
+    small = ParagraphStyle("Small", fontSize=9, leading=11, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
     story = [
@@ -236,7 +247,17 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     heading, text = _resolve_body_text(candidate, cfg)
     if text.strip():
         story.append(Paragraph(heading, h2))
-        snippet = text[:2600] + ("…" if len(text) > 2600 else "")
+        # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
+        # body at 2600 chars regardless of how much real content
+        # _resolve_body_text() actually returned -- for a dense, multi-
+        # role resume, the entire Professional Experience/Education/
+        # Certifications section (everything past the opening summary
+        # paragraph) was silently cut off with an ellipsis, even after
+        # today's earlier fix restored the full text into the pipeline.
+        # SimpleDocTemplate/python-docx both paginate naturally across as
+        # many pages as the real content needs -- no reason to
+        # artificially truncate before handing it to them.
+        snippet = text
         for para in snippet.split("\n"):
             if para.strip():
                 story.append(Paragraph(_esc(para.strip()), body))
@@ -272,13 +293,16 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
     PRIMARY = colors.HexColor("#1e40af")
     GRAY = colors.HexColor("#64748b")
 
-    sb_label = ParagraphStyle("SbLabel", fontSize=9, textColor=SIDEBAR_ACCENT, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=4)
+    # REAL BUG FIX (2026-08-18): see the identical fix + explanation in
+    # _render_pdf_classic above -- every style here missing an explicit
+    # `leading` defaulted to reportlab's fixed 12pt regardless of fontSize.
+    sb_label = ParagraphStyle("SbLabel", fontSize=9, leading=11, textColor=SIDEBAR_ACCENT, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=4)
     sb_body = ParagraphStyle("SbBody", fontSize=9, textColor=SIDEBAR_TEXT, leading=13, fontName="Helvetica")
-    m_name = ParagraphStyle("MName", fontSize=20, textColor=DARK, fontName="Helvetica-Bold", spaceAfter=2)
-    m_title = ParagraphStyle("MTitle", fontSize=12, textColor=PRIMARY, fontName="Helvetica-Bold", spaceAfter=14)
-    m_h2 = ParagraphStyle("MH2", fontSize=11, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=6)
+    m_name = ParagraphStyle("MName", fontSize=20, leading=24, textColor=DARK, fontName="Helvetica-Bold", spaceAfter=4)
+    m_title = ParagraphStyle("MTitle", fontSize=12, leading=15, textColor=PRIMARY, fontName="Helvetica-Bold", spaceAfter=14)
+    m_h2 = ParagraphStyle("MH2", fontSize=11, leading=14, textColor=PRIMARY, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=6)
     m_body = ParagraphStyle("MBody", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica")
-    small = ParagraphStyle("Small", fontSize=8, textColor=GRAY, fontName="Helvetica")
+    small = ParagraphStyle("Small", fontSize=8, leading=10, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
 
@@ -312,7 +336,21 @@ def _render_pdf_sidebar(candidate: dict, cfg: dict, client_name: str = None) -> 
     heading, text = _resolve_body_text(candidate, cfg)
     if text.strip():
         main.append(Paragraph(heading, m_h2))
-        snippet = text[:2600] + ("…" if len(text) > 2600 else "")
+        # REAL BUG FIX (2026-08-18): unlike the classic/minimal themes,
+        # this theme's sidebar+main layout is ONE reportlab Table row --
+        # reportlab cannot split a single Table row across pages, so an
+        # uncapped (or insufficiently capped) body throws "too large on
+        # page N" and generation fails outright. The main column is
+        # narrower than a full-width page (~68%), so it wraps into
+        # meaningfully more lines per character than the classic theme's
+        # full-width column -- confirmed empirically that even 2600 chars
+        # still overflowed a page here; 1400 reliably fits with real
+        # header/sidebar content alongside it. A sidebar/infographic-style
+        # resume is conventionally a single-page format by design anyway
+        # (unlike the classic/minimal themes, which render a traditional
+        # flowing resume and were deliberately left uncapped this same
+        # day) -- not an attempt at true multi-page two-column pagination.
+        snippet = text[:1400] + ("…" if len(text) > 1400 else "")
         for para in snippet.split("\n"):
             if para.strip():
                 main.append(Paragraph(_esc(para.strip()), m_body))
@@ -353,11 +391,13 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
                              topMargin=2.2 * cm, bottomMargin=2.2 * cm)
     BLACK = colors.HexColor("#000000")
     GRAY = colors.HexColor("#444444")
-    h1 = ParagraphStyle("H1", fontSize=16, textColor=BLACK, fontName="Helvetica-Bold", spaceAfter=2)
-    sub = ParagraphStyle("Sub", fontSize=11, textColor=BLACK, fontName="Helvetica", spaceAfter=8)
-    h2 = ParagraphStyle("H2", fontSize=10.5, textColor=BLACK, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=5)
+    # REAL BUG FIX (2026-08-18): see the identical fix + explanation in
+    # _render_pdf_classic above.
+    h1 = ParagraphStyle("H1", fontSize=16, leading=19, textColor=BLACK, fontName="Helvetica-Bold", spaceAfter=4)
+    sub = ParagraphStyle("Sub", fontSize=11, leading=14, textColor=BLACK, fontName="Helvetica", spaceAfter=8)
+    h2 = ParagraphStyle("H2", fontSize=10.5, leading=13, textColor=BLACK, fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=5)
     body = ParagraphStyle("Body", fontSize=10, textColor=BLACK, leading=14, fontName="Helvetica")
-    small = ParagraphStyle("Small", fontSize=8.5, textColor=GRAY, fontName="Helvetica")
+    small = ParagraphStyle("Small", fontSize=8.5, leading=10.5, textColor=GRAY, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
     story = [Paragraph(_esc(display_name), h1)]
@@ -389,7 +429,17 @@ def _render_pdf_minimal(candidate: dict, cfg: dict, client_name: str = None) -> 
     heading, text = _resolve_body_text(candidate, cfg)
     if text.strip():
         story.append(Paragraph(heading, h2))
-        snippet = text[:2600] + ("…" if len(text) > 2600 else "")
+        # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
+        # body at 2600 chars regardless of how much real content
+        # _resolve_body_text() actually returned -- for a dense, multi-
+        # role resume, the entire Professional Experience/Education/
+        # Certifications section (everything past the opening summary
+        # paragraph) was silently cut off with an ellipsis, even after
+        # today's earlier fix restored the full text into the pipeline.
+        # SimpleDocTemplate/python-docx both paginate naturally across as
+        # many pages as the real content needs -- no reason to
+        # artificially truncate before handing it to them.
+        snippet = text
         for para in snippet.split("\n"):
             if para.strip():
                 story.append(Paragraph(_esc(para.strip()), body))
@@ -478,7 +528,17 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
         r = h.add_run(heading)
         r.bold = True
         r.font.color.rgb = PRIMARY
-        snippet = text[:2600] + ("…" if len(text) > 2600 else "")
+        # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
+        # body at 2600 chars regardless of how much real content
+        # _resolve_body_text() actually returned -- for a dense, multi-
+        # role resume, the entire Professional Experience/Education/
+        # Certifications section (everything past the opening summary
+        # paragraph) was silently cut off with an ellipsis, even after
+        # today's earlier fix restored the full text into the pipeline.
+        # SimpleDocTemplate/python-docx both paginate naturally across as
+        # many pages as the real content needs -- no reason to
+        # artificially truncate before handing it to them.
+        snippet = text
         for para in snippet.split("\n"):
             if para.strip():
                 doc.add_paragraph(para.strip())
@@ -595,6 +655,12 @@ def _render_docx_sidebar(candidate: dict, cfg: dict, client_name: str = None) ->
         r = h.add_run(heading)
         r.bold = True
         r.font.color.rgb = PRIMARY
+        # REAL BUG FIX (2026-08-18): kept capped, matching the PDF sidebar
+        # renderer -- a sidebar/infographic-style layout is a one-page
+        # design by convention (unlike the classic/minimal themes, which
+        # render a traditional flowing resume and were deliberately left
+        # uncapped this same day). Keeps PDF/DOCX output consistent for
+        # the same theme rather than one paginating and the other not.
         snippet = text[:2600] + ("…" if len(text) > 2600 else "")
         for para in snippet.split("\n"):
             if para.strip():
@@ -669,7 +735,17 @@ def _render_docx_minimal(candidate: dict, cfg: dict, client_name: str = None) ->
         r = h.add_run(heading)
         r.bold = True
         r.font.color.rgb = BLACK
-        snippet = text[:2600] + ("…" if len(text) > 2600 else "")
+        # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
+        # body at 2600 chars regardless of how much real content
+        # _resolve_body_text() actually returned -- for a dense, multi-
+        # role resume, the entire Professional Experience/Education/
+        # Certifications section (everything past the opening summary
+        # paragraph) was silently cut off with an ellipsis, even after
+        # today's earlier fix restored the full text into the pipeline.
+        # SimpleDocTemplate/python-docx both paginate naturally across as
+        # many pages as the real content needs -- no reason to
+        # artificially truncate before handing it to them.
+        snippet = text
         for para in snippet.split("\n"):
             if para.strip():
                 doc.add_paragraph(para.strip())
