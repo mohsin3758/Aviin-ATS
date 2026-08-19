@@ -4498,6 +4498,66 @@ test.describe.serial('S38 Pipeline Stage + JD Job-Match + Full Resume View', () 
     expect(persisted.matched_skills).toContain('Kubernetes');
   });
 
+  // Real bug reported live by a user (2026-08-20): a real SAP FI/CO
+  // consultant with ZERO overlapping skills against two open roles (SAP
+  // ABAP Developer, Senior React Developer) was still shown a "52% C"
+  // match score - the composite formula only weighted skill match 35%,
+  // so strong experience/stability/education alone could carry a total
+  // skill mismatch into a passing grade. Fixed with a skill-match gate on
+  // the composite (readiness_raw * (0.5 + 0.5*skill_score/100)) so 0%
+  // skill overlap can never score above roughly half of what the other
+  // factors alone would suggest, while a strong match is never penalized.
+  test('a candidate with ZERO overlapping skills is honestly graded low, not a misleading passing score', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const zeroReq = await request.post(`${API}/requisitions`, {
+      headers: auth, data: { title: `QA S38 ZeroMatch Test Role ${stamp}`, skills_required: ['Rust', 'Haskell'], status: 'open' },
+    });
+    const zeroReqId = (await zeroReq.json()).id;
+    const zeroCand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `QA S38 ZeroMatch Candidate ${stamp}`, email: `qa.s38.zero.${stamp}@test.com`,
+        phone: `9${String(stamp + 1).slice(-9)}`, skills: ['SAP FICO', 'SAP HANA'], total_exp_mo: 300,
+      },
+    });
+    const zeroCandId = (await zeroCand.json()).id;
+
+    const r = await request.post(`${API}/candidates/${zeroCandId}/match-open-jobs`, { headers: auth });
+    const body = await r.json();
+    const own = (body.results || []).find((x: any) => x.requisition_id === zeroReqId);
+    expect(own).toBeTruthy();
+    expect(own.skill_match_score).toBe(0);
+    // The real, previously-reported bug: this used to land at 51.75/"C"
+    // despite 0% skill overlap. Now must be honestly low.
+    expect(own.readiness_index).toBeLessThan(35);
+    expect(['D']).toContain(own.readiness_grade);
+
+    await request.delete(`${API}/candidates/${zeroCandId}`, { headers: auth }).catch(() => {});
+    await request.delete(`${API}/requisitions/${zeroReqId}`, { headers: auth }).catch(() => {});
+  });
+
+  // Real bug found while investigating the above (2026-08-20): a
+  // completely separate, orphaned scoring endpoint (no frontend caller
+  // anywhere, found only via this deep-check) referenced an undeclared
+  // `body.fast_mode` field - every real call with a non-empty jd_text
+  // crashed with a 500 AttributeError, unconditionally, since the
+  // endpoint was first built.
+  test('POST /intelligence/score/bulk with jd_text no longer crashes (real, previously-undiscovered 500)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const r = await request.post(`${API}/intelligence/score/bulk`, {
+      headers: auth,
+      data: { requisition_id: reqId, jd_text: 'Looking for a strong Kubernetes and Terraform engineer', candidate_ids: [candId], limit: 5 },
+    });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    expect(body.scored).toBeGreaterThan(0);
+    expect(body.top_candidates[0]).toHaveProperty('readiness_index');
+  });
+
   test('Resume Inbox queue endpoint carries pipeline_stage when a resume_files row is linked', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };

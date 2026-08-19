@@ -162,6 +162,43 @@ def parse_resume(text: str) -> dict:
     }
 
 
+def compute_skill_similarity(
+    candidate_skills: Optional[list] = None,
+    required_skills: Optional[list] = None,
+    cosine_sim_value: Optional[float] = None,
+) -> tuple:
+    """Real gap fix (2026-08-20): skill_match_score previously came ONLY
+    from embed cosine similarity of free-text JD description - if a
+    requisition had no description text (jd_text empty/None), skill_sim
+    silently defaulted to 0.0 even when the requisition's own structured
+    `skills_required` list had real, checkable overlap with the
+    candidate's skills (the exact same keyword comparison already used
+    elsewhere in this codebase for the matched_skills/missing_skills UI
+    chips - just never fed back into the score itself). Blends both
+    signals honestly instead of letting either one silently zero out the
+    other: keyword overlap against skills_required (explicit, zero-token,
+    most reliable when present) weighted 60%, semantic cosine similarity
+    of the free-text JD (fuzzier, but the only signal when skills_required
+    is empty) weighted 40% - falls back to whichever single signal is
+    actually available, and only to 0.0 when neither exists at all.
+    Returns (skill_similarity_0_to_1, matched_skills, missing_skills)."""
+    cand_lower = {s.lower() for s in (candidate_skills or []) if s}
+    req_list = [s for s in (required_skills or []) if s]
+    matched = [s for s in req_list if s.lower() in cand_lower]
+    missing = [s for s in req_list if s.lower() not in cand_lower]
+    keyword_ratio = (len(matched) / len(req_list)) if req_list else None
+
+    if keyword_ratio is not None and cosine_sim_value is not None:
+        sim = 0.6 * keyword_ratio + 0.4 * cosine_sim_value
+    elif keyword_ratio is not None:
+        sim = keyword_ratio
+    elif cosine_sim_value is not None:
+        sim = cosine_sim_value
+    else:
+        sim = 0.0
+    return sim, matched, missing
+
+
 def score_candidate(
     parsed: dict,
     candidate_exp_mo: int = 0,
@@ -220,14 +257,27 @@ def score_candidate(
     gap_flag = max_gap > 12
 
     # 6. Composite Readiness Index
-    readiness = round(
-        skill_score    * 0.35 +
-        exp_score      * 0.25 +
-        stability_score* 0.20 +
+    # Real fix (2026-08-20): skill match was only 35% of the composite,
+    # so a candidate with ZERO overlapping skills for a role could still
+    # land a "C" grade (50%+) purely from strong experience/stability/
+    # education - reported live as a "fake" match score by a real user
+    # (a SAP FI/CO functional consultant scored 52% against an SAP ABAP
+    # Developer role and a Senior React Developer role despite matching
+    # none of either role's required skills). Skill fit is the single
+    # most decisive signal for a role-specific match, so it now carries
+    # more weight AND directly gates the final composite - a candidate
+    # with 0% skill overlap can never score above half of what their
+    # non-skill factors alone would suggest, while a strong skill match
+    # is never penalized (gate=1.0 at skill_score=100).
+    readiness_raw = (
+        skill_score    * 0.40 +
+        exp_score      * 0.22 +
+        stability_score* 0.18 +
         edu_score      * 0.15 +
-        max(0, 100 - fraud_risk) * 0.05,
-        2
+        max(0, 100 - fraud_risk) * 0.05
     )
+    skill_gate = 0.5 + 0.5 * (skill_score / 100)
+    readiness = round(readiness_raw * skill_gate, 2)
 
     return {
         'skill_match_score':      skill_score,

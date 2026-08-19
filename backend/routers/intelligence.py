@@ -53,6 +53,14 @@ class BulkScoreRequest(BaseModel):
     jd_text: Optional[str] = None
     limit: int = 50
     candidate_ids: list = []
+    # Real bug fixed 2026-08-20: this field was referenced below
+    # (`not body.fast_mode`) but never declared here — every real call
+    # with a non-empty jd_text crashed with a 500 AttributeError the
+    # instant that line was reached (Pydantic raises on an undefined
+    # attribute access, not silently returning None). Never caught
+    # before because this endpoint has zero real callers, frontend or
+    # backend, so nothing had ever exercised the jd_text-provided path.
+    fast_mode: bool = False
 
 class JdParseRequest(BaseModel):
     requisition_id: str
@@ -171,13 +179,15 @@ async def parse_jd(body: JdParseRequest, actor: Actor = Depends(get_actor)):
 
 async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisition_id: Optional[str] = None,
                                 required_exp_yr_min: float = 0, required_exp_yr_max: Optional[float] = None,
-                                required_education: Optional[str] = None, jd_text: Optional[str] = None):
+                                required_education: Optional[str] = None, jd_text: Optional[str] = None,
+                                required_skills: Optional[list] = None):
     """Core of /intelligence/score, pulled out so it's callable from
     non-HTTP contexts (e.g. auto-scoring on resume intake) on a caller-
     supplied connection, not just via the ScoreRequest/Actor HTTP path."""
+    from routers.ner import compute_skill_similarity
     cand = await conn.fetchrow("""
         SELECT ca.id, ca.total_exp_mo, ca.resume_text, ca.resume_embedding::text AS emb,
-               cpd.extracted_skills, cpd.education_level,
+               ca.skills, cpd.extracted_skills, cpd.education_level,
                cpd.total_years_exp, cpd.max_gap_months, cpd.avg_tenure_months,
                cpd.job_count
         FROM candidates ca
@@ -207,7 +217,7 @@ async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisit
         # Refresh cand
         cand = await conn.fetchrow("""
             SELECT ca.id, ca.total_exp_mo, ca.resume_text, ca.resume_embedding::text AS emb,
-                   cpd.extracted_skills, cpd.education_level,
+                   ca.skills, cpd.extracted_skills, cpd.education_level,
                    cpd.total_years_exp, cpd.max_gap_months, cpd.avg_tenure_months, cpd.job_count
             FROM candidates ca
             LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id=ca.id AND cpd.tenant_id=ca.tenant_id
@@ -215,15 +225,32 @@ async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisit
         """, candidate_id, tenant_id)
 
     parsed_data = dict(cand)
-    skill_sim = 0.0
 
-    # Semantic similarity via embed service
+    # Real gap fix (2026-08-20): skill match previously came ONLY from
+    # cosine similarity of jd_text - a requisition with no description
+    # text (common on quickly-created test/real requisitions alike)
+    # silently forced skill_sim to 0 regardless of real, structured
+    # skills_required overlap. When requisition_id is given but the
+    # caller didn't already supply skills_required (score_one/auto-score
+    # callers don't - only match_candidate_against_open_jobs does, since
+    # it already has the row), fetch it here so every caller benefits,
+    # not just the ones that remember to pass it.
+    if requisition_id and required_skills is None:
+        required_skills = await conn.fetchval(
+            "SELECT skills_required FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            requisition_id, tenant_id) or []
+
+    cosine_val = None
     if jd_text and cand["resume_text"]:
         try:
             embeddings = await get_embedding([cand["resume_text"], jd_text])
-            skill_sim  = max(0.0, cosine_sim(embeddings[0], embeddings[1]))
+            cosine_val = max(0.0, cosine_sim(embeddings[0], embeddings[1]))
         except Exception:
-            skill_sim = 0.5  # fallback if embed service issues
+            cosine_val = 0.5  # fallback if embed service issues
+
+    skill_sim, matched_skills, missing_skills = compute_skill_similarity(
+        candidate_skills=cand["skills"], required_skills=required_skills, cosine_sim_value=cosine_val,
+    )
 
     scores = score_candidate(
         parsed_data,
@@ -233,7 +260,11 @@ async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisit
         skill_similarity=skill_sim,
         required_education=required_education,
     )
-    scores["skill_match_details"] = json.dumps({"cosine_similarity": round(skill_sim, 4)})
+    scores["skill_match_details"] = json.dumps({
+        "cosine_similarity": round(cosine_val, 4) if cosine_val is not None else None,
+        "keyword_matched_skills": matched_skills,
+        "keyword_missing_skills": missing_skills,
+    })
 
     row = await conn.fetchrow("""
         INSERT INTO candidate_scores
@@ -261,7 +292,7 @@ async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisit
         scores["fraud_risk_score"], scores["readiness_index"],
         scores["readiness_grade"],  scores["has_gap_flag"],
         scores["duplicate_flag"],   scores["inconsistency_flag"],
-        json.dumps({"cosine_similarity": round(skill_sim, 4)}),
+        scores["skill_match_details"],
     )
     return dict(row)
 
@@ -279,75 +310,45 @@ async def score_one(body: ScoreRequest, actor: Actor = Depends(get_actor)):
 
 @router.post("/score/bulk")
 async def score_bulk(body: BulkScoreRequest, actor: Actor = Depends(get_actor)):
-    """Score all candidates for a requisition using embed similarity."""
+    """Score all candidates for a requisition. Rewritten 2026-08-20 to call
+    the shared score_candidate_core() per candidate instead of maintaining
+    a second, independently-drifted copy of the same scoring logic - that
+    second copy is what let the fast_mode bug (undeclared field, crashed
+    every real call with jd_text) and the skills_required-blind skill
+    score both go unnoticed here specifically, even after being fixed in
+    score_candidate_core's own callers. fast_mode now means "skip the
+    per-candidate embed round-trip" (jd_text withheld from the core call)
+    rather than a separate, less-capable scoring path - keyword-based
+    skill_similarity from skills_required still applies either way."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        # Get JD embedding from parsed_data or generate
-        jd_emb = None
-        if body.jd_text:
-            try:
-                jd_embs = await get_embedding([body.jd_text])
-                jd_emb = jd_embs[0]
-            except Exception:
-                pass
+        req = await conn.fetchrow(
+            "SELECT skills_required FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            body.requisition_id, actor.tenant_id)
+        required_skills = (req["skills_required"] if req else None) or []
 
-        candidates = await conn.fetch("""
-            SELECT ca.id, ca.total_exp_mo, ca.resume_text,
-                   cpd.education_level, cpd.total_years_exp,
-                   cpd.max_gap_months, cpd.avg_tenure_months, cpd.job_count,
-                   ca.resume_embedding::text AS emb
-            FROM candidates ca
-            LEFT JOIN candidate_parsed_data cpd ON cpd.candidate_id=ca.id AND cpd.tenant_id=ca.tenant_id
-            WHERE ca.tenant_id=$1 AND (ARRAY_LENGTH($2::uuid[], 1) IS NULL OR ca.id = ANY($2::uuid[]))
+        candidate_ids = await conn.fetch("""
+            SELECT id FROM candidates
+            WHERE tenant_id=$1 AND is_active IS NOT FALSE
+              AND (ARRAY_LENGTH($2::uuid[], 1) IS NULL OR id = ANY($2::uuid[]))
             LIMIT $3
         """, actor.tenant_id, [c for c in (body.candidate_ids or [])], body.limit)
 
         results = []
-        for cand in candidates:
-            parsed_data = dict(cand)
-            skill_sim = 0.0
-            if jd_emb and cand["resume_text"] and not body.fast_mode:
-                try:
-                    import asyncio
-                    c_embs = await asyncio.wait_for(
-                        get_embedding([cand["resume_text"][:300]]),
-                        timeout=3.0
-                    )
-                    skill_sim = max(0.0, cosine_sim(c_embs[0], jd_emb))
-                except Exception:
-                    skill_sim = 0.5  # fallback if embed times out
-
-            scores = score_candidate(
-                parsed_data,
-                candidate_exp_mo=cand["total_exp_mo"] or 0,
-                required_exp_yr_min=body.required_exp_yr_min,
-                required_exp_yr_max=body.required_exp_yr_max,
-                skill_similarity=skill_sim,
-                required_education=body.required_education,
-            )
-
-            await conn.execute("""
-                INSERT INTO candidate_scores
-                  (tenant_id, candidate_id, requisition_id,
-                   skill_match_score, experience_score, stability_score,
-                   education_score, fraud_risk_score, readiness_index,
-                   readiness_grade, has_gap_flag, skill_match_details)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
-                ON CONFLICT (tenant_id, candidate_id, requisition_id) DO UPDATE SET
-                  readiness_index = EXCLUDED.readiness_index,
-                  readiness_grade = EXCLUDED.readiness_grade,
-                  skill_match_score = EXCLUDED.skill_match_score,
-                  scored_at = now()
-            """,
-                actor.tenant_id, cand["id"], body.requisition_id,
-                scores["skill_match_score"], scores["experience_score"],
-                scores["stability_score"],  scores["education_score"],
-                scores["fraud_risk_score"], scores["readiness_index"],
-                scores["readiness_grade"],  scores["has_gap_flag"],
-                json.dumps({"cosine_similarity": round(skill_sim, 4)}),
-            )
-            results.append({"candidate_id": str(cand["id"]),
-                            "readiness_index": scores["readiness_index"],
-                            "readiness_grade": scores["readiness_grade"]})
+        for row in candidate_ids:
+            try:
+                scores = await score_candidate_core(
+                    conn, actor.tenant_id, str(row["id"]), body.requisition_id,
+                    required_exp_yr_min=body.required_exp_yr_min,
+                    required_exp_yr_max=body.required_exp_yr_max,
+                    required_education=body.required_education,
+                    jd_text=(None if body.fast_mode else body.jd_text),
+                    required_skills=required_skills,
+                )
+                results.append({"candidate_id": str(row["id"]),
+                                "readiness_index": scores["readiness_index"],
+                                "readiness_grade": scores["readiness_grade"]})
+            except Exception as e:
+                print(f"[ScoreBulk] Failed scoring candidate {row['id']}: {e}")
 
     results.sort(key=lambda x: x["readiness_index"], reverse=True)
     return {"scored": len(results), "top_candidates": results[:20]}

@@ -587,6 +587,7 @@ async def match_candidate_against_open_jobs(candidate_id: str, actor: Actor = De
                     required_exp_yr_max=r["experience_max"],
                     required_education=r["education_required"],
                     jd_text=r["description"],
+                    required_skills=r["skills_required"],
                 )
                 res["requisition_title"] = r["title"]
                 # Same matched/missing computation as get_candidate()'s

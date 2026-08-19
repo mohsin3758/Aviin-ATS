@@ -6143,6 +6143,103 @@ data looks like at test-run time. Full regression sweep (S1/S2/S8/S13/
 S16/S20/S30, 48 tests touching the same files) passed clean. Zero-token
 audit: `CONFIRMED CLEAN` (380 files, 0 external API refs).
 
+## AI Match Score deep-check: fixed a real "fake score" bug + a separate,
+## previously-undiscovered 500 crash in a second, orphaned scoring path,
+## 2026-08-20
+User reported, from a live screenshot of V. Subbarao's candidate profile:
+a SAP FI/CO functional consultant with literally zero overlapping skills
+against 2 open roles (SAP ABAP Developer, Senior React Developer — both
+correctly showing `matched_skills:[]`) was still scored "52% C" against
+both. Asked for a deep check across every AI match score, not just this
+one instance.
+
+**Root cause #1 (the reported bug), found in `ner.py::score_candidate()`'s
+composite formula**: `skill_match_score` was weighted only 35% of the
+final `readiness_index`, with experience(25%)/stability(20%)/education
+(15%)/fraud(5%) making up the rest — a candidate with a genuinely strong,
+unrelated background could carry a 0% skill match into a "passing" 50%+
+grade purely on those other factors. Verified by hand-computing the exact
+observed 51.75 from the real pre-fix inputs (skill=0, exp=70, stability=
+90, edu=75) before touching any code, confirming this was the real
+formula at fault, not a data bug. Fixed with a skill-match gate on the
+composite: `readiness = readiness_raw * (0.5 + 0.5 * skill_score/100)` —
+0% skill overlap can never score above roughly half of what the other
+factors alone would suggest (verified across the full 0/25/50/75/100
+range by hand before deploying: 27→40→56→74→94, monotonic and sane, a
+strong match is never penalized), and raised skill weight itself from
+35% to 40% in the underlying composite.
+
+**Root cause #2, the deeper bug enabling #1's specific numbers**: even
+before the weighting fix, `skill_match_score` should never have been a
+flat 0 for this candidate — `score_candidate_core()`'s ONLY source for
+skill similarity was cosine similarity of the requisition's free-text
+`description`, and both real requisitions in this case had an EMPTY
+description (confirmed directly: `desc len: 0`) — so `skill_sim` silently
+defaulted to 0.0 regardless of whether the requisition's own STRUCTURED
+`skills_required` field had real, checkable overlap with the candidate's
+skills. That structured comparison already existed elsewhere in this
+codebase (the `matched_skills`/`missing_skills` chips shown right next to
+the score) but was never fed back into the score itself — two disconnected
+computations of "does this candidate have the right skills," the same bug
+class found and fixed repeatedly elsewhere in this project. New
+`compute_skill_similarity()` (`ner.py`) blends keyword overlap against
+`skills_required` (60% weight — explicit, zero-token, most reliable when
+present) with cosine similarity of `jd_text` (40% — the only signal when
+`skills_required` is empty), falling back to whichever single signal is
+actually available. `score_candidate_core()` now fetches `ca.skills` and
+self-fetches the requisition's `skills_required` when a caller doesn't
+already have it, so every caller benefits without needing to be
+individually updated. (In THIS specific case, both signals independently
+agreed on 0% — the candidate really is a 0% skill fit for both roles, a
+SAP functional consultant is not an ABAP developer or a React developer —
+so fix #1's formula change was the one that actually corrected the
+misleading number; fix #2 closes a real, separate latent bug that would
+matter for other candidate/requisition pairs where `skills_required` has
+genuine overlap but the JD description happens to be thin or empty.)
+
+**A third, independent, previously-undiscovered bug found while doing
+the "deep check for all AI match scores"**: `POST /intelligence/score/
+bulk` — a second, fully orphaned scoring endpoint (confirmed via grep:
+zero callers anywhere, frontend or backend) — maintained its own
+separate, duplicated copy of the skill-scoring logic (the same
+disconnected-from-skills_required flaw as #2, independently) AND
+referenced an undeclared `body.fast_mode` field. Since Pydantic raises
+`AttributeError` on an undefined attribute access rather than returning
+`None`, **every real call to this endpoint with a non-empty `jd_text`
+has crashed with an uncaught 500 since it was built** — confirmed live
+before touching anything (`HTTP:500`, traceback in backend logs pointing
+at the exact line). Never caught before because nothing has ever called
+it. Fixed by declaring `fast_mode: bool = False` on `BulkScoreRequest`,
+and rewriting the endpoint to call the now-fixed, shared
+`score_candidate_core()` per candidate instead of maintaining a second,
+independently-drifted copy of the same scoring logic — `fast_mode` now
+means "skip the per-candidate embed round-trip" (withholds `jd_text` from
+the core call) rather than a separate, less-capable code path; the
+keyword-based skill signal from `skills_required` still applies either
+way. Confirmed via grep this is the ONLY other place in the entire
+backend that writes `candidate_scores` — no third scoring path exists.
+
+Verified for real end-to-end, not code review: re-scored the exact real
+candidate from the user's screenshot — `readiness_index` 51.75→23.93
+(Grade D) for both roles via a direct API call, matching the hand-computed
+formula exactly; confirmed the previously-crashing `/score/bulk` call now
+returns a real 200; built a real throwaway candidate+requisition with
+100% skill overlap and confirmed a real 94.45/"A+" (matching the hand
+calculation exactly, proving strong matches aren't being punished); a
+real headless-browser check of the live candidate profile page confirmed
+the actual UI now shows "38% D" / "24% D" (the SAP ABAP Developer score
+picked up a small real cosine-similarity contribution from an interim
+verification call using real `jd_text`, correctly blended in per the new
+60/40 formula) — down from the reported misleading "52% C" for both.
+Confirmed via grep that `intelligence.py` is the sole writer of
+`candidate_scores` tenant-wide, so no other scoring surface was missed.
+New permanent test coverage added to "S38" (2 tests): a real zero-overlap
+candidate must score below 35 (was landing at 51.75 pre-fix) and grade
+D, and a real `/score/bulk` call with `jd_text` must return 200, not 500.
+Full S38 (8/8) + a broader regression sweep (S1/S2/S8/S13/S16/S20/S30,
+48 tests) passed clean. Zero-token audit: `CONFIRMED CLEAN` (380 files,
+0 external API refs).
+
 ## Feature-level permissions: 12 broad modules -> 73 individual features across 11 groups, 2026-08-17
 User asked for permissions to work at the level of every individual
 feature/page, not just ~12 broad modules — e.g. under Communication,

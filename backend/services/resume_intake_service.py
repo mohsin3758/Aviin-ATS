@@ -662,7 +662,7 @@ async def _auto_score_on_intake_bg(tenant_id: str, candidate_id: str, requisitio
         from routers.intelligence import score_candidate_core
         async with db.tenant_conn(tenant_id) as conn:
             req = await conn.fetchrow(
-                "SELECT description, experience_min, experience_max, education_required "
+                "SELECT description, experience_min, experience_max, education_required, skills_required "
                 "FROM requisitions WHERE id=$1 AND tenant_id=$2", requisition_id, tenant_id)
             if not req:
                 return
@@ -672,6 +672,7 @@ async def _auto_score_on_intake_bg(tenant_id: str, candidate_id: str, requisitio
                 required_exp_yr_max=req["experience_max"],
                 required_education=req["education_required"],
                 jd_text=req["description"],
+                required_skills=req["skills_required"],
             )
             print(f"[ResumeIntake] Auto-scored candidate {candidate_id} vs requisition {requisition_id}: "
                   f"readiness_index={result.get('readiness_index')}")
