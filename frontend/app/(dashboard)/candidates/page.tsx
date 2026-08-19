@@ -7,7 +7,7 @@ import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
   FileText, Users, GitMerge, Eye, Clock, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Layers,
-  Bookmark,
+  Bookmark, Sparkles,
 } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1031,6 +1031,13 @@ export default function CandidatesPage() {
                             {d.pipeline_job && <div style={{fontSize:'10px',color:'#94a3b8',marginTop:'2px',maxWidth:'120px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.pipeline_job}</div>}
                           </div>
                         ) : <span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
+                        {d.top_match && (
+                          <div title={`AI JD match score vs ${d.top_match.requisition_title||'a scored requisition'}`}
+                            style={{marginTop:'4px',display:'flex',alignItems:'center',gap:'3px',fontSize:'10px',fontWeight:'700',
+                              color:d.top_match.readiness_index>=70?'#16a34a':d.top_match.readiness_index>=50?'#0891b2':'#d97706'}}>
+                            <Sparkles size={10}/>{Math.round(d.top_match.readiness_index||0)}% match
+                          </div>
+                        )}
                       </td>
                       {/* Last activity */}
                       <td style={{padding:'10px 14px'}}>

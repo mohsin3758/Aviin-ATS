@@ -6069,6 +6069,80 @@ Pipeline Stage visibility to Resume Inbox/Candidates/candidate profile,
 a JD-matching score against open requisitions on Candidates/profile,
 and a full-page resume view with JD-match skill highlighting.
 
+## Pipeline stage visibility + JD job-matching + full-page resume review, 2026-08-20
+Direct follow-up to the same-day JD Match bug fix above — the other 3
+sub-asks from the same user message, all built and deployed.
+
+- **Pipeline Stage visibility** — Candidates list already had a working
+  Pipeline column (confirmed before building anything, not assumed
+  missing); the real gaps were the candidate profile and Resume Inbox.
+  `GET /candidates/{id}` now returns `pipeline_stage`/`pipeline_job`
+  (most-recently-updated real application, same convention as the list
+  endpoint's existing `pl_sub`). Candidate profile header now shows a
+  real stage badge next to the name, using the tenant's actual
+  `/settings/pipeline-stages` config — **found and fixed a real,
+  pre-existing bug while wiring this up**: the profile page's
+  Application-History and Applications-tab badges were both using a
+  hardcoded local `STAGE_COLORS` dict (sourced/screened/submitted/
+  interview/offer/placed/rejected only), the exact "hardcoded stage
+  key" bug class fixed repeatedly elsewhere in this project — any
+  tenant-custom round (e.g. `l3_interview`) silently fell back to a
+  generic grey badge with the raw key as its label. Replaced both with
+  a real `stageMap` fetched the same way the Candidates list page
+  already does it. `resume-intake.py`'s `intake_queue()` and
+  `get_resume_file()` gained the same `pipeline_stage`/`pipeline_job`
+  via a `LEFT JOIN LATERAL` on `applications`; Resume Inbox's detail
+  drawer and table row both show it now.
+- **JD Matching Score vs available open Jobs** — new
+  `POST /candidates/{id}/match-open-jobs`: scores one candidate against
+  every real `status='open'` requisition (capped 25) by reusing
+  `score_candidate_core()` — the SAME Tier-1 BGE-embed-similarity engine
+  already used by auto-score-on-intake and the manual `/intelligence/
+  score` call, not a second matching engine — and upserts into the same
+  `candidate_scores` table so results show up in the pre-existing "AI
+  Match Score" panel for free (the profile page just `refetch()`s after
+  a match). Candidates list gained a lightweight "Top Match" badge (best
+  pre-computed score already on file, via a cheap subquery — deliberately
+  NOT a live per-row embed call on every list render, which would be
+  expensive at scale) next to the Pipeline column.
+- **Full-page Resume view** — new route `/candidates/{id}/resume`:
+  complete, untruncated `resume_text` (the profile page's own "Resume
+  Extract" panel stayed capped at 240px on purpose, for the compact
+  profile layout — the new page is the dedicated full-review surface,
+  linked from both the header and that panel) with real matched-skill
+  highlighting (`<mark>` wrapping, computed client-side from the same
+  `matched_skills` the backend already returns — no HTML injection risk,
+  built as a React node array, not `dangerouslySetInnerHTML`) and a
+  missing-skills chip list, plus a requisition-score selector when the
+  candidate has multiple. `matched_skills` was a genuinely new field on
+  `GET /candidates/{id}`'s `ai_scores` (only `missing_skills` existed
+  before) — added alongside it, same computation, opposite condition.
+
+**A real bug in the new `match-open-jobs` endpoint caught by the
+permanent regression test, not manual review**: the first version
+returned raw `score_candidate_core()` output (just the `candidate_scores`
+row + a `requisition_title`) with no skill breakdown at all —
+`matched_skills`/`missing_skills` were only ever computed inside
+`get_candidate()`, never inside this new endpoint. The S38 test's own
+assertion (`own.matched_skills` toContain 'Kubernetes') caught this
+immediately as `undefined`. Fixed by computing the same matched/missing
+split inline against each requisition's `skills_required`.
+
+Verified for real end-to-end, not code review: called the real endpoint
+against V. Subbarao (the exact candidate from the user's own screenshots)
+and confirmed genuine scores against both real open requisitions, with an
+honest `matched_skills:[]` explained by checking the requisition's actual
+`skills_required` — a real, thin-test-data result, not a bug (confirmed
+the highlighting mechanism itself works correctly via an isolated regex
+test showing "SAP FICO"/"RICEF" correctly wrapped while "SAP HANA" was
+correctly left alone). New permanent "S38" suite (6 tests) using a real
+throwaway candidate+requisition with deliberate skill overlap (Kubernetes
+matched, Terraform missing) so the highlighting/matched-skill assertions
+have something genuine to check, independent of whatever real production
+data looks like at test-run time. Full regression sweep (S1/S2/S8/S13/
+S16/S20/S30, 48 tests touching the same files) passed clean. Zero-token
+audit: `CONFIRMED CLEAN` (380 files, 0 external API refs).
+
 ## Feature-level permissions: 12 broad modules -> 73 individual features across 11 groups, 2026-08-17
 User asked for permissions to work at the level of every individual
 feature/page, not just ~12 broad modules — e.g. under Communication,

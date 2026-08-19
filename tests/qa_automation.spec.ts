@@ -4408,3 +4408,150 @@ test.describe.serial('S37 Screening Auto-Notification on Stage->Screened', () =>
     await expect(page.getByText('Truecaller Verification')).toBeVisible();
   });
 });
+
+// S38 (2026-08-20): user-reported bug + 3 requested features from live
+// screenshots -- pipeline-stage visibility on Resume Inbox/Candidates/
+// candidate profile, a JD-match score against currently-open requisitions
+// on Candidates/profile, and a full-page resume view with matched-skill
+// highlighting for manual review. Real throwaway candidate + requisition
+// so the match-open-jobs scoring has a genuine, controllable overlap to
+// assert on (production data at test-run time won't reliably have one).
+test.describe.serial('S38 Pipeline Stage + JD Job-Match + Full Resume View', () => {
+  const stamp = Date.now();
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway open requisition + candidate with real skill overlap', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const r = await request.post(`${API}/requisitions`, {
+      headers: auth,
+      data: { title: `QA S38 JobMatch Test Role ${stamp}`, skills_required: ['Kubernetes', 'Terraform'], status: 'open' },
+    });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `QA S38 JobMatch Candidate ${stamp}`, email: `qa.s38.${stamp}@test.com`,
+        phone: `9${String(stamp).slice(-9)}`, skills: ['Kubernetes', 'Docker'], total_exp_mo: 60,
+        resume_text: 'Experienced DevOps engineer with strong Kubernetes and Docker background, cloud infra automation.',
+      },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+  });
+
+  test('pipeline_stage is null before any application, then real stage+job after one is created', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const before = await request.get(`${API}/candidates/${candId}`, { headers: auth });
+    expect((await before.json()).pipeline_stage).toBeNull();
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: candId, requisition_id: reqId } });
+    expect(app.ok()).toBeTruthy();
+    appId = (await app.json()).id;
+
+    const after = await request.get(`${API}/candidates/${candId}`, { headers: auth });
+    const afterBody = await after.json();
+    expect(afterBody.pipeline_stage).toBeTruthy();
+    expect(afterBody.pipeline_job).toContain('QA S38 JobMatch Test Role');
+
+    // The Candidates list should surface the same stage for this row too.
+    const list = await request.get(`${API}/candidates?search=${encodeURIComponent('QA S38 JobMatch Candidate ' + stamp)}`, { headers: auth });
+    const listBody = await list.json();
+    const row = (listBody.items || []).find((c: any) => c.id === candId);
+    expect(row?.pipeline_stage).toBe(afterBody.pipeline_stage);
+  });
+
+  test('POST /candidates/{id}/match-open-jobs scores against real open requisitions with real matched/missing skills', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const r = await request.post(`${API}/candidates/${candId}/match-open-jobs`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    expect(body.matched).toBeGreaterThan(0);
+    const own = (body.results || []).find((x: any) => x.requisition_id === reqId);
+    expect(own).toBeTruthy();
+    // Real overlap: candidate has Kubernetes (matched), lacks Terraform (missing).
+    expect(own.matched_skills).toContain('Kubernetes');
+    expect(own.missing_skills).toContain('Terraform');
+
+    // The scores just written should now also appear via GET /candidates/{id}
+    // (same candidate_scores table, single scoring path, not a second one).
+    const detail = await request.get(`${API}/candidates/${candId}`, { headers: auth });
+    const detailBody = await detail.json();
+    const persisted = (detailBody.ai_scores || []).find((s: any) => s.requisition_id === reqId);
+    expect(persisted).toBeTruthy();
+    expect(persisted.matched_skills).toContain('Kubernetes');
+  });
+
+  test('Resume Inbox queue endpoint carries pipeline_stage when a resume_files row is linked', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    // No direct resume_files-creation endpoint exists (established pattern
+    // elsewhere in this suite) - a structural shape check on a real,
+    // already-linked queue item is the meaningful assertion here: if any
+    // item with a candidate_id is present, it must expose the field (even
+    // if null), proving the response shape genuinely changed.
+    const q = await request.get(`${API}/resume-intake/queue?limit=5`, { headers: auth });
+    expect(q.ok()).toBeTruthy();
+    const items = (await q.json()).items || [];
+    const withCandidate = items.find((i: any) => i.candidate_id);
+    if (withCandidate) expect(withCandidate).toHaveProperty('pipeline_stage');
+  });
+
+  test('real headless UI: candidate profile shows pipeline stage badge, Match Against Open Jobs, and View Full Resume', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`/candidates/${candId}`);
+    await expect(page.getByTestId('candidate-pipeline-stage')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId('match-open-jobs-btn')).toBeVisible();
+    await expect(page.getByText('View Full Resume')).toBeVisible();
+
+    await page.getByTestId('match-open-jobs-btn').click();
+    await expect(page.getByText(/Matched against \d+ open requisition/)).toBeVisible({ timeout: 15000 });
+
+    expect(errors).toHaveLength(0);
+  });
+
+  test('real headless UI: full-page resume view renders complete text with matched-skill highlighting', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`/candidates/${candId}/resume`);
+    await expect(page.getByTestId('full-resume-text')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/DevOps engineer with strong Kubernetes/)).toBeVisible();
+    // The "Comparing Against" selector defaults to the most-recently-scored
+    // requisition, which - since match-open-jobs (previous test) scores
+    // every real open req in one batch - isn't guaranteed to be this
+    // suite's own throwaway one. Select it explicitly by name if a
+    // dropdown is present (multiple scores) before asserting on it.
+    const compareSelect = page.locator('select');
+    if (await compareSelect.isVisible().catch(() => false)) {
+      const optValues: { value: string; label: string }[] = await compareSelect.locator('option').evaluateAll(
+        opts => opts.map(o => ({ value: (o as HTMLOptionElement).value, label: o.textContent || '' }))
+      );
+      const match = optValues.find(o => o.label.includes(`QA S38 JobMatch Test Role ${stamp}`));
+      if (match) await compareSelect.selectOption(match.value);
+    }
+    // Real skill highlighting: "Kubernetes" (a matched skill for the
+    // throwaway requisition) should render inside a <mark> element.
+    await expect(page.locator('mark', { hasText: 'Kubernetes' }).first()).toBeVisible({ timeout: 10000 });
+    // Missing-skill chip should list the requisition's unmet requirement.
+    await expect(page.getByText('✕ Terraform')).toBeVisible();
+
+    expect(errors).toHaveLength(0);
+  });
+});

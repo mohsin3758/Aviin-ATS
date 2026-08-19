@@ -34,6 +34,10 @@ interface ResumeItem {
   // Enrichment from candidates table (Phase H backfill + new intake)
   jd_match_score?: number;
   matched_requisition_id?: string; matched_jd_title?: string;
+  // Real gap fix (2026-08-20): the candidate's CURRENT pipeline stage
+  // (most-recently-updated real application), distinct from
+  // matched_jd_title above which is just the auto-match suggestion.
+  pipeline_stage?: string; pipeline_job?: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -193,6 +197,9 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
   const [pipelineMsg, setPipelineMsg] = useState('');
   const reqId = item.matched_requisition_id || item.requisition_id;
   const reqTitle = matchTitle || item.matched_jd_title || item.requisition_title;
+  const currentStageInfo = item.pipeline_stage
+    ? PIPELINE_STAGES_LIVE.find((s: any) => s.key === item.pipeline_stage)
+    : null;
 
   async function handleMoveToStage(stage: string) {
     if (!item.candidate_id) return;
@@ -229,6 +236,13 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
           <StatusBadge status={item.parse_status} />
           {matchScore != null && <JdMatchBadge score={matchScore} />}
+          {item.pipeline_stage && (
+            <span data-testid="resume-inbox-pipeline-stage" title={item.pipeline_job || ''}
+              style={{ display: 'inline-flex', alignItems: 'center', padding: '2px 9px', borderRadius: 999, fontSize: 11, fontWeight: 700,
+                background: currentStageInfo ? `${currentStageInfo.color}1a` : '#f1f5f9', color: currentStageInfo?.color || '#64748b' }}>
+              {currentStageInfo?.label || item.pipeline_stage}{item.pipeline_job ? ` · ${item.pipeline_job}` : ''}
+            </span>
+          )}
           {nearDup && (
             <a href={`/candidates/${nearDup.candidate_id}`} target="_blank" rel="noreferrer"
               style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', textDecoration: 'none' }}>
@@ -766,7 +780,15 @@ function ResumeInboxPageInner() {
                           ? <JdMatchBadge score={matchScore} title={r.matched_jd_title || r.requisition_title} />
                           : <span style={{ fontSize: 11, color: '#e2e8f0' }}>—</span>}
                       </td>
-                      <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}><StatusBadge status={r.parse_status || 'pending'} /></td>
+                      <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}>
+                        <StatusBadge status={r.parse_status || 'pending'} />
+                        {r.pipeline_stage && (
+                          <div data-testid={`resume-inbox-pipeline-stage-${r.id}`} title={r.pipeline_job || ''}
+                            style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: '#0891b2', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
+                            📍 {r.pipeline_stage.replace(/_/g, ' ')}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ padding: '10px 8px' }}>
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={e => { e.stopPropagation(); setEditItem(r); }} title="Edit & Approve" style={{ padding: '4px 8px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Edit</button>

@@ -1530,6 +1530,39 @@ export default function CandidateProfilePage() {
     setTimeout(() => setStatusLinkCopied(false), 2000);
   }
   const [activeTab, setActiveTab] = useState<string>('profile');
+  const [matching, setMatching] = useState(false);
+  const [jobMatches, setJobMatches] = useState<any[]|null>(null);
+
+  // Real, tenant-configured stage labels/colors — matches the exact
+  // convention already used on /candidates (the flat STAGE_COLORS below
+  // is only a fallback for a stage key not in this tenant's real config,
+  // e.g. before this loads, not a substitute for it - custom rounds like
+  // l3_interview were previously silently falling back to a generic grey
+  // badge here since STAGE_COLORS never knew about them).
+  const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
+  const stageMap: Record<string,{bg:string;color:string;label:string}> = (stageConfig && stageConfig.length>0)
+    ? Object.fromEntries(stageConfig.map((s:any)=>[s.stage_key,{bg:`${s.color}1a`,color:s.color,label:s.label}]))
+    : {};
+  function stageBadge(stg: string) {
+    return stageMap[stg] || { bg: STAGE_COLORS[stg]?.bg || '#f1f5f9', color: STAGE_COLORS[stg]?.color || '#64748b', label: stg };
+  }
+
+  async function matchOpenJobs() {
+    setMatching(true);
+    try {
+      const r = await apiFetch(`/candidates/${candidate.id}/match-open-jobs`, { method: 'POST' });
+      setJobMatches(r.results || []);
+      // Writes real candidate_scores rows server-side - refetch so the
+      // existing AI Match Score panel picks them up immediately, rather
+      // than building a second, competing results panel showing the
+      // same data twice.
+      refetch();
+    } catch (e: any) {
+      alert(e?.message || 'Job matching failed');
+    } finally {
+      setMatching(false);
+    }
+  }
 
   // Use fetched data unless locally overridden by an edit
   const candidate = cand ?? candRaw;
@@ -1589,7 +1622,18 @@ export default function CandidateProfilePage() {
         <div style={{flex:1,minWidth:'200px'}}>
           <div style={{display:'flex',alignItems:'flex-start',gap:'12px',flexWrap:'wrap'}}>
             <div style={{flex:1}}>
-              <h1 style={{fontSize:'22px',fontWeight:'800',color:'#0f172a',marginBottom:'2px'}}>{candidate.full_name}</h1>
+              <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginBottom:'4px'}}>
+                <h1 style={{fontSize:'22px',fontWeight:'800',color:'#0f172a',margin:0}}>{candidate.full_name}</h1>
+                {candidate.pipeline_stage && (() => {
+                  const sb = stageBadge(candidate.pipeline_stage);
+                  return (
+                    <span data-testid="candidate-pipeline-stage" title={candidate.pipeline_job || ''}
+                      style={{fontSize:'11px',fontWeight:'700',padding:'3px 10px',borderRadius:'10px',background:sb.bg,color:sb.color,whiteSpace:'nowrap'}}>
+                      {sb.label}{candidate.pipeline_job ? ` · ${candidate.pipeline_job}` : ''}
+                    </span>
+                  );
+                })()}
+              </div>
               {candidate.current_designation && (
                 <div style={{fontSize:'14px',color:'#374151',fontWeight:'600',marginBottom:'2px'}}>{candidate.current_designation}</div>
               )}
@@ -1638,6 +1682,21 @@ export default function CandidateProfilePage() {
                   border:'none',background:'#7c3aed',color:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',whiteSpace:'nowrap'}}>
                 <FileText size={13}/> Generate Resume
               </button>
+              <button onClick={matchOpenJobs} disabled={matching}
+                title="Score this candidate against every currently open requisition (zero-token: BGE-small embed similarity + the same readiness formula used everywhere else)"
+                data-testid="match-open-jobs-btn"
+                style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
+                  border:'none',background:matching?'#94a3b8':'#0891b2',color:'white',cursor:matching?'not-allowed':'pointer',fontSize:'13px',fontWeight:'600',whiteSpace:'nowrap'}}>
+                <TrendingUp size={13}/> {matching?'Matching…':'Match Against Open Jobs'}
+              </button>
+              {candidate.resume_text && (
+                <button onClick={() => router.push(`/candidates/${candidate.id}/resume`)}
+                  title="Full-page resume view with JD-matched skill highlighting"
+                  style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
+                    border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151',whiteSpace:'nowrap'}}>
+                  <FileSearch size={13}/> View Full Resume
+                </button>
+              )}
             </div>
           </div>
 
@@ -1737,6 +1796,13 @@ export default function CandidateProfilePage() {
         {activeTab==='profile' && (
           <div data-testid="profile-panel" style={{marginTop:'16px',display:'flex',flexDirection:'column',gap:'16px'}}>
             {id && <OwnershipCard candidateId={id as string} />}
+            {jobMatches && (
+              <div style={{fontSize:'12px',color:jobMatches.length>0?'#0f766e':'#94a3b8',background:jobMatches.length>0?'#f0fdfa':'#f8fafc',border:'1px solid '+(jobMatches.length>0?'#99f6e4':'#e2e8f0'),borderRadius:'8px',padding:'10px 14px'}}>
+                {jobMatches.length>0
+                  ? `Matched against ${jobMatches.length} open requisition${jobMatches.length>1?'s':''} — scores below.`
+                  : 'No open requisitions to match against right now.'}
+              </div>
+            )}
             {candidate.ai_scores?.length > 0 && (
               <div data-testid="ai-score-panel" style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
                 <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>AI Match Score</h3>
@@ -1773,7 +1839,7 @@ export default function CandidateProfilePage() {
                 <p style={{color:'#94a3b8',fontSize:'13px'}}>No applications found</p>
               ) : applications.map((app:any, i:number) => {
                 const stg = app.stage || 'sourced';
-                const sc = STAGE_COLORS[stg] || {color:'#64748b',bg:'#f1f5f9'};
+                const sc = stageBadge(stg);
                 return (
                   <div key={i} style={{display:'flex',alignItems:'center',justifyContent:'space-between',
                     padding:'12px 16px',background:'#f8fafc',borderRadius:'10px',border:'1px solid #e2e8f0',marginBottom:'8px'}}>
@@ -1782,7 +1848,7 @@ export default function CandidateProfilePage() {
                       <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>Applied {fmtDate(app.created_at)}</div>
                     </div>
                     <span style={{padding:'4px 12px',borderRadius:'20px',fontSize:'11px',fontWeight:'700',
-                      background:sc.bg,color:sc.color,textTransform:'capitalize'}}>{stg}</span>
+                      background:sc.bg,color:sc.color}}>{sc.label}</span>
                   </div>
                 );
               })}
@@ -1790,7 +1856,14 @@ export default function CandidateProfilePage() {
 
             {candidate.resume_text && (
               <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
-                <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>Resume Extract</h3>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}}>
+                  <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',margin:0}}>Resume Extract</h3>
+                  <button onClick={() => router.push(`/candidates/${candidate.id}/resume`)}
+                    style={{display:'flex',alignItems:'center',gap:'5px',padding:'5px 10px',borderRadius:'6px',
+                      border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'11px',fontWeight:'600',color:'#1e40af'}}>
+                    <FileSearch size={11}/> Open Full Page
+                  </button>
+                </div>
                 <pre style={{fontSize:'12px',color:'#475569',lineHeight:'1.6',whiteSpace:'pre-wrap',maxHeight:'240px',overflowY:'auto',margin:0}}>
                   {candidate.resume_text}
                 </pre>
@@ -1812,9 +1885,9 @@ export default function CandidateProfilePage() {
                   <div style={{fontSize:'11px',color:'#94a3b8'}}>Applied {fmtDate(a.created_at)}</div>
                 </div>
                 <span style={{fontSize:'11px',padding:'3px 10px',borderRadius:'20px',
-                  background:(STAGE_COLORS[a.stage]||{bg:'#f1f5f9'}).bg,
-                  color:(STAGE_COLORS[a.stage]||{color:'#475569'}).color,
-                  fontWeight:'700',textTransform:'capitalize'}}>{a.stage}</span>
+                  background:stageBadge(a.stage||'sourced').bg,
+                  color:stageBadge(a.stage||'sourced').color,
+                  fontWeight:'700'}}>{stageBadge(a.stage||'sourced').label}</span>
               </div>
             ))}
           </div>

@@ -91,12 +91,18 @@ async def intake_queue(
                    im.subject as email_subject, im.received_at as email_received_at,
                    im.imap_uid,
                    r.title as requisition_title,
-                   mr.title as matched_jd_title
+                   mr.title as matched_jd_title,
+                   pl.stage as pipeline_stage, pl.pipeline_job
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
             LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
             LEFT JOIN requisitions r ON r.id=rf.requisition_id
             LEFT JOIN requisitions mr ON mr.id=c.matched_requisition_id
+            LEFT JOIN LATERAL (
+                SELECT a.stage, ar.title AS pipeline_job
+                FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
+                WHERE a.candidate_id=c.id ORDER BY a.updated_at DESC LIMIT 1
+            ) pl ON c.id IS NOT NULL
             WHERE {where}
             ORDER BY rf.created_at DESC
             LIMIT ${p} OFFSET ${p+1}""",
@@ -134,10 +140,16 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
         row = await conn.fetchrow("""
             SELECT rf.*, c.full_name, c.email, c.phone, c.skills, c.total_exp_mo,
                    c.location, c.current_employer, c.current_designation,
-                   r.title as requisition_title
+                   r.title as requisition_title,
+                   pl.stage as pipeline_stage, pl.pipeline_job
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
             LEFT JOIN requisitions r ON r.id=rf.requisition_id
+            LEFT JOIN LATERAL (
+                SELECT a.stage, ar.title AS pipeline_job
+                FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
+                WHERE a.candidate_id=c.id ORDER BY a.updated_at DESC LIMIT 1
+            ) pl ON c.id IS NOT NULL
             WHERE rf.id=$1 AND rf.tenant_id=$2""",
             resume_file_id, actor.tenant_id)
     if not row:

@@ -89,11 +89,20 @@ async def list_candidates(
                  "'expires_at',co.ownership_expires_at,'status',co.status,'source',co.source)"
                  " FROM candidate_ownership co JOIN users u ON u.id=co.recruiter_id AND u.is_active IS NOT FALSE"
                  " WHERE co.candidate_id=c.id) AS owner_json")
+    # Best pre-computed JD-match score this candidate already has on file
+    # (from resume-intake auto-score, a manual /intelligence/score call, or
+    # the new "Match Against Open Jobs" action) — cheap, no live embed calls
+    # on every list render; the profile page's dedicated action recomputes
+    # a fresh set against all currently-open requisitions on demand.
+    top_match_sub = ("(SELECT json_build_object('readiness_index',cs.readiness_index,"
+                      "'readiness_grade',cs.readiness_grade,'requisition_title',r.title)"
+                      " FROM candidate_scores cs LEFT JOIN requisitions r ON r.id=cs.requisition_id"
+                      " WHERE cs.candidate_id=c.id ORDER BY cs.readiness_index DESC NULLS LAST LIMIT 1) AS top_match_json")
     flds = ", ".join("c." + f.strip() for f in FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
         rows  = await conn.fetch(
-            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub} FROM candidates c {where} ORDER BY c.{sort_by} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
+            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub}, {top_match_sub} FROM candidates c {where} ORDER BY c.{sort_by} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
             *params, limit, offset)
     items = []
     for r in rows:
@@ -110,6 +119,8 @@ async def list_candidates(
         d["tags"] = json.loads(tj) if tj else []
         oj = d.pop("owner_json", None)
         d["owner"] = json.loads(oj) if oj else None
+        tm = d.pop("top_match_json", None)
+        d["top_match"] = json.loads(tm) if tm else None
         items.append(d)
     return {"items": items, "total": int(total), "limit": limit, "offset": offset}
 
@@ -516,19 +527,81 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
                WHERE cs.candidate_id=$1 AND cs.tenant_id=$2
                ORDER BY cs.scored_at DESC LIMIT 5""",
             candidate_id, actor.tenant_id)
+        # Current pipeline stage (most-recently-updated real application),
+        # matching the same pl_sub convention already used by the list
+        # endpoint — real gap fix (2026-08-20): the profile page had no
+        # stage visibility at all outside a buried Applications-tab list.
+        pl_row = await conn.fetchrow(
+            "SELECT a.stage, r.title AS pipeline_job, a.updated_at"
+            " FROM applications a JOIN requisitions r ON r.id=a.requisition_id"
+            " WHERE a.candidate_id=$1 ORDER BY a.updated_at DESC LIMIT 1",
+            candidate_id)
     d = dict(row)
     if rf:
         d['latest_resume_file_id'] = str(rf['id'])
         d['latest_resume_file_name'] = rf['file_name']
+    d['pipeline_stage'] = pl_row['stage'] if pl_row else None
+    d['pipeline_job'] = pl_row['pipeline_job'] if pl_row else None
     cand_skills_lower = {s.lower() for s in (d.get('skills') or [])}
     scores_out = []
     for sr in score_rows:
         s = dict(sr)
         req_skills = s.pop('skills_required', None) or []
         s['missing_skills'] = [x for x in req_skills if x.lower() not in cand_skills_lower]
+        s['matched_skills'] = [x for x in req_skills if x.lower() in cand_skills_lower]
         scores_out.append(s)
     d['ai_scores'] = scores_out
     return d
+
+
+@router.post("/{candidate_id}/match-open-jobs")
+async def match_candidate_against_open_jobs(candidate_id: str, actor: Actor = Depends(get_actor)):
+    """Real gap fix (2026-08-20): the existing AI Match Score panel only
+    ever shows requisitions this candidate happened to already be scored
+    against (auto-score on intake, or a manual /intelligence/score call) —
+    there was no way to see how a candidate stacks up against EVERY
+    currently-open job. Reuses score_candidate_core (the same Tier-1
+    embed-similarity engine already used by auto-score-on-intake and the
+    manual scorer) against each real open requisition, upserting into the
+    same candidate_scores table so results show up in the existing AI
+    Match Score panel afterward too - one scoring path, not a second one."""
+    from routers.intelligence import score_candidate_core
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow(
+            "SELECT id, skills FROM candidates WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
+            candidate_id, actor.tenant_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        cand_skills_lower = {s.lower() for s in (cand["skills"] or [])}
+        reqs = await conn.fetch(
+            "SELECT id, title, description, experience_min, experience_max, education_required, skills_required"
+            " FROM requisitions WHERE tenant_id=$1 AND status='open' AND is_active IS NOT FALSE"
+            " ORDER BY created_at DESC LIMIT 25",
+            actor.tenant_id)
+        results = []
+        for r in reqs:
+            try:
+                res = await score_candidate_core(
+                    conn, actor.tenant_id, candidate_id, str(r["id"]),
+                    required_exp_yr_min=(r["experience_min"] or 0),
+                    required_exp_yr_max=r["experience_max"],
+                    required_education=r["education_required"],
+                    jd_text=r["description"],
+                )
+                res["requisition_title"] = r["title"]
+                # Same matched/missing computation as get_candidate()'s
+                # ai_scores field - real bug fixed here: the first version
+                # of this endpoint returned raw candidate_scores rows with
+                # no skill breakdown at all, caught by the S38 regression
+                # test (matched_skills came back undefined).
+                req_skills = r["skills_required"] or []
+                res["matched_skills"] = [x for x in req_skills if x.lower() in cand_skills_lower]
+                res["missing_skills"] = [x for x in req_skills if x.lower() not in cand_skills_lower]
+                results.append(res)
+            except Exception as e:
+                print(f"[JobMatch] Failed scoring candidate {candidate_id} vs req {r['id']}: {e}")
+    results.sort(key=lambda x: x.get("readiness_index") or 0, reverse=True)
+    return {"matched": len(results), "results": results}
 
 
 @router.get("/{candidate_id}/standard-resume")
