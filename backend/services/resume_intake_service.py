@@ -568,8 +568,18 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
 async def match_requisition(conn, tenant_id: str, subject: str, skills: list, job_board: str = ''):
     if not subject:
         return None
+    # Real bug fix (2026-08-20), found while root-causing the same live
+    # "nothing to sort by" report the skills-matching fix above addresses:
+    # this query had no is_active/status filter at all - a candidate could
+    # only ever match against whichever 50 requisitions happened to be
+    # MOST RECENTLY CREATED, soft-deleted or not. On a real tenant with
+    # heavy test-suite activity (this one), that window can fill up
+    # entirely with soft-deleted QA rows, crowding out every real open
+    # requisition and making a match structurally impossible regardless of
+    # how well subject/skills actually line up with a real role.
     reqs = await conn.fetch(
-        "SELECT id, title FROM requisitions WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 50",
+        "SELECT id, title FROM requisitions WHERE tenant_id=$1 AND is_active IS NOT FALSE"
+        " AND status='open' ORDER BY created_at DESC LIMIT 50",
         tenant_id)
     if not reqs:
         return None
@@ -599,12 +609,24 @@ async def match_requisition(conn, tenant_id: str, subject: str, skills: list, jo
         if title in subj_lower or any(w in subj_lower for w in words):
             return str(r['id'])
 
-    # 3. Skills-based fallback
+    # 3. Skills-based fallback. Real bug fixed 2026-08-20 (root-caused
+    # while investigating a live "Sort by Match % does nothing" report -
+    # this was the actual cause: candidates were never getting matched to
+    # a requisition at intake at all, so there was nothing to score or
+    # sort): `skill_set & title_words` requires an EXACT match between a
+    # whole skill phrase ("sap fico") and a single title token ("sap") -
+    # a set intersection of two different string values, which can never
+    # succeed for the overwhelmingly common case of a multi-word skill
+    # against a short requisition title. Confirmed directly against a
+    # real candidate (skills incl. "SAP FICO"/"SAP HANA", title "SAP ABAP
+    # Developer") that the old check always returned an empty set despite
+    # "sap" plainly being a real, meaningful match. Fixed to check whether
+    # any significant title word appears as a substring of any skill.
     if skills:
         skill_set = {s.lower() for s in skills}
         for r in reqs:
-            title_words = {w.lower() for w in r['title'].split()}
-            if skill_set & title_words:
+            title_words = [w.lower() for w in r['title'].split() if len(w) > 2]
+            if any(tw in sk for tw in title_words for sk in skill_set):
                 return str(r['id'])
     return None
 

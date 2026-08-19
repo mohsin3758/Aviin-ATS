@@ -530,7 +530,12 @@ function ResumeInboxPageInner() {
   const [limit, setLimit] = useState(100);
   const [dedupTarget, setDedupTarget] = useState<string|null>(null);
   const [sortByMatch, setSortByMatch] = useState(false);
-  const [sortNewest, setSortNewest] = useState(false);
+  // Real bug fix (2026-08-20): this was a plain boolean "is newest-first
+  // active" flag - but the API's own default order IS already newest-
+  // first, so toggling it on produced the identical order to toggling it
+  // off, making the button look completely broken (click it, nothing
+  // visibly changes). Now a real direction that actually reverses order.
+  const [addedDir, setAddedDir] = useState<'desc' | 'asc'>('desc');
 
   const { data: stats, refetch: reloadStats } = useFetch<any>('/resume-intake/stats');
   const { data: reqs } = useFetch<any>('/requisitions?limit=200&status=open');
@@ -598,16 +603,17 @@ function ResumeInboxPageInner() {
         return sb - sa;
       });
     }
-    // "Added" (created_at) — when OUR system actually processed this email,
-    // not the email's own original date (that's the separate "Received"
-    // column). The API already defaults to this order, but making it an
-    // explicit, clickable sort makes recently-cleared backlog activity
-    // visible and lets you get back to it after using Match % sort.
-    if (sortNewest) {
-      return [...baseItems].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    }
-    return baseItems;
-  }, [baseItems, sortByMatch, sortNewest]);
+    // "Added" (created_at) — when OUR system actually processed this
+    // email, not the email's own original date (that's the separate
+    // "Received" column). desc (newest first) matches the API's own
+    // default order — always applied, so the button genuinely reverses
+    // the list on click instead of silently no-op'ing against a default
+    // that already matched it.
+    return [...baseItems].sort((a, b) => {
+      const diff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      return addedDir === 'desc' ? diff : -diff;
+    });
+  }, [baseItems, sortByMatch, addedDir]);
 
   const selectAll = () => { const all = items.map(r => r.id); setSelectedIds(prev => prev.size === all.length ? new Set() : new Set(all)); };
 
@@ -708,12 +714,12 @@ function ResumeInboxPageInner() {
             <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <input type="checkbox" checked={selectedIds.size === items.length && items.length > 0} onChange={selectAll} style={{ cursor: 'pointer' }} />
               <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>{items.length} resumes</span>
-              {/* Sort by newest-added toggle — shows live backlog-clearing activity */}
-              <button onClick={() => { setSortNewest(s => !s); setSortByMatch(false); }} style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: sortNewest ? '#eff6ff' : '#f8fafc', color: sortNewest ? '#1e40af' : '#64748b', border: `1px solid ${sortNewest ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-                <ArrowUpDown size={11} /> {sortNewest ? 'Sorted: Newest Added' : 'Sort by Newest Added'}
+              {/* Added-date sort — genuinely toggles newest-first/oldest-first now (see addedDir) */}
+              <button onClick={() => { setAddedDir(d => d === 'desc' ? 'asc' : 'desc'); setSortByMatch(false); }} style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: !sortByMatch ? '#eff6ff' : '#f8fafc', color: !sortByMatch ? '#1e40af' : '#64748b', border: `1px solid ${!sortByMatch ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                <ArrowUpDown size={11} /> {addedDir === 'desc' ? 'Newest Added First' : 'Oldest Added First'}
               </button>
               {/* Sort by match toggle */}
-              <button onClick={() => { setSortByMatch(s => !s); setSortNewest(false); }} style={{ marginLeft: 4, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: sortByMatch ? '#eff6ff' : '#f8fafc', color: sortByMatch ? '#1e40af' : '#64748b', border: `1px solid ${sortByMatch ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+              <button onClick={() => { setSortByMatch(s => !s); }} style={{ marginLeft: 4, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: sortByMatch ? '#eff6ff' : '#f8fafc', color: sortByMatch ? '#1e40af' : '#64748b', border: `1px solid ${sortByMatch ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
                 <ArrowUpDown size={11} /> {sortByMatch ? 'Sorted: Match %' : 'Sort by Match %'}
               </button>
               {withNearDup > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '3px 8px', borderRadius: 6, fontWeight: 600 }}><AlertTriangle size={10} style={{ display: 'inline', marginRight: 3 }} />{withNearDup} near-dup{withNearDup !== 1 ? 's' : ''}</span>}
@@ -732,9 +738,9 @@ function ResumeInboxPageInner() {
                 {['Candidate', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', 'Status', ''].map(h => (
                   <th key={h} title={h === 'Received' ? "The email's own date" : h === 'Added' ? 'When our system processed this email' : undefined}
                     style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : h === 'Added' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: (h === 'Match %' || h === 'Added') ? 'pointer' : 'default' }}
-                    onClick={h === 'Match %' ? () => { setSortByMatch(s => !s); setSortNewest(false); } : h === 'Added' ? () => { setSortNewest(s => !s); setSortByMatch(false); } : undefined}>
+                    onClick={h === 'Match %' ? () => { setSortByMatch(s => !s); } : h === 'Added' ? () => { setAddedDir(d => d === 'desc' ? 'asc' : 'desc'); setSortByMatch(false); } : undefined}>
                     {h === 'Match %' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Target size={11} />{h}{sortByMatch ? ' ↓' : ''}</span>
-                      : h === 'Added' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><ArrowUpDown size={11} />{h}{sortNewest ? ' ↓' : ''}</span>
+                      : h === 'Added' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><ArrowUpDown size={11} />{h}{!sortByMatch ? (addedDir === 'desc' ? ' ↓' : ' ↑') : ''}</span>
                       : h}
                   </th>
                 ))}

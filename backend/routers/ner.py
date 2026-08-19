@@ -213,7 +213,16 @@ def score_candidate(
     skill_score = round(min(skill_similarity * 100, 100), 2)
 
     # 2. Experience fit
-    actual_yr = (parsed.get('total_years_exp') or 0) or (candidate_exp_mo / 12)
+    # Real bug fixed 2026-08-20, found while backfilling requisition
+    # matching for the existing Resume Inbox queue: total_years_exp comes
+    # from a NUMERIC column (candidate_parsed_data), which asyncpg returns
+    # as a Python Decimal - a genuinely pre-existing latent bug (the old
+    # composite formula multiplied exp_score by a float too), just never
+    # triggered before today because no candidate with a Decimal-valued
+    # total_years_exp had ever been scored via this exact code path.
+    # float() here keeps every downstream computation in plain float,
+    # since Decimal arithmetic with float literals raises TypeError.
+    actual_yr = float((parsed.get('total_years_exp') or 0) or (candidate_exp_mo / 12))
     if required_exp_yr_max:
         if actual_yr < required_exp_yr_min:
             exp_score = max(0, 50 - (required_exp_yr_min - actual_yr) * 10)

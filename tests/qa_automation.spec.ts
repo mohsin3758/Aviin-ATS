@@ -4657,3 +4657,86 @@ test.describe.serial('S38 Pipeline Stage + JD Job-Match + Full Resume View', () 
     expect(errors).toHaveLength(0);
   });
 });
+
+// S39 (2026-08-20): user-reported "Sort by Newest Added / Sort by Match %
+// not working" on Resume Inbox. Root-caused to 3 separate, real bugs: (1)
+// the "Newest Added" toggle was a no-op against the API's own already-
+// newest-first default order, so clicking it never visibly changed
+// anything; (2) match_requisition()'s skill-based fallback compared whole
+// skill phrases ("sap fico") against single title words ("sap") via exact
+// set intersection, which can never match - the real reason almost no
+// candidate in the queue had ever gotten auto-scored at intake, so there
+// was nothing real to sort by; (3) that same fallback's requisition query
+// had no is_active/status filter, so a tenant with heavy test-suite
+// activity could have its whole top-50-by-created_at window filled with
+// soft-deleted rows, crowding out every real open requisition. Fixing (2)
+// surfaced a 4th, previously-latent bug during a real backfill: a
+// Decimal-typed total_years_exp (from a NUMERIC column) propagating into
+// a float multiplication in the composite readiness formula.
+test.describe.serial('S39 Resume Inbox Sort Fixes', () => {
+  const stamp = Date.now();
+  let candId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('a candidate whose resume implies fractional-year experience (Decimal from candidate_parsed_data) scores without crashing', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `QA S39 Decimal Test Candidate ${stamp}`, email: `qa.s39.${stamp}@test.com`,
+        phone: `9${String(stamp).slice(-9)}`, skills: ['Python'], total_exp_mo: 30,
+        resume_text: 'Experienced Python engineer with 2.5 years of professional experience across two roles, building backend services.',
+      },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    // Scoring auto-parses resume_text into candidate_parsed_data
+    // (total_years_exp, a NUMERIC column -> Decimal via asyncpg) then
+    // feeds it into the composite formula - this must not 500.
+    const r = await request.post(`${API}/candidates/${candId}/match-open-jobs`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    // Real assertion, not just "didn't crash": every real open
+    // requisition matched must carry a real numeric readiness_index.
+    for (const res of body.results || []) {
+      expect(typeof res.readiness_index).toBe('number');
+    }
+  });
+
+  test('real headless UI: Sort by Match % and the Added-date toggle both genuinely reorder the list', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/resume-inbox');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+
+    const namesBefore = await page.locator('table tbody tr td:nth-child(2)').allTextContents();
+
+    await page.click('button:has-text("Sort by Match %")');
+    await page.waitForTimeout(500);
+    const namesAfterMatchSort = await page.locator('table tbody tr td:nth-child(2)').allTextContents();
+    expect(namesAfterMatchSort.slice(0, 5)).not.toEqual(namesBefore.slice(0, 5));
+
+    // Toggling the Added-date button must genuinely reverse the list -
+    // this was the reported-broken no-op case.
+    const addedBtn = page.getByRole('button', { name: /Added First/ });
+    await addedBtn.click();
+    await page.waitForTimeout(500);
+    await expect(page.getByRole('button', { name: 'Oldest Added First' })).toBeVisible();
+    const namesOldestFirst = await page.locator('table tbody tr td:nth-child(2)').allTextContents();
+    expect(namesOldestFirst.slice(0, 5)).not.toEqual(namesBefore.slice(0, 5));
+
+    await addedBtn.click();
+    await page.waitForTimeout(500);
+    await expect(page.getByRole('button', { name: 'Newest Added First' })).toBeVisible();
+
+    expect(errors).toHaveLength(0);
+  });
+});

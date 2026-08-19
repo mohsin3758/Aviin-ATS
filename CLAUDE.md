@@ -6381,6 +6381,88 @@ visible, `Match %`/`Status`/Actions all reachable) before finalizing.
 Full S14 (12/12) + S38 (10/10) re-run clean after the revert. Zero-token
 audit: `CONFIRMED CLEAN` (382 files, 0 external API refs).
 
+## "Sort by Newest Added"/"Sort by Match %" not working — root-caused to
+## 4 real, compounding bugs, all fixed, plus a backfill of the live
+## Resume Inbox queue, 2026-08-20
+User reported both sort buttons on Resume Inbox doing nothing when
+clicked. Investigated live rather than assumed — found 4 distinct real
+bugs, not one, three of which meant there was almost no real data to
+sort in the first place.
+
+**Bug 1 — "Sort by Newest Added" was a pure no-op by design.** The API's
+own default order is already newest-first, so toggling the button
+produced the identical order whether on or off — confirmed live via a
+real click-through showing zero change. Rewrote it as a genuine
+`addedDir: 'desc'|'asc'` toggle that actually reverses the list, with
+the button label changing to reflect the real state ("Newest Added
+First" / "Oldest Added First").
+
+**Bug 2 — the real reason `Sort by Match %` looked broken: almost
+nothing in the queue had ever been auto-scored.** `match_requisition()`
+(the intake-time "which open job does this resume match" function) had
+a skills-based fallback comparing whole skill phrases against single
+title words via exact set intersection: `{"sap fico","sap hana",...} &
+{"sap","abap","developer"}` — always empty, since "sap fico" can never
+equal "sap" as a set member, even though "sap" is plainly a real
+substring match. Confirmed directly: this fallback has essentially never
+worked for any multi-word skill (the common case) against a short
+requisition title. Fixed to check substring containment instead of
+exact phrase equality.
+
+**Bug 3 — even fixed, the query had nothing real to match against.**
+`match_requisition()`'s own requisition query had no `is_active`/
+`status` filter at all — just the 50 most-recently-created rows,
+soft-deleted or not. On this tenant, today's own heavy testing session
+left dozens of soft-deleted QA requisitions with very recent timestamps,
+completely crowding the real, older "SAP ABAP Developer"/"Senior React
+Developer" roles out of the window — meaning even a candidate with a
+perfect keyword match had structurally no way to be matched. Added
+`is_active IS NOT FALSE AND status='open'`.
+
+**Bug 4 — found only by actually running a real backfill, not by
+reasoning about the fix**: applying bugs 2+3's fix to the existing
+Resume Inbox queue (so the reported symptom would be visibly fixed, not
+just fixed-for-future-intake) surfaced a genuinely new, previously-
+latent crash: `total_years_exp` comes from a NUMERIC column
+(`candidate_parsed_data`), which asyncpg returns as Python `Decimal` —
+multiplying that into the composite readiness formula's `exp_score *
+0.22` raised `TypeError: unsupported operand type(s) for *:
+'decimal.Decimal' and 'float'`. This bug predates today (the old
+formula multiplied by a float too) but had never been triggered before,
+since no real candidate scoring had ever hit this exact code path with
+a Decimal-valued `total_years_exp`. Fixed with a single `float()` cast
+at the point `actual_yr` is read, closing it for every caller.
+
+**Real backfill executed, not just a future-facing fix**: of 46
+existing queued candidates with no application yet, 15 now genuinely
+match a real open requisition (was ~0 before) — real `applications`
+rows created and real `candidate_scores` computed via the exact same
+functions live intake uses, not a separate one-off codepath. 2 matched
+candidates had known "wrong name extraction" quirks (a real address
+fragment, a skills-section header) already documented elsewhere in this
+project's history as a distinct, deliberately-untouched issue — confirmed
+their underlying resume content and skills were genuine before including
+them, consistent with that established precedent of never guess-fixing a
+name field.
+
+Verified for real end-to-end, not code review: reproduced the exact
+`skill_set & title_words` empty-intersection bug by hand before touching
+code; called the real, fixed `match_requisition()` directly inside the
+container and confirmed it now correctly resolves "SAP FICO Profile" +
+SAP-related skills to the real "SAP ABAP Developer" role; ran the
+backfill in dry-run first, inspected all 15 matches (including the 2
+name-quirk cases) before applying for real; caught the Decimal crash via
+a genuine failed backfill run (not anticipated), got the exact traceback
+line via a direct reproduction script, fixed it, then re-scored all 4
+originally-failed candidates and confirmed real numeric readiness_index
+values; a real headless-browser check confirmed clicking "Sort by
+Match %" now produces a genuine descending sequence (49%, 44%, 44%,
+27%, 24%, 24%) and toggling the Added-date button now produces a
+completely different candidate list, not the same one. New permanent
+"S39 Resume Inbox Sort Fixes" suite (2 tests). Full S39 + S14 + S38 +
+a broader sweep (S1/S2/S8/S13/S16/S20/S30, 50 tests total) passed clean.
+Zero-token audit: `CONFIRMED CLEAN` (380 files, 0 external API refs).
+
 ## Feature-level permissions: 12 broad modules -> 73 individual features across 11 groups, 2026-08-17
 User asked for permissions to work at the level of every individual
 feature/page, not just ~12 broad modules — e.g. under Communication,
