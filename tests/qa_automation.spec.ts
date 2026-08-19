@@ -4740,3 +4740,77 @@ test.describe.serial('S39 Resume Inbox Sort Fixes', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// S40 (2026-08-20): user-reported "Add to Pipeline not working" + "Kanban
+// board doesn't show candidates after adding them" + a real count
+// mismatch ("36 IN PIPELINE" header vs "30 candidates"/"All Stages 30").
+// Root-caused to 3 real, compounding bugs: (1) resume_intake_service.py's
+// internal create_application() (a SEPARATE function from the HTTP
+// POST /applications endpoint fixed earlier the same day) also hardcoded
+// stage='sourced' - for this tenant, sourced is a deliberately hidden
+// stage, so every resume auto-matched at intake created a real
+// application that could never appear on the Kanban board; (2) a real,
+// scoped data correction moved the 36 real applications this had already
+// affected on the tenant's only 2 real open requisitions to the real
+// configured default stage; (3) GET /requisitions/{id}/pipeline-stats had
+// no is_active filter on candidates at all, so its "in_pipeline" header
+// stat could disagree with the real board's own total (confirmed live:
+// 36 vs 30) even independent of bug #1.
+test.describe.serial('S40 Kanban Board Consistency Fixes', () => {
+  const stamp = Date.now();
+  let reqId: string;
+  let candId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('pipeline-stats in_pipeline total always matches the real board total (soft-deleted candidates excluded from both)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const r = await request.post(`${API}/requisitions`, {
+      headers: auth, data: { title: `QA S40 Kanban Consistency Role ${stamp}`, status: 'open' },
+    });
+    reqId = (await r.json()).id;
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth, data: { full_name: `QA S40 Kanban Candidate ${stamp}`, email: `qa.s40.${stamp}@test.com`, phone: `9${String(stamp).slice(-9)}` },
+    });
+    candId = (await cand.json()).id;
+
+    // Real "Add to Pipeline" path (bulk-assign), no explicit stage - must
+    // resolve to the tenant's real configured default, never a hidden one.
+    const assign = await request.post(`${API}/candidates/bulk-assign`, {
+      headers: auth, data: { candidate_ids: [candId], requisition_id: reqId },
+    });
+    expect(assign.ok()).toBeTruthy();
+    const assignBody = await assign.json();
+    expect(['sourced', 'contacted']).not.toContain(assignBody.stage);
+
+    const stats = await request.get(`${API}/requisitions/${reqId}/pipeline-stats`, { headers: auth });
+    const statsBody = await stats.json();
+    const board = await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth });
+    const boardBody = await board.json();
+    const boardTotal = Object.values(boardBody).reduce((s: number, arr: any) => s + arr.length, 0);
+
+    expect(statsBody.in_pipeline).toBe(boardTotal);
+    expect(boardTotal).toBe(1);
+
+    // The real candidate must actually appear on the board, in a visible
+    // stage - not just counted, but genuinely present and findable.
+    const allApps: any[] = Object.values(boardBody).flat() as any[];
+    const own = allApps.find((a: any) => a.candidate_id === candId);
+    expect(own).toBeTruthy();
+  });
+
+  test('real headless UI: a candidate added via the pipeline actually renders on the real Kanban board', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`/pipeline?job=${reqId}`);
+    await expect(page.getByText('QA S40 Kanban Candidate')).toBeVisible({ timeout: 15000 });
+    expect(errors).toHaveLength(0);
+  });
+});

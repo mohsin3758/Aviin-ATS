@@ -344,14 +344,24 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
 @router.get("/{requisition_id}/pipeline-stats")
 async def pipeline_stats(requisition_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Real bug fix (2026-08-20), same class fixed repeatedly elsewhere
+        # in this project: no is_active filter on candidates at all - a
+        # soft-deleted candidate's application still counted toward
+        # in_pipeline/total here, even though the real /pipeline board
+        # (which joins candidates and correctly filters is_active) never
+        # shows them - the header stat and the actual visible board could
+        # silently disagree (confirmed live: 36 vs 30 for a real
+        # requisition before this fix).
         row = await conn.fetchrow(
             """SELECT
-                 COUNT(*) FILTER (WHERE stage = 'placed') AS placed,
-                 COUNT(*) FILTER (WHERE stage = 'offer_accepted') AS offer_accepted,
-                 COUNT(*) FILTER (WHERE stage NOT IN ('placed','rejected','hold')) AS in_pipeline,
-                 COUNT(*) FILTER (WHERE stage IN ('rejected','hold')) AS dropped,
+                 COUNT(*) FILTER (WHERE a.stage = 'placed') AS placed,
+                 COUNT(*) FILTER (WHERE a.stage = 'offer_accepted') AS offer_accepted,
+                 COUNT(*) FILTER (WHERE a.stage NOT IN ('placed','rejected','hold')) AS in_pipeline,
+                 COUNT(*) FILTER (WHERE a.stage IN ('rejected','hold')) AS dropped,
                  COUNT(*) AS total
-               FROM applications WHERE requisition_id = $1 AND tenant_id = $2""",
+               FROM applications a
+               JOIN candidates c ON c.id = a.candidate_id
+               WHERE a.requisition_id = $1 AND a.tenant_id = $2 AND c.is_active IS NOT FALSE""",
             requisition_id, actor.tenant_id,
         )
     return dict(row) if row else {"placed":0,"offer_accepted":0,"in_pipeline":0,"dropped":0,"total":0}

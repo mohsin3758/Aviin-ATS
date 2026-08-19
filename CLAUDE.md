@@ -6463,6 +6463,81 @@ completely different candidate list, not the same one. New permanent
 a broader sweep (S1/S2/S8/S13/S16/S20/S30, 50 tests total) passed clean.
 Zero-token audit: `CONFIRMED CLEAN` (380 files, 0 external API refs).
 
+## "Add to Pipeline not working" + Kanban board not showing added
+## candidates + a real count mismatch — root-caused to 3 more real bugs,
+## a 36-application data correction on both real open requisitions,
+## 2026-08-20
+Direct follow-up, same day, to the Resume Inbox sort fixes above. User
+showed 3 more screenshots: the Candidates page's "Assign to Pipeline"
+modal, the SAP ABAP Developer Kanban board showing only 7 visible
+candidates against a "36 IN PIPELINE" header stat and "30 candidates" in
+the job picker (three different numbers for the same board), and a
+Resume Inbox candidate drawer showing "Already in pipeline for this job"
+for someone who never appeared on any real board.
+
+**Root cause, found by re-checking a function I didn't touch earlier
+today**: `resume_intake_service.py::create_application()` — a separate,
+internal function from `applications.py`'s HTTP `POST /applications`
+(fixed earlier today) — had the **identical** hardcoded `stage='sourced'`
+bug. This tenant deliberately hides the `sourced`/`contacted` stages
+(a real, confirmed-intentional setting from earlier project history), so
+every resume auto-matched at intake via this function created a real
+application that could never appear on the Kanban board — only ever
+surfacing as an "already in pipeline" banner elsewhere, with no way to
+actually see or act on it. Fixed with the same tenant-configured-default
+-add-stage resolution already used by the other two creation paths
+(`POST /applications`, `/candidates/bulk-assign`).
+
+**Real, scoped data correction — not a blind bulk fix.** A tenant-wide
+scan found 563 applications stuck in hidden stages, but breaking it down
+by requisition showed only 36 of them (24 + 12) belonged to the tenant's
+2 real, currently-**open and active** requisitions (SAP ABAP Developer,
+Senior React Developer) — everything else (Senior Python Developer,
+Cloud Solutions Architect, Data Scientist, dozens of QA test roles, 109
+rows with no title at all) belonged to already soft-deleted/closed
+requisitions with no visible board anyone actually looks at, so touching
+those would have had zero real effect while carrying real risk on a much
+larger, less-understood dataset. Migrated exactly those 36 real
+applications (dry-run inspected first, every name checked) from
+`sourced`/`contacted` to the tenant's real configured default
+(`interested`), with an honest `pipeline_movements` + `candidate_
+activities` row on each explaining this was a retroactive data-integrity
+correction, not a real recruiter action — matching this project's
+established precedent for exactly this kind of fix (the offer-HITL
+audit-trail backfill, the duplicate-assignments cleanup).
+
+**A third, independent bug found while verifying the fix**:
+`GET /requisitions/{id}/pipeline-stats` (the board header's "IN
+PIPELINE" stat) had no `is_active` filter on candidates at all — a
+soft-deleted candidate's application still counted toward it, while the
+real board (which correctly joins and filters `is_active`) never showed
+them. Confirmed live before touching anything: `36` (stats) vs `30`
+(real board total) for the exact requisition in the user's screenshot.
+Fixed with the same join+filter pattern used everywhere else in this
+project for this exact bug class.
+
+Verified for real end-to-end, not code review: dry-run of the 36-row
+migration inspected every real candidate name before applying; re-queried
+both real requisitions' `pipeline-stats` and `/pipeline` totals before
+and after (36→30 and 12→12, both now exactly matching their real board
+totals); a real headless-browser screenshot confirmed the actual Kanban
+board now shows "30 IN PIPELINE" / "All Stages 30" / "Interested 28"
+all consistent, with V. Subbarao, Venkatesh.C, and 26 other previously-
+invisible real candidates now genuinely rendering; a fresh, real
+end-to-end "Add to Pipeline" test (new throwaway candidate → `/candidates
+/bulk-assign` → real pipeline query) confirmed the whole flow now works
+correctly end-to-end, landing in `interested` and immediately visible.
+New permanent "S40 Kanban Board Consistency Fixes" suite (2 tests). Full
+S40 + a broader regression sweep (S14/S16/S20/S22/S30/S38/S39, 42 tests)
+passed clean. Zero-token audit: `CONFIRMED CLEAN` (380 files, 0 external
+API refs).
+
+**Flagged, not touched**: the other ~527 applications stuck in hidden
+stages, all belonging to already-closed/soft-deleted requisitions with
+no live board — a real, larger cleanup opportunity, deliberately left
+for a future, explicit decision given its size and that it currently has
+zero visible impact on any board a recruiter actually uses today.
+
 ## Feature-level permissions: 12 broad modules -> 73 individual features across 11 groups, 2026-08-17
 User asked for permissions to work at the level of every individual
 feature/page, not just ~12 broad modules — e.g. under Communication,

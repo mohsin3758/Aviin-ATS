@@ -668,11 +668,23 @@ async def create_application(conn, tenant_id: str, candidate_id: str, requisitio
             recruiter_id = owner["recruiter_id"]
         else:
             recruiter_id = await _pick_round_robin_recruiter(conn, tenant_id)
+        # Real bug fix (2026-08-20): this hardcoded 'sourced' unconditionally
+        # - the exact same flaw already found and fixed in applications.py's
+        # HTTP POST /applications (same day), just missed here since this is
+        # a separate internal function, not the HTTP endpoint. For this
+        # tenant, 'sourced' is a deliberately hidden stage - every resume
+        # auto-matched at intake landed in a real application that could
+        # never appear on the actual Kanban board, only ever visible via
+        # "already in pipeline" banners elsewhere. Same fallback as the
+        # other two creation paths (bulk-assign, POST /applications).
+        default_stage = await conn.fetchval(
+            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add AND is_visible",
+            tenant_id) or 'sourced'
         await conn.execute("""
             INSERT INTO applications(tenant_id,requisition_id,candidate_id,stage,assigned_recruiter_id)
-            VALUES($1,$2,$3,'sourced',$4)
+            VALUES($1,$2,$3,$4,$5)
             ON CONFLICT(tenant_id,requisition_id,candidate_id) DO NOTHING""",
-            tenant_id, requisition_id, candidate_id, recruiter_id)
+            tenant_id, requisition_id, candidate_id, default_stage, recruiter_id)
     except Exception as e:
         print(f'[ResumeIntake] Application insert: {e}')
 
