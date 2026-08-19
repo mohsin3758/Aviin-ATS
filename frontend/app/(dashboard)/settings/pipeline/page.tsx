@@ -238,7 +238,16 @@ export default function PipelineStagesSettings() {
 // ── Pipeline Automation Rules (Tier-0, evaluated nightly by the scheduler) ────
 const COND_FIELDS = [
   { key: 'total_exp_mo',       label: 'Experience (months)' },
-  { key: 'ai_match_score',     label: 'AI Match Score (0-100)' },
+  // Real bug fix (2026-08-20): candidates.ai_match_score has no writer
+  // anywhere in the backend (confirmed via a full grep) - a rule
+  // configured against it can never match, silently. readiness_index
+  // (from candidate_scores, the same engine behind the AI Match Score
+  // panel and the Kanban board's per-card score) is the real, live
+  // signal - kept ai_match_score in the list too, unchanged, so any
+  // already-saved rule referencing it doesn't break, just added the
+  // working field alongside it.
+  { key: 'readiness_index',    label: 'AI Readiness Score (0-100)' },
+  { key: 'ai_match_score',     label: 'AI Match Score (0-100) — legacy, currently always empty' },
   { key: 'fit_score',          label: 'JD Fit Score (0-100)' },
   { key: 'expected_ctc',       label: 'Expected CTC' },
   { key: 'notice_period_days', label: 'Notice Period (days)' },

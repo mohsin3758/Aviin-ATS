@@ -122,7 +122,14 @@ class ApplicationCreate(BaseModel):
     requisition_id: str
     candidate_id: str
     assigned_recruiter_id: Optional[str] = None
-    stage: Optional[str] = 'sourced'
+    # Real bug fix (2026-08-20): defaulting this to the literal 'sourced'
+    # at the schema level meant an omitted stage never reached
+    # create_application() as falsy, silently defeating its own
+    # tenant-configured-default-add-stage fallback (a candidate could
+    # land in a hidden 'sourced' stage - invisible on the Kanban board -
+    # for any tenant that hides it, exactly what that feature exists to
+    # prevent). None lets the endpoint's own resolution logic run.
+    stage: Optional[str] = None
 
 
 class StageUpdate(BaseModel):

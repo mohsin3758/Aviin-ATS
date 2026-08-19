@@ -454,7 +454,7 @@ function RejectReasonModal({ onCancel, onConfirm }: any) {
 }
 
 function CandidateCard({ app, stageColor, onClick, onDragStart, onMoveStage }: any) {
-  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
+  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score ?? app.readiness_index;
   const skills: string[] = app.skills || [];
 
   return (
@@ -509,7 +509,7 @@ function CandidateCard({ app, stageColor, onClick, onDragStart, onMoveStage }: a
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
 function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
-  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score;
+  const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score ?? app.readiness_index;
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end' }} onClick={onClose}>
@@ -645,6 +645,7 @@ function ProfileTab({ app }: any) {
           { label: 'JD Match Score', val: app.jd_match_score },
           { label: 'AI Match Score', val: app.ai_match_score },
           { label: 'Fit Score', val: app.fit_score },
+          { label: 'Readiness Score', val: app.readiness_index },
         ].filter(r => r.val != null).map(r => (
           <div key={r.label} style={{ marginBottom: 8 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>

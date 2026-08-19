@@ -283,8 +283,15 @@ async def trigger_auto_move(bg: BackgroundTasks, actor: Actor = Depends(get_acto
             apps = await conn.fetch("""
                 SELECT a.id, a.candidate_id, a.stage, a.fit_score,
                        c.total_exp_mo, c.ai_match_score, c.expected_ctc,
-                       c.notice_period_days, c.full_name, c.email, c.phone
+                       c.notice_period_days, c.full_name, c.email, c.phone,
+                       cs.readiness_index
                 FROM applications a JOIN candidates c ON c.id=a.candidate_id
+                LEFT JOIN LATERAL (
+                    SELECT readiness_index FROM candidate_scores cs
+                    WHERE cs.candidate_id=c.id AND cs.tenant_id=a.tenant_id
+                      AND cs.requisition_id=a.requisition_id
+                    ORDER BY cs.scored_at DESC LIMIT 1
+                ) cs ON true
                 WHERE a.stage=$1 AND a.tenant_id=$2""", rule["stage_from"], actor.tenant_id)
 
             for app in apps:
@@ -861,8 +868,15 @@ async def check_rules_for_application(application_id: str, bg: BackgroundTasks, 
         app = await conn.fetchrow("""
             SELECT a.id, a.stage, a.candidate_id, a.fit_score,
                    c.total_exp_mo, c.ai_match_score, c.expected_ctc,
-                   c.notice_period_days, c.full_name, c.email, c.phone
+                   c.notice_period_days, c.full_name, c.email, c.phone,
+                   cs.readiness_index
             FROM applications a JOIN candidates c ON c.id=a.candidate_id
+            LEFT JOIN LATERAL (
+                SELECT readiness_index FROM candidate_scores cs
+                WHERE cs.candidate_id=c.id AND cs.tenant_id=a.tenant_id
+                  AND cs.requisition_id=a.requisition_id
+                ORDER BY cs.scored_at DESC LIMIT 1
+            ) cs ON true
             WHERE a.id=$1 AND a.tenant_id=$2
         """, application_id, actor.tenant_id)
 

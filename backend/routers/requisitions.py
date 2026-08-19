@@ -303,6 +303,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                       c.current_designation, c.current_employer, c.location,
                       c.resume_path, c.expected_ctc, c.notice_period_days,
                       c.jd_match_score, c.ai_match_score,
+                      cs.readiness_index, cs.readiness_grade,
                       rf.id AS resume_file_id, rf.file_name AS resume_file_name,
                       a.stage, a.fit_score, a.app_notes, a.app_tags,
                       a.rejected_reason, a.assigned_recruiter_id, a.board_rank,
@@ -317,6 +318,12 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                    WHERE rf.candidate_id = c.id AND rf.tenant_id = a.tenant_id
                    ORDER BY rf.created_at DESC LIMIT 1
                ) rf ON true
+               LEFT JOIN LATERAL (
+                   SELECT readiness_index, readiness_grade FROM candidate_scores cs
+                   WHERE cs.candidate_id = c.id AND cs.tenant_id = a.tenant_id
+                     AND cs.requisition_id = a.requisition_id
+                   ORDER BY cs.scored_at DESC LIMIT 1
+               ) cs ON true
                WHERE a.requisition_id = $1 AND c.is_active IS NOT FALSE
                ORDER BY a.board_rank ASC NULLS LAST, a.updated_at DESC""",
             requisition_id,

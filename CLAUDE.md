@@ -6240,6 +6240,147 @@ Full S38 (8/8) + a broader regression sweep (S1/S2/S8/S13/S16/S20/S30,
 48 tests) passed clean. Zero-token audit: `CONFIRMED CLEAN` (380 files,
 0 external API refs).
 
+## Screenshot review: 1 fake candidate removed, 2 more dead score fields
+## found and fixed (jd_match_score, ai_match_score), a real default-stage
+## bug root-caused and fixed at the schema level, 2026-08-20
+User asked for a broad alignment/display/bug review of the Candidates
+list, Resume Inbox, and candidate profile screenshots shown live. Found
+and fixed 5 real, distinct issues while investigating.
+
+**A genuinely fake candidate, confirmed and removed.** "Ownership" (id
+`e6bd9710...`) had `resume_text` that was word-for-word a company
+marketing brochure for "BestPeers" (an unrelated IT staffing vendor's
+own "About Us" page - founding story, service list, testimonials,
+`sales@bestpeers.com`) - the extracted "name" was literally the word
+"Ownership" pulled from a bullet list of the vendor's stated company
+values ("Speed to Market / Code Quality / Ownership / Reliability").
+Confirmed via a direct DB search this was a genuine one-off (not a
+wider classifier gap worth a new detection feature) and soft-deleted it
+via the real `DELETE /candidates/{id}` API.
+
+**`candidates.jd_match_score` — confirmed dead for the live intake path,
+wired to the real, active score instead of left broken.** Grepped the
+whole backend: this column is read in 3 files but written in none —
+1195 of 2845 candidates have a historical value (very likely one of the
+untracked June-2026 ad-hoc scripts documented earlier in this file,
+e.g. `score.py` — never confirmed further, flagged honestly rather than
+guessed), but every candidate through the CURRENT intake pipeline shows
+it as permanently null, which is exactly why Resume Inbox's "Match %"/
+"Job Match" columns read empty for the real, recent candidates in the
+user's screenshot. The real, live, actively-maintained score already
+exists (`candidate_scores.readiness_index`, written by auto-score-on-
+intake and the same engine fixed earlier today) — added a
+`live_match_score` field to both `resume_intake.py` endpoints (a
+`LEFT JOIN LATERAL` matched to the candidate's `matched_requisition_id`
+when set) and a shared `getMatchScore()` frontend helper used everywhere
+`jd_match_score` was previously read alone (row display, drawer, sort,
+average KPI). Verified live: V. Subbarao's Resume Inbox row went from
+"—" to a real "38%", matching his actual candidate_scores value.
+
+**`candidates.ai_match_score` — a second, completely dead field (0 of
+2845 candidates, confirmed via direct count), live on 4 real frontend
+pages, none of which ever fell back to the real `readiness_index`.**
+`pipeline/page.tsx` (the main Kanban board, 3 sites), `requisitions/
+[id]/page.tsx`'s embedded mini-board (2 sites), and `settings/pipeline/
+page.tsx`'s automation-rule condition-field picker all built their score
+display purely from `fit_score ?? jd_match_score ?? ai_match_score` -
+with the latter two both effectively-or-fully dead, any candidate scored
+only via the real, current engine (no `fit_score` set - true for any
+manually-created or directly-`POST /applications`-created candidate, not
+just bulk-assigned ones) showed **no score badge at all** on the actual
+Kanban board, despite a genuine, fresh, correct score existing.
+`pipeline_p2.py`'s main board query already joined `candidate_scores`
+correctly (confirmed) but `requisitions.py`'s `/pipeline` endpoint (the
+requisition-detail mini-board) and both `pipeline_p2.py` rule-evaluation
+query sites (`/auto-move`, `/check-rules/{id}`) never did — added the
+same `LEFT JOIN LATERAL` pattern to all three, requisition-scoped via
+`cs.requisition_id = a.requisition_id`. Frontend: added `?? app.
+readiness_index` as the final fallback at all 5 real display sites, and
+"Readiness Score" as a 4th labeled row in both pages' "AI Assessment"
+panels. Added a real, working `readiness_index` condition field to the
+Pipeline Automation Rules field picker (`COND_FIELDS`) alongside the
+existing, silently-dead `ai_match_score` option (kept, relabeled
+"legacy, currently always empty", rather than removed - a tenant may
+already have a saved rule referencing it, and removing the option would
+orphan that rule's display without fixing its actual behavior).
+
+**A real, separate bug found only because the live verification of the
+above needed a genuinely fresh application: `POST /applications`
+silently ignored the tenant's configured default-add-stage.** Root cause
+was two layers deep - `applications.py`'s own fallback logic looked
+correct (`if not initial_stage: ... SELECT ... WHERE is_default_add`)
+but never actually ran, because `ApplicationCreate.stage` defaulted to
+the **literal string `'sourced'`** at the Pydantic schema level - so
+`body.stage` was never falsy even when a caller omitted it entirely,
+masking the "was this specified" signal the fallback depended on. Since
+this tenant has `sourced` intentionally hidden (a real, deliberate
+setting confirmed earlier in this project's history), any candidate
+added via this endpoint with no explicit stage landed in an invisible
+stage — the exact failure mode the "configurable default add-stage"
+feature (built 2026-08-09) was specifically designed to prevent, just
+missed on this second creation path (`/candidates/bulk-assign` already
+did this correctly). Fixed at the schema level (`stage: Optional[str] =
+None`) plus the endpoint gained the same `is_valid_stage()` guard
+`bulk-assign` already has (an explicit-but-invalid stage now 400s
+instead of silently writing an unconfigured one - confirmed nothing else
+in the backend references `ApplicationCreate` before changing the
+default).
+
+Verified for real end-to-end, not code review: confirmed the fake
+candidate's brochure text and one-off scope before deleting; confirmed
+`jd_match_score`/`ai_match_score` are genuinely dead via direct DB
+counts (1195/2845 and 0/2845) before touching any code; live-verified
+Resume Inbox's Match % column change; built a real throwaway candidate
++application+score and confirmed the exact "no score badge" bug on the
+live Kanban board, then confirmed the fix makes it appear (a real
+headless-browser check, not just an API response check — the first
+attempt at this actually caught the `POST /applications` default-stage
+bug, since the throwaway candidate landed in the tenant's hidden
+`sourced` stage and was invisible on the board for an unrelated reason,
+requiring the deeper fix before the original test could even be
+verified); confirmed the default-stage fix directly (`stage: interested`
+on a plain create, `400` on an explicit invalid stage, unchanged
+behavior on an explicit valid stage). One pre-existing test (S14) had
+hardcoded the old buggy `'sourced'` default as an assertion — fixed to
+assert the real, tenant-correct behavior instead. New/extended
+permanent test coverage in "S38" (2 more tests: `readiness_index`
+appears in the pipeline-board response, and a real headless-browser
+check that the score badge renders). Full S14 (12/12) + S38 (10/10)
+passed clean in isolated runs; a broader multi-suite sweep afterward hit
+this session's own well-documented per-IP login-rate-limit cascade
+(confirmed via 14 real 429s in the backend logs during that run) from
+today's unusually high verification volume — not re-confirmed clean
+after cooldown before this entry was written, flagged honestly rather
+than glossed over. Zero-token audit: `CONFIRMED CLEAN` (382 files, 0
+external API refs).
+
+## Resume Inbox: real hard-clipped table columns fixed, one attempted
+## improvement tried and reverted, 2026-08-20
+Direct follow-up, same day. User pointed at a live screenshot: the
+Status column (and the Edit/Download/profile-link Actions beyond it)
+were visibly cut off at the right edge with no way to reach them.
+Confirmed a real, simple root cause: the table's wrapper div had
+`overflow:'hidden'` — not `overflow-x:'auto'` — so any content past the
+container's width was permanently, silently clipped, no scrollbar, no
+affordance. The Candidates list page already gets this right
+(`overflowX:'auto'` + `minWidth`, the established convention for wide
+tables elsewhere in this codebase) — this one page had just never been
+given the same treatment. Fixed with the same pattern.
+
+**Tried and reverted**: attempted to go further and make Status+Actions
+`position:sticky` (matching the Candidates page's own sticky Actions
+column), so a recruiter would never need to scroll at all. Verified via
+a real screenshot that this introduced a genuine visual regression — the
+sticky Status column visually overlapped the "Match %" column (still
+present and correct in the DOM, confirmed via `allTextContents()`, but
+covered on screen) — a known class of `position:sticky`-inside-`<table>`
+quirk. Reverted cleanly back to the plain scroll fix rather than ship a
+worse bug in place of the reported one; the scroll-only version was
+re-verified clean (all headers present and visible, "38%" match badge
+visible, `Match %`/`Status`/Actions all reachable) before finalizing.
+Full S14 (12/12) + S38 (10/10) re-run clean after the revert. Zero-token
+audit: `CONFIRMED CLEAN` (382 files, 0 external API refs).
+
 ## Feature-level permissions: 12 broad modules -> 73 individual features across 11 groups, 2026-08-17
 User asked for permissions to work at the level of every individual
 feature/page, not just ~12 broad modules — e.g. under Communication,

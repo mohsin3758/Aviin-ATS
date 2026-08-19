@@ -9,6 +9,7 @@ import events, asyncio
 from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
 from permissions import require_permission
+from routers.pipeline_stages import is_valid_stage
 from routers.p30_p35 import fire_webhook
 from services import candidate_ownership as ownership
 from services import activity_events
@@ -187,8 +188,23 @@ async def create_application(body: ApplicationCreate, background_tasks: Backgrou
                         detail=f"Submission limit reached for this role ({limit} per recruiter) — {used} already submitted",
                     )
 
-        # allow stage override (default 'sourced')
-        initial_stage = body.stage or 'sourced'
+        # allow stage override; default falls back to the tenant's real
+        # configured default-add stage, matching /candidates/bulk-assign's
+        # established convention. Real bug fixed 2026-08-20: this used to
+        # hardcode 'sourced' unconditionally - for any tenant where sourced
+        # is hidden (a real, intentional per-tenant setting, e.g. this
+        # project's own primary tenant), a candidate added via this
+        # endpoint with no explicit stage silently landed in an invisible
+        # stage, disappearing from the Kanban board with no error - the
+        # exact failure mode the configurable-default-add-stage feature
+        # was built to prevent, just missed on this second creation path.
+        initial_stage = body.stage
+        if not initial_stage:
+            initial_stage = await conn.fetchval(
+                "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add AND is_visible",
+                actor.tenant_id) or 'sourced'
+        elif not await is_valid_stage(conn, actor.tenant_id, initial_stage):
+            raise HTTPException(400, f"Unknown stage '{initial_stage}' — add it under Settings > Pipeline Stages first")
         # Default assigned_recruiter_id to the creating user when not given —
         # "who submitted this" needs to be attributable for the submission
         # limit above to mean anything on a second call; leaving it NULL

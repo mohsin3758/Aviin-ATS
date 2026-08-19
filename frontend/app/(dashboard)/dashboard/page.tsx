@@ -78,7 +78,7 @@ export default function DashboardPage() {
   const totalCands = cands?.total || 0;
 
   // Real signals instead of ephemeral click-state that reset on reload
-  const hasAiMatch = (cands?.items || []).some((c: any) => c.jd_match_score != null || c.ai_match_score != null);
+  const hasAiMatch = (cands?.items || []).some((c: any) => c.jd_match_score != null || c.ai_match_score != null || c.top_match != null);
   const doneItems = new Set<number>([
     ...(totalCands > 0 ? [1] : []),
     ...((clients?.length || 0) > 0 ? [2] : []),

@@ -677,7 +677,7 @@ function PipelineInner() {
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
 function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart, selectMode, isSelected, onToggleSelect, onCardDragOver, onCardDrop }: any) {
-  const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
+  const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const skills: string[] = app.skills || [];
   const notesCount = Array.isArray(app.app_notes) ? app.app_notes.length : 0;
   const [hovered, setHovered] = useState(false);
@@ -755,7 +755,7 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart, selec
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
 function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages, requisitionId, clientName }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
-  const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score;
+  const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
   return (
@@ -877,9 +877,9 @@ function ProfileTab({ app, apiUrl }: any) {
           </div>
         </InfoCard>
       )}
-      {[{ label: 'JD Match Score', val: app.jd_match_score }, { label: 'AI Match Score', val: app.ai_match_score }, { label: 'Fit Score', val: app.fit_score }].filter(r => r.val != null).length > 0 && (
+      {[{ label: 'JD Match Score', val: app.jd_match_score }, { label: 'AI Match Score', val: app.ai_match_score }, { label: 'Fit Score', val: app.fit_score }, { label: 'Readiness Score', val: app.readiness_index }].filter(r => r.val != null).length > 0 && (
         <InfoCard title="AI Assessment">
-          {[{ label: 'JD Match Score', val: app.jd_match_score }, { label: 'AI Match Score', val: app.ai_match_score }, { label: 'Fit Score', val: app.fit_score }].filter(r => r.val != null).map(r => (
+          {[{ label: 'JD Match Score', val: app.jd_match_score }, { label: 'AI Match Score', val: app.ai_match_score }, { label: 'Fit Score', val: app.fit_score }, { label: 'Readiness Score', val: app.readiness_index }].filter(r => r.val != null).map(r => (
             <div key={r.label} style={{ marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
                 <span style={{ fontSize: 11, color: '#64748B' }}>{r.label}</span>
@@ -1693,7 +1693,7 @@ function CompareModal({ apps, requiredSkills, stages, onClose }: any) {
             </thead>
             <tbody>
               <CompareRow label="Score" cells={apps.map((a: any) => {
-                const s = a.fit_score ?? a.jd_match_score ?? a.ai_match_score;
+                const s = a.fit_score ?? a.jd_match_score ?? a.ai_match_score ?? a.readiness_index;
                 return s != null ? <span style={{ color: scoreColor(s), fontWeight: 800 }}>{Math.round(s)}%</span> : '—';
               })} />
               <CompareRow label="Stage" cells={apps.map((a: any) => stages.find((s: any) => s.key === a.stage)?.label || a.stage)} />

@@ -38,6 +38,16 @@ interface ResumeItem {
   // (most-recently-updated real application), distinct from
   // matched_jd_title above which is just the auto-match suggestion.
   pipeline_stage?: string; pipeline_job?: string;
+  // Real bug fix (2026-08-20): candidates.jd_match_score (above) has no
+  // writer anywhere in the current codebase — confirmed via a full
+  // backend grep, only ever read, likely populated once by an old,
+  // untracked ad-hoc script (this project's history documents several).
+  // Every candidate through the live intake pipeline shows this as null,
+  // which is why Match %/Job Match read empty for genuinely real,
+  // recent candidates. live_match_score is the real, actively-maintained
+  // readiness_index from candidate_scores (auto-scored on intake against
+  // the matched requisition) — used as the real fallback below.
+  live_match_score?: number;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -49,6 +59,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api';
 const gx = (mo: number) => { if (!mo) return 'Fresher'; const y = Math.floor(mo / 12), m = mo % 12; return y ? `${y}y${m ? ` ${m}m` : ''}` : `${mo}mo`; };
 const fdt = (s: string) => { if (!s) return '—'; return new Date(s).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); };
 const fsize = (b: number) => b ? `${(b / 1024).toFixed(0)} KB` : '';
+// Real bug fix (2026-08-20): jd_match_score has no writer anywhere in the
+// backend (confirmed via grep) - falls back to the live, actively-scored
+// candidate_scores value instead of showing a dead, always-empty field.
+const getMatchScore = (r: ResumeItem) => r.jd_match_score ?? r.parsed_data?.jd_match_score ?? r.live_match_score;
 
 // No download option existed anywhere on this page even though the
 // backend endpoint (resume_intake.py's /{resume_file_id}/download) has
@@ -188,7 +202,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
   const PIPELINE_STAGES_LIVE = LIVE_STAGES.length > 0 ? LIVE_STAGES : PIPELINE_STAGES;
   const pd = item.parsed_data || {};
   const skills = item.skills || pd.skills || [];
-  const matchScore = item.jd_match_score ?? pd.jd_match_score;
+  const matchScore = item.jd_match_score ?? pd.jd_match_score ?? item.live_match_score;
   const matchTitle = pd.jd_match_title || item.matched_jd_title || item.requisition_title;
   const skillsGap: string[] = pd.skills_gap || [];
   const nearDup = pd.near_dup;
@@ -579,8 +593,8 @@ function ResumeInboxPageInner() {
   const items = useMemo(() => {
     if (sortByMatch) {
       return [...baseItems].sort((a, b) => {
-        const sa = a.jd_match_score ?? a.parsed_data?.jd_match_score ?? -1;
-        const sb = b.jd_match_score ?? b.parsed_data?.jd_match_score ?? -1;
+        const sa = getMatchScore(a) ?? -1;
+        const sb = getMatchScore(b) ?? -1;
         return sb - sa;
       });
     }
@@ -614,9 +628,9 @@ function ResumeInboxPageInner() {
   const bySrc: any[] = stats?.by_source || [];
 
   // Stats for enrichment KPIs
-  const withMatch = baseItems.filter(r => (r.jd_match_score ?? r.parsed_data?.jd_match_score) != null).length;
+  const withMatch = baseItems.filter(r => getMatchScore(r) != null).length;
   const withNearDup = baseItems.filter(r => r.parsed_data?.near_dup).length;
-  const avgMatch = withMatch > 0 ? Math.round(baseItems.reduce((s, r) => s + ((r.jd_match_score ?? r.parsed_data?.jd_match_score) ?? 0), 0) / withMatch) : null;
+  const avgMatch = withMatch > 0 ? Math.round(baseItems.reduce((s, r) => s + (getMatchScore(r) ?? 0), 0) / withMatch) : null;
 
   return (
     <div style={{ padding: '18px 22px', background: '#f8fafc', minHeight: '100vh' }}>
@@ -691,7 +705,7 @@ function ResumeInboxPageInner() {
           <div style={{ padding: 56, textAlign: 'center' }}><Inbox size={40} color="#cbd5e1" style={{ display: 'block', margin: '0 auto 12px' }} /><div style={{ color: '#94a3b8', fontSize: 14 }}>No resumes match your filters. Click "Process Pending" to scan your inbox.</div></div>
         ) : (
           <>
-            <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <input type="checkbox" checked={selectedIds.size === items.length && items.length > 0} onChange={selectAll} style={{ cursor: 'pointer' }} />
               <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>{items.length} resumes</span>
               {/* Sort by newest-added toggle — shows live backlog-clearing activity */}
@@ -705,7 +719,14 @@ function ResumeInboxPageInner() {
               {withNearDup > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '3px 8px', borderRadius: 6, fontWeight: 600 }}><AlertTriangle size={10} style={{ display: 'inline', marginRight: 3 }} />{withNearDup} near-dup{withNearDup !== 1 ? 's' : ''}</span>}
               {queueData?.total > limit && <button onClick={() => setLimit(l => l + 100)} style={{ marginLeft: 'auto', fontSize: 12, color: '#1e40af', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>Load more ({queueData.total - limit} remaining)</button>}
             </div>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            {/* Real bug fix (2026-08-20): this wrapper had no horizontal
+                scroll at all - a table this wide (12 columns) hard-clipped
+                Status/Actions off the right edge on any normal-width
+                screen, with no way to reach them. Matches the established
+                "wide content gets its own overflow-x:auto container"
+                convention already used elsewhere in this codebase. */}
+            <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', minWidth: 1180, borderCollapse: 'collapse' }}>
               <thead><tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
                 <th style={{ width: 32, padding: '10px 8px' }}></th>
                 {['Candidate', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', 'Status', ''].map(h => (
@@ -721,10 +742,11 @@ function ResumeInboxPageInner() {
               <tbody>
                 {items.map((r, i) => {
                   const skills = r.skills || r.parsed_data?.skills || [];
-                  const matchScore = r.jd_match_score ?? r.parsed_data?.jd_match_score;
+                  const matchScore = getMatchScore(r);
                   const nearDup = r.parsed_data?.near_dup;
+                  const rowBg = selectedIds.has(r.id) ? '#eff6ff' : i % 2 === 0 ? '#fff' : '#fafafa';
                   return (
-                    <tr key={r.id} data-testid={`resume-inbox-row-${r.id}`} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', background: selectedIds.has(r.id) ? '#eff6ff' : i % 2 === 0 ? '#fff' : '#fafafa' }}
+                    <tr key={r.id} data-testid={`resume-inbox-row-${r.id}`} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', background: rowBg }}
                       onMouseEnter={e => { if (!selectedIds.has(r.id)) (e.currentTarget as HTMLElement).style.background = '#f0f7ff'; }}
                       onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = selectedIds.has(r.id) ? '#eff6ff' : i % 2 === 0 ? '#fff' : '#fafafa'; }}>
                       <td style={{ padding: '10px 8px' }} onClick={e => { e.stopPropagation(); toggleSelect(r.id); }}><input type="checkbox" checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} style={{ cursor: 'pointer' }} /></td>
@@ -801,6 +823,7 @@ function ResumeInboxPageInner() {
                 })}
               </tbody>
             </table>
+            </div>
           </>
         )}
       </div>

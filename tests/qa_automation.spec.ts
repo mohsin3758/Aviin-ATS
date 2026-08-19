@@ -963,8 +963,13 @@ test.describe.serial('S14 KAE Candidate Submission', () => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
 
+    // Was hardcoded 'sourced' - real bug fixed 2026-08-20:
+    // POST /applications now correctly defaults to the tenant's real
+    // configured default-add stage (this tenant: 'interested') instead
+    // of a schema-level hardcoded literal, so only assert it's some
+    // pre-submission stage the bump logic will still advance past.
     const before = await request.get(`${API}/applications/${appId}`, { headers: auth });
-    expect((await before.json()).stage).toBe('sourced');
+    expect((await before.json()).stage).not.toBe('submitted');
 
     const sub1 = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
       headers: auth,
@@ -4612,6 +4617,43 @@ test.describe.serial('S38 Pipeline Stage + JD Job-Match + Full Resume View', () 
     // Missing-skill chip should list the requisition's unmet requirement.
     await expect(page.getByText('✕ Terraform')).toBeVisible();
 
+    expect(errors).toHaveLength(0);
+  });
+
+  // Real bug reported live (2026-08-20): the Kanban board's per-card score
+  // badge and the requisition detail page's mini-board both fell back
+  // through fit_score -> jd_match_score -> ai_match_score only - the
+  // latter two have NO writer anywhere in the backend (confirmed via
+  // grep), so a candidate scored via the real, live AI Match Score engine
+  // (candidate_scores.readiness_index - the exact field just fixed above)
+  // showed NO score at all on either board, even with a genuine, fresh
+  // score on file. Fixed by adding readiness_index as the final fallback.
+  test('GET /requisitions/{id}/pipeline includes readiness_index for a scored application (dead-field fallback fix)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const board = await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth });
+    expect(board.ok()).toBeTruthy();
+    const boardBody = await board.json();
+    const allApps: any[] = Object.values(boardBody).flat() as any[];
+    const own = allApps.find((a: any) => a.candidate_id === candId);
+    expect(own).toBeTruthy();
+    // The earlier match-open-jobs test already wrote a real candidate_scores
+    // row for this exact candidate+requisition - fit_score/jd_match_score/
+    // ai_match_score are all genuinely null for a manually-created
+    // application, so readiness_index must be the one populated field.
+    expect(own.fit_score == null && own.jd_match_score == null && own.ai_match_score == null).toBeTruthy();
+    expect(own.readiness_index).toBeGreaterThan(0);
+  });
+
+  test('real headless UI: Kanban board shows a score badge from readiness_index when fit/jd/ai match scores are all null', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`/pipeline?job=${reqId}`);
+    await expect(page.getByText('QA S38 JobMatch Candidate')).toBeVisible({ timeout: 15000 });
+    // A percentage badge must render on the card - previously this
+    // candidate would have shown no score badge at all.
+    await expect(page.locator('text=/%$/').first()).toBeVisible({ timeout: 10000 });
     expect(errors).toHaveLength(0);
   });
 });
