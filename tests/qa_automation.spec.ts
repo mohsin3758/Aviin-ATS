@@ -2145,6 +2145,23 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
   await addBtn.click();
   await expect(page.getByText(/Assign 1 Candidate to Requisition/i)).toBeVisible({ timeout: 5000 });
 
+  // Regression test for a real bug reported live (2026-08-20): BulkAssignModal
+  // rendered with a raw zIndex:1000 overlay while it can be opened ON TOP of
+  // this JD Match modal (the shared Modal component uses 9999/10000) — the
+  // still-mounted ranked-results list underneath silently intercepted every
+  // click meant for "Assign to Pipeline", hanging forever with no visible
+  // error. Fixed by raising BulkAssignModal's (and BulkResumeGenModal's) own
+  // overlay z-index above Modal.tsx's. This step is the one that must
+  // actually exercise the click, not just confirm the modal opened.
+  const reqSelect = page.locator('select').last();
+  const optValues = await reqSelect.locator('option').evaluateAll(opts => opts.map(o => (o as HTMLOptionElement).value));
+  test.skip(optValues.length < 2, 'no open requisitions in this environment to assign into');
+  await reqSelect.selectOption(optValues[1]);
+  const assignBtn = page.getByRole('button', { name: /Assign to Pipeline/i });
+  await expect(assignBtn).toBeEnabled();
+  await assignBtn.click({ timeout: 8000 }); // would previously hang ~30s on pointer-event interception
+  await expect(page.getByText(/assigned,.*already in pipeline/i)).toBeVisible({ timeout: 5000 });
+
   expect(errors).toHaveLength(0);
 });
 

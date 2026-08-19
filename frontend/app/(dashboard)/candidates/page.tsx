@@ -93,7 +93,11 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
       setResult(r); setTimeout(()=>{onDone();onClose();},1800);
     } catch(e:any){alert(e?.message||'Failed');setSaving(false);}
   }
-  const OV:any={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'};
+  // zIndex must clear the shared Modal component's 9999/10000 (Modal.tsx)
+  // since this can be opened ON TOP of it (e.g. from the JD Match modal's
+  // "Add to Pipeline") - at 1000 it used to render BELOW that modal's
+  // content, which silently intercepted every click meant for this one.
+  const OV:any={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:10500,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'};
   return (
     <div style={OV} onClick={onClose}>
       <div style={{background:'white',borderRadius:'16px',padding:'28px',width:'100%',maxWidth:'440px',boxShadow:'0 20px 60px rgba(0,0,0,0.25)'}} onClick={e=>e.stopPropagation()}>
@@ -160,7 +164,8 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
     setTimeout(()=>URL.revokeObjectURL(url),5000);
   }
 
-  const OV:any={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'};
+  // Same z-index fix as BulkAssignModal above - must clear Modal.tsx's 9999/10000.
+  const OV:any={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:10500,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'};
   return (
     <div style={OV} onClick={onClose}>
       <div style={{background:'white',borderRadius:'16px',padding:'28px',width:'100%',maxWidth:'480px',maxHeight:'85vh',overflowY:'auto',boxShadow:'0 20px 60px rgba(0,0,0,0.25)'}} onClick={e=>e.stopPropagation()}>

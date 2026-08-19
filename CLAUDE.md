@@ -6009,6 +6009,66 @@ during that exact run, the same extensively-documented per-IP
 characteristic, not a regression). Zero-token audit: `CONFIRMED CLEAN`
 (370 files, 0 external API refs).
 
+## JD Match "Add to Pipeline" bug fixed: a real z-index/pointer-events
+## interception between two simultaneously-open modals, 2026-08-20
+User reported the "JD Match — AI Ranking" modal's "Add to Pipeline"
+action not working, alongside 3 other new asks (pipeline-stage
+visibility, a JD-match score on Candidates/profile, a full-page resume
+view) — investigated and fixed this one first before starting the new
+feature work, per this project's own established discipline of
+root-causing reported breakage before building on top of it.
+
+**Root cause, found via a genuine live Playwright reproduction, not
+guessed**: `POST /candidates/rank` and `POST /candidates/bulk-assign`
+both worked correctly when called directly — the bug was purely
+frontend. Selecting a candidate in the JD Match modal and clicking
+"Add 1 to Pipeline" correctly opened `BulkAssignModal` on top of the
+still-mounted JD Match modal, but clicking "Assign to Pipeline" inside
+it hung for the full 30s Playwright timeout with:
+`<div>SAP ABAP LEAD · EventHQ · 8y 9m</div> from <div>…</div> subtree
+intercepts pointer events`. Root cause: the shared `Modal` component
+(`frontend/components/ui/Modal.tsx`) uses `zIndex:9999` (overlay) /
+`10000` (content), but `BulkAssignModal` and `BulkResumeGenModal`
+(`candidates/page.tsx`) each used their own raw overlay at `zIndex:1000`
+— when either opens ON TOP of a shared-`Modal`-based modal (JD Match's
+own ranked-results modal), the still-visible content underneath, at a
+higher z-index, silently ate every click meant for the nested modal's
+buttons, with zero console error and zero visible sign anything was
+wrong (button looked clickable, was genuinely unclickable). This is a
+real bug CLASS, not a one-off: fixed both `BulkAssignModal`'s and
+`BulkResumeGenModal`'s overlay z-index to `10500` (clears the shared
+Modal's 10000) so any future nested-modal pairing is safe by
+construction, not just the one reported instance.
+
+**Real gap in why the existing S20 test never caught this**: S20
+(added 2026-08-11 for a different JD Match bug) opens `BulkAssignModal`
+and asserts it's visible, but never actually selects a requisition and
+clicks "Assign to Pipeline" — the exact step where this bug lived.
+Extended S20 to complete that flow for real (select the 2nd real
+option, click Assign, assert the real "N assigned, M already in
+pipeline" result renders) so this class of bug is now covered going
+forward, not just the symptom that was originally reported.
+
+Verified for real end-to-end, not code review: re-ran the exact live
+reproduction after deploying the fix — the click that previously hung
+30s now completes immediately, `POST /candidates/bulk-assign` fires and
+returns a real 200 with a real created/skipped count; ran it twice more
+against two different real requisitions to confirm both the
+already-assigned (`skipped:1`) and genuinely-new (`created:1`) paths
+work correctly through the actual UI, not just the API. Cleaned up the
+one real test-created application (a genuine candidate briefly added to
+a genuine requisition's pipeline during verification) via direct
+cascade-safe deletes. Extended S20 passes clean; a broader 48-test
+regression sweep (S1/S2/S8/S13/S16/S30 — areas touching
+pipeline/candidates/requisitions) ran 47 passed / 1 skipped (Ollama
+model check, unrelated) / 0 failed. Zero-token audit: `CONFIRMED CLEAN`
+(379 files, 0 external API refs).
+
+**Still pending from the same user request** (not started yet): adding
+Pipeline Stage visibility to Resume Inbox/Candidates/candidate profile,
+a JD-matching score against open requisitions on Candidates/profile,
+and a full-page resume view with JD-match skill highlighting.
+
 ## Feature-level permissions: 12 broad modules -> 73 individual features across 11 groups, 2026-08-17
 User asked for permissions to work at the level of every individual
 feature/page, not just ~12 broad modules — e.g. under Communication,
