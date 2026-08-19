@@ -635,6 +635,22 @@ async def update_stage(
             ))
     except Exception as _ex:
         print(f"Stage notification error: {_ex}")
+
+    # Real automation (2026-08-19): recruiter shortlists a candidate
+    # (moves them to "screened") -> automatically build the tracking
+    # sheet (with the real AI JD match score already in it) and email the
+    # resume + sheet to the internal screening team, CC'ing every active
+    # KAE on the client -- so the manual "Submit to KAE" click is no
+    # longer the only way this happens. Best-effort background task, same
+    # pattern as _notify_stage_change_bg above; silently no-ops for any
+    # tenant that hasn't configured a screening-team email yet (see
+    # kae_submission.py's screening_notification_settings).
+    if old["stage"] != "screened" and body.stage == "screened":
+        try:
+            from routers.kae_submission import _auto_notify_screening_team
+            asyncio.create_task(_auto_notify_screening_team(actor.tenant_id, application_id, actor))
+        except Exception as _ex:
+            print(f"Auto screening-team notification dispatch error: {_ex}")
     return dict(row)
 
 @router.get("/{application_id}/notes")

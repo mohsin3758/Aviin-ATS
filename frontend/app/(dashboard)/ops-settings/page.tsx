@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Star, Pencil, Trophy } from 'lucide-react';
+import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Star, Pencil, Trophy, Mail } from 'lucide-react';
 
 const TABS = [
   { key: 'scoring', label: 'Matching Weights', icon: Sliders },
@@ -9,6 +9,7 @@ const TABS = [
   { key: 'performance', label: 'Performance Weights', icon: Trophy },
   { key: 'blocks', label: 'Recruiter-Client Blocks', icon: Ban },
   { key: 'templates', label: 'Tracking Sheet Templates', icon: FileSpreadsheet },
+  { key: 'screening', label: 'Screening Notifications', icon: Mail },
   { key: 'gdpr', label: 'Data Retention (GDPR)', icon: ShieldOff },
 ];
 
@@ -170,6 +171,78 @@ function PerformanceWeightsTab() {
       </div>
       {err && <div style={{ color: '#DC2626', fontSize: 12, margin: '8px 0' }}>{err}</div>}
       <button onClick={save} disabled={saving} style={{ ...btn, marginTop: 10 }}>{saving ? 'Saving…' : 'Save Weights'}</button>
+    </div>
+  );
+}
+
+function ScreeningTab() {
+  // Real feature (2026-08-19): who gets the automatic "candidate
+  // shortlisted" email (To:) once a recruiter moves an application to
+  // "screened" -- the internal screening team, with every active KAE on
+  // the client cc'd automatically (backend-resolved, not configured
+  // here). Same "first save establishes the default, PUT any time to
+  // change it" pattern as every other tab on this page -- nothing here
+  // is a one-time-only lock.
+  const { data, refetch } = useFetch<any>('/screening-settings');
+  const [emails, setEmails] = useState<string[]>([]);
+  const [newEmail, setNewEmail] = useState('');
+  const [enabled, setEnabled] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (data) { setEmails(data.to_emails || []); setEnabled(data.is_enabled !== false); }
+  }, [data]);
+
+  const addEmail = () => {
+    const e = newEmail.trim();
+    if (!e || emails.includes(e)) return;
+    setEmails([...emails, e]);
+    setNewEmail('');
+  };
+  const removeEmail = (e: string) => setEmails(emails.filter(x => x !== e));
+
+  const save = async () => {
+    setSaving(true); setErr(''); setSaved(false);
+    try {
+      await apiFetch('/screening-settings', { method: 'PUT', body: JSON.stringify({ to_emails: emails, is_enabled: enabled }) });
+      refetch();
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <div style={card}>
+      <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>
+        When a recruiter moves a candidate to <strong>Screened</strong>, the resume and full tracking sheet (with the
+        real AI JD match score already filled in) are emailed automatically — <strong>To:</strong> the addresses below,
+        <strong> CC:</strong> every KAE currently assigned to that client (resolved automatically, nothing to configure here).
+        Turn it off any time without losing the saved addresses.
+      </p>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, color: '#1E293B', marginBottom: 14, cursor: 'pointer' }}>
+        <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
+        Auto-send enabled
+      </label>
+      <label style={label}>SCREENING TEAM EMAIL ADDRESSES</label>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+        {emails.map(e => (
+          <span key={e} style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', borderRadius: 999, padding: '4px 10px', fontSize: 12, fontWeight: 600 }}>
+            {e}
+            <button onClick={() => removeEmail(e)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#1D4ED8', display: 'flex' }}><Trash2 size={12} /></button>
+          </span>
+        ))}
+        {!emails.length && <span style={{ fontSize: 12, color: '#94A3B8' }}>No screening-team email set yet — auto-send will be skipped until at least one is added.</span>}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <input value={newEmail} onChange={e => setNewEmail(e.target.value)} onKeyDown={e => e.key === 'Enter' && addEmail()}
+          placeholder="screening.team@aviintech.com" style={{ ...input, marginBottom: 0, flex: 1 }} />
+        <button onClick={addEmail} style={{ ...btn, display: 'flex', alignItems: 'center', gap: 4 }}><Plus size={14} /> Add</button>
+      </div>
+      {err && <div style={{ color: '#DC2626', fontSize: 12, margin: '8px 0' }}>{err}</div>}
+      {saved && <div style={{ color: '#16A34A', fontSize: 12, margin: '8px 0', fontWeight: 700 }}>Saved ✓</div>}
+      <button onClick={save} disabled={saving} style={btn}>{saving ? 'Saving…' : 'Save Screening Settings'}</button>
     </div>
   );
 }
@@ -421,6 +494,7 @@ export default function OpsSettingsPage() {
       {tab === 'performance' && <PerformanceWeightsTab />}
       {tab === 'blocks' && <BlocksTab />}
       {tab === 'templates' && <TemplatesTab />}
+      {tab === 'screening' && <ScreeningTab />}
       {tab === 'gdpr' && <GdprTab />}
     </div>
   );

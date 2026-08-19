@@ -36,7 +36,7 @@ from pydantic import BaseModel
 
 import db
 import events
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 from routers.pipeline_stages import is_valid_stage
 from services.resume_formatting import render_resume_pdf, redact_contact, mask_name, _VALID_THEMES, _VALID_LOGO_POSITIONS
 
@@ -65,6 +65,30 @@ COLUMN_REGISTRY = [
     {"key": "current_company",     "label": "Current Company",                                           "auto": True},
     {"key": "ctc",                 "label": "CTC",                                                       "auto": True},
     {"key": "ectc_rate_card",      "label": "ECTC / Rate Card",                                          "auto": True},
+    # Real gap-closing additions (2026-08-19): LinkedIn/Job Type/NDA/
+    # Recruiter Name/AI JD Score all have a genuine data source already in
+    # this schema (candidates.linkedin_url, requisitions.employment_type,
+    # nda_documents.status, applications.assigned_recruiter_id,
+    # candidate_scores.readiness_index) — just never wired into the sheet.
+    # RTR and Truecaller Verification have NO existing source of truth
+    # anywhere in this codebase (no e-sign flow, no verification service) —
+    # kept honest as manual (auto=False) entries rather than fabricating a
+    # fake automatic status.
+    {"key": "linkedin_id",             "label": "LinkedIn Id",                                           "auto": True},
+    {"key": "job_type",                "label": "Job Type (Full Time / Contract / C2H / Freelancer)",    "auto": True},
+    {"key": "nda_status",              "label": "NDA Status",                                            "auto": True},
+    {"key": "recruiter_name",          "label": "Recruiter Name",                                        "auto": True},
+    {"key": "ai_jd_score",             "label": "AI JD Match Score",                                     "auto": True},
+    {"key": "rtr_status",              "label": "RTR (Right To Represent)",                               "auto": False},
+    {"key": "truecaller_verification", "label": "Truecaller Verification",                               "auto": False},
+]
+
+# The real, out-of-the-box default column set for a brand-new tenant's
+# default template — includes every genuinely automatic column above so
+# "fill the missing features with a clean table sheet with all candidate
+# details" is true immediately, no manual template editing required.
+_DEFAULT_TEMPLATE_COLUMNS = [
+    {"key": c["key"], "label": c["label"]} for c in COLUMN_REGISTRY
 ]
 
 _PRE_SUBMIT_STAGES = {"sourced", "contacted", "interested", "nda", "screened"}
@@ -105,15 +129,29 @@ def _template_out(row) -> dict:
 async def _app_context(conn, application_id: str):
     row = await conn.fetchrow(
         """SELECT a.id AS application_id, a.requisition_id, a.candidate_id, a.stage,
+                  a.assigned_recruiter_id,
                   c.full_name, c.phone, c.email, c.location, c.current_employer,
                   c.total_exp_mo, c.notice_period_days, c.current_ctc, c.expected_ctc,
-                  c.current_designation, c.skills, c.resume_text,
-                  r.title AS role_title, r.client_id,
-                  t.name AS tenant_name
+                  c.current_designation, c.skills, c.resume_text, c.linkedin_url,
+                  r.title AS role_title, r.client_id, r.employment_type,
+                  t.name AS tenant_name,
+                  ru.full_name AS recruiter_name,
+                  nda.status AS nda_status,
+                  cs.readiness_index AS ai_score, cs.readiness_grade AS ai_grade
            FROM applications a
            JOIN candidates c ON c.id = a.candidate_id
            JOIN requisitions r ON r.id = a.requisition_id
            JOIN tenants t ON t.id = a.tenant_id
+           LEFT JOIN users ru ON ru.id = a.assigned_recruiter_id
+           LEFT JOIN LATERAL (
+               SELECT status FROM nda_documents
+               WHERE application_id = a.id ORDER BY created_at DESC LIMIT 1
+           ) nda ON true
+           LEFT JOIN LATERAL (
+               SELECT readiness_index, readiness_grade FROM candidate_scores
+               WHERE candidate_id = a.candidate_id AND requisition_id = a.requisition_id
+               ORDER BY id DESC LIMIT 1
+           ) cs ON true
            WHERE a.id = $1""",
         application_id,
     )
@@ -121,6 +159,8 @@ async def _app_context(conn, application_id: str):
         raise HTTPException(404, "Application not found")
 
     notice = f"{row['notice_period_days']} days" if row["notice_period_days"] is not None else ""
+    ai_score = f"{row['ai_score']:.0f}% ({row['ai_grade']})" if row["ai_score"] is not None and row["ai_grade"] else \
+               (f"{row['ai_score']:.0f}%" if row["ai_score"] is not None else "")
     auto_values = {
         "date": datetime.date.today().strftime("%d-%m-%Y"),
         "partner": row["tenant_name"] or "",
@@ -134,18 +174,31 @@ async def _app_context(conn, application_id: str):
         "current_company": row["current_employer"] or "",
         "ctc": _fmt_ctc(row["current_ctc"]),
         "ectc_rate_card": _fmt_ctc(row["expected_ctc"]),
+        "linkedin_id": row["linkedin_url"] or "",
+        "job_type": (row["employment_type"] or "").replace("_", " ").title(),
+        "nda_status": (row["nda_status"] or "not_started").replace("_", " ").title(),
+        "recruiter_name": row["recruiter_name"] or "",
+        "ai_jd_score": ai_score,
     }
     return row, auto_values
 
 
-async def _resolve_kae(conn, tenant_id: str, client_id: Optional[str]):
+async def _resolve_kaes(conn, tenant_id: str, client_id: Optional[str]):
+    """Real fix (2026-08-19): client_owners has no uniqueness constraint on
+    (tenant_id, client_id, owner_type) — only on (tenant_id, client_id,
+    user_id) — so a client can genuinely have more than one active
+    owner_type='kae' row (e.g. a primary + a backup KAE). The old version
+    of this only ever fetched the single most-recently-assigned one and
+    silently ignored the rest. Returns ALL active KAEs for a client,
+    most-recent first; callers that need "the" primary KAE use [0]."""
     if not client_id:
-        return None
-    return await conn.fetchrow(
+        return []
+    return await conn.fetch(
         """SELECT u.id, u.full_name, u.email
            FROM client_owners co JOIN users u ON u.id = co.user_id
            WHERE co.tenant_id=$1 AND co.client_id=$2 AND co.owner_type='kae' AND co.is_active
-           ORDER BY co.assigned_at DESC LIMIT 1""",
+             AND u.email IS NOT NULL AND u.email != ''
+           ORDER BY co.assigned_at DESC""",
         tenant_id, client_id,
     )
 
@@ -234,6 +287,90 @@ async def delete_template(template_id: str, actor: Actor = Depends(get_actor)):
             raise HTTPException(400, "Cannot delete the default template — set another template as default first")
         await conn.execute("DELETE FROM tracking_sheet_templates WHERE id=$1", template_id)
     return {"ok": True}
+
+
+# ─────────────────────────── Screening notification settings ───────────────────────────
+# Real feature (2026-08-19): who gets the automatic "candidate shortlisted"
+# email (To:) when a recruiter moves an application to "screened" — the
+# internal screening team, not the KAE (who's cc'd instead, see
+# _auto_notify_screening_team below). Same "auto-create a sensible default
+# row on first read, PUT any time to change it" pattern already used by
+# scoring_weight_config/sla_tier_config — the first save IS the default;
+# nothing about it is a one-time-only lock, it can be changed again later
+# exactly the same way.
+
+class ScreeningSettingsIn(BaseModel):
+    to_emails: list[str]
+    is_enabled: bool = True
+
+
+@router.get("/screening-settings")
+async def get_screening_settings(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM screening_notification_settings WHERE tenant_id=$1", actor.tenant_id)
+        if not row:
+            row = await conn.fetchrow(
+                "INSERT INTO screening_notification_settings (tenant_id) VALUES ($1) RETURNING *", actor.tenant_id)
+    return dict(row)
+
+
+@router.put("/screening-settings")
+async def update_screening_settings(body: ScreeningSettingsIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    emails = [e.strip() for e in body.to_emails if e and e.strip()]
+    if body.is_enabled and not emails:
+        raise HTTPException(400, "At least one screening-team email is required to enable auto-notifications")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO screening_notification_settings (tenant_id, to_emails, is_enabled, updated_by, updated_at)
+               VALUES ($1,$2,$3,$4,now())
+               ON CONFLICT (tenant_id) DO UPDATE SET
+                 to_emails=$2, is_enabled=$3, updated_by=$4, updated_at=now()
+               RETURNING *""",
+            actor.tenant_id, emails, body.is_enabled, actor.user_id,
+        )
+    return dict(row)
+
+
+async def _auto_notify_screening_team(tenant_id: str, application_id: str, actor: Actor):
+    """Fired (best-effort, background) when a recruiter moves an
+    application to "screened" — real automation for the ask: recruiter
+    shortlists a candidate, the system automatically builds the tracking
+    sheet (with the real AI JD match score already in it) and emails it
+    with the resume to the internal screening team, CC'ing every active
+    KAE on the client. Never raises — a missing/disabled setting, a
+    missing SMTP config, or any other failure here must never break the
+    stage-change request itself, matching the existing
+    _notify_stage_change_bg convention in applications.py."""
+    try:
+        async with db.tenant_conn(tenant_id) as conn:
+            settings = await conn.fetchrow(
+                "SELECT to_emails, is_enabled FROM screening_notification_settings WHERE tenant_id=$1", tenant_id)
+        if not settings or not settings["is_enabled"] or not settings["to_emails"]:
+            return  # Not configured for this tenant yet — silently skip, not an error.
+
+        async with db.tenant_conn(tenant_id) as conn:
+            row, _ = await _app_context(conn, application_id)
+        candidate = {
+            "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
+            "location": row["location"], "current_employer": row["current_employer"],
+            "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
+            "skills": row["skills"], "resume_text": row["resume_text"],
+        }
+        # Sensible, safe default: the same "clean, contact-free" style/theme
+        # every other unattended flow in this codebase defaults to — an
+        # auto-fired email has no recruiter present to pick a style.
+        resume_bytes = render_resume_pdf(candidate, _STYLE_CONFIGS["clean_generated"])
+        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
+
+        await _do_kae_submission(
+            tenant_id, application_id, actor, resume_bytes,
+            f"Resume_{safe_name}_clean_generated.pdf", "clean_generated",
+            _RESUME_LABELS["clean_generated"],
+            override_to_emails=settings["to_emails"], trigger_source="auto_screened",
+        )
+    except Exception as exc:
+        print(f"Auto screening-team notification error (application {application_id}): {exc}")
 
 
 # ─────────────────────────── Redaction + document generation ───────────────────────────
@@ -338,12 +475,23 @@ def _build_tracking_html_table(columns: list, rows: list) -> str:
     )
 
 
-async def _send_kae_email(tenant_id: str, to_email: str, cc_email: Optional[str], subject: str,
+async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
                            body_text: str, attachments: list, body_html_extra: str = "") -> tuple:
     """attachments: list of (filename, bytes, mime_subtype). body_html_extra,
     if given, is appended as real HTML below the plain-text intro (used for
     the inline tracking-sheet table) — the message becomes multipart/
-    alternative so clients without HTML rendering still see the plain text."""
+    alternative so clients without HTML rendering still see the plain text.
+
+    Real improvement (2026-08-19): to_emails/cc_emails now accept either a
+    single string (back-compat with every existing caller) or a real
+    list — needed once a submission could go to a whole screening-team
+    list with multiple KAEs cc'd, not just one of each."""
+    to_list = [to_emails] if isinstance(to_emails, str) else list(to_emails or [])
+    cc_list = [cc_emails] if isinstance(cc_emails, str) else list(cc_emails or [])
+    to_list = [e for e in to_list if e]
+    cc_list = [e for e in cc_list if e and e not in to_list]
+    if not to_list:
+        return False, "No recipient email address resolved"
     try:
         db_url = os.environ.get("DATABASE_URL", "postgresql://app_user:apppw@db:5432/ats")
         raw = await asyncpg.connect(db_url)
@@ -359,11 +507,11 @@ async def _send_kae_email(tenant_id: str, to_email: str, cc_email: Optional[str]
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = f'{cfg["smtp_from_name"] or "AVIIN ATS"} <{cfg["smtp_from"] or cfg["smtp_user"]}>'
-        msg["To"] = to_email
-        recipients = [to_email]
-        if cc_email and cc_email != to_email:
-            msg["Cc"] = cc_email
-            recipients.append(cc_email)
+        msg["To"] = ", ".join(to_list)
+        recipients = list(to_list)
+        if cc_list:
+            msg["Cc"] = ", ".join(cc_list)
+            recipients.extend(cc_list)
 
         if body_html_extra:
             alt = MIMEMultipart("alternative")
@@ -400,7 +548,7 @@ async def _send_kae_email(tenant_id: str, to_email: str, cc_email: Optional[str]
 async def submission_preview(application_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row, auto_values = await _app_context(conn, application_id)
-        kae = await _resolve_kae(conn, actor.tenant_id, row["client_id"])
+        kaes = await _resolve_kaes(conn, actor.tenant_id, row["client_id"])
         template = await _resolve_template(conn, actor.tenant_id, row["client_id"])
         templates = await conn.fetch(
             """SELECT tst.id, tst.name, tst.client_id, tst.is_default, cl.name AS client_name
@@ -409,9 +557,16 @@ async def submission_preview(application_id: str, actor: Actor = Depends(get_act
             actor.tenant_id)
         prior_count = await conn.fetchval(
             "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1", row["requisition_id"])
+        screening = await conn.fetchrow(
+            "SELECT to_emails, is_enabled FROM screening_notification_settings WHERE tenant_id=$1", actor.tenant_id)
     return {
         "client_id": str(row["client_id"]) if row["client_id"] else None,
-        "kae": dict(kae) if kae else None,
+        "kae": dict(kaes[0]) if kaes else None,
+        # Real fix (2026-08-19): a client can have more than one active KAE
+        # (backup/secondary) — the old "kae" singular field silently hid
+        # every KAE past the most-recently-assigned one.
+        "kaes": [dict(k) for k in kaes],
+        "screening_team_configured": bool(screening and screening["is_enabled"] and screening["to_emails"]),
         "resolved_template_id": str(template["id"]) if template else None,
         "templates": [dict(t) for t in templates],
         "auto_values": {**auto_values, "sl_no": str((prior_count or 0) + 1)},
@@ -450,6 +605,7 @@ async def _do_kae_submission(
     tenant_id: str, application_id: str, actor: Actor,
     resume_bytes: bytes, resume_filename: str, resume_style: str, resume_style_label: str,
     generated_resume_id: str = None, template_id: str = None, field_values: dict = None, cc_self: bool = True,
+    override_to_emails: Optional[list] = None, trigger_source: str = "manual",
 ) -> dict:
     """Shared submission-tracking core (2026-08-12 audit fix): resolves the
     KAE + tracking-sheet template, builds the real cumulative tracking
@@ -461,14 +617,25 @@ async def _do_kae_submission(
     fix, a resume sent via the new Resume Generator's Generate & Submit
     button emailed the KAE directly with none of this: invisible in
     submission history, stage never advanced, tracking-sheet sl_no never
-    incremented for it."""
+    incremented for it.
+
+    Real improvement (2026-08-19): override_to_emails (the screening-team
+    address list) lets the auto-screened trigger send primarily to the
+    screening team instead of the KAE directly, CC'ing every active KAE
+    on the client (plural — client_owners genuinely allows more than one)
+    instead of just one. When override_to_emails is None (every existing
+    caller), behavior is completely unchanged: primary KAE is the "To",
+    still a hard 400 if none is assigned — that requirement only ever
+    applied to the manual/direct-to-KAE flow, not the screening-team one,
+    where a still-unassigned KAE is a real, expected, non-blocking state."""
     async with db.tenant_conn(tenant_id) as conn:
         row, auto_values = await _app_context(conn, application_id)
         client_id = row["client_id"]
         if not client_id:
             raise HTTPException(400, "This requisition has no client linked — cannot resolve a KAE")
-        kae = await _resolve_kae(conn, tenant_id, client_id)
-        if not kae or not kae["email"]:
+        kaes = await _resolve_kaes(conn, tenant_id, client_id)
+        primary_kae = kaes[0] if kaes else None
+        if not override_to_emails and (not primary_kae or not primary_kae["email"]):
             raise HTTPException(400, "No active KAE with an email address is assigned to this client (see KAE > Owners)")
 
         template = None
@@ -495,19 +662,33 @@ async def _do_kae_submission(
     sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
     tracking_html = _build_tracking_html_table(columns, sheet_rows)
 
+    kae_emails = [k["email"] for k in kaes if k["email"]]
+    if override_to_emails:
+        to_recipients = list(override_to_emails)
+        cc_recipients = kae_emails + ([recruiter_email] if cc_self and recruiter_email else [])
+        greeting = "Hi Team,"
+        kae_note = f"\n\nKAE{'s' if len(kae_emails) != 1 else ''} cc'd: {', '.join(k['full_name'] or k['email'] for k in kaes)}." if kaes else \
+                   "\n\nNote: no KAE is currently assigned to this client (Settings > KAE > Owners)."
+    else:
+        to_recipients = [primary_kae["email"]]
+        cc_recipients = kae_emails[1:] + ([recruiter_email] if cc_self and recruiter_email else [])
+        greeting = f"Hi {primary_kae['full_name'] or ''},"
+        kae_note = ""
+
     subject = f"Candidate Submission — {row['full_name']} for {row['role_title']}"
     body_text = (
-        f"Hi {kae['full_name'] or ''},\n\n"
+        f"{greeting}\n\n"
         f"Please find attached the profile for {row['full_name']} against \"{row['role_title']}\""
         f"{' (' + client_row['name'] + ')' if client_row else ''}. The tracking sheet "
         f"({sl_no} submission{'s' if sl_no != 1 else ''} on this role so far) is below.\n\n"
-        f"Resume attached: {resume_style_label}.\n\n"
+        f"Resume attached: {resume_style_label}."
+        f"{kae_note}\n\n"
         f"Regards,\n{actor.full_name or 'AVIIN ATS'}"
     )
     ext = resume_filename.rsplit(".", 1)[-1].lower()
     subtype = "pdf" if ext == "pdf" else "vnd.openxmlformats-officedocument.wordprocessingml.document"
     email_sent, email_error = await _send_kae_email(
-        tenant_id, kae["email"], recruiter_email if cc_self else None, subject, body_text,
+        tenant_id, to_recipients, cc_recipients, subject, body_text,
         [(resume_filename, resume_bytes, subtype)],
         body_html_extra=tracking_html,
     )
@@ -517,12 +698,12 @@ async def _do_kae_submission(
             """INSERT INTO candidate_submissions
                  (tenant_id, application_id, candidate_id, requisition_id, client_id, template_id,
                   kae_user_id, resume_style, field_values, recipient_emails, status, error_message, sent_by,
-                  generated_resume_id)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *""",
+                  generated_resume_id, trigger_source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *""",
             tenant_id, application_id, row["candidate_id"], row["requisition_id"], client_id,
-            template["id"], kae["id"], resume_style, json.dumps(final_values),
-            [kae["email"]] + ([recruiter_email] if cc_self and recruiter_email and recruiter_email != kae["email"] else []),
-            "sent" if email_sent else "failed", email_error, actor.user_id, generated_resume_id,
+            template["id"], primary_kae["id"] if primary_kae else None, resume_style, json.dumps(final_values),
+            list(dict.fromkeys(to_recipients + cc_recipients)),
+            "sent" if email_sent else "failed", email_error, actor.user_id, generated_resume_id, trigger_source,
         )
 
         bumped = False
@@ -538,13 +719,14 @@ async def _do_kae_submission(
         await events.write_outbox(
             conn, tenant_id, "candidate.submitted_to_kae",
             {"application_id": application_id, "candidate_id": str(row["candidate_id"]),
-             "kae_user_id": str(kae["id"]), "email_sent": email_sent},
+             "kae_user_id": str(primary_kae["id"]) if primary_kae else None, "email_sent": email_sent},
             f"candidate.submitted_to_kae:{sub_row['id']}",
         )
         await events.write_audit(
             conn, tenant_id, actor.user_id, "submit_to_kae", "application", application_id,
             before={"stage": row["stage"]},
-            after={"kae": kae["full_name"], "resume_style": resume_style, "email_sent": email_sent, "sl_no": sl_no},
+            after={"to": to_recipients, "cc": cc_recipients, "resume_style": resume_style,
+                   "email_sent": email_sent, "sl_no": sl_no, "trigger_source": trigger_source},
         )
 
     out = dict(sub_row)
@@ -552,7 +734,7 @@ async def _do_kae_submission(
     out["email_sent"] = email_sent
     out["email_error"] = email_error
     out["stage_bumped_to_submitted"] = bumped
-    out["kae_name"] = kae["full_name"]
+    out["kae_name"] = primary_kae["full_name"] if primary_kae else None
     return out
 
 

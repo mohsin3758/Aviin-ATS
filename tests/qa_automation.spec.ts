@@ -4179,3 +4179,215 @@ test.describe.serial('S36 Deep Test/QA Data Audit — is_active Filter Fixes', (
     expect(errors).toHaveLength(0);
   });
 });
+
+// S37 (2026-08-19): recruiter shortlists a candidate (moves stage ->
+// "screened") -> automatic email to the internal screening team, CC'ing
+// every active KAE on the client, with a real tracking sheet including
+// the new LinkedIn/Job Type/NDA/Recruiter Name/AI JD Score columns. The
+// screening-team recipient list is a real, tenant-configurable setting
+// (first save = the default, PUT any time to change it) -- this suite
+// captures the tenant's real setting before touching it and restores it
+// in afterAll so a test run never leaves production reconfigured.
+test.describe.serial('S37 Screening Auto-Notification on Stage->Screened', () => {
+  const stamp = Date.now();
+  let clientId: string;
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+  let secondKaeUserId: string;
+  let originalScreeningSettings: any = null;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
+    // Restore the tenant's real screening-notification setting exactly as
+    // it was before this suite ran -- never leave a test-only address
+    // behind on a real, shared, tenant-wide setting.
+    if (originalScreeningSettings) {
+      await request.put(`${API}/screening-settings`, {
+        headers: auth,
+        data: { to_emails: originalScreeningSettings.to_emails, is_enabled: originalScreeningSettings.is_enabled },
+      }).catch(() => {});
+    }
+  });
+
+  test('screening-settings: GET auto-creates a default, PUT establishes it, PUT again changes it', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const before = await request.get(`${API}/screening-settings`, { headers: auth });
+    expect(before.ok()).toBeTruthy();
+    originalScreeningSettings = await before.json();
+    expect(originalScreeningSettings).toHaveProperty('to_emails');
+
+    const firstSave = await request.put(`${API}/screening-settings`, {
+      headers: auth, data: { to_emails: [`qa.s37.screening.${stamp}@test.com`], is_enabled: true },
+    });
+    expect(firstSave.ok()).toBeTruthy();
+    expect((await firstSave.json()).to_emails).toEqual([`qa.s37.screening.${stamp}@test.com`]);
+
+    // Real "keep the option to change in future" check -- a second save
+    // genuinely overwrites the first, it isn't a one-time-only lock.
+    const secondSave = await request.put(`${API}/screening-settings`, {
+      headers: auth, data: { to_emails: [`qa.s37.screening.changed.${stamp}@test.com`], is_enabled: true },
+    });
+    expect(secondSave.ok()).toBeTruthy();
+    expect((await secondSave.json()).to_emails).toEqual([`qa.s37.screening.changed.${stamp}@test.com`]);
+
+    // Enabling with zero addresses is rejected (nothing to send to).
+    const emptyEnabled = await request.put(`${API}/screening-settings`, {
+      headers: auth, data: { to_emails: [], is_enabled: true },
+    });
+    expect(emptyEnabled.status()).toBe(400);
+  });
+
+  test('setup: throwaway client with 2 active KAEs + requisition + candidate + application', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    // Real, final value the auto-trigger test below will actually fire
+    // against -- kept distinct from the placeholder values in the test above.
+    await request.put(`${API}/screening-settings`, {
+      headers: auth, data: { to_emails: [`qa.s37.final.${stamp}@test.com`], is_enabled: true },
+    });
+
+    const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S37 Screening Test Client ${stamp}` } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+
+    const me = await request.get(`${API}/auth/me`, { headers: auth });
+    const adminId = (await me.json()).id;
+    const usersResp = await request.get(`${API}/users?is_active=true`, { headers: auth });
+    const users = await usersResp.json();
+    const second = (users || []).find((u: any) => u.id !== adminId && u.email);
+    secondKaeUserId = second?.id;
+
+    const kae1 = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: clientId, user_id: adminId, owner_type: 'kae' } });
+    expect(kae1.ok()).toBeTruthy();
+    if (secondKaeUserId) {
+      const kae2 = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: clientId, user_id: secondKaeUserId, owner_type: 'kae' } });
+      expect(kae2.ok()).toBeTruthy();
+    }
+
+    const r = await request.post(`${API}/requisitions`, {
+      headers: auth, data: { title: `QA S37 Screening Test Role ${stamp}`, client_id: clientId, skills_required: ['Python'], employment_type: 'fulltime' },
+    });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: {
+        full_name: `QA S37 Screening Test Candidate ${stamp}`, email: `qa.s37.cand.${stamp}@test.com`,
+        phone: `9${String(stamp).slice(-9)}`, skills: ['Python'], total_exp_mo: 48,
+        current_ctc: 1000000, expected_ctc: 1400000, current_employer: 'QA Old Co',
+      },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const app = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: candId, requisition_id: reqId } });
+    expect(app.ok()).toBeTruthy();
+    appId = (await app.json()).id;
+
+    // A real AI JD score for this candidate/requisition pair, so the
+    // tracking sheet's ai_jd_score column has real data to surface.
+    await request.post(`${API}/intelligence/score`, { headers: auth, data: { candidate_id: candId, requisition_id: reqId } });
+  });
+
+  test('moving stage to "screened" auto-fires: real candidate_submissions row, correct recipients, real tracking-sheet data', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const before = await request.get(`${API}/applications/${appId}/submissions`, { headers: auth });
+    expect((await before.json()).length).toBe(0);
+
+    const move = await request.patch(`${API}/applications/${appId}/stage`, { headers: auth, data: { stage: 'screened' } });
+    expect(move.ok()).toBeTruthy();
+
+    // The auto-notification is a genuine background task (not awaited by
+    // the stage-change request) -- poll rather than assume it's instant.
+    let subs: any[] = [];
+    for (let i = 0; i < 20; i++) {
+      const r = await request.get(`${API}/applications/${appId}/submissions`, { headers: auth });
+      subs = await r.json();
+      if (subs.length > 0) break;
+      await new Promise(res => setTimeout(res, 500));
+    }
+    expect(subs.length).toBe(1);
+    const sub = subs[0];
+    expect(sub.trigger_source).toBe('auto_screened');
+    expect(sub.status).toBe('sent');
+    expect(sub.recipient_emails).toContain(`qa.s37.final.${stamp}@test.com`);
+    // Both KAEs must be cc'd, not just the most-recently-assigned one.
+    const me = await request.get(`${API}/auth/me`, { headers: auth });
+    const adminEmail = (await me.json()).email;
+    expect(sub.recipient_emails).toContain(adminEmail);
+    if (secondKaeUserId) {
+      const secondUser = (await (await request.get(`${API}/users?is_active=true`, { headers: auth })).json())
+        .find((u: any) => u.id === secondKaeUserId);
+      expect(sub.recipient_emails).toContain(secondUser.email);
+    }
+
+    // Real tracking-sheet data, not placeholders.
+    expect(sub.field_values.job_type).toBe('Fulltime');
+    expect(sub.field_values.nda_status).toBe('Not Started');
+    expect(sub.field_values.recruiter_name).toBeTruthy();
+    expect(sub.field_values.ai_jd_score).toMatch(/%/);
+
+    // The application must have auto-advanced to "submitted", matching
+    // the existing manual-submission behavior exactly.
+    const app = await request.get(`${API}/applications/${appId}`, { headers: auth });
+    expect((await app.json()).stage).toBe('submitted');
+  });
+
+  test('screening-settings disabled: moving a second candidate to "screened" does NOT auto-submit', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    await request.put(`${API}/screening-settings`, { headers: auth, data: { to_emails: [`qa.s37.disabled.${stamp}@test.com`], is_enabled: false } });
+
+    const cand2 = await request.post(`${API}/candidates`, {
+      headers: auth, data: { full_name: `QA S37 Disabled Test Candidate ${stamp}`, email: `qa.s37.cand2.${stamp}@test.com`, phone: `8${String(stamp).slice(-9)}`, skills: ['Python'] },
+    });
+    const cand2Id = (await cand2.json()).id;
+    const app2 = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: cand2Id, requisition_id: reqId } });
+    const app2Id = (await app2.json()).id;
+
+    await request.patch(`${API}/applications/${app2Id}/stage`, { headers: auth, data: { stage: 'screened' } });
+    await new Promise(res => setTimeout(res, 1500));
+    const subs = await (await request.get(`${API}/applications/${app2Id}/submissions`, { headers: auth })).json();
+    expect(subs.length).toBe(0);
+
+    await request.delete(`${API}/candidates/${cand2Id}`, { headers: auth }).catch(() => {});
+  });
+
+  test('real headless UI: Ops Settings > Screening Notifications tab — add/remove emails, toggle, save', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/ops-settings');
+    await page.getByRole('button', { name: 'Screening Notifications' }).click();
+    await expect(page.getByText('SCREENING TEAM EMAIL ADDRESSES')).toBeVisible({ timeout: 10000 });
+
+    const testEmail = `qa.s37.ui.${stamp}@test.com`;
+    await page.getByPlaceholder('screening.team@aviintech.com').fill(testEmail);
+    await page.getByRole('button', { name: 'Add' }).click();
+    await expect(page.getByText(testEmail)).toBeVisible();
+    await page.getByRole('button', { name: 'Save Screening Settings' }).click();
+    await expect(page.getByText('Saved ✓')).toBeVisible({ timeout: 10000 });
+    expect(errors).toHaveLength(0);
+  });
+
+  test('real headless UI: Tracking Sheet Templates shows the 7 new columns as selectable', async ({ page }) => {
+    await page.goto('/ops-settings');
+    await page.getByRole('button', { name: 'Tracking Sheet Templates' }).click();
+    await page.getByRole('button', { name: /New Template/i }).click();
+    await expect(page.getByText('LinkedIn Id')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('AI JD Match Score')).toBeVisible();
+    await expect(page.getByText('RTR (Right To Represent)')).toBeVisible();
+    await expect(page.getByText('Truecaller Verification')).toBeVisible();
+  });
+});

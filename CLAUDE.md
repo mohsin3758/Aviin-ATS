@@ -7884,3 +7884,113 @@ browser test confirming the "VISUAL LAYOUT"/"LOGO POSITION" sections
 render in the drawer and a themed submission completes end-to-end
 through the actual UI. Full S14 (12/12) + S29 (18/18) + S30 (9/9) =
 39/39 passing. Zero-token audit: `CONFIRMED CLEAN`.
+
+## Recruiter -> screening-team auto-notification on "Screened", tracking
+## sheet gaps closed, 2026-08-19
+Direct follow-up to a research-only session earlier the same day (no
+code, just explained the real recruiter->KAE->client process and mapped
+every column in a real tracking-sheet screenshot against actual DB
+columns). User then asked to build it: automatically email the resume +
+full tracking sheet (with the real AI JD match score in it) to the
+internal screening team when a recruiter moves a candidate to
+"screened" — **To:** a real, tenant-configurable screening-team email
+list; **CC:** every active KAE on the client, not just one.
+
+**Gap-closing on the tracking sheet itself** — of the 19 columns in the
+user's real reference sheet, checked each against the schema before
+building anything: `COLUMN_REGISTRY` (`kae_submission.py`) gained 5 new
+`auto=True` columns wired to real, already-existing data that was just
+never surfaced here — `linkedin_id` (`candidates.linkedin_url`),
+`job_type` (`requisitions.employment_type`), `nda_status`
+(`nda_documents.status`, latest row per application), `recruiter_name`
+(`applications.assigned_recruiter_id` → `users.full_name`), and
+`ai_jd_score` (`candidate_scores.readiness_index`/`readiness_grade` for
+that candidate+requisition pair — the literal "AI JD score" from the
+original ask). **RTR** and **Truecaller Verification** have no source
+of truth anywhere in this schema — no e-sign flow, no verification
+service — added as real `auto=False` manual columns rather than
+fabricating a fake automatic status. The real tenant's live default
+tracking-sheet template was updated to include all 7 new columns via
+the real `PUT /submission-templates/{id}` API, so the "clean table
+sheet with all candidate details" ask is true immediately, not just
+theoretically available.
+
+**Multiple KAEs, not just one** — `client_owners`' real unique
+constraint is `(tenant_id, client_id, user_id)`, not `(..., owner_type)`
+— confirmed directly against the live schema — so a client genuinely
+can have more than one active `owner_type='kae'` row (primary + backup).
+The old `_resolve_kae()` only ever fetched the single most-recently-
+assigned one via `LIMIT 1` and silently ignored the rest. Replaced with
+`_resolve_kaes()` (returns all of them); `_send_kae_email()` widened
+from single `to_email`/`cc_email` strings to real lists.
+
+**New table** `screening_notification_settings` (`sql/68_screening_
+notifications.sql`, one row per tenant, FORCE RLS) + `GET`/`PUT
+/screening-settings` (PUT admin/manager-gated) — same "auto-create a
+sensible default on first GET, PUT any time to change it" pattern
+already used by `scoring_weight_config`/`sla_tier_config` elsewhere in
+this codebase, matching the explicit ask ("manually make default once,
+keep the option to change in future"). New "Screening Notifications"
+tab on Ops Settings — add/remove email chips, an enable toggle, Save.
+
+**The trigger**: `applications.py`'s `update_stage()` (the one endpoint
+every manual stage move already funnels through — drag-and-drop, drawer
+buttons) fires `_auto_notify_screening_team()` as a best-effort
+background task, same convention as the existing `_notify_stage_change_bg`
+right above it, whenever `old_stage != "screened" and new_stage ==
+"screened"`. That function resolves the tenant's screening-team emails
+(silently no-ops if unconfigured or disabled — never an error, since not
+every tenant will have set this up yet), then calls `_do_kae_submission()`
+— the SAME core function the manual "Submit to KAE" button and the
+Resume Generator's "Generate & Submit" already both use — with a new
+`override_to_emails` param (screening team becomes the "To", every
+active KAE becomes "CC") and a new `trigger_source='auto_screened'` flag
+(new `candidate_submissions` column) so auto-fired sends are
+distinguishable from real manual ones in history. Reuses the existing
+resume-rendering/tracking-sheet/audit/outbox/stage-bump machinery
+completely unchanged — no new document engine, no new stage-bump logic.
+
+**Real bug caught during verification, not by inspection**: the first
+end-to-end test showed 0 rows in `candidate_submissions` after moving a
+candidate to "screened", looking like the trigger silently failed.
+Traced with temporary debug prints — the background task WAS being
+created correctly (`asyncio.create_task` returned a real pending task),
+but my very first check ran only ~3 seconds after the stage change,
+before the task's cold-start (first-ever load of reportlab/PIL for PDF
+rendering in that worker) finished. Confirmed by re-querying the SAME
+application a minute later — the row was there all along, just not yet
+at the moment of the premature check. A second, fresh end-to-end test
+with a proper poll-until-present pattern (matching what the new
+permanent regression test now does) confirmed this is reliable, not
+flaky — not a real bug, but a genuine lesson about not trusting a
+same-request-cycle timing assumption for a fire-and-forget background
+task, now reflected in how the permanent test itself waits.
+
+Verified for real end-to-end, not code review: built a real throwaway
+client with 2 active KAEs (not 1), a requisition, a candidate, and a
+real AI JD score via `POST /intelligence/score`; moved the application
+to "screened" via the real `PATCH .../stage` endpoint and confirmed a
+real `candidate_submissions` row (`trigger_source: auto_screened`,
+`status: sent`) with `recipient_emails` containing the configured
+screening-team address AND both KAEs' emails; confirmed `field_values`
+carried real resolved data (`job_type: "Fulltime"`, `nda_status: "Not
+Started"`, `recruiter_name`, `ai_jd_score: "54% (C)"` — the real,
+computed score, not a placeholder); confirmed the application
+auto-advanced to `submitted`, matching the manual flow's existing
+behavior exactly. Separately confirmed `linkedin_id` resolves correctly
+once a candidate actually has one on file (this test candidate didn't —
+traced to `CandidateCreate` not exposing `linkedin_url` on manual
+creation at all, the same known, pre-existing, out-of-scope gap already
+documented for `current_designation` elsewhere in this project — not a
+bug in the new column mapping itself). New permanent "S37 Screening
+Auto-Notification on Stage->Screened" suite (6 tests) covers the
+settings GET/auto-default/PUT-to-change round-trip, the full real
+auto-trigger with multi-KAE CC and real tracking-sheet data, a disabled-
+setting negative case (moving to "screened" must NOT auto-submit when
+turned off), and 2 real headless-browser checks (the new Ops Settings
+tab, and the Templates admin UI showing all 7 new columns as
+selectable) — carefully captures the tenant's real screening-settings
+value before the suite touches it and restores it in `afterAll`, so a
+test run never leaves a shared, tenant-wide setting reconfigured. Full
+S14 (12) + S29 (18) + S30 (9) + S37 (6) = 45/45 passing. Zero-token
+audit: `CONFIRMED CLEAN` (379 files, 0 external API refs).
