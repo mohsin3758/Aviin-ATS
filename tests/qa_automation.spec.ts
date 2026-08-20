@@ -5401,3 +5401,59 @@ test.describe.serial('S45 Resume Inbox: Load More has no upper bound', () => {
     expect(countAfterAction).toBeGreaterThan(100);
   });
 });
+
+// S46 (2026-08-20): same-day follow-up. User reported the "last" columns
+// on Resume Inbox overlapping/hiding features. The single sticky Actions
+// column kept earlier the same day (after 2 failed attempts at a 2nd
+// sticky column) had only ever been verified at one viewport width —
+// real geometry checks at 1366px and 1600px both showed it genuinely
+// overlapping Job Match or Match % (whichever it happened to land on at
+// that width). Identical bug independently found the same day on the
+// Candidates page, hiding its entire Owner column — same fix applied:
+// sticky removed entirely, plain scroll.
+test.describe.serial('S46 Resume Inbox: Job Match / Match % no longer hidden by the sticky Actions column', () => {
+  test('real element geometry: Actions is no longer sticky, and does not overlap Job Match or Match % at two real viewport widths', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    for (const width of [1366, 1600]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('/resume-inbox');
+      await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+
+      const geom = await page.evaluate(() => {
+        const ths = Array.from(document.querySelectorAll('thead th'));
+        const jobMatch = ths.find(t => t.textContent.trim() === 'Job Match');
+        const matchPct = ths.find(t => t.textContent.trim() === 'Match %');
+        const actions = ths[ths.length - 1];
+        if (!jobMatch || !matchPct || !actions) return null;
+        const jm = jobMatch.getBoundingClientRect(), mp = matchPct.getBoundingClientRect(), a = actions.getBoundingClientRect();
+        return {
+          actionsPosition: getComputedStyle(actions).position,
+          overlapJobMatch: !(jm.right <= a.left || jm.left >= a.right),
+          overlapMatchPct: !(mp.right <= a.left || mp.left >= a.right),
+        };
+      });
+      expect(geom, `width=${width}`).toBeTruthy();
+      expect(geom!.actionsPosition, `width=${width}`).toBe('static');
+      expect(geom!.overlapJobMatch, `width=${width}`).toBe(false);
+      expect(geom!.overlapMatchPct, `width=${width}`).toBe(false);
+    }
+    expect(errors).toHaveLength(0);
+  });
+
+  test('real headless UI: scrolling right reveals real Job Match and Match % content alongside working Edit/download/link actions', async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.goto('/resume-inbox');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+    // This page's horizontal-scroll wrapper has no dedicated testid —
+    // scroll its table's own parent directly, matching how the bug was
+    // diagnosed in the first place.
+    await page.evaluate(() => {
+      const w = document.querySelector('table')?.parentElement;
+      if (w) w.scrollLeft = w.scrollWidth;
+    });
+    await page.waitForTimeout(300);
+    await expect(page.locator('th:has-text("Match %")')).toBeVisible();
+    await expect(page.locator('table tbody tr').first().locator('button[title="Edit & Approve"]')).toBeVisible();
+  });
+});

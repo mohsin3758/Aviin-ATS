@@ -782,25 +782,26 @@ function ResumeInboxPageInner() {
                     moved Status right after Candidate - the column a
                     recruiter needs the fastest anyway (auto-accepted vs.
                     needs review) - so it's within the very first, always-
-                    visible section of the table with no CSS trickery at all. */}
+                    visible section of the table with no CSS trickery at all.
+
+                    Follow-up, same day: the remaining single sticky Actions
+                    column (kept at the time as "the exact convention the
+                    Candidates list page already uses successfully") turned
+                    out to NOT actually be safe either — only ever verified
+                    at one viewport width. Real geometry checks at 1366px
+                    and 1600px both showed it genuinely overlapping Job
+                    Match or Match % (whichever column its "stuck" position
+                    happened to land on at that width). The identical bug
+                    was independently found the same day on the Candidates
+                    page, hiding its entire Owner column — same fix applied
+                    there first, now applied here too: sticky removed
+                    entirely, plain honest scroll for the Actions column,
+                    matching the "sticky-inside-a-<table> is unreliable"
+                    lesson this file already documents above. */}
                 {['Candidate', 'Status', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', ''].map(h => (
                   <th key={h} title={h === 'Received' ? "The email's own date" : h === 'Added' ? 'When our system processed this email' : undefined}
                     style={{
                       padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : h === 'Added' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: (h === 'Match %' || h === 'Added') ? 'pointer' : 'default',
-                      // Real bug fix (2026-08-20): "the last Status/Actions
-                      // content is hidden" - the horizontal-scroll fix
-                      // earlier today made it reachable, but on a narrower
-                      // real browser window the scrollbar itself is easy
-                      // to miss entirely (thin, easy to overlook, hidden
-                      // by default on some OSes until actively scrolled).
-                      // Making ONLY the trailing Actions column sticky
-                      // (single column, matching the exact convention the
-                      // Candidates list page already uses successfully)
-                      // keeps it always reachable without scrolling at
-                      // all - a second attempt at 2 stacked sticky columns
-                      // earlier today visually broke Match%, so this stays
-                      // to exactly one.
-                      ...(h === '' ? { position: 'sticky' as const, right: 0, background: '#f8fafc', boxShadow: '-2px 0 4px rgba(0,0,0,0.06)', width: 112 } : {}),
                     }}
                     onClick={h === 'Match %' ? () => { setSortByMatch(s => !s); } : h === 'Added' ? () => { setAddedDir(d => d === 'desc' ? 'asc' : 'desc'); setSortByMatch(false); } : undefined}>
                     {h === 'Match %' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Target size={11} />{h}{sortByMatch ? ' ↓' : ''}</span>
@@ -890,7 +891,7 @@ function ResumeInboxPageInner() {
                           ? <JdMatchBadge score={matchScore} title={r.matched_jd_title || r.requisition_title} />
                           : <span style={{ fontSize: 11, color: '#e2e8f0' }}>—</span>}
                       </td>
-                      <td style={{ padding: '10px 8px', position: 'sticky', right: 0, background: rowBg, boxShadow: '-2px 0 4px rgba(0,0,0,0.05)', width: 112 }}>
+                      <td style={{ padding: '10px 8px' }}>
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={e => { e.stopPropagation(); setEditItem(r); }} title="Edit & Approve" style={{ padding: '4px 8px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Edit</button>
                           <button onClick={e => { e.stopPropagation(); downloadResumeFile(r.id, r.file_name); }} title="Download resume file" style={{ padding: '4px 6px', background: 'none', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', color: '#374151', display: 'flex', alignItems: 'center' }}><Download size={11} /></button>

@@ -9067,3 +9067,53 @@ repeated CI runs never mutate real candidate records). Full regression
 sweep (S1/S2/S32/S39/S41/S44, 19 tests touching Resume Inbox and the
 adjacent Candidates fix from the same day) passed clean. Zero-token
 audit: `CONFIRMED CLEAN` (381 files, 0 external API refs).
+
+## Same-day follow-up: Resume Inbox's remaining sticky Actions column had
+## the identical Candidates-page overlap bug — "safe" was never actually
+## verified past one viewport width, 2026-08-20
+User sent two follow-up screenshots: one showing "2030 resumes" fully
+loaded, one (after a page refresh) back to "100 resumes." Explained this
+part is expected, not a bug — pagination progress lives only in React
+state, so a full browser refresh naturally restarts at page 1, the same
+as any page in this app; nothing currently persists "how far you'd
+scrolled" across a reload, and nothing promised that it would.
+
+The second, concrete part of the report ("job match its last overlapping
+and hiding the features") was real. Checked directly rather than
+assumed: the single sticky Actions column kept earlier the same day
+(after reverting two failed 2-sticky-column attempts) had only ever been
+verified at one viewport width (~1552px). Real geometry checks at 1366px
+and 1600px both showed genuine overlap — Job Match at 1366px, Match % at
+1600px, whichever column the sticky "stuck" position happened to land on
+at that width — the exact same bug independently found and fixed the
+same day on the Candidates page (hiding its entire Owner column). The
+"kept as safe, matches the Candidates page convention" comment written
+earlier the same day was itself the mistake: that convention was never
+actually safe, just untested at more than one width.
+
+**Fixed the same way, for consistency**: removed `position:sticky` from
+Resume Inbox's Actions column entirely — plain, honest scroll, matching
+the Candidates page fix. Swept the rest of the frontend for the same
+risky `position:sticky, right:0` (trailing-column) pattern before
+calling this done, rather than waiting for a 4th report on a different
+page — found none; every other `sticky` usage across the app is a
+`top:0`/`bottom:0` modal header/footer or section label (vertical
+sticky, a genuinely different and safe pattern, nothing competing for
+the same screen space) or a `left:0` sticky row-label column (Compare
+Candidates modal — also safe, since nothing is naturally positioned to
+its right that gets visually dragged onto).
+
+Verified for real, not code review: real element geometry at both
+widths now shows `position:static` on Actions with zero overlap on
+either Job Match or Match %; a real scrolled screenshot confirms both
+columns render their actual content (real "24%"/"21%" match badges, real
+"SAP ABAP Developer · Applied · View JD ↗" text) alongside working Edit/
+download/link buttons, nothing hidden. New permanent "S46" suite (2
+tests) — real geometry assertions at both viewport widths, and a real
+scroll-and-verify UI check. One test-writing mistake caught and fixed
+before it became a false failure: the Edit button's real `title`
+attribute on this page is "Edit & Approve", not "Edit" (a copy-paste
+assumption from the Candidates page's own, differently-labeled button) —
+corrected after the test's own first run caught it. Full regression
+sweep (S1/S2/S32/S39/S41/S44/S45, 21 tests) passed clean. Zero-token
+audit: `CONFIRMED CLEAN` (381 files, 0 external API refs).
