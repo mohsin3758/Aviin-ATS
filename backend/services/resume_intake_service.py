@@ -680,10 +680,16 @@ async def create_application(conn, tenant_id: str, candidate_id: str, requisitio
         default_stage = await conn.fetchval(
             "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add AND is_visible",
             tenant_id) or 'sourced'
+        # ON CONFLICT target must restate the partial unique index's
+        # predicate (applications_tenant_req_cand_active_key,
+        # 2026-08-20's "Remove from Pipeline" migration) — a removed
+        # (is_active=false) row falls outside that index, so this
+        # correctly inserts a fresh application rather than silently
+        # no-op-ing against a candidate someone already removed.
         await conn.execute("""
             INSERT INTO applications(tenant_id,requisition_id,candidate_id,stage,assigned_recruiter_id)
             VALUES($1,$2,$3,$4,$5)
-            ON CONFLICT(tenant_id,requisition_id,candidate_id) DO NOTHING""",
+            ON CONFLICT(tenant_id,requisition_id,candidate_id) WHERE is_active IS NOT FALSE DO NOTHING""",
             tenant_id, requisition_id, candidate_id, default_stage, recruiter_id)
     except Exception as e:
         print(f'[ResumeIntake] Application insert: {e}')

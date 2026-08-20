@@ -86,22 +86,27 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
     # the requisition they applied to has since closed/been removed).
     async with db.tenant_conn(actor.tenant_id) as conn:
         total      = await conn.fetchval("SELECT COUNT(*) FROM candidates WHERE is_active IS NOT FALSE") or 0
+        # Real bug fix (2026-08-20), same class as the candidate-is_active
+        # fix above it: none of these queries excluded a.is_active either,
+        # so a genuinely removed application (the new "Remove from
+        # Pipeline" feature) would keep counting on the Dashboard/Pipeline
+        # Velocity even though it no longer appears on the real board.
         if req_id:
             stage_rows = await conn.fetch(
                 """SELECT a.stage, COUNT(*) as cnt FROM applications a
                    JOIN candidates c ON c.id=a.candidate_id
-                   WHERE a.requisition_id=$1::uuid AND c.is_active IS NOT FALSE GROUP BY a.stage""",
+                   WHERE a.requisition_id=$1::uuid AND c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE GROUP BY a.stage""",
                 req_id)
             total = await conn.fetchval(
                 """SELECT COUNT(DISTINCT a.candidate_id) FROM applications a
                    JOIN candidates c ON c.id=a.candidate_id
-                   WHERE a.requisition_id=$1::uuid AND c.is_active IS NOT FALSE""",
+                   WHERE a.requisition_id=$1::uuid AND c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE""",
                 req_id) or 0
         else:
             stage_rows = await conn.fetch(
                 """SELECT a.stage, COUNT(*) as cnt FROM applications a
                    JOIN candidates c ON c.id=a.candidate_id
-                   WHERE c.is_active IS NOT FALSE GROUP BY a.stage""")
+                   WHERE c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE GROUP BY a.stage""")
 
         # Pre-seed from this tenant's live stage config (includes custom
         # stages), not the fixed STAGES list — same bug class fixed in
@@ -133,18 +138,18 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
         rev = await conn.fetchval("""
             SELECT COALESCE(SUM(c.expected_ctc),0) FROM candidates c
             JOIN applications a ON a.candidate_id=c.id
-            WHERE c.is_active IS NOT FALSE AND a.stage NOT IN ('placed','rejected')""") or 0
+            WHERE c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE AND a.stage NOT IN ('placed','rejected')""") or 0
 
         stuck = await conn.fetchval("""
             SELECT COUNT(*) FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            WHERE c.is_active IS NOT FALSE AND a.stage NOT IN ('placed','rejected')
+            WHERE c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE AND a.stage NOT IN ('placed','rejected')
             AND a.updated_at < NOW() - INTERVAL '7 days'""") or 0
 
         upcoming = interview  # matches Kanban interview column(s): l1 + l2
 
         high_pri = await conn.fetchval("""
             SELECT COUNT(*) FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            WHERE c.is_active IS NOT FALSE AND a.fit_score > 0.7 AND a.stage NOT IN ('placed','rejected')""") or 0
+            WHERE c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE AND a.fit_score > 0.7 AND a.stage NOT IN ('placed','rejected')""") or 0
 
         return {
             "total_candidates":    int(total),
@@ -166,11 +171,15 @@ async def get_pipeline_metrics(req_id: str = None, actor: Actor = Depends(get_ac
 async def get_intelligence(req_id: str = None, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         req_filter = f"AND a.requisition_id={repr(req_id)}::uuid" if req_id else ""
+        # Real bug fix (2026-08-20): neither c.is_active nor a.is_active
+        # was ever filtered here — a soft-deleted candidate or a genuinely
+        # removed application (the new "Remove from Pipeline" feature)
+        # could still show up as a Strong Hire/Offer Ready/etc. chip.
         def q(cond): return f"""
             SELECT a.id, a.candidate_id, a.stage, a.fit_score,
                    c.full_name as candidate_name, c.skills, c.total_exp_mo
             FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            WHERE {cond} {req_filter} LIMIT 50"""
+            WHERE c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE AND {cond} {req_filter} LIMIT 50"""
 
         # Strong Hire: high AI fit score (>= 0.65) in any active stage
         strong  = await conn.fetch(q("a.fit_score >= 0.65 AND a.stage NOT IN ('placed','rejected','hold')"))

@@ -7,7 +7,8 @@ import {
   ArrowLeft, MapPin, Users, Clock, Briefcase, Edit, BarChart2,
   Plus, X, ChevronDown, Mail, Phone, Download, ExternalLink,
   Star, MessageSquare, FileText, Activity, Search, SlidersHorizontal,
-  RotateCcw, CheckCircle, AlertTriangle, Send, UserCog, Repeat, Sparkles
+  RotateCcw, CheckCircle, AlertTriangle, Send, UserCog, Repeat, Sparkles,
+  Trash2,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -129,6 +130,16 @@ export default function RequisitionPipelinePage() {
   const dragRef = useRef<{ id: string; fromStage: string } | null>(null);
   const [pendingReject, setPendingReject] = useState<{ appId: string; fromStage: string } | null>(null);
 
+  // "Remove from Pipeline" (2026-08-20) — same feature as the main
+  // /pipeline board, added here too for parity (this embedded board is a
+  // separate implementation). getTokenPayload() reads localStorage,
+  // deferred to an effect so server/client first-render match.
+  const [canManage, setCanManage] = useState(false);
+  useEffect(() => {
+    setCanManage(['admin', 'super_admin', 'manager'].includes(getTokenPayload()?.role || ''));
+  }, []);
+  const [pendingRemove, setPendingRemove] = useState<{ appId: string; fromStage: string; candidateName: string } | null>(null);
+
   // Sync board from fetch
   useEffect(() => {
     if (rawBoard) setBoard(rawBoard);
@@ -167,6 +178,21 @@ export default function RequisitionPipelinePage() {
       if (rawBoard) setBoard(rawBoard);
     }
   }, [rawBoard, selected, showToast, refreshStats, ALL_STAGES]);
+
+  // Full removal from the pipeline (distinct from Reject, which just
+  // moves a card to the Rejected column).
+  const removeApplication = useCallback(async (appId: string, fromStage: string, reasonText?: string) => {
+    setBoard(prev => ({ ...prev, [fromStage]: (prev[fromStage] || []).filter((a: any) => a.id !== appId) }));
+    if (selected?.id === appId) setSelected(null);
+    try {
+      await apiFetch(`/applications/${appId}`, { method: 'DELETE', body: JSON.stringify({ reason: reasonText || undefined }) });
+      showToast('Removed from pipeline');
+      refreshStats(); refreshBoard();
+    } catch (e: any) {
+      showToast(String(e?.message || 'Remove failed'), false);
+      if (rawBoard) setBoard(rawBoard);
+    }
+  }, [rawBoard, selected, showToast, refreshStats, refreshBoard]);
 
   // ── Drag & drop ─────────────────────────────────────────────────────────────
   function onDragStart(e: React.DragEvent, appId: string, fromStage: string) {
@@ -383,6 +409,7 @@ export default function RequisitionPipelinePage() {
           onClose={() => setSelected(null)}
           onMoveStage={(toStage: string, extra?: Record<string, any>) => moveStage(selected.id, selected.stage, toStage, undefined, extra)}
           onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
+          onRequestRemove={canManage ? () => setPendingRemove({ appId: selected.id, fromStage: selected.stage, candidateName: selected.candidate_name }) : undefined}
           drawerTab={drawerTab}
           setDrawerTab={setDrawerTab}
           showToast={showToast}
@@ -397,6 +424,16 @@ export default function RequisitionPipelinePage() {
           onConfirm={(reason_code: string, reason: string) => {
             moveStage(pendingReject.appId, pendingReject.fromStage, 'rejected', undefined, { reason_code, reason: reason || undefined });
             setPendingReject(null);
+          }} />
+      )}
+
+      {pendingRemove && (
+        <RemoveFromPipelineModal
+          candidateName={pendingRemove.candidateName}
+          onCancel={() => setPendingRemove(null)}
+          onConfirm={(reasonText: string) => {
+            removeApplication(pendingRemove.appId, pendingRemove.fromStage, reasonText || undefined);
+            setPendingRemove(null);
           }} />
       )}
 
@@ -447,6 +484,44 @@ function RejectReasonModal({ onCancel, onConfirm }: any) {
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button onClick={onCancel} style={{ padding: '8px 16px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
           <button onClick={confirm} style={{ padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Reject Candidate</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Remove From Pipeline Modal ───────────────────────────────────────────────
+// Deliberately separate from RejectReasonModal — this is a more final
+// action (the candidate disappears from every stage entirely, not even
+// shown under Rejected), so it gets its own clearer warning copy rather
+// than reusing Reject's UI with different labels. Same component as the
+// main /pipeline board's own version (kept as a duplicate here rather
+// than a shared import — this file's own established pattern for every
+// other drawer/modal component, e.g. RejectReasonModal itself).
+function RemoveFromPipelineModal({ candidateName, onCancel, onConfirm }: any) {
+  const [reasonText, setReasonText] = useState('');
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
+      <div style={{ width: 420, maxWidth: '92vw', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <Trash2 size={16} color="#DC2626" />
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Remove from Pipeline</div>
+        </div>
+        <div style={{ fontSize: 12, color: '#64748B', marginBottom: 16, lineHeight: 1.5 }}>
+          This is different from <b>Reject</b> — <b>{candidateName}</b> will disappear from
+          every stage on this board entirely, including Rejected. Use this for a duplicate
+          entry or a candidate added by mistake, not a real hiring decision. This can be
+          undone by an admin/manager if needed.
+        </div>
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>REASON (OPTIONAL)</label>
+        <textarea value={reasonText} onChange={e => setReasonText(e.target.value)} rows={2}
+          placeholder="e.g. duplicate of another application, added by mistake…"
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 14px', resize: 'vertical', fontFamily: 'inherit' }} />
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onCancel} style={{ padding: '8px 16px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+          <button data-testid="drawer-remove-from-pipeline-confirm-reqpage" onClick={() => onConfirm(reasonText)} style={{ padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Remove from Pipeline</button>
         </div>
       </div>
     </div>
@@ -507,7 +582,7 @@ function CandidateCard({ app, stageColor, onClick, onDragStart, onMoveStage }: a
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, onRequestRemove, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score ?? app.readiness_index;
 
@@ -560,6 +635,15 @@ function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, drawerTab
                 style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>
                 Reject
               </button>
+              {/* Remove from Pipeline (2026-08-20) — deliberately separate
+                  from Reject: fully removes the candidate from this job's
+                  board, not just moves them to Rejected. admin/manager only. */}
+              {onRequestRemove && (
+                <button title="Fully remove this candidate from the pipeline (different from Reject)" data-testid="drawer-remove-from-pipeline-reqpage" onClick={() => onRequestRemove()}
+                  style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#64748B' }}>
+                  <Trash2 size={10} /> Remove
+                </button>
+              )}
             </div>
           </div>
 

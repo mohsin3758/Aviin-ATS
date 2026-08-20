@@ -8596,3 +8596,100 @@ that Status is genuinely the 2nd header column with Match %/Actions
 still reachable further right. Full S32 (5) + S39 (2) + S40 (2) + S41
 (4) = 13/13 passing. Zero-token audit: `CONFIRMED CLEAN` (380 files, 0
 external API refs).
+
+## New feature: real "Remove from Pipeline" (distinct from Reject), 2026-08-20
+User asked, from a Kanban board screenshot: how do I remove a candidate
+from a stage entirely — there's no option on any card. Checked before
+building: the only existing action was Reject (click into the drawer, or
+drag onto the Rejected column) — it moves a candidate to the Rejected
+column, it doesn't remove them from the board. Asked the user directly
+which one they actually wanted; answer was "both" — make Reject easier
+to find AND build a genuine full-removal action, since they're different
+in kind (Reject is a real hiring decision with a required reason code;
+removal is for "added by mistake"/"duplicate entry," with no pipeline
+trace left at all, not even under Rejected).
+
+**Schema** (`sql/69_application_removal.sql`, run as `postgres` — table
+is owned by `postgres`, not `app_user`, same as `clients`/`requisitions`)
+— `applications.is_active`/`removed_at`/`removed_by`/`removed_reason`.
+Soft-delete, not a hard `DELETE` — `applications` is FK-referenced by
+`offers`/`interview_schedules`/`interview_scorecards`/`client_feedback`/
+`submittals` with no `ON DELETE` clause, so a hard delete would throw on
+any candidate with real pipeline history; soft-delete also matches this
+codebase's own convention everywhere else. The old plain unique
+constraint on `(tenant_id, requisition_id, candidate_id)` was replaced
+with a **partial** unique index (`WHERE is_active IS NOT FALSE`) — same
+precedent as the `candidates.email` partial-index fix (2026-08-12) — so
+a removed candidate can genuinely be re-added to the same job later,
+rather than silently blocked by a "conflict" with their own removed row.
+
+**Backend** (`backend/routers/applications.py`) — `DELETE /applications/
+{id}` (soft-remove: `is_active=false`, writes `candidate_activities` +
+`assignment_event` + `audit_log` + `event_outbox`, same discipline as
+every other high-stakes write in this codebase) and `POST /applications/
+{id}/restore` (undo — real conflict-guarded: refuses to restore into a
+newer active application that's since been created for the same
+candidate+requisition, a clean 409 rather than a raw constraint-violation
+500). Both gated to admin/manager — same HITL bar `update_stage()`
+already applies to Reject, arguably more warranted here since removal
+also hides the candidate from the Rejected column. Fixed 3 real call
+sites that needed to stop treating a removed row as "still occupying
+that candidate+job slot": `create_application`'s existing-application
+409 check, `candidates.py`'s `bulk-assign` existence check (both now
+filter `is_active IS NOT FALSE`), and `resume_intake_service.py`'s
+`ON CONFLICT(tenant_id,requisition_id,candidate_id) DO NOTHING` (needed
+`WHERE is_active IS NOT FALSE` restated in the conflict target to match
+the new partial index — without it, Postgres can't infer which index the
+conflict clause is even targeting).
+
+**Filtered `a.is_active` alongside every existing `c.is_active` check**
+in the queries directly feeding what the user was looking at — the Kanban
+board itself (`GET /requisitions/{id}/pipeline`), its header stats
+(`pipeline-stats`), `submission-usage`, the core `GET /applications` list,
+and `pipeline_p2.py`'s `get_pipeline_metrics` (Dashboard's "Candidate
+Pipeline Overview" + Pipeline Velocity) and `get_intelligence` (Strong
+Hire/Offer Ready/Stuck/At Risk chips) — otherwise a removed candidate
+would vanish from the board but keep inflating every one of these counts,
+the same "is_active leak" bug class documented dozens of times elsewhere
+in this project, just for a brand-new column instead of a pre-existing
+oversight. **Deliberately scoped, not exhaustive**: `applications` is
+joined in ~29 backend files total (KAE submission, NDA, offers, call
+letters, communications, scheduler, analytics reports, recruiter
+dashboard, SLA predictions, etc.) — left untouched in this pass, flagged
+honestly as a real, smaller-value follow-up rather than claimed complete.
+Most of those operate on one specific `application_id` a caller already
+has (not a listing query a removed candidate could newly leak into), so
+the risk is lower than the ones actually fixed.
+
+**Frontend** — two separate, real UI additions on both boards (the main
+`/pipeline` Kanban and the requisition detail page's own embedded
+mini-board, kept as parallel implementations matching this codebase's
+existing precedent for that pair of pages):
+- A hover-reveal "✕" quick-reject icon directly on each Kanban card
+  (main board only — the requisition-page board is a smaller, more
+  compact view by design, not extended here) — opens the same
+  reason-required Reject modal, just one click closer than opening the
+  drawer first.
+- A "Remove" button in the candidate drawer, next to Reject, visible
+  only to admin/manager (`getTokenPayload()?.role`, deferred to a
+  `useEffect` for the established SSR-safe pattern used elsewhere in
+  this project) — opens a dedicated `RemoveFromPipelineModal` with
+  explicit warning copy distinguishing it from Reject, an optional reason
+  field, and a real confirm step before the DELETE fires.
+
+Verified for real end-to-end, not code review: a full curl-driven cycle
+against a real throwaway requisition/candidate/application — remove
+(board and stats both went to 0), a 2nd remove correctly 404s, re-add via
+`bulk-assign` succeeds (the partial-index fix genuinely holds), restore
+brings it back to its exact original stage, and a real throwaway
+recruiter user correctly 403s on both remove and restore while admin
+succeeds. Real headless-browser pass confirmed the entire UI flow on the
+live board: hover reveals the quick-reject icon, the drawer's Remove
+button opens the real confirm modal, confirming empties the board with a
+real "Removed from pipeline" toast — visually confirmed via a pulled
+screenshot (0/0/0 header stats, empty columns), not just a passing
+locator check. New permanent "S42 Remove from Pipeline" suite (5 tests)
+added to `qa_automation.spec.ts`. Full regression sweep (S1/S2/S8/S13/
+S16/S20/S30/S40, 51 tests touching pipeline/applications) + S42 (5)
+passed clean. Zero-token audit: `CONFIRMED CLEAN` (380 files, 0 external
+API refs).

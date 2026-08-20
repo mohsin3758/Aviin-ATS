@@ -281,7 +281,7 @@ async def submission_usage(requisition_id: str, actor: Actor = Depends(get_actor
             """SELECT a.assigned_recruiter_id, u.full_name AS recruiter_name, count(*) AS used
                FROM applications a LEFT JOIN users u ON u.id = a.assigned_recruiter_id
                WHERE a.requisition_id=$1 AND a.tenant_id=$2 AND a.assigned_recruiter_id IS NOT NULL
-                 AND u.is_active IS NOT FALSE
+                 AND u.is_active IS NOT FALSE AND a.is_active IS NOT FALSE
                GROUP BY a.assigned_recruiter_id, u.full_name ORDER BY count(*) DESC""",
             requisition_id, actor.tenant_id)
     return {"limit": limit, "by_recruiter": [dict(r) for r in rows]}
@@ -324,7 +324,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                      AND cs.requisition_id = a.requisition_id
                    ORDER BY cs.scored_at DESC LIMIT 1
                ) cs ON true
-               WHERE a.requisition_id = $1 AND c.is_active IS NOT FALSE
+               WHERE a.requisition_id = $1 AND c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE
                ORDER BY a.board_rank ASC NULLS LAST, a.updated_at DESC""",
             requisition_id,
         )
@@ -361,7 +361,7 @@ async def pipeline_stats(requisition_id: str, actor: Actor = Depends(get_actor))
                  COUNT(*) AS total
                FROM applications a
                JOIN candidates c ON c.id = a.candidate_id
-               WHERE a.requisition_id = $1 AND a.tenant_id = $2 AND c.is_active IS NOT FALSE""",
+               WHERE a.requisition_id = $1 AND a.tenant_id = $2 AND c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE""",
             requisition_id, actor.tenant_id,
         )
     return dict(row) if row else {"placed":0,"offer_accepted":0,"in_pipeline":0,"dropped":0,"total":0}

@@ -132,7 +132,7 @@ async def list_applications(
                    FROM applications a
                    JOIN candidates c ON c.id = a.candidate_id
                    JOIN requisitions r ON r.id = a.requisition_id
-                   WHERE a.stage = $1 AND c.is_active IS NOT FALSE
+                   WHERE a.stage = $1 AND c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE
                    ORDER BY a.created_at DESC LIMIT $2""",
                 stage, limit)
         else:
@@ -143,7 +143,7 @@ async def list_applications(
                    FROM applications a
                    JOIN candidates c ON c.id = a.candidate_id
                    JOIN requisitions r ON r.id = a.requisition_id
-                   WHERE c.is_active IS NOT FALSE
+                   WHERE c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE
                    ORDER BY a.created_at DESC LIMIT $1""",
                 limit)
     return [dict(r) for r in rows]
@@ -153,7 +153,7 @@ async def create_application(body: ApplicationCreate, background_tasks: Backgrou
                               actor: Actor = Depends(require_permission("applications", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         existing = await conn.fetchval(
-            "SELECT id FROM applications WHERE requisition_id = $1 AND candidate_id = $2",
+            "SELECT id FROM applications WHERE requisition_id = $1 AND candidate_id = $2 AND is_active IS NOT FALSE",
             body.requisition_id, body.candidate_id,
         )
         if existing:
@@ -257,6 +257,115 @@ async def get_application_rejection(application_id: str, actor: Actor = Depends(
             "SELECT * FROM application_rejections WHERE application_id=$1 AND tenant_id=$2 ORDER BY rejected_at DESC LIMIT 1",
             application_id, actor.tenant_id)
     return dict(row) if row else None
+
+
+class RemoveApplicationIn(BaseModel):
+    reason: Optional[str] = None
+
+
+# Real "Remove from Pipeline" feature (2026-08-20) — user reported no
+# way to get a candidate off a job's board at all besides Reject, which
+# only moves them to the Rejected column (still visible/counted, not
+# actually removed). This is a genuinely separate, more final action:
+# the application disappears from every stage on the board entirely.
+# Soft-delete, not a hard DELETE — applications is FK-referenced by
+# offers/interview_schedules/interview_scorecards/client_feedback/
+# submittals with no ON DELETE clause, so a hard delete would throw on
+# any candidate with real pipeline history; soft-delete also matches
+# this codebase's convention everywhere else (clients/candidates/
+# requisitions/users). Gated the same HITL bar as Reject (admin/manager
+# only) since removing is at least as consequential — it also hides the
+# candidate from the Rejected column, unlike Reject itself.
+@router.delete("/{application_id}")
+async def remove_application(
+    application_id: str, body: RemoveApplicationIn = RemoveApplicationIn(),
+    actor: Actor = Depends(require_permission("pipeline", "delete")),
+):
+    if actor.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Removing a candidate from the pipeline requires manager/admin role (HITL)")
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        old = await conn.fetchrow(
+            "SELECT stage, candidate_id, requisition_id FROM applications WHERE id=$1 AND is_active IS NOT FALSE",
+            application_id)
+        if old is None:
+            raise HTTPException(status_code=404, detail="Application not found (or already removed)")
+
+        await ownership.check_ownership_or_raise(conn, actor.tenant_id, str(old["candidate_id"]), actor)
+
+        await conn.execute(
+            """UPDATE applications
+               SET is_active = false, removed_at = now(), removed_by = $1, removed_reason = $2
+               WHERE id = $3""",
+            actor.user_id, body.reason, application_id,
+        )
+
+        cand = await conn.fetchrow("SELECT full_name FROM candidates WHERE id=$1", old["candidate_id"])
+        await conn.execute(
+            """INSERT INTO candidate_activities
+                 (tenant_id, candidate_id, user_id, activity_type, title, description)
+               VALUES ($1,$2,$3,'status_change','Removed from Pipeline',$4)""",
+            actor.tenant_id, old["candidate_id"], actor.user_id,
+            f"Removed from pipeline (was {old['stage'].replace('_',' ').title()})" + (f" — {body.reason}" if body.reason else ""),
+        )
+        await events.write_assignment_event(
+            conn, actor.tenant_id, "application.removed",
+            reason=body.reason, actor_user_id=actor.user_id,
+            metadata={"application_id": application_id, "from_stage": old["stage"], "requisition_id": str(old["requisition_id"])},
+        )
+        await events.write_audit(
+            conn, actor.tenant_id, actor.user_id, "remove", "application", application_id,
+            before={"stage": old["stage"], "is_active": True},
+            after={"is_active": False, "reason": body.reason},
+        )
+        await events.write_outbox(
+            conn, actor.tenant_id, "application.removed",
+            {"application_id": application_id, "candidate_id": str(old["candidate_id"]), "requisition_id": str(old["requisition_id"])},
+            f"application.removed:{application_id}:{old['stage']}",
+        )
+    return {"ok": True, "removed": True}
+
+
+@router.post("/{application_id}/restore")
+async def restore_application(application_id: str, actor: Actor = Depends(require_permission("pipeline", "delete"))):
+    if actor.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Restoring a removed candidate requires manager/admin role (HITL)")
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        old = await conn.fetchrow(
+            "SELECT stage, candidate_id, requisition_id FROM applications WHERE id=$1 AND is_active IS FALSE",
+            application_id)
+        if old is None:
+            raise HTTPException(status_code=404, detail="Removed application not found")
+
+        # The partial unique index only protects *active* rows — restoring
+        # could collide with a fresh application already created for the
+        # same candidate+requisition in the meantime (e.g. re-added via
+        # bulk-assign after removal). Fail clearly rather than let the DB
+        # throw a raw constraint-violation 500.
+        conflict = await conn.fetchval(
+            "SELECT id FROM applications WHERE requisition_id=$1 AND candidate_id=$2 AND is_active IS NOT FALSE AND id != $3",
+            old["requisition_id"], old["candidate_id"], application_id)
+        if conflict:
+            raise HTTPException(status_code=409, detail="This candidate already has a newer active application for this requisition")
+
+        row = await conn.fetchrow(
+            f"""UPDATE applications SET is_active = true, removed_at = NULL, removed_by = NULL, removed_reason = NULL
+                WHERE id = $1 RETURNING {FIELDS}""",
+            application_id,
+        )
+        await conn.execute(
+            """INSERT INTO candidate_activities
+                 (tenant_id, candidate_id, user_id, activity_type, title, description)
+               VALUES ($1,$2,$3,'status_change','Restored to Pipeline',$4)""",
+            actor.tenant_id, old["candidate_id"], actor.user_id,
+            f"Restored to pipeline (stage: {old['stage'].replace('_',' ').title()})",
+        )
+        await events.write_audit(
+            conn, actor.tenant_id, actor.user_id, "restore", "application", application_id,
+            before={"is_active": False}, after={"is_active": True, "stage": old["stage"]},
+        )
+    return dict(row)
 
 
 async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, custom_msg=None, requisition_id=None, application_id=None):

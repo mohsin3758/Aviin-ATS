@@ -4886,3 +4886,133 @@ test.describe.serial('S41 Resume Inbox: checkbox toggle + Status column visibili
     await expect(firstRow.locator('button:has-text("Edit")')).toBeVisible();
   });
 });
+
+// S42 (2026-08-20): user asked how to remove a candidate from a pipeline
+// stage entirely — the only existing action was Reject, which just moves
+// a card to the Rejected column (still visible/counted), not a genuine
+// removal. Built a real, separate "Remove from Pipeline" feature:
+// applications.is_active (soft-delete, matching this codebase's
+// convention everywhere else — clients/candidates/requisitions/users),
+// a partial unique index so a removed candidate can be re-added to the
+// same job later, DELETE/POST-restore endpoints gated to admin/manager
+// (same HITL bar as Reject), and UI on both the main /pipeline board and
+// the requisition detail page's embedded mini-board.
+test.describe.serial('S42 Remove from Pipeline', () => {
+  const stamp = Date.now();
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway requisition + candidate + application', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const r = await request.post(`${API}/requisitions`, { headers: auth, data: { title: `QA S42 Remove Test Role ${stamp}`, status: 'open' } });
+    reqId = (await r.json()).id;
+    const c = await request.post(`${API}/candidates`, {
+      headers: auth, data: { full_name: `QA S42 Remove Candidate ${stamp}`, email: `qa.s42.${stamp}@test.com`, phone: `9${String(stamp).slice(-9)}` },
+    });
+    candId = (await c.json()).id;
+    const a = await request.post(`${API}/applications`, { headers: auth, data: { candidate_id: candId, requisition_id: reqId, stage: 'interested' } });
+    expect(a.ok()).toBeTruthy();
+    appId = (await a.json()).id;
+  });
+
+  test('remove empties the board and stats; a 2nd remove 404s; re-add via bulk-assign succeeds (partial unique index)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const boardBefore = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    expect((boardBefore.interested || []).some((a: any) => a.id === appId)).toBeTruthy();
+
+    const del = await request.delete(`${API}/applications/${appId}`, { headers: auth, data: { reason: 'QA regression test' } });
+    expect(del.ok()).toBeTruthy();
+
+    const boardAfter = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    expect(Object.values(boardAfter).flat().length).toBe(0);
+    const stats = await (await request.get(`${API}/requisitions/${reqId}/pipeline-stats`, { headers: auth })).json();
+    expect(stats.total).toBe(0);
+
+    const del2 = await request.delete(`${API}/applications/${appId}`, { headers: auth });
+    expect(del2.status()).toBe(404);
+
+    const reAdd = await request.post(`${API}/candidates/bulk-assign`, { headers: auth, data: { candidate_ids: [candId], requisition_id: reqId, stage: 'interested' } });
+    expect(reAdd.ok()).toBeTruthy();
+    expect((await reAdd.json()).created).toBe(1);
+    const boardReAdded = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    expect(Object.values(boardReAdded).flat().length).toBe(1);
+  });
+
+  test('a plain recruiter is blocked (403) from removing or restoring', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const u = await request.post(`${API}/users`, {
+      headers: auth, data: { full_name: 'QA S42 RoleGate Recruiter', email: `qa.s42.rolegate.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    expect(u.ok()).toBeTruthy();
+    const uid = (await u.json()).id;
+    try {
+      const rl = await request.post(`${API}/auth/login`, { data: { email: `qa.s42.rolegate.${stamp}@test.com`, password: 'TestPass123!', tenant_id: TID } });
+      const rtoken = (await rl.json()).access_token;
+      const rauth = { 'Authorization': `Bearer ${rtoken}`, 'Content-Type': 'application/json' };
+      const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+      const currentAppId = Object.values(board).flat()[0] && (Object.values(board).flat()[0] as any).id;
+      expect(currentAppId).toBeTruthy();
+      const del = await request.delete(`${API}/applications/${currentAppId}`, { headers: rauth });
+      expect(del.status()).toBe(403);
+      const restore = await request.post(`${API}/applications/${currentAppId}/restore`, { headers: rauth });
+      expect(restore.status()).toBe(403);
+    } finally {
+      await request.delete(`${API}/users/${uid}`, { headers: auth }).catch(() => {});
+    }
+  });
+
+  test('restore brings a removed application back to its original stage; a conflict with a newer active one 409s', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    const currentApp: any = Object.values(board).flat()[0];
+    expect(currentApp).toBeTruthy();
+
+    const del = await request.delete(`${API}/applications/${currentApp.id}`, { headers: auth });
+    expect(del.ok()).toBeTruthy();
+    const restore = await request.post(`${API}/applications/${currentApp.id}/restore`, { headers: auth });
+    expect(restore.ok()).toBeTruthy();
+    const restored = await restore.json();
+    expect(restored.stage).toBe('interested');
+    const boardAfterRestore = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    expect(Object.values(boardAfterRestore).flat().length).toBe(1);
+  });
+
+  test('real headless UI on the main /pipeline board: hover reveals a quick-reject icon, drawer has a Remove button, removing empties the board', async ({ page, request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth })).json();
+    const currentApp: any = Object.values(board).flat()[0];
+    expect(currentApp).toBeTruthy();
+
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`/pipeline?job=${reqId}`);
+    const card = page.getByText('QA S42 Remove Candidate').first();
+    await expect(card).toBeVisible({ timeout: 15000 });
+    await card.hover();
+    await expect(page.getByTestId(`quick-reject-${currentApp.id}`)).toBeVisible();
+
+    await card.click();
+    const removeBtn = page.getByTestId('drawer-remove-from-pipeline');
+    await expect(removeBtn).toBeVisible();
+    await removeBtn.click();
+    await expect(page.getByText('Remove from Pipeline').first()).toBeVisible();
+    await page.getByTestId('remove-from-pipeline-confirm').click();
+    await expect(page.getByText('Removed from pipeline')).toBeVisible({ timeout: 10000 });
+    await expect(card).not.toBeVisible();
+    expect(errors).toHaveLength(0);
+  });
+});

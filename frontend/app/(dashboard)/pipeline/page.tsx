@@ -3,14 +3,14 @@ import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'rea
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { ResumeGeneratorModal } from '@/components/ResumeGeneratorModal';
-import { authHeaders, API } from '@/lib/auth';
+import { authHeaders, API, getTokenPayload } from '@/lib/auth';
 import {
   Search, Plus, X, RotateCcw, ChevronDown, MapPin, Users, Briefcase,
   Clock, CheckCircle, AlertTriangle, Send, Star, MessageSquare,
   Activity, Download, ExternalLink, ArrowRight, Inbox, LayoutGrid,
   KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
   FileSignature, Upload, ShieldCheck, Copy, CheckSquare, Printer,
-  Columns3, GripVertical,
+  Columns3, GripVertical, Trash2,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -137,6 +137,21 @@ function PipelineInner() {
   // Reject button), so there's one modal, not two divergent flows.
   const [pendingReject, setPendingReject] = useState<{ appId: string; fromStage: string } | null>(null);
 
+  // "Remove from Pipeline" (2026-08-20) — a genuinely separate, more
+  // final action than Reject: the candidate disappears from every stage
+  // on this board entirely (not even shown under Rejected), for cases
+  // like "added by mistake" or "duplicate entry." Backend soft-deletes
+  // and enforces the same HITL admin/manager bar as Reject — this local
+  // `canManage` just avoids showing a button that would only 403.
+  // getTokenPayload() reads localStorage, unavailable during SSR —
+  // deferred to an effect so the server/client first-render match (same
+  // pattern used elsewhere in this codebase, e.g. offers/recruiter-ops).
+  const [canManage, setCanManage] = useState(false);
+  useEffect(() => {
+    setCanManage(['admin', 'super_admin', 'manager'].includes(getTokenPayload()?.role || ''));
+  }, []);
+  const [pendingRemove, setPendingRemove] = useState<{ appId: string; fromStage: string; candidateName: string } | null>(null);
+
   // Bulk multi-select — checkboxes on cards, a floating action bar for
   // bulk stage-move (via the existing /pipeline/bulk-action endpoint,
   // previously only reachable outside the board itself) and comparison.
@@ -220,6 +235,21 @@ function PipelineInner() {
       if (rawBoard) setBoard(rawBoard);
     }
   }, [rawBoard, selected, showToast, refreshStats, ALL_STAGES]);
+
+  // Full removal from the pipeline (distinct from Reject, which just
+  // moves a card to the Rejected column — see pendingRemove above).
+  const removeApplication = useCallback(async (appId: string, fromStage: string, reason?: string) => {
+    setBoard(prev => ({ ...prev, [fromStage]: (prev[fromStage] || []).filter((a: any) => a.id !== appId) }));
+    if (selected?.id === appId) setSelected(null);
+    try {
+      await apiFetch(`/applications/${appId}`, { method: 'DELETE', body: JSON.stringify({ reason: reason || undefined }) });
+      showToast('Removed from pipeline');
+      refreshStats(); refreshBoard();
+    } catch (e: any) {
+      showToast(String(e?.message || 'Remove failed'), false);
+      if (rawBoard) setBoard(rawBoard);
+    }
+  }, [rawBoard, selected, showToast, refreshStats, refreshBoard]);
 
   const filteredApps = useCallback((apps: any[]) => {
     if (!candSearch.trim()) return apps;
@@ -584,6 +614,7 @@ function PipelineInner() {
                       <KanbanCard key={app.id} app={app} stageColor={stage.color}
                         onClick={() => { if (selectMode) { toggleSelected(app.id); return; } setSelected(app); setDrawerTab('profile'); }}
                         onNotesClick={() => { setSelected(app); setDrawerTab('notes'); }}
+                        onQuickReject={() => setPendingReject({ appId: app.id, fromStage: stage.key })}
                         selectMode={selectMode} isSelected={selectedIds.has(app.id)} onToggleSelect={() => toggleSelected(app.id)}
                         onDragStart={(e: React.DragEvent) => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }}
                         onCardDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); }}
@@ -629,6 +660,7 @@ function PipelineInner() {
             refreshStats();
           }}
           onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
+          onRequestRemove={canManage ? () => setPendingRemove({ appId: selected.id, fromStage: selected.stage, candidateName: selected.candidate_name }) : undefined}
           drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES}
           requisitionId={selectedJobId} clientName={selectedJob?.client_name} />
       )}
@@ -656,6 +688,17 @@ function PipelineInner() {
           }} />
       )}
 
+      {/* ── REMOVE FROM PIPELINE MODAL ─────────────────────────────────── */}
+      {pendingRemove && (
+        <RemoveFromPipelineModal
+          candidateName={pendingRemove.candidateName}
+          onCancel={() => setPendingRemove(null)}
+          onConfirm={(reason: string) => {
+            removeApplication(pendingRemove.appId, pendingRemove.fromStage, reason || undefined);
+            setPendingRemove(null);
+          }} />
+      )}
+
       {/* ── CANDIDATE COMPARISON MODAL ─────────────────────────────────── */}
       {compareOpen && (
         <CompareModal
@@ -676,7 +719,7 @@ function PipelineInner() {
 }
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
-function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart, selectMode, isSelected, onToggleSelect, onCardDragOver, onCardDrop }: any) {
+function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onDragStart, selectMode, isSelected, onToggleSelect, onCardDragOver, onCardDrop }: any) {
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const skills: string[] = app.skills || [];
   const notesCount = Array.isArray(app.app_notes) ? app.app_notes.length : 0;
@@ -693,6 +736,17 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart, selec
           style={{ position: 'absolute', top: 8, right: 8, width: 15, height: 15, cursor: 'pointer', zIndex: 1 }} />
       )}
       {!selectMode && <GripVertical size={11} style={{ position: 'absolute', top: 10, right: 6, color: '#E2E8F0' }} />}
+      {/* Quick Reject (2026-08-20): the only way to reject used to be
+          opening the drawer or dragging onto the Rejected column — neither
+          obvious from the board itself. A hover-reveal icon here makes it
+          discoverable without hiding the full Reject-reason flow (still
+          opens the same reason modal, just one click closer). */}
+      {!selectMode && hovered && onQuickReject && app.stage !== 'rejected' && (
+        <button title="Reject candidate" data-testid={`quick-reject-${app.id}`} onClick={e => { e.stopPropagation(); onQuickReject(); }}
+          style={{ position: 'absolute', top: 8, right: 20, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: 4, background: '#FEF2F2', color: '#DC2626', cursor: 'pointer', padding: 0 }}>
+          <X size={10} strokeWidth={3} />
+        </button>
+      )}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 7 }}>
         <div style={{ width: 32, height: 32, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(app.candidate_name)},${avatarColor(app.candidate_name)}aa)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
           {initials(app.candidate_name)}
@@ -753,7 +807,7 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onDragStart, selec
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, drawerTab, setDrawerTab, showToast, stages, allStages, requisitionId, clientName }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, onRequestRemove, drawerTab, setDrawerTab, showToast, stages, allStages, requisitionId, clientName }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -799,6 +853,16 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               ))}
               <button onClick={() => onMoveStage('hold')} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #CBD5E140', background: app.stage === 'hold' ? '#94A3B8' : '#F8FAFC', color: app.stage === 'hold' ? '#fff' : '#94A3B8' }}>Hold</button>
               <button onClick={() => onRequestReject()} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>Reject</button>
+              {/* Remove from Pipeline (2026-08-20) — deliberately separate
+                  from Reject: fully removes the candidate from this job's
+                  board, not just moves them to Rejected. admin/manager only
+                  (onRequestRemove is undefined for everyone else). */}
+              {onRequestRemove && (
+                <button title="Fully remove this candidate from the pipeline (different from Reject)" data-testid="drawer-remove-from-pipeline" onClick={() => onRequestRemove()}
+                  style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#64748B' }}>
+                  <Trash2 size={10} /> Remove
+                </button>
+              )}
             </div>
           </div>
 
@@ -1644,6 +1708,41 @@ function RejectReasonModal({ onCancel, onConfirm }: any) {
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button onClick={onCancel} style={{ padding: '8px 16px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
           <button onClick={confirm} style={{ padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Reject Candidate</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Remove From Pipeline Modal ───────────────────────────────────────────────
+// Deliberately separate from RejectReasonModal — this is a more final
+// action (the candidate disappears from every stage entirely, not even
+// shown under Rejected), so it gets its own clearer warning copy rather
+// than reusing Reject's UI with different labels.
+function RemoveFromPipelineModal({ candidateName, onCancel, onConfirm }: any) {
+  const [reason, setReason] = useState('');
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
+      <div style={{ width: 420, maxWidth: '92vw', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <Trash2 size={16} color="#DC2626" />
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Remove from Pipeline</div>
+        </div>
+        <div style={{ fontSize: 12, color: '#64748B', marginBottom: 16, lineHeight: 1.5 }}>
+          This is different from <b>Reject</b> — <b>{candidateName}</b> will disappear from
+          every stage on this board entirely, including Rejected. Use this for a duplicate
+          entry or a candidate added by mistake, not a real hiring decision. This can be
+          undone by an admin/manager if needed.
+        </div>
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>REASON (OPTIONAL)</label>
+        <textarea value={reason} onChange={e => setReason(e.target.value)} rows={2}
+          placeholder="e.g. duplicate of another application, added by mistake…"
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 14px', resize: 'vertical', fontFamily: 'inherit' }} />
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onCancel} style={{ padding: '8px 16px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+          <button data-testid="remove-from-pipeline-confirm" onClick={() => onConfirm(reason)} style={{ padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Remove from Pipeline</button>
         </div>
       </div>
     </div>

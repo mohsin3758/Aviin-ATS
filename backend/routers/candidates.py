@@ -363,7 +363,7 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
         for cid in body.candidate_ids:
             # Check if application already exists
             exists = await conn.fetchval(
-                "SELECT 1 FROM applications WHERE candidate_id=$1 AND requisition_id=$2 AND tenant_id=$3",
+                "SELECT 1 FROM applications WHERE candidate_id=$1 AND requisition_id=$2 AND tenant_id=$3 AND is_active IS NOT FALSE",
                 cid, body.requisition_id, actor.tenant_id)
             if exists:
                 skipped += 1
