@@ -8693,3 +8693,107 @@ added to `qa_automation.spec.ts`. Full regression sweep (S1/S2/S8/S13/
 S16/S20/S30/S40, 51 tests touching pipeline/applications) + S42 (5)
 passed clean. Zero-token audit: `CONFIRMED CLEAN` (380 files, 0 external
 API refs).
+
+## KAE Module (P16): "How do I assign a KAE?" — the whole page was
+## read-only, plus a real, previously-unexercised 500 found and fixed,
+## 2026-08-20
+User asked, from screenshots of the P16 KAE Module page: how to assign a
+KAE to a client, whether it's assignable per-client, and to check the
+rest of the page for the same gap. Checked before building: `POST /kae/
+owners` was already real (client-wise, one client + one user at a time,
+correctly enforcing the real 3-KAE limit) but the frontend's Owners tab
+could only ever REMOVE an assignment — nothing anywhere called that
+endpoint to create one. Widening the check to the other 3 tabs found the
+identical gap on all of them: every empty-state message literally said
+"POST /kae/... to add" (Visibility, Scorecards, Retention) — the whole
+page was read-only end to end, matching the exact "real backend, zero
+write UI" pattern already found and fixed for Finance/ERP on 2026-08-09.
+
+**Backend** (`backend/routers/kae.py`) — none of the 11 endpoints in
+this router had any permission check at all (`Depends(get_actor)` only);
+added `require_permission("kae", <action>)` consistently across every
+GET/POST/PATCH/DELETE, matching the "kae" feature key already declared
+in the permissions taxonomy. Layered explicit admin/manager role gates
+on every write (`assign_owner`, `remove_owner`, `set_visibility`,
+`upsert_kae_scorecard`, `approve_kae_scorecard`, `upsert_kae_retention`)
+— this whole module is business/account administration, not a
+self-service action, and letting a KAE self-report the metrics that
+drive their own incentive payout (`upsert_kae_scorecard`) would be a
+real conflict of interest, same reasoning already applied to
+`recruiter_kpi_scores` (P15 Incentives) requiring an admin to enter the
+numbers, not the person being scored. Reads (`GET /kae/owners`, etc.)
+stay open to any authenticated user — this is a role gate on writes,
+not a blanket lockout, matching the soft-launch precedent used
+everywhere else in this project. **Flagged, not fixed in this pass**:
+`incentives.py`'s structurally identical `upsert_scorecard`/
+`approve_scorecard` (P15, the recruiter equivalent of this exact module)
+have the same missing-role-gate gap and were left untouched — noted
+honestly as a real, adjacent, same-shaped follow-up rather than silently
+expanded into scope.
+
+**A real, previously-unexercised bug found only because this was the
+first time `POST /kae/retention` was ever actually called**: `asyncpg.
+exceptions.DataError: invalid input for query argument $4: '2026-01-01'
+('str' object has no attribute 'toordinal')` — `KaeRetentionIn.owner_since`
+is typed `str` and was bound directly against a DATE column, the exact
+"asyncpg needs a real date object, not a plain string" bug class already
+documented dozens of times elsewhere in this project (ERP timesheets,
+Shift Scheduling, etc.), just never caught here since this endpoint had
+zero callers before today. Fixed with `date.fromisoformat(body.
+owner_since)`, a clean 400 on an invalid date instead of a raw 500.
+
+**Frontend** (`frontend/app/(dashboard)/kae/page.tsx`) — 4 new forms,
+one per tab, all gated to admin/manager via the same deferred-
+`getTokenPayload()` `useEffect` pattern used elsewhere in this project
+(offers/recruiter-ops), matching `/incentives`' own `NewScorecardForm`
+layout convention for the structurally near-identical P15 module rather
+than inventing a new one:
+- **Assign KAE** (Owners tab) — client picker, user picker, owner type
+  (kae/account_manager/secondary — the real `client_owners.owner_type`
+  CHECK-constraint values), visibility level, optional notes. Shows a
+  real, live "N/3 KAEs already assigned" count for the selected client
+  (only the `kae` type is capped) and disables Assign once the limit is
+  hit, rather than letting the user submit and hit a raw 400.
+- **Set Visibility** (Visibility tab) — user + L1-L5 level picker.
+- **New Scorecard** (Scorecards tab) — the same manual points-entry
+  shape as the Incentives page's recruiter version (revenue/collection
+  target+actual+score, relationship/growth/renewal scores, base
+  incentive, optional client).
+- **Track Retention** (Retention tab) — user, client, owner-since date,
+  months-served (a real date input, not a free-text field, closing off
+  the exact bug found above at the UI layer too).
+Also fixed the Owners and Retention tables themselves to resolve the
+real client name from the already-fetched `/clients` list instead of a
+truncated raw UUID (`o.client_id?.slice(0,8)…`) — a small, obviously-
+related readability gap sitting right next to the feature being built.
+
+Verified for real end-to-end, not code review: a genuine 3-KAE-limit
+cycle against a real client (assigned 3 different real active users,
+confirmed a 4th correctly 400s, confirmed a *different* real client
+correctly shows 0/3 — client-wise scoping genuinely isolated, not
+shared); a real throwaway recruiter correctly 403s on all 5 writes
+(assign/remove owner, set visibility, create scorecard, track
+retention) while reads stay open; a real scorecard create→approve cycle
+computed the correct grade (100/100 → A+) and total_incentive; the
+retention date fix re-verified directly (the exact prior 500 now
+succeeds, an invalid date cleanly 400s). Real headless-browser pass on
+the actual Assign KAE form: selecting a client fetches and shows a real
+live "3/3 KAEs already assigned" count with the Assign button correctly
+disabled, and a real Account-Manager-type assignment (not capped)
+renders in the table with the client's real name — confirmed via a
+screenshot, not just a locator check, after an initial premature-check
+race in my own verification script gave a false negative (fixed by
+waiting for the real `POST /kae/owners` response before asserting,
+not a fixed delay). New permanent "S43 KAE Module: Assign forms + role
+gates" suite (5 tests). One test-methodology mistake caught and
+corrected mid-verification, not a real bug: an early `-g` grep-isolated
+run of a single S17 test appeared to fail because it skipped that
+suite's own `.serial()` `setup` step (the same documented trap this
+project already knows about) — re-running the full S17 and S29 blocks
+(30 tests total, both files untouched by this work) confirmed 30/30
+clean, and a `global-setup login failed: 429` on one attempt was
+confirmed as this session's own well-documented login-rate-limit
+artifact from heavy back-to-back testing, resolved cleanly on retry
+after cooldown, not a regression. Full S43 (5) + S17 (12) + S29 (30) =
+47/47 passing. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0
+external API refs).

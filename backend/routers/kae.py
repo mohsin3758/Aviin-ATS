@@ -1,4 +1,5 @@
 """P16 - KAE Module & Account Ownership."""
+from datetime import date
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -45,7 +46,7 @@ class KaeRetentionIn(BaseModel):
     months_served: int = 0
 
 @router.get("/owners")
-async def list_owners(client_id: Optional[str]=None, actor: Actor=Depends(get_actor)):
+async def list_owners(client_id: Optional[str]=None, actor: Actor=Depends(require_permission("kae", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT co.*, u.full_name, u.email
@@ -59,7 +60,12 @@ async def list_owners(client_id: Optional[str]=None, actor: Actor=Depends(get_ac
     return [dict(r) for r in rows]
 
 @router.post("/owners")
-async def assign_owner(body: ClientOwnerIn, actor: Actor=Depends(get_actor)):
+async def assign_owner(body: ClientOwnerIn, actor: Actor=Depends(require_permission("kae", "create"))):
+    # Account ownership is a business-admin action (who owns this client
+    # relationship, up to the 3-KAE limit), not a self-service one — same
+    # bar as every other write in this module.
+    if actor.role not in ("admin", "super_admin", "manager"):
+        raise HTTPException(403, "Assigning account ownership requires manager/admin role")
     async with db.tenant_conn(actor.tenant_id) as conn:
         if body.owner_type == 'kae':
             count = await conn.fetchval("""
@@ -81,7 +87,9 @@ async def assign_owner(body: ClientOwnerIn, actor: Actor=Depends(get_actor)):
     return dict(row)
 
 @router.delete("/owners/{owner_id}")
-async def remove_owner(owner_id: str, actor: Actor=Depends(get_actor)):
+async def remove_owner(owner_id: str, actor: Actor=Depends(require_permission("kae", "delete"))):
+    if actor.role not in ("admin", "super_admin", "manager"):
+        raise HTTPException(403, "Removing account ownership requires manager/admin role")
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             "UPDATE client_owners SET is_active=false WHERE id=$1 RETURNING id", owner_id)
@@ -90,7 +98,7 @@ async def remove_owner(owner_id: str, actor: Actor=Depends(get_actor)):
     return {"status": "removed"}
 
 @router.get("/owners/by-client/{client_id}")
-async def get_client_owners(client_id: str, actor: Actor=Depends(get_actor)):
+async def get_client_owners(client_id: str, actor: Actor=Depends(require_permission("kae", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT co.*, u.full_name, u.email,
@@ -108,7 +116,7 @@ async def get_client_owners(client_id: str, actor: Actor=Depends(get_actor)):
             "kae_count": sum(1 for r in rows if r["owner_type"]=="kae"), "max_kae": 3}
 
 @router.get("/visibility")
-async def list_visibility(actor: Actor=Depends(get_actor)):
+async def list_visibility(actor: Actor=Depends(require_permission("kae", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT av.*, u.full_name, u.email FROM account_visibility av
@@ -119,7 +127,9 @@ async def list_visibility(actor: Actor=Depends(get_actor)):
     return [dict(r) for r in rows]
 
 @router.post("/visibility")
-async def set_visibility(body: VisibilityIn, actor: Actor=Depends(get_actor)):
+async def set_visibility(body: VisibilityIn, actor: Actor=Depends(require_permission("kae", "update"))):
+    if actor.role not in ("admin", "super_admin", "manager"):
+        raise HTTPException(403, "Setting visibility level requires manager/admin role")
     if body.visibility_lvl not in ('L1','L2','L3','L4','L5'):
         raise HTTPException(400, "visibility_lvl must be L1..L5")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -146,7 +156,7 @@ async def my_visibility(actor: Actor=Depends(get_actor)):
 
 @router.get("/scorecard")
 async def list_kae_scorecards(month: Optional[int]=None, year: Optional[int]=None,
-                               actor: Actor=Depends(get_actor)):
+                               actor: Actor=Depends(require_permission("kae", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT k.*, u.full_name, u.email FROM kae_kpi_scores k
@@ -159,7 +169,13 @@ async def list_kae_scorecards(month: Optional[int]=None, year: Optional[int]=Non
     return [dict(r) for r in rows]
 
 @router.post("/scorecard")
-async def upsert_kae_scorecard(body: KaeKpiIn, actor: Actor=Depends(get_actor)):
+async def upsert_kae_scorecard(body: KaeKpiIn, actor: Actor=Depends(require_permission("kae", "create"))):
+    # Same "an admin enters the numbers, not the person being scored" model
+    # already established for recruiter_kpi_scores (P15 Incentives) —
+    # letting a KAE self-report the metrics that drive their own incentive
+    # payout would be a real conflict of interest.
+    if actor.role not in ("admin", "super_admin", "manager"):
+        raise HTTPException(403, "Creating a KAE scorecard requires manager/admin role")
     async with db.tenant_conn(actor.tenant_id) as conn:
         ret_bonus = 0
         if body.client_id:
@@ -199,7 +215,9 @@ async def upsert_kae_scorecard(body: KaeKpiIn, actor: Actor=Depends(get_actor)):
     return dict(row)
 
 @router.patch("/scorecard/{score_id}/status")
-async def approve_kae_scorecard(score_id: str, body: KaeApproveIn, actor: Actor=Depends(get_actor)):
+async def approve_kae_scorecard(score_id: str, body: KaeApproveIn, actor: Actor=Depends(require_permission("kae", "update"))):
+    if actor.role not in ("admin", "super_admin", "manager"):
+        raise HTTPException(403, "Approving/paying a KAE scorecard requires manager/admin role")
     if body.status not in ('approved','paid'):
         raise HTTPException(400, "status must be approved or paid")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -225,7 +243,7 @@ async def approve_kae_scorecard(score_id: str, body: KaeApproveIn, actor: Actor=
     return dict(row)
 
 @router.get("/retention")
-async def list_kae_retention(user_id: Optional[str]=None, actor: Actor=Depends(get_actor)):
+async def list_kae_retention(user_id: Optional[str]=None, actor: Actor=Depends(require_permission("kae", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT kr.*, u.full_name,
@@ -239,7 +257,13 @@ async def list_kae_retention(user_id: Optional[str]=None, actor: Actor=Depends(g
     return [dict(r) for r in rows]
 
 @router.post("/retention")
-async def upsert_kae_retention(body: KaeRetentionIn, actor: Actor=Depends(get_actor)):
+async def upsert_kae_retention(body: KaeRetentionIn, actor: Actor=Depends(require_permission("kae", "create"))):
+    if actor.role not in ("admin", "super_admin", "manager"):
+        raise HTTPException(403, "Tracking KAE retention requires manager/admin role")
+    try:
+        owner_since_date = date.fromisoformat(body.owner_since)
+    except ValueError:
+        raise HTTPException(400, "owner_since must be a valid date (YYYY-MM-DD)")
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO kae_client_retention
@@ -248,7 +272,7 @@ async def upsert_kae_retention(body: KaeRetentionIn, actor: Actor=Depends(get_ac
             ON CONFLICT (tenant_id,user_id,client_id) DO UPDATE SET
               months_served=EXCLUDED.months_served, last_checked_at=now()
             RETURNING *, kae_retention_bonus(months_served) AS current_bonus
-        """, actor.tenant_id, body.user_id, body.client_id, body.owner_since, body.months_served)
+        """, actor.tenant_id, body.user_id, body.client_id, owner_since_date, body.months_served)
     return dict(row)
 
 @router.get("/summary")
@@ -274,7 +298,7 @@ async def kae_summary(month: Optional[int]=None, year: Optional[int]=None,
     return {**dict(stats), **dict(own)}
 
 @router.get("/leaderboard")
-async def kae_leaderboard(actor: Actor=Depends(get_actor)):
+async def kae_leaderboard(actor: Actor=Depends(require_permission("kae", "read"))):
     """Per-KAE leaderboard (v_kae_summary) - was defined since P16 but had
     no caller; /kae/summary above only returns tenant-wide totals."""
     async with db.tenant_conn(actor.tenant_id) as conn:

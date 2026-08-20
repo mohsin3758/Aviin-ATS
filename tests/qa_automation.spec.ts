@@ -5016,3 +5016,148 @@ test.describe.serial('S42 Remove from Pipeline', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// S43 (2026-08-20): user asked how to assign a KAE to a client on the P16
+// KAE Module page — the Owners tab could only ever REMOVE an assignment,
+// there was no way to create one anywhere in the app despite POST
+// /kae/owners already being real and enforcing the 3-KAE limit. Same gap
+// found across all 4 tabs (Owners/Visibility/Scorecards/Retention) — every
+// empty-state message literally said "POST /kae/... to add". Built real
+// forms for all 4, added role gates (admin/manager) that didn't exist on
+// any of these writes before, and found + fixed a real, previously-
+// unexercised bug in POST /kae/retention (asyncpg needs a real date
+// object, not a plain string — the same bug class documented repeatedly
+// elsewhere in this project).
+test.describe.serial('S43 KAE Module: Assign forms + role gates', () => {
+  const stamp = Date.now();
+  let clientId: string;
+  let userAId: string;
+  let userBId: string;
+  let userCId: string;
+  let ownerIds: string[] = [];
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    for (const id of ownerIds) await request.delete(`${API}/kae/owners/${id}`, { headers: auth }).catch(() => {});
+    for (const id of [userAId, userBId, userCId]) if (id) await request.delete(`${API}/users/${id}`, { headers: auth }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth }).catch(() => {});
+  });
+
+  test('setup: throwaway client + 3 recruiter users', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S43 KAE Test Client ${stamp}` } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+    for (const [varSet, i] of [[(v: string) => userAId = v, 1], [(v: string) => userBId = v, 2], [(v: string) => userCId = v, 3]] as any) {
+      const u = await request.post(`${API}/users`, {
+        headers: auth, data: { full_name: `QA S43 KAE User ${i} ${stamp}`, email: `qa.s43.kae${i}.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+      });
+      expect(u.ok()).toBeTruthy();
+      varSet((await u.json()).id);
+    }
+  });
+
+  test('assign KAE, real 3-KAE limit enforced, real client-wise scoping via by-client', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    for (const uid of [userAId, userBId, userCId]) {
+      const r = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: clientId, user_id: uid, owner_type: 'kae' } });
+      expect(r.ok()).toBeTruthy();
+      ownerIds.push((await r.json()).id);
+    }
+    const byClient = await (await request.get(`${API}/kae/owners/by-client/${clientId}`, { headers: auth })).json();
+    expect(byClient.kae_count).toBe(3);
+
+    // 4th KAE on the SAME client must 400 — the limit is real, not decorative.
+    const uD = await request.post(`${API}/users`, {
+      headers: auth, data: { full_name: `QA S43 KAE User 4 ${stamp}`, email: `qa.s43.kae4.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    const uDId = (await uD.json()).id;
+    const over = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: clientId, user_id: uDId, owner_type: 'kae' } });
+    expect(over.status()).toBe(400);
+    await request.delete(`${API}/users/${uDId}`, { headers: auth }).catch(() => {});
+
+    // Client-wise: a real DIFFERENT client must show 0, not leak the count above.
+    const c2 = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S43 KAE Other Client ${stamp}` } });
+    const c2Id = (await c2.json()).id;
+    const byClient2 = await (await request.get(`${API}/kae/owners/by-client/${c2Id}`, { headers: auth })).json();
+    expect(byClient2.kae_count).toBe(0);
+    await request.delete(`${API}/clients/${c2Id}`, { headers: auth }).catch(() => {});
+  });
+
+  test('a plain recruiter is blocked (403) from assigning/removing owners, setting visibility, creating/approving scorecards, or tracking retention — reads still work', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const rl = await request.post(`${API}/auth/login`, { data: { email: `qa.s43.kae1.${stamp}@test.com`, password: 'TestPass123!', tenant_id: TID } });
+    const rtoken = (await rl.json()).access_token;
+    const rauth = { 'Authorization': `Bearer ${rtoken}`, 'Content-Type': 'application/json' };
+
+    expect((await request.post(`${API}/kae/owners`, { headers: rauth, data: { client_id: clientId, user_id: userAId, owner_type: 'kae' } })).status()).toBe(403);
+    expect((await request.delete(`${API}/kae/owners/${ownerIds[0]}`, { headers: rauth })).status()).toBe(403);
+    expect((await request.post(`${API}/kae/visibility`, { headers: rauth, data: { user_id: userAId, visibility_lvl: 'L4' } })).status()).toBe(403);
+    expect((await request.post(`${API}/kae/scorecard`, { headers: rauth, data: { user_id: userAId, period_month: 8, period_year: 2026 } })).status()).toBe(403);
+    expect((await request.post(`${API}/kae/retention`, { headers: rauth, data: { user_id: userAId, client_id: clientId, owner_since: '2026-01-01', months_served: 1 } })).status()).toBe(403);
+    // Reads must still be open — this is a role gate on writes, not a
+    // blanket lockout (matches the soft-launch precedent everywhere else).
+    expect((await request.get(`${API}/kae/owners`, { headers: rauth })).ok()).toBeTruthy();
+  });
+
+  test('set visibility, create + approve a scorecard, and track retention with a real date — regression guard for the date-parsing bug found while building this', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const vis = await request.post(`${API}/kae/visibility`, { headers: auth, data: { user_id: userAId, visibility_lvl: 'L4' } });
+    expect(vis.ok()).toBeTruthy();
+    expect((await vis.json()).visibility_lvl).toBe('L4');
+
+    const sc = await request.post(`${API}/kae/scorecard`, {
+      headers: auth, data: {
+        user_id: userAId, period_month: 12, period_year: 2099,
+        revenue_target: 100000, revenue_actual: 100000, revenue_score: 40,
+        collection_target: 100000, collection_actual: 100000, collection_score: 25,
+        client_sat_score: 20, new_pos_score: 10, renewal_score: 5, base_incentive: 1000,
+      },
+    });
+    expect(sc.ok()).toBeTruthy();
+    const scBody = await sc.json();
+    expect(scBody.total_score).toBe(100);
+    expect(scBody.grade).toBe('A+');
+    const approve = await request.patch(`${API}/kae/scorecard/${scBody.id}/status`, { headers: auth, data: { status: 'approved' } });
+    expect(approve.ok()).toBeTruthy();
+
+    // Real regression guard: POST /kae/retention 500'd on any real date
+    // string before the fix (asyncpg 'str' object has no attribute
+    // 'toordinal') — this endpoint had zero callers before today, so
+    // nothing had ever caught it until this test.
+    const ret = await request.post(`${API}/kae/retention`, { headers: auth, data: { user_id: userAId, client_id: clientId, owner_since: '2026-01-01', months_served: 7 } });
+    expect(ret.ok()).toBeTruthy();
+    expect((await ret.json()).current_bonus).toBeGreaterThan(0);
+    const badDate = await request.post(`${API}/kae/retention`, { headers: auth, data: { user_id: userAId, client_id: clientId, owner_since: 'not-a-date', months_served: 1 } });
+    expect(badDate.status()).toBe(400);
+  });
+
+  test('real headless UI: Assign KAE form shows a live 0/3 count, a real assignment renders with the client\'s real name (not a UUID)', async ({ page, request }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/kae');
+    await page.getByTestId('assign-kae-client').selectOption({ label: `QA S43 KAE Test Client ${stamp}` });
+    await page.getByTestId('assign-kae-user').selectOption({ label: `QA S43 KAE User 1 ${stamp}` });
+    // 3 KAEs already assigned from an earlier test in this suite.
+    await expect(page.getByText(/3\/3 KAEs already assigned/)).toBeVisible();
+    await expect(page.getByTestId('assign-kae-submit')).toBeDisabled();
+
+    // Switch to Account Manager (not subject to the 3-KAE cap) to prove a
+    // real assignment renders with the client's real name, not a UUID.
+    await page.getByTestId('assign-kae-owner-type').selectOption('account_manager');
+    const [resp] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/kae/owners') && r.request().method() === 'POST'),
+      page.getByTestId('assign-kae-submit').click(),
+    ]);
+    expect(resp.status()).toBe(200);
+    ownerIds.push((await resp.json()).id);
+    await expect(page.locator('table').getByText(`QA S43 KAE Test Client ${stamp}`).first()).toBeVisible();
+    expect(errors).toHaveLength(0);
+  });
+});
