@@ -5148,6 +5148,17 @@ test.describe.serial('S43 KAE Module: Assign forms + role gates', () => {
     await expect(page.getByText(/3\/3 KAEs already assigned/)).toBeVisible();
     await expect(page.getByTestId('assign-kae-submit')).toBeDisabled();
 
+    // Real regression guard (2026-08-20): the Assign button used
+    // bg-[--color-primary], a Tailwind token that tailwind.config.js maps
+    // to a CSS variable globals.css never actually defined (only the
+    // un-prefixed --primary existed) — white text on a transparent
+    // background, invisible even though isVisible()/isDisabled() reported
+    // it correctly as present. Fixed by aliasing --color-primary to the
+    // real palette in globals.css; this asserts the button's real
+    // rendered background is non-transparent, not just that it exists.
+    const bg = await page.getByTestId('assign-kae-submit').evaluate(el => getComputedStyle(el).backgroundColor);
+    expect(bg).not.toBe('rgba(0, 0, 0, 0)');
+
     // Switch to Account Manager (not subject to the 3-KAE cap) to prove a
     // real assignment renders with the client's real name, not a UUID.
     await page.getByTestId('assign-kae-owner-type').selectOption('account_manager');

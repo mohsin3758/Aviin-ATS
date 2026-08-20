@@ -15,6 +15,23 @@
   --primary-dark:  #1e3a8a;
   --primary-bg:    #eff6ff;
 
+  /* Real bug fix (2026-08-20): tailwind.config.js/.ts map the `primary`/
+     `primary-dark` Tailwind color tokens to --color-primary/
+     --color-primary-dark, but those two variables were never actually
+     defined here (only the un-prefixed --primary/--primary-dark above
+     exist) - a naming mismatch that made every `bg-primary`,
+     `text-[--color-primary]`, etc. usage resolve to nothing (transparent/
+     invalid), not the intended blue. Found live on the new KAE Module
+     "Assign" button (white text on a transparent background = invisible),
+     then confirmed the same silent breakage on 8 more real pages
+     (account-pl, bu-tracker, collections, command-center, finance,
+     incentives, pipeline/[req_id], predictions) plus Button.tsx's own
+     `primary` variant. Aliased to the real, already-defined palette
+     instead of picking a new color, so every affected page/component is
+     fixed at once with zero visual-design decision needed. */
+  --color-primary:      var(--primary);
+  --color-primary-dark: var(--primary-dark);
+
   /* Accent */
   --accent:        #10b981;
   --accent-light:  #d1fae5;

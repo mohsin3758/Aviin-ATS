@@ -8797,3 +8797,53 @@ artifact from heavy back-to-back testing, resolved cleanly on retry
 after cooldown, not a regression. Full S43 (5) + S17 (12) + S29 (30) =
 47/47 passing. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0
 external API refs).
+
+## Follow-up same day: the new Assign KAE button was genuinely invisible
+## — a real, pre-existing bug affecting 9 pages app-wide, not just KAE
+User followed the assign-a-client walkthrough above, sent a screenshot
+of the real live form, and correctly flagged: no Assign button visible
+anywhere. Confirmed directly, not assumed: Playwright's `isVisible()`
+reported the button as present and visible (correct per the DOM/layout
+sense — it had real dimensions, wasn't `display:none`) but a real pulled
+screenshot showed genuinely nothing there. Checked its computed style:
+`background: rgba(0,0,0,0)` (fully transparent) with `color:
+rgb(255,255,255)` (white) — white text on a transparent background over
+a white page, invisible even though technically "rendered."
+
+**Root cause, not scoped to my own new code**: the button's class,
+`bg-[--color-primary]`, was copied from `/incentives`' own "New
+Scorecard" button (P15, the module this P16 form's layout was
+deliberately modeled on) — and `tailwind.config.js`/`.ts` map Tailwind's
+`primary`/`primary-dark` color tokens to CSS variables `--color-primary`/
+`--color-primary-dark`, but `globals.css`'s `:root` block never actually
+defined those two variables — only the un-prefixed `--primary`/
+`--primary-dark` exist. A real naming-mismatch bug, not something this
+session introduced: grepping the whole frontend for `color-primary`
+found 8 OTHER real pages with the identical broken class (`account-pl`,
+`bu-tracker`, `collections`, `command-center`, `finance`, `incentives`,
+`pipeline/[req_id]`, `predictions`) plus `Button.tsx`'s own `primary`
+variant — confirmed live: `/incentives`' "New Scorecard" button had the
+exact same `rgba(0,0,0,0)` background before this fix. `Spinner.tsx`
+already worked around it with an inline `var(--color-primary, #1e3a5f)`
+fallback — the one place in the codebase that happened to guard against
+this, everywhere else silently broke.
+
+**Fixed at the root, not per-button**: added `--color-primary: var(
+--primary); --color-primary-dark: var(--primary-dark);` to `globals.css`'s
+`:root` block — a single 2-line alias that transparently repairs every
+current and future usage across the whole app, rather than patching each
+of the 9+ affected call sites individually with a hardcoded color.
+
+Verified for real: the KAE Assign button's computed background went
+`rgba(0,0,0,0)` → `rgb(30,64,175)` (the real, intended blue) after
+deploy; independently re-checked `/incentives`' "New Scorecard" button
+and confirmed it picked up the identical fix with zero code changes of
+its own. A full real click-through of the now-visible button (not a
+`data-testid`-only check) correctly created a real assignment, visible
+in the table. Added a permanent regression guard to S43's existing UI
+test — asserts the button's real computed background isn't transparent,
+not just that the element exists, since that distinction is exactly what
+let this bug through undetected until a human actually looked at a
+screenshot. Full S43 (5) + S8/S13 (14, covering account-pl/bu-tracker/
+collections/kae/incentives-adjacent pages) = 19/19 passing. Zero-token
+audit: `CONFIRMED CLEAN` (381 files, 0 external API refs).
