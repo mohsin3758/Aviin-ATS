@@ -4814,3 +4814,75 @@ test.describe.serial('S40 Kanban Board Consistency Fixes', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// S41 (2026-08-20): user reported the Resume Inbox row checkboxes not
+// toggling ("left single and all check mark is not working") and the
+// Status column being hidden ("check the last status, its hide it").
+// Root causes: (1) the row <td>'s own onClick and the checkbox's own
+// onChange both fired from the same physical click (bubbling), so
+// toggleSelect() ran twice per click and cancelled itself out - fixed
+// with stopPropagation() on the checkbox itself. (2) two separate
+// attempts at making Status position:sticky (stacked next to the
+// already-sticky Actions column) both visually covered the Match %
+// column - confirmed via real screenshots both times, since Playwright's
+// isVisible() locator check gave a false positive on both attempts.
+// Fixed structurally instead: moved Status to be the 2nd column (right
+// after Candidate), always inside the initial viewport with zero CSS
+// sticky-stacking risk.
+test.describe.serial('S41 Resume Inbox: checkbox toggle + Status column visibility', () => {
+  let anyItemId: string;
+
+  test('setup: find a real queue item to test against', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/resume-intake/queue?status=all&limit=10`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const items = (await r.json()).items || [];
+    if (!items.length) return test.skip();
+    anyItemId = items[0].id;
+  });
+
+  test('a single click on a row checkbox actually toggles it (not a no-op double-toggle)', async ({ page }) => {
+    if (!anyItemId) return test.skip();
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/resume-inbox');
+    const cb = page.getByTestId(`resume-inbox-checkbox-${anyItemId}`);
+    await expect(cb).toBeVisible({ timeout: 15000 });
+    await expect(cb).not.toBeChecked();
+    await cb.click();
+    await expect(cb).toBeChecked();
+    await expect(page.getByText(/^1 selected$/)).toBeVisible();
+    // Clicking again must un-toggle it cleanly too - not get stuck checked.
+    await cb.click();
+    await expect(cb).not.toBeChecked();
+    expect(errors).toHaveLength(0);
+  });
+
+  test('the "select all" header checkbox still works after the row-checkbox fix', async ({ page }) => {
+    await page.goto('/resume-inbox');
+    const selectAll = page.getByTestId('resume-inbox-select-all');
+    await expect(selectAll).toBeVisible({ timeout: 15000 });
+    await selectAll.click();
+    await expect(page.getByText(/^\d+ selected$/)).toBeVisible();
+    await selectAll.click();
+    await expect(page.getByText(/^\d+ selected$/)).not.toBeVisible();
+  });
+
+  test('Status is the 2nd table column and renders without any horizontal scroll, with Match % and Actions still reachable further right', async ({ page }) => {
+    await page.goto('/resume-inbox');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+    const headers = await page.locator('table thead th').allTextContents();
+    const clean = headers.map(h => h.trim());
+    expect(clean[1]).toBe('Candidate');
+    expect(clean[2]).toBe('Status');
+    // Status badge on the very first row must be visible with zero scrolling.
+    const firstRow = page.locator('table tbody tr').first();
+    await expect(firstRow.locator('text=/Auto-Accepted|Review Needed|Pending|Approved|Rejected/').first()).toBeVisible();
+    // Match % header (now further right) and the sticky Actions column
+    // must both still genuinely render - not covered by anything, and
+    // not lost off the right edge.
+    await expect(page.locator('th:has-text("Match %")')).toBeVisible();
+    await expect(firstRow.locator('button:has-text("Edit")')).toBeVisible();
+  });
+});

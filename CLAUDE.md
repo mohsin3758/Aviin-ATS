@@ -8523,3 +8523,76 @@ value before the suite touches it and restores it in `afterAll`, so a
 test run never leaves a shared, tenant-wide setting reconfigured. Full
 S14 (12) + S29 (18) + S30 (9) + S37 (6) = 45/45 passing. Zero-token
 audit: `CONFIRMED CLEAN` (379 files, 0 external API refs).
+
+## Resume Inbox: row checkboxes not toggling + Status column hidden, both fixed for real, 2026-08-20
+User reported, from a screenshot of the Resume Inbox table: "left single
+and all check mark is not working and display view is not completly
+view, check the last status, its hide it." Investigated both against
+the real live page rather than guessing — found 2 distinct real bugs.
+
+**Bug 1 — a single click on a row checkbox silently did nothing.**
+`frontend/app/(dashboard)/resume-inbox/page.tsx`'s row `<td>` had its
+own `onClick={() => toggleSelect(r.id)}` (a deliberate "click anywhere
+in the cell" convenience) wrapping a real `<input type="checkbox"
+onChange={() => toggleSelect(r.id)}>` — clicking the checkbox directly
+fires BOTH the checkbox's own click (native toggle + `onChange`) AND the
+same click bubbles up to the parent `<td>`'s `onClick`, so
+`toggleSelect()` ran twice per click and cancelled itself back to the
+original state. Reproduced live before fixing: `isChecked()` read
+`false` both before and after a direct click. Fixed with
+`onClick={e => e.stopPropagation()}` on the `<input>` itself — kept the
+parent `<td>`'s own `onClick` for the rest of the cell, since that's a
+real, deliberate UX convenience, not the bug. Verified live: one click
+now genuinely toggles `false→true`, a second click toggles it back
+`true→false`, and the "N selected" bar tracks correctly both ways. The
+header "select all" checkbox was never affected (no nested onClick
+conflict there) — reverified it still works correctly after the fix,
+since it shares the same `toggleSelect`/`selectAll` state.
+
+**Bug 2 — the Status column ("the last status") was genuinely covered/
+hidden**, confirmed via a real pulled screenshot, not just a locator
+check. First attempt: made Status `position:sticky` next to the
+already-sticky Actions column (`right:112, width:130`, matching the
+Actions column's own working `width:112`). Playwright's `isVisible()`
+locator check on the "Match %" header reported `true` — but a real,
+visually-inspected screenshot showed Match % was actually covered by the
+newly-sticky Status column. **This is the second time in this exact
+file that 2 stacked `position:sticky` columns inside this
+`border-collapse` table produced this identical false-positive-passing,
+visually-broken result** (the first was earlier the same session, also
+reverted) — `isVisible()` checks that an element has a non-zero bounding
+box and isn't `display:none`/`visibility:hidden`; it does NOT check
+whether another element is painted on top of it, so element-covering
+bugs in a stacked-sticky-column layout need a real screenshot pull +
+visual read to catch reliably, not just a locator assertion. Reverted
+the sticky-Status attempt entirely (back to plain, non-sticky styling).
+
+**Real fix — moved Status to be the 2nd column** (right after
+Candidate) instead of fighting sticky-CSS a third time. This puts it
+inside the table's initial visible viewport unconditionally, with zero
+CSS stacking-context risk: `['Candidate', 'Status', 'Source', 'File',
+'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', '']`,
+moved the Status `<td>` (StatusBadge + pipeline-stage indicator) to sit
+right after the Candidate `<td>`, removed the old duplicate at its
+former position (between Match % and the sticky Actions column).
+
+Verified for real, at every step, not just via locator checks that had
+already given 2 false positives on this exact regression class: a real
+pulled screenshot (1552px viewport, no scroll) shows Status rendering
+cleanly right after Candidate with the selection bar/checkbox both
+working; a second screenshot with the table's internal horizontal
+scroll container scrolled to its far right edge confirms Source through
+Match % all render correctly with zero overlap, and the sticky Actions
+column (Edit/download/link icons) is genuinely reachable without any
+scrolling at all — visible in the very first, unscrolled screenshot.
+Added 2 new `data-testid`s (`resume-inbox-checkbox-{id}` on each row
+checkbox, `resume-inbox-select-all` on the header one) — the page had no
+reliable hook for either before this, matching this project's
+established "give the test a real hook" convention used elsewhere in
+this file. New permanent "S41 Resume Inbox: checkbox toggle + Status
+column visibility" suite (4 tests) — a real single-click-toggles-and-
+untoggles-cleanly check, a select-all round-trip, and a structural check
+that Status is genuinely the 2nd header column with Match %/Actions
+still reachable further right. Full S32 (5) + S39 (2) + S40 (2) + S41
+(4) = 13/13 passing. Zero-token audit: `CONFIRMED CLEAN` (380 files, 0
+external API refs).

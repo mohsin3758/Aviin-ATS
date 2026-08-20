@@ -712,7 +712,7 @@ function ResumeInboxPageInner() {
         ) : (
           <>
             <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              <input type="checkbox" checked={selectedIds.size === items.length && items.length > 0} onChange={selectAll} style={{ cursor: 'pointer' }} />
+              <input type="checkbox" data-testid="resume-inbox-select-all" checked={selectedIds.size === items.length && items.length > 0} onChange={selectAll} style={{ cursor: 'pointer' }} />
               <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>{items.length} resumes</span>
               {/* Added-date sort — genuinely toggles newest-first/oldest-first now (see addedDir) */}
               <button onClick={() => { setAddedDir(d => d === 'desc' ? 'asc' : 'desc'); setSortByMatch(false); }} style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: !sortByMatch ? '#eff6ff' : '#f8fafc', color: !sortByMatch ? '#1e40af' : '#64748b', border: `1px solid ${!sortByMatch ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
@@ -735,9 +735,37 @@ function ResumeInboxPageInner() {
             <table style={{ width: '100%', minWidth: 1180, borderCollapse: 'collapse' }}>
               <thead><tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
                 <th style={{ width: 32, padding: '10px 8px' }}></th>
-                {['Candidate', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', 'Status', ''].map(h => (
+                {/* Real bug fix (2026-08-20): "Status is hidden" - two
+                    separate attempts at making Status sticky (alongside the
+                    already-working sticky Actions column) both visually
+                    covered the Match % column instead (confirmed via real
+                    screenshots both times, not just a locator check - which
+                    gave a false "visible" pass since a covered element still
+                    technically has a bounding box). Rather than keep
+                    fighting sticky-positioning-inside-a-<table> quirks,
+                    moved Status right after Candidate - the column a
+                    recruiter needs the fastest anyway (auto-accepted vs.
+                    needs review) - so it's within the very first, always-
+                    visible section of the table with no CSS trickery at all. */}
+                {['Candidate', 'Status', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', ''].map(h => (
                   <th key={h} title={h === 'Received' ? "The email's own date" : h === 'Added' ? 'When our system processed this email' : undefined}
-                    style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : h === 'Added' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: (h === 'Match %' || h === 'Added') ? 'pointer' : 'default' }}
+                    style={{
+                      padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : h === 'Added' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: (h === 'Match %' || h === 'Added') ? 'pointer' : 'default',
+                      // Real bug fix (2026-08-20): "the last Status/Actions
+                      // content is hidden" - the horizontal-scroll fix
+                      // earlier today made it reachable, but on a narrower
+                      // real browser window the scrollbar itself is easy
+                      // to miss entirely (thin, easy to overlook, hidden
+                      // by default on some OSes until actively scrolled).
+                      // Making ONLY the trailing Actions column sticky
+                      // (single column, matching the exact convention the
+                      // Candidates list page already uses successfully)
+                      // keeps it always reachable without scrolling at
+                      // all - a second attempt at 2 stacked sticky columns
+                      // earlier today visually broke Match%, so this stays
+                      // to exactly one.
+                      ...(h === '' ? { position: 'sticky' as const, right: 0, background: '#f8fafc', boxShadow: '-2px 0 4px rgba(0,0,0,0.06)', width: 112 } : {}),
+                    }}
                     onClick={h === 'Match %' ? () => { setSortByMatch(s => !s); } : h === 'Added' ? () => { setAddedDir(d => d === 'desc' ? 'asc' : 'desc'); setSortByMatch(false); } : undefined}>
                     {h === 'Match %' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Target size={11} />{h}{sortByMatch ? ' ↓' : ''}</span>
                       : h === 'Added' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><ArrowUpDown size={11} />{h}{!sortByMatch ? (addedDir === 'desc' ? ' ↓' : ' ↑') : ''}</span>
@@ -755,7 +783,16 @@ function ResumeInboxPageInner() {
                     <tr key={r.id} data-testid={`resume-inbox-row-${r.id}`} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', background: rowBg }}
                       onMouseEnter={e => { if (!selectedIds.has(r.id)) (e.currentTarget as HTMLElement).style.background = '#f0f7ff'; }}
                       onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = selectedIds.has(r.id) ? '#eff6ff' : i % 2 === 0 ? '#fff' : '#fafafa'; }}>
-                      <td style={{ padding: '10px 8px' }} onClick={e => { e.stopPropagation(); toggleSelect(r.id); }}><input type="checkbox" checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} style={{ cursor: 'pointer' }} /></td>
+                      {/* Real bug fix (2026-08-20): the <td>'s own onClick
+                          AND the checkbox's onChange both fired from the
+                          SAME click (the native click bubbles from the
+                          input up to the td) - toggleSelect ran twice per
+                          click, cancelling itself out, so clicking the
+                          checkbox directly silently did nothing. Stopping
+                          propagation on the checkbox's own click keeps the
+                          "click anywhere in the cell" convenience for the
+                          rest of the cell while fixing the checkbox itself. */}
+                      <td style={{ padding: '10px 8px' }} onClick={e => { e.stopPropagation(); toggleSelect(r.id); }}><input type="checkbox" data-testid={`resume-inbox-checkbox-${r.id}`} checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} onClick={e => e.stopPropagation()} style={{ cursor: 'pointer' }} /></td>
                       {/* Candidate cell — shows name + near-dup warning */}
                       <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}>
                         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
@@ -764,6 +801,15 @@ function ResumeInboxPageInner() {
                         </div>
                         <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{r.email || r.source_email || '—'}</div>
                         {r.current_designation && <div style={{ fontSize: 10, color: '#94a3b8' }}>{r.current_designation}</div>}
+                      </td>
+                      <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}>
+                        <StatusBadge status={r.parse_status || 'pending'} />
+                        {r.pipeline_stage && (
+                          <div data-testid={`resume-inbox-pipeline-stage-${r.id}`} title={r.pipeline_job || ''}
+                            style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: '#0891b2', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
+                            📍 {r.pipeline_stage.replace(/_/g, ' ')}
+                          </div>
+                        )}
                       </td>
                       <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}><SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} /></td>
                       <td style={{ padding: '10px 12px', maxWidth: 150 }} onClick={() => setSelected(r)}>
@@ -808,16 +854,7 @@ function ResumeInboxPageInner() {
                           ? <JdMatchBadge score={matchScore} title={r.matched_jd_title || r.requisition_title} />
                           : <span style={{ fontSize: 11, color: '#e2e8f0' }}>—</span>}
                       </td>
-                      <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}>
-                        <StatusBadge status={r.parse_status || 'pending'} />
-                        {r.pipeline_stage && (
-                          <div data-testid={`resume-inbox-pipeline-stage-${r.id}`} title={r.pipeline_job || ''}
-                            style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: '#0891b2', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
-                            📍 {r.pipeline_stage.replace(/_/g, ' ')}
-                          </div>
-                        )}
-                      </td>
-                      <td style={{ padding: '10px 8px' }}>
+                      <td style={{ padding: '10px 8px', position: 'sticky', right: 0, background: rowBg, boxShadow: '-2px 0 4px rgba(0,0,0,0.05)', width: 112 }}>
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={e => { e.stopPropagation(); setEditItem(r); }} title="Edit & Approve" style={{ padding: '4px 8px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Edit</button>
                           <button onClick={e => { e.stopPropagation(); downloadResumeFile(r.id, r.file_name); }} title="Download resume file" style={{ padding: '4px 6px', background: 'none', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', color: '#374151', display: 'flex', alignItems: 'center' }}><Download size={11} /></button>
