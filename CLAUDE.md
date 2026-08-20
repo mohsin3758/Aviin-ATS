@@ -9117,3 +9117,66 @@ assumption from the Candidates page's own, differently-labeled button) —
 corrected after the test's own first run caught it. Full regression
 sweep (S1/S2/S32/S39/S41/S44/S45, 21 tests) passed clean. Zero-token
 audit: `CONFIRMED CLEAN` (381 files, 0 external API refs).
+
+## Resume Inbox: background auto-load (no more manual "Load more"
+## clicking) + Candidates re-report resolved by shrinking real table
+## width, not more overlap-hunting, 2026-08-20
+User asked for the remaining resumes to load automatically in the
+background rather than needing a manual click per page. Asked one
+clarifying question first, since it's a real, consequential choice (does
+every visit to Resume Inbox immediately fire ~20 background requests, or
+only when the user opts in) — user picked always-on by default.
+
+**Backend-load-conscious implementation**: a background effect keeps
+calling the existing offset-based `loadMore()` (built earlier the same
+day) roughly every 400ms — not back-to-back — until every resume
+matching the current filters is loaded, paused, or genuinely stuck.
+Stops cleanly on 3 consecutive failures rather than hammering a broken
+connection forever, with a visible error + manual Retry rather than
+silently giving up. Restarts fresh (fail counter included) on any filter
+change, since that's a genuinely new query. The old manual "Load more"
+button is gone, replaced with a live "Auto-loading… N/Total" indicator
+and a Pause/Resume toggle for anyone who'd rather not keep pulling data
+(slow connection, conserving bandwidth) — pausing genuinely stops new
+fetches, confirmed by watching the row count hold steady while paused.
+
+**Mid-turn, before this was finished deploying**, the user sent a fresh
+screenshot saying the exact same overlap/hiding problem from earlier the
+same day was still happening on "candidates" (screenshot was actually
+Resume Inbox, going by its columns) — specifically Match % and other
+trailing columns. Investigated immediately rather than assuming the
+earlier fix was already sufficient: real geometry checks on the live,
+already-deployed page confirmed the earlier sticky-column fix WAS
+holding (Actions genuinely `position:static`, zero overlap with Job
+Match or Match % at 1366px/1600px/1680px) — Match % rendered its real
+"24%"/"21%" values correctly in every check. What was still real: at
+~1680px (matching the width implied by the user's own screenshots), the
+table needed a small ~48px horizontal scroll to reach the very last
+Actions icons — small, but with no obvious scrollbar affordance, easy to
+mistake for the same "hidden" bug rather than "just scroll a little."
+
+**Fixed by shrinking the table's real footprint, not more sticky/overlap
+hunting**: cut every data cell's horizontal padding from 12px to 8px
+(11 cells × 4px saved × 2 sides ≈ 88px reclaimed) — comfortably more
+than the measured 48px overflow. Verified directly: `wrapperScrollWidth
+> wrapperClientWidth` (needs scroll) flipped to false at 1680px after
+the change — a real pulled screenshot at that exact width now shows
+every column, including Match % and all 3 action icons, fully visible
+with zero scrolling required. Narrower real laptop widths (1366–1536px)
+still need some scroll — an honest, expected limit of a genuinely
+11-real-column table on a narrow screen, not something to hide columns
+or remove real functionality to chase away.
+
+Verified for real end-to-end: the pulled 1680px screenshot shows
+"Auto-loading… 400/2030" actively counting up with a real Pause button,
+and the full row (Match % badge, Edit, download, external-link) all
+visible with nothing cut off. Rewrote the now-obsolete S45 suite (it
+asserted on the manual `resume-inbox-load-more` button, which no longer
+exists) to test the real auto-load behavior instead: page loads and
+grows past 500 rows with zero clicks (`expect.poll`, not a fixed sleep),
+Pause genuinely halts growth and Resume continues it, and the existing
+approve-preserves-progress case still holds against the new mechanism.
+S46 (Job Match/Match % geometry) re-verified unaffected by the padding
+change. Full regression sweep (S1/S2/S32/S39/S41/S44/S45/S46, 17 tests)
+passed clean. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0 external
+API refs).

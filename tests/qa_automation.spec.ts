@@ -5344,8 +5344,15 @@ test.describe.serial('S44 Candidates Table: sticky Actions column no longer hide
 // switched per-item actions (approve/reject) from a full reloadQueue()
 // (which would always land back on page 1) to local removal, so
 // pagination progress survives an action instead of resetting.
-test.describe.serial('S45 Resume Inbox: Load More has no upper bound', () => {
-  test('real headless UI: clicking Load More 6 times (past the old 500-item wall) keeps succeeding with 200s and appending rows', async ({ page }) => {
+//
+// Follow-up, same day: user asked for this to run automatically in the
+// background rather than requiring a manual click per page — the manual
+// "Load more" button (data-testid resume-inbox-load-more) was replaced
+// entirely with a background auto-load loop (fetches the next page every
+// ~400ms on its own until everything matching the current filters is
+// loaded) plus a live progress indicator and a Pause/Resume toggle.
+test.describe.serial('S45 Resume Inbox: background auto-load has no upper bound', () => {
+  test('real headless UI: without any click, the page keeps auto-loading past the old 500-item wall and shows live progress', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', e => errors.push(e.message));
     await page.goto('/resume-inbox');
@@ -5353,36 +5360,45 @@ test.describe.serial('S45 Resume Inbox: Load More has no upper bound', () => {
     const initial = await page.locator('table tbody tr').count();
     expect(initial).toBeLessThanOrEqual(100);
 
-    let rows = initial;
-    for (let i = 0; i < 6; i++) {
-      const btn = page.getByTestId('resume-inbox-load-more');
-      if (!(await btn.isVisible().catch(() => false))) break;
-      const [resp] = await Promise.all([
-        page.waitForResponse(r => r.url().includes('/resume-intake/queue') && r.request().method() === 'GET'),
-        btn.click(),
-      ]);
-      // The exact regression: every click must be a real 200, never a
-      // silent 422 once the old limit-based approach exceeded 500.
-      expect(resp.status()).toBe(200);
-      await page.waitForTimeout(300);
-      const now = await page.locator('table tbody tr').count();
-      expect(now).toBeGreaterThan(rows);
-      rows = now;
-    }
-    // 6 successful clicks from a <=100 start guarantees we're past the
-    // old 500-item wall (100 + 6*100 = 700 max, but even a shorter real
-    // queue proves every available click succeeded, not silently failed).
-    expect(rows).toBeGreaterThan(100);
+    const status = page.getByTestId('resume-inbox-autoload-status');
+    await expect(status).toBeVisible({ timeout: 5000 });
+    await expect(status).toContainText('Auto-loading');
+
+    // No click anywhere — just wait, matching the real "in the background"
+    // behavior. 6 real page-fetches at ~400ms apart is comfortably past
+    // the old 500-item wall (100+6*100=700) within a generous timeout.
+    await expect.poll(async () => page.locator('table tbody tr').count(), { timeout: 20000, intervals: [500] })
+      .toBeGreaterThan(500);
     expect(errors).toHaveLength(0);
   });
 
-  test('real headless UI: approving an item removes it locally without resetting pagination back to page 1', async ({ page }) => {
+  test('real headless UI: Pause stops further loading, Resume continues it', async ({ page }) => {
     await page.goto('/resume-inbox');
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
-    const btn = page.getByTestId('resume-inbox-load-more');
-    if (!(await btn.isVisible().catch(() => false))) return test.skip();
-    await Promise.all([page.waitForResponse(r => r.url().includes('/resume-intake/queue')), btn.click()]);
-    await page.waitForTimeout(400);
+    const toggle = page.getByTestId('resume-inbox-autoload-toggle');
+    await expect(toggle).toBeVisible({ timeout: 5000 });
+
+    // Let it load a bit, then pause, then confirm the count genuinely
+    // stops growing while paused.
+    await expect.poll(async () => page.locator('table tbody tr').count(), { timeout: 10000 }).toBeGreaterThan(100);
+    await toggle.click(); // Pause
+    await expect(toggle).toHaveText('Resume');
+    const countWhilePaused = await page.locator('table tbody tr').count();
+    await page.waitForTimeout(1500);
+    expect(await page.locator('table tbody tr').count()).toBe(countWhilePaused);
+
+    await toggle.click(); // Resume
+    await expect(toggle).toHaveText('Pause');
+    await expect.poll(async () => page.locator('table tbody tr').count(), { timeout: 10000 }).toBeGreaterThan(countWhilePaused);
+  });
+
+  test('real headless UI: approving an item removes it locally without resetting auto-load progress back to page 1', async ({ page }) => {
+    await page.goto('/resume-inbox');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+    await expect.poll(async () => page.locator('table tbody tr').count(), { timeout: 10000 }).toBeGreaterThan(100);
+    // Pause first so auto-load can't itself change the count mid-assertion.
+    await page.getByTestId('resume-inbox-autoload-toggle').click();
+    await page.waitForTimeout(300);
     const countBeforeAction = await page.locator('table tbody tr').count();
     expect(countBeforeAction).toBeGreaterThan(100);
 
@@ -5396,7 +5412,7 @@ test.describe.serial('S45 Resume Inbox: Load More has no upper bound', () => {
 
     const countAfterAction = await page.locator('table tbody tr').count();
     // The real regression this guards: a full reloadQueue() would reset
-    // to page 1 (<=100 rows), losing everything Load More brought in.
+    // to page 1 (<=100 rows), losing everything auto-load brought in.
     expect(countAfterAction).toBe(countBeforeAction - 1);
     expect(countAfterAction).toBeGreaterThan(100);
   });

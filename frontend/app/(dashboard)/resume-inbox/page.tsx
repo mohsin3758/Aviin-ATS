@@ -553,15 +553,44 @@ function ResumeInboxPageInner() {
   const [accumItems, setAccumItems] = useState<ResumeItem[]>([]);
   const [loadingMore, setLoadingMore] = useState(false);
   useEffect(() => { setAccumItems((queueData?.items || []) as ResumeItem[]); }, [queueData]);
+  const [autoLoadFails, setAutoLoadFails] = useState(0);
   const loadMore = async () => {
     setLoadingMore(true);
     try {
       const url = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}&limit=${PAGE_SIZE}&offset=${accumItems.length}`;
       const more = await apiFetch(url);
       setAccumItems(prev => [...prev, ...((more?.items || []) as ResumeItem[])]);
-    } catch (e: any) { showToast('Error loading more: ' + e.message, false); }
-    finally { setLoadingMore(false); }
+      setAutoLoadFails(0);
+    } catch (e: any) {
+      setAutoLoadFails(f => { if (f === 0) showToast('Error loading more: ' + e.message, false); return f + 1; });
+    } finally { setLoadingMore(false); }
   };
+
+  // Auto-load remaining resumes in the background (2026-08-20, user
+  // request) — instead of requiring a manual click per page, this keeps
+  // fetching subsequent pages on its own, on load and after any filter
+  // change, until every matching resume is loaded or the user pauses it.
+  // A short delay between requests (rather than firing them back-to-back)
+  // keeps this from hammering the backend when the queue is large.
+  const [autoLoadPaused, setAutoLoadPaused] = useState(false);
+  const autoLoadInFlightRef = useRef(false);
+  const total = queueData?.total ?? 0;
+  const allLoaded = total > 0 && accumItems.length >= total;
+  const autoLoadStuck = autoLoadFails >= 3;
+  // A fresh filter/status/job change starts a genuinely new query — any
+  // earlier failure streak belongs to the OLD query, not this one.
+  useEffect(() => { setAutoLoadFails(0); }, [queueUrl]);
+  useEffect(() => {
+    if (autoLoadPaused || loadingMore || allLoaded || autoLoadStuck || !queueData) return;
+    if (autoLoadInFlightRef.current) return;
+    autoLoadInFlightRef.current = true;
+    const t = setTimeout(async () => {
+      await loadMore();
+      autoLoadInFlightRef.current = false;
+    }, 400);
+    return () => { clearTimeout(t); autoLoadInFlightRef.current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accumItems.length, queueData, autoLoadPaused, loadingMore, allLoaded, autoLoadStuck]);
   // Per-item actions remove the affected row(s) locally instead of a full
   // reloadQueue() — a server refetch would always land back on page 1
   // (the primary fetch is pinned to offset=0), silently discarding
@@ -754,11 +783,31 @@ function ResumeInboxPageInner() {
                 <ArrowUpDown size={11} /> {sortByMatch ? 'Sorted: Match %' : 'Sort by Match %'}
               </button>
               {withNearDup > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '3px 8px', borderRadius: 6, fontWeight: 600 }}><AlertTriangle size={10} style={{ display: 'inline', marginRight: 3 }} />{withNearDup} near-dup{withNearDup !== 1 ? 's' : ''}</span>}
-              {queueData?.total > accumItems.length && (
-                <button data-testid="resume-inbox-load-more" onClick={loadMore} disabled={loadingMore}
-                  style={{ marginLeft: 'auto', fontSize: 12, color: '#1e40af', background: 'none', border: 'none', cursor: loadingMore ? 'wait' : 'pointer', fontWeight: 600, opacity: loadingMore ? 0.6 : 1 }}>
-                  {loadingMore ? 'Loading…' : `Load more (${queueData.total - accumItems.length} remaining)`}
-                </button>
+              {/* Auto-load (2026-08-20, user request): loads the rest of
+                  the queue in the background on its own — the manual
+                  "Load more" click is gone, replaced with a live progress
+                  indicator + a pause/resume toggle for anyone who'd
+                  rather not keep pulling data (slow connection, wants to
+                  conserve bandwidth, etc.). */}
+              {queueData?.total > accumItems.length && !autoLoadStuck && (
+                <div data-testid="resume-inbox-autoload-status" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#64748b', fontWeight: 600 }}>
+                  {autoLoadPaused
+                    ? `Paused — ${queueData.total - accumItems.length} remaining`
+                    : `Auto-loading… ${accumItems.length}/${queueData.total}`}
+                  <button data-testid="resume-inbox-autoload-toggle" onClick={() => setAutoLoadPaused(p => !p)}
+                    style={{ fontSize: 11, color: '#1e40af', background: 'none', border: '1px solid #bfdbfe', borderRadius: 6, padding: '2px 8px', cursor: 'pointer', fontWeight: 600 }}>
+                    {autoLoadPaused ? 'Resume' : 'Pause'}
+                  </button>
+                </div>
+              )}
+              {autoLoadStuck && (
+                <div data-testid="resume-inbox-autoload-error" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#dc2626', fontWeight: 600 }}>
+                  Auto-load stopped after repeated errors ({queueData.total - accumItems.length} remaining)
+                  <button onClick={() => setAutoLoadFails(0)} style={{ fontSize: 11, color: '#dc2626', background: 'none', border: '1px solid #fecaca', borderRadius: 6, padding: '2px 8px', cursor: 'pointer', fontWeight: 600 }}>Retry</button>
+                </div>
+              )}
+              {queueData && accumItems.length > 0 && queueData.total <= accumItems.length && (
+                <span style={{ marginLeft: 'auto', fontSize: 12, color: '#16a34a', fontWeight: 600 }}>✓ All {queueData.total} loaded</span>
               )}
             </div>
             {/* Real bug fix (2026-08-20): this wrapper had no horizontal
@@ -801,7 +850,7 @@ function ResumeInboxPageInner() {
                 {['Candidate', 'Status', 'Source', 'File', 'Skills', 'Exp', 'Received', 'Added', 'Job Match', 'Match %', ''].map(h => (
                   <th key={h} title={h === 'Received' ? "The email's own date" : h === 'Added' ? 'When our system processed this email' : undefined}
                     style={{
-                      padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : h === 'Added' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: (h === 'Match %' || h === 'Added') ? 'pointer' : 'default',
+                      padding: '10px 8px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: h === 'Match %' ? '#1e40af' : h === 'Added' ? '#1e40af' : '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', cursor: (h === 'Match %' || h === 'Added') ? 'pointer' : 'default',
                     }}
                     onClick={h === 'Match %' ? () => { setSortByMatch(s => !s); } : h === 'Added' ? () => { setAddedDir(d => d === 'desc' ? 'asc' : 'desc'); setSortByMatch(false); } : undefined}>
                     {h === 'Match %' ? <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Target size={11} />{h}{sortByMatch ? ' ↓' : ''}</span>
@@ -831,7 +880,7 @@ function ResumeInboxPageInner() {
                           rest of the cell while fixing the checkbox itself. */}
                       <td style={{ padding: '10px 8px' }} onClick={e => { e.stopPropagation(); toggleSelect(r.id); }}><input type="checkbox" data-testid={`resume-inbox-checkbox-${r.id}`} checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} onClick={e => e.stopPropagation()} style={{ cursor: 'pointer' }} /></td>
                       {/* Candidate cell — shows name + near-dup warning */}
-                      <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}>
+                      <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}>
                         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
                           <span style={{ fontWeight: 700, color: '#1e293b', fontSize: 13 }}>{r.full_name || r.parsed_data?.name || '—'}</span>
                           {nearDup && <NearDupBadge dup={nearDup} />}
@@ -839,7 +888,7 @@ function ResumeInboxPageInner() {
                         <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{r.email || r.source_email || '—'}</div>
                         {r.current_designation && <div style={{ fontSize: 10, color: '#94a3b8' }}>{r.current_designation}</div>}
                       </td>
-                      <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}>
+                      <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}>
                         <StatusBadge status={r.parse_status || 'pending'} />
                         {r.pipeline_stage && (
                           <div data-testid={`resume-inbox-pipeline-stage-${r.id}`} title={r.pipeline_job || ''}
@@ -848,20 +897,20 @@ function ResumeInboxPageInner() {
                           </div>
                         )}
                       </td>
-                      <td style={{ padding: '10px 12px' }} onClick={() => setSelected(r)}><SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} /></td>
-                      <td style={{ padding: '10px 12px', maxWidth: 150 }} onClick={() => setSelected(r)}>
+                      <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}><SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} /></td>
+                      <td style={{ padding: '10px 8px', maxWidth: 150 }} onClick={() => setSelected(r)}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#374151' }}><FileText size={12} color="#6366f1" /><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{r.file_name || r.email_subject || '—'}</span></div>
                         {r.file_size > 0 && <div style={{ fontSize: 10, color: '#94a3b8' }}>{fsize(r.file_size)}</div>}
                       </td>
-                      <td style={{ padding: '10px 12px', maxWidth: 160 }} onClick={() => setSelected(r)}>
+                      <td style={{ padding: '10px 8px', maxWidth: 160 }} onClick={() => setSelected(r)}>
                         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>{skills.slice(0, 3).map((sk: string) => <span key={sk} style={{ fontSize: 10, background: '#eff6ff', color: '#1e40af', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>{sk}</span>)}{skills.length > 3 && <span style={{ fontSize: 10, color: '#94a3b8' }}>+{skills.length - 3}</span>}</div>
                       </td>
-                      <td style={{ padding: '10px 12px', fontSize: 12, color: '#374151', fontWeight: 600, whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{gx(r.total_exp_mo || 0)}</td>
-                      <td style={{ padding: '10px 12px', fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.email_received_at || r.created_at)}</td>
-                      <td style={{ padding: '10px 12px', fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.created_at)}</td>
+                      <td style={{ padding: '10px 8px', fontSize: 12, color: '#374151', fontWeight: 600, whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{gx(r.total_exp_mo || 0)}</td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.email_received_at || r.created_at)}</td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.created_at)}</td>
                       {/* Job Match column — entire cell is clickable when JD is known */}
                       <td
-                        style={{ padding: '10px 12px', cursor: (r.requisition_title || r.matched_jd_title) ? 'pointer' : 'default' }}
+                        style={{ padding: '10px 8px', cursor: (r.requisition_title || r.matched_jd_title) ? 'pointer' : 'default' }}
                         onClick={e => {
                           e.stopPropagation();
                           const reqId = r.requisition_id || r.matched_requisition_id;
@@ -886,7 +935,7 @@ function ResumeInboxPageInner() {
                         )}
                       </td>
                       {/* Match % column — sortable, tooltip shows which JD */}
-                      <td style={{ padding: '10px 12px', textAlign: 'center' }} onClick={() => setSelected(r)}>
+                      <td style={{ padding: '10px 8px', textAlign: 'center' }} onClick={() => setSelected(r)}>
                         {matchScore != null
                           ? <JdMatchBadge score={matchScore} title={r.matched_jd_title || r.requisition_title} />
                           : <span style={{ fontSize: 11, color: '#e2e8f0' }}>—</span>}
