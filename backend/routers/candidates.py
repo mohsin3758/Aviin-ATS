@@ -241,6 +241,7 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
     """
     import re
     from services.improved_parser import extract_skills_from_text, extract_experience_v2
+    from routers.ner import compute_skill_similarity
 
     jd = body.jd_text or ''
     req_skills    = extract_skills_from_text(jd)
@@ -283,9 +284,19 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
         loc_score = 5 if loc_hint and loc_hint in (c.get('location') or '').lower() else 0
 
         total = skill_score + exp_score + desig_score + loc_score
-        matched_names = [s for s in (c.get('skills') or []) if s.lower() in req_lower]
-        missing_names = [s for s in req_skills if s.lower() not in cand_skills_lower]
+        # REAL GAP FIX (2026-08-20): matched/missing used to be checked
+        # ONLY against the candidate's structured `skills` array - a
+        # required skill genuinely described in the resume's own text
+        # but never captured by the (imperfect) resume-parsing pass
+        # showed as flatly missing. Now also does a case-insensitive
+        # substring check against resume_text, via the same shared
+        # helper every other missing_skills computation in this codebase
+        # uses, so a "missing skill" chip means the same thing everywhere.
+        _, matched_names, missing_names = compute_skill_similarity(
+            candidate_skills=c.get('skills'), required_skills=req_skills, resume_text=c.get('resume_text'),
+        )
 
+        c.pop('resume_text', None)  # not needed in the response; can be very large
         scored.append({
             **c,
             'rank_score':      total,
@@ -542,13 +553,16 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
         d['latest_resume_file_name'] = rf['file_name']
     d['pipeline_stage'] = pl_row['stage'] if pl_row else None
     d['pipeline_job'] = pl_row['pipeline_job'] if pl_row else None
-    cand_skills_lower = {s.lower() for s in (d.get('skills') or [])}
+    from routers.ner import compute_skill_similarity
     scores_out = []
     for sr in score_rows:
         s = dict(sr)
         req_skills = s.pop('skills_required', None) or []
-        s['missing_skills'] = [x for x in req_skills if x.lower() not in cand_skills_lower]
-        s['matched_skills'] = [x for x in req_skills if x.lower() in cand_skills_lower]
+        _, matched, missing = compute_skill_similarity(
+            candidate_skills=d.get('skills'), required_skills=req_skills, resume_text=d.get('resume_text'),
+        )
+        s['missing_skills'] = missing
+        s['matched_skills'] = matched
         scores_out.append(s)
     d['ai_scores'] = scores_out
     return d
@@ -566,13 +580,13 @@ async def match_candidate_against_open_jobs(candidate_id: str, actor: Actor = De
     same candidate_scores table so results show up in the existing AI
     Match Score panel afterward too - one scoring path, not a second one."""
     from routers.intelligence import score_candidate_core
+    from routers.ner import compute_skill_similarity
     async with db.tenant_conn(actor.tenant_id) as conn:
         cand = await conn.fetchrow(
-            "SELECT id, skills FROM candidates WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
+            "SELECT id, skills, resume_text FROM candidates WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
             candidate_id, actor.tenant_id)
         if not cand:
             raise HTTPException(404, "Candidate not found")
-        cand_skills_lower = {s.lower() for s in (cand["skills"] or [])}
         reqs = await conn.fetch(
             "SELECT id, title, description, experience_min, experience_max, education_required, skills_required"
             " FROM requisitions WHERE tenant_id=$1 AND status='open' AND is_active IS NOT FALSE"
@@ -594,10 +608,17 @@ async def match_candidate_against_open_jobs(candidate_id: str, actor: Actor = De
                 # ai_scores field - real bug fixed here: the first version
                 # of this endpoint returned raw candidate_scores rows with
                 # no skill breakdown at all, caught by the S38 regression
-                # test (matched_skills came back undefined).
-                req_skills = r["skills_required"] or []
-                res["matched_skills"] = [x for x in req_skills if x.lower() in cand_skills_lower]
-                res["missing_skills"] = [x for x in req_skills if x.lower() not in cand_skills_lower]
+                # test (matched_skills came back undefined). Uses the same
+                # resume-text-aware shared helper score_candidate_core()
+                # itself now uses internally (2026-08-20) rather than a
+                # separate, structured-skills-only computation that would
+                # otherwise silently contradict it.
+                _, matched, missing = compute_skill_similarity(
+                    candidate_skills=cand["skills"], required_skills=r["skills_required"],
+                    resume_text=cand["resume_text"],
+                )
+                res["matched_skills"] = matched
+                res["missing_skills"] = missing
                 results.append(res)
             except Exception as e:
                 print(f"[JobMatch] Failed scoring candidate {candidate_id} vs req {r['id']}: {e}")

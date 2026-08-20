@@ -9457,3 +9457,98 @@ what gets submitted, and a dedicated `req-stage-counts` soft-removal
 regression test). Broader regression sweep (S1/S2/S8/S13/S16/S20/S22/
 S30/S38/S40/S42/S47/S48, 74 tests) passed clean. Zero-token audit:
 `CONFIRMED CLEAN` (381 files, 0 external API refs).
+
+
+## Follow-up same day: no way to view a candidate before adding + a real
+## skill-data-quality bug behind incomplete AI matching, 2026-08-20
+User reported, from 2 screenshots: (1) the AI Match modal has a checkbox
+but no way to open Rahul's profile/resume to check him before adding to
+the pipeline, and (2) the Edit Requirement form's "Required Skills" list
+wasn't checking all skills — some were missing from the resume-matching
+check. Asked to understand both and "make perfect AI matching resume as
+per JD and Mandatory skills."
+
+**Part 1 — no candidate detail access before adding.** The AI Match
+modal's row was a `<label>` wrapping the checkbox and all content, so
+adding any link inside it would also toggle the checkbox on click
+(clicking anywhere in a `<label>` activates its associated `<input>`).
+Switched the row to a plain div with an explicit row-click-to-toggle
+handler (the same `stopPropagation` convention already used elsewhere in
+this file for this exact class of nested-clickable bug), and added a
+real "👁 View Profile" link per row (`target="_blank"`, opens `/candidates/
+{id}`) with its own `stopPropagation` so it never toggles selection.
+Verified live via real network/DOM interaction: clicking it opens the
+candidate's real profile in a new tab, and the checkbox state is
+provably unchanged before/after (`false → false`).
+
+**Part 2 — real, live skill data corruption, found by direct
+investigation, not assumed.** Queried the exact requisition from the
+screenshot directly: `skills_required` genuinely contained `'Disaster'`,
+`'Credit'`, `'Clain'` — truncated fragments of the JD's own "Disaster
+management, Credit management and Claim Management" line. Traced the
+cause: `addSkill()` (`requisitions/page.tsx`) committed the ENTIRE
+input-box value as ONE skill on every Enter/Add, with no support for a
+multi-skill paste or fast sequential typing — a real, understandable
+data-entry trap for anyone trying to add a JD's own multi-word skill
+list one Enter-press at a time. Fixed `addSkill()` to split on comma/
+semicolon/" and "/newline, so a real multi-skill paste or fast-typed
+list becomes multiple clean tags in one action instead of silently
+truncated fragments — a single plain skill with no delimiter behaves
+exactly as before. Fixed the real, already-corrupted production data
+directly via the API (`'Disaster'`→`'Disaster Management'`, etc.).
+
+**Part 3 — a much deeper, systemic bug found investigating "not checking
+all skills," present in 5 separate code paths.** Every `missing_skills`/
+`matched_skills` computation in this codebase (`ner.py::compute_
+skill_similarity` — the shared engine `score_candidate_core` already
+uses — plus 4 duplicated inline copies in `requisitions.py` and
+`candidates.py`) checked a required skill ONLY against the candidate's
+structured, parsed `skills` array — never the candidate's actual resume
+text. Since that array is itself the output of an imperfect resume-
+parsing pass, a candidate could have real, described experience with a
+required skill and still get flatly marked "missing." **Confirmed live,
+not theoretical**: Rishith's parsed `skills` array is `{"SAP ABAP","SAP
+FICO","SAP HANA",LSMW,JUnit}` — no "Credit Management" — but his actual
+resume text literally reads "...defining Dunning letters and Credit
+management..." real, substantive experience the old check had no way to
+see.
+
+Extended the one shared function (`ner.compute_skill_similarity`) with
+an optional `resume_text` parameter — a case-insensitive substring check
+against the candidate's real resume text as a second pass before a
+required skill is declared missing — then wired it into every one of the
+5 call sites instead of leaving 4 separate, now-inconsistent, exact-
+match-only copies: `intelligence.py::score_candidate_core` (already had
+`resume_text` in scope, just never passed it), `requisitions.py::match_
+candidates_for_requisition` (the AI Match modal's own backend — fetches
+resume_text in a separate lightweight query, not returned in the
+response body, to avoid bloating a 50-candidate payload with up to
+200,000 chars each), and 3 sites in `candidates.py` (`rank_candidates`
+— the Candidates page's "JD Match — AI Ranking" feature, which already
+had resume_text in its own `FIELDS` select and now strips it back out of
+the response after use; `get_candidate()`'s `ai_scores`; and `/candidates/
+{id}/match-open-jobs`, which previously ran its OWN separate, poorer
+exact-match computation right after calling `score_candidate_core` -
+silently contradicting that function's own internal, now-better answer -
+replaced with a single call to the same shared helper).
+
+Verified for real end-to-end, not code review: re-ran the exact
+requisition/candidate from the report post-fix — `match-candidates` now
+returns full clean skill names, and Rishith's/Para Praveen's "Credit
+Management" correctly flips to matched while Rahul K Y's (whose resume
+genuinely doesn't mention it) correctly stays missing; independently
+confirmed via a direct SQL substring search of Rishith's real stored
+resume_text that "Credit management" genuinely appears there, ruling out
+a false positive. A real headless-browser pass confirmed the fixed
+modal renders full "Disaster Management"/"Credit Management"/"Claim
+Management" chips (matched, blue, for candidates whose resume supports
+it) and the View Profile link/checkbox independence. New permanent
+coverage in the existing "S48" suite (3 more tests: a real resume-text-
+vs-structured-skills API check, a real UI bulk-paste-splits-correctly
+check — caught and fixed one genuine test-locator bug along the way, a
+`text=` locator matching the underlying page's own clipped-but-still-in-
+DOM JD description behind the modal overlay, not an app bug — and the
+View Profile / checkbox-independence UI check). Full regression sweep
+(S1/S2/S8/S13/S16/S20/S22/S30/S38/S40/S42/S47/S48, 84 tests) passed
+clean. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0 external API
+refs).

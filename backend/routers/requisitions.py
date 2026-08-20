@@ -373,16 +373,37 @@ async def match_candidates_for_requisition(
     sql/04_phase3_ai_engine.sql). RLS makes a wrong-tenant requisition_id yield [].
     match_candidates() itself only returns a skill_overlap COUNT, not which
     skills are missing — computed here in Python from skills_required so a
-    recruiter can see exactly why a candidate scored the way they did."""
+    recruiter can see exactly why a candidate scored the way they did.
+
+    REAL GAP FIX (2026-08-20): missing_skills used to be checked ONLY
+    against the candidate's structured `skills` array (an imperfect
+    resume-parsing output) - a candidate could have real, described
+    experience with a required skill in their actual resume text and
+    still show it as flatly "missing" here. Now also checks a case-
+    insensitive substring match against resume_text (fetched separately,
+    not returned in the response body — resume_text can be very large
+    and this endpoint returns up to 50 candidates at once) via the same
+    shared ner.compute_skill_similarity() every other missing_skills
+    computation in this codebase now uses, so this stays honest and
+    consistent everywhere a recruiter sees a "missing skill" chip."""
+    from routers.ner import compute_skill_similarity
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT * FROM match_candidates($1, $2)", requisition_id, limit)
         req_skills = await conn.fetchval(
             "SELECT skills_required FROM requisitions WHERE id=$1", requisition_id) or []
+        cand_ids = [r["candidate_id"] for r in rows]
+        text_rows = await conn.fetch(
+            "SELECT id, resume_text FROM candidates WHERE id = ANY($1::uuid[])", cand_ids) if cand_ids else []
+        resume_text_by_id = {r["id"]: r["resume_text"] for r in text_rows}
     out = []
     for r in rows:
         d = dict(r)
-        cand_lower = {s.lower() for s in (d.get("skills") or [])}
-        d["missing_skills"] = [s for s in req_skills if s.lower() not in cand_lower]
+        _, matched, missing = compute_skill_similarity(
+            candidate_skills=d.get("skills"), required_skills=req_skills,
+            resume_text=resume_text_by_id.get(d["candidate_id"]),
+        )
+        d["missing_skills"] = missing
+        d["matched_skills"] = matched
         out.append(d)
     return out
 

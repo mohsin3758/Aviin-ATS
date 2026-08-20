@@ -166,6 +166,7 @@ def compute_skill_similarity(
     candidate_skills: Optional[list] = None,
     required_skills: Optional[list] = None,
     cosine_sim_value: Optional[float] = None,
+    resume_text: Optional[str] = None,
 ) -> tuple:
     """Real gap fix (2026-08-20): skill_match_score previously came ONLY
     from embed cosine similarity of free-text JD description - if a
@@ -181,11 +182,26 @@ def compute_skill_similarity(
     of the free-text JD (fuzzier, but the only signal when skills_required
     is empty) weighted 40% - falls back to whichever single signal is
     actually available, and only to 0.0 when neither exists at all.
+
+    Second real gap fix (2026-08-20, same day): a skill was only ever
+    checked against the candidate's STRUCTURED `skills` array - which is
+    itself the output of an imperfect resume-parsing pass and routinely
+    misses a genuine skill mentioned in the resume's actual project/
+    experience text but never pulled into that array. A candidate with
+    real "Claim Management" experience described in a project bullet, but
+    whose parsed `skills` list only captured "SAP FICO"/"SAP HANA", was
+    shown as flatly missing it - not a fair "is this genuinely absent"
+    signal. `resume_text`, when given, is checked as a second, case-
+    insensitive substring pass before a required skill is declared
+    missing - a skill found only in resume_text (not the structured list)
+    still counts as matched, since it's real, checkable evidence, just
+    not one this app's own parser happened to capture structurally.
     Returns (skill_similarity_0_to_1, matched_skills, missing_skills)."""
     cand_lower = {s.lower() for s in (candidate_skills or []) if s}
+    text_lower = (resume_text or "").lower()
     req_list = [s for s in (required_skills or []) if s]
-    matched = [s for s in req_list if s.lower() in cand_lower]
-    missing = [s for s in req_list if s.lower() not in cand_lower]
+    matched = [s for s in req_list if s.lower() in cand_lower or (text_lower and s.lower() in text_lower)]
+    missing = [s for s in req_list if s.lower() not in cand_lower and not (text_lower and s.lower() in text_lower)]
     keyword_ratio = (len(matched) / len(req_list)) if req_list else None
 
     if keyword_ratio is not None and cosine_sim_value is not None:

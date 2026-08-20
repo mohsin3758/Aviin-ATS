@@ -250,6 +250,7 @@ async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisit
 
     skill_sim, matched_skills, missing_skills = compute_skill_similarity(
         candidate_skills=cand["skills"], required_skills=required_skills, cosine_sim_value=cosine_val,
+        resume_text=cand["resume_text"],
     )
 
     scores = score_candidate(

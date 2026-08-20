@@ -293,15 +293,31 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
           {items.length === 0 && <div style={{ textAlign: 'center', color: '#cbd5e1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>No matching candidates found</div>}
           {items.map((c: any) => {
             const isSelected = selected.has(c.candidate_id);
+            // REAL FIX (2026-08-20): this row used to be a <label> wrapping
+            // the checkbox, so there was no way to add a "View Profile"
+            // link without it also toggling the checkbox (clicking
+            // anywhere in a <label> activates its associated <input>) —
+            // exactly the "not able to check the candidate before adding"
+            // complaint. Switched to a plain row-click-to-toggle div (the
+            // same stopPropagation convention already used elsewhere in
+            // this codebase for this exact class of nested-clickable bug),
+            // so the View Profile link/icon can sit inside without also
+            // selecting the row.
             return (
-              <label key={c.candidate_id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 8px', borderRadius: 10, cursor: 'pointer', background: isSelected ? '#eff6ff' : 'transparent', marginBottom: 2 }}>
-                <input type="checkbox" checked={isSelected} onChange={() => toggle(c.candidate_id)} style={{ marginTop: 3 }} />
+              <div key={c.candidate_id} onClick={() => toggle(c.candidate_id)}
+                style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 8px', borderRadius: 10, cursor: 'pointer', background: isSelected ? '#eff6ff' : 'transparent', marginBottom: 2 }}>
+                <input type="checkbox" checked={isSelected} onChange={() => toggle(c.candidate_id)} onClick={e => e.stopPropagation()} style={{ marginTop: 3 }} />
                 <div style={{ width: 40, height: 40, borderRadius: '50%', border: `2px solid ${aiScoreColor(c.fit_score)}`, background: aiScoreBg(c.fit_score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 900, color: aiScoreColor(c.fit_score), flexShrink: 0 }}>
                   {Math.round(c.fit_score || 0)}%
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 12, fontWeight: 700, color: '#1e293b' }}>{c.full_name}</span>
+                    <a href={`/candidates/${c.candidate_id}`} target="_blank" rel="noreferrer"
+                      onClick={e => e.stopPropagation()} title="View full profile & resume before adding"
+                      style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 700, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 999, padding: '1px 7px' }}>
+                      <Eye size={9} /> View Profile
+                    </a>
                   </div>
                   <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>
                     {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ') || '—'}
@@ -310,7 +326,7 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
                   </div>
                   {c.missing_skills?.length > 0 && (
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
-                      {(c.skills || []).slice(0, 4).map((sk: string) => (
+                      {(c.matched_skills?.length ? c.matched_skills : (c.skills || [])).slice(0, 4).map((sk: string) => (
                         <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' }}>{sk}</span>
                       ))}
                       {c.missing_skills.slice(0, 3).map((sk: string) => (
@@ -326,7 +342,7 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
                     </div>
                   )}
                 </div>
-              </label>
+              </div>
             );
           })}
         </div>
@@ -997,10 +1013,26 @@ function RequisitionsPageInner() {
   const fNum = (key: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm(prev => ({ ...prev, [key]: e.target.value === '' ? '' : Number(e.target.value) }));
 
+  // REAL BUG FOUND 2026-08-20: pasting or typing a JD's own multi-skill
+  // line ("Important skills - Disaster management, Credit management and
+  // Claim Management") only ever committed the ENTIRE input as one skill
+  // string — and a recruiter trying to add each phrase separately by
+  // pressing Enter mid-typing ended up with truncated fragments
+  // ("Disaster", "Credit", "Clain") silently saved as real, permanent
+  // required skills, directly feeding (and degrading) every AI-match
+  // "missing skill" check downstream. Now splits on comma/semicolon/
+  // " and "/newline so a real multi-skill paste becomes multiple clean
+  // tags in one shot — a single plain skill with no delimiter behaves
+  // exactly as before.
   const addSkill = (skill: string) => {
-    const s = skill.trim();
-    if (s && !form.skills_required.includes(s))
-      setForm(prev => ({ ...prev, skills_required: [...prev.skills_required, s] }));
+    const parts = skill.split(/,|;|\n|\r| and /i).map(p => p.trim()).filter(Boolean);
+    if (parts.length > 0) {
+      setForm(prev => {
+        const next = [...prev.skills_required];
+        for (const p of parts) if (!next.includes(p)) next.push(p);
+        return { ...prev, skills_required: next };
+      });
+    }
     setSkillInput('');
   };
   const removeSkill = (s: string) =>
