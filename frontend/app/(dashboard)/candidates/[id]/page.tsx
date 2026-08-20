@@ -1496,6 +1496,19 @@ function NotesPanel({ id }: { id: string }) {
 export default function CandidateProfilePage() {
   const { id } = useParams<{id:string}>();
   const router = useRouter();
+  // REAL BUG FIX (2026-08-21): "Back to Candidates" always hardcoded to
+  // /candidates regardless of how this page was actually reached (Jobs &
+  // Requisitions' AI Match modal, Resume Inbox, JD Match ranked list,
+  // pipeline board...) — reported live: opening a candidate from the AI
+  // Match modal and clicking "Back" dropped the user on the plain
+  // Candidates list, losing the modal/context they came from. Uses real
+  // browser history when there's somewhere real to go back to; falls
+  // back to /candidates only for a genuinely history-less entry (direct
+  // URL, a fresh tab with nothing else in its history).
+  const goBack = () => {
+    if (typeof window !== 'undefined' && window.history.length > 1) router.back();
+    else router.push('/candidates');
+  };
   const { data: candRaw, loading, refetch } = useFetch<any>(id ? `/candidates/${id}` : null);
   const { data: apps } = useFetch<any>(id ? `/candidates/${id}/applications` : null);
   const [cand, setCand] = useState<any>(null);
@@ -1576,7 +1589,7 @@ export default function CandidateProfilePage() {
     <div style={{padding:'48px',textAlign:'center',color:'#94a3b8'}}>
       Candidate not found.
       <br/>
-      <button onClick={() => router.push('/candidates')}
+      <button onClick={goBack}
         style={{marginTop:'12px',padding:'8px 16px',background:'#0f172a',color:'white',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px'}}>
         Back to Candidates
       </button>
@@ -1609,7 +1622,7 @@ export default function CandidateProfilePage() {
       )}
 
       {/* Back */}
-      <button onClick={() => router.push('/candidates')}
+      <button onClick={goBack}
         style={{display:'flex',alignItems:'center',gap:'6px',background:'none',border:'none',cursor:'pointer',color:'#64748b',fontSize:'13px',padding:0,width:'fit-content'}}>
         <ArrowLeft size={15}/> Back to Candidates
       </button>

@@ -3,7 +3,28 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
-import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X } from 'lucide-react';
+import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X, ArrowLeft, Download, Mail, Phone, ExternalLink } from 'lucide-react';
+
+// Same auth-gated blob-fetch pattern already used by the Candidate 360
+// page's own Download Resume button — duplicated here (not imported
+// cross-page) matching this file's existing AiMatchModal/AddCandidateModal
+// precedent of small, self-contained components over cross-page imports.
+async function downloadResume(fileId: string, fileName: string) {
+  const token = localStorage.getItem('airecruit_token');
+  const apiBase = process.env.NEXT_PUBLIC_API_URL ?? '/api';
+  try {
+    const resp = await fetch(`${apiBase}/resume-intake/${fileId}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName || 'resume';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
+}
 
 const SKILLS_LIST = [
   'Python','Java','React','Node.js','FastAPI','Django','AWS','Docker','Kubernetes',
@@ -211,6 +232,18 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  // REAL BUG FIX (2026-08-21): "View Profile" used to be a plain <a
+  // target="_blank"> link — reported live: after opening a candidate this
+  // way and clicking the profile page's own "Back" button, it dropped
+  // the user on the plain Candidates list instead of returning to this
+  // modal (a separate, now-also-fixed bug in that page — see candidates/
+  // [id]/page.tsx's goBack()). Rather than depend on cross-page/cross-tab
+  // navigation at all, viewing a candidate now opens an inline preview
+  // right inside this same modal — nothing to "come back" from, the
+  // ranked list and every already-fetched match stays exactly as it was.
+  // A "Open Full Profile" escape hatch still opens the real page in a
+  // new tab for anyone who wants the complete Candidate 360 view.
+  const [previewCandidateId, setPreviewCandidateId] = useState<string | null>(null);
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
   const visibleStages = (stageConfig || []).filter((s: any) => s.is_visible)
     .sort((a: any, b: any) => a.display_order - b.display_order);
@@ -275,6 +308,15 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
           </div>
           <button onClick={onClose} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94a3b8' }}><X size={14} /></button>
         </div>
+        {previewCandidateId ? (
+          <CandidatePreviewPanel
+            candidateId={previewCandidateId}
+            isSelected={selected.has(previewCandidateId)}
+            onToggle={() => toggle(previewCandidateId)}
+            onBack={() => setPreviewCandidateId(null)}
+          />
+        ) : (
+        <>
         <div style={{ padding: '12px 18px 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '7px 10px' }}>
             <Search size={13} color="#94a3b8" />
@@ -313,11 +355,11 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 12, fontWeight: 700, color: '#1e293b' }}>{c.full_name}</span>
-                    <a href={`/candidates/${c.candidate_id}`} target="_blank" rel="noreferrer"
-                      onClick={e => e.stopPropagation()} title="View full profile & resume before adding"
-                      style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 700, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 999, padding: '1px 7px' }}>
+                    <button onClick={e => { e.stopPropagation(); setPreviewCandidateId(c.candidate_id); }}
+                      title="Preview full profile & resume before adding — stays on this list"
+                      style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 700, color: '#2563eb', cursor: 'pointer', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 999, padding: '1px 7px' }}>
                       <Eye size={9} /> View Profile
-                    </a>
+                    </button>
                   </div>
                   <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>
                     {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ') || '—'}
@@ -346,6 +388,8 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
             );
           })}
         </div>
+        </>
+        )}
         <div style={{ padding: '12px 18px', borderTop: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: '#94a3b8' }}>{selected.size} selected</span>
           <button onClick={submit} disabled={selected.size === 0 || saving}
@@ -354,6 +398,85 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Inline candidate preview inside AiMatchModal — fetched on demand only
+// when a recruiter actually clicks "View Profile" on one candidate, not
+// eagerly for every ranked match. Deliberately does NOT navigate to
+// /candidates/{id}: that was the original implementation and the direct
+// cause of the reported bug (the Candidate 360 page's own "Back" button
+// couldn't reliably return here — see candidates/[id]/page.tsx's
+// goBack() for the companion fix to that page for every OTHER path into
+// it). Staying inside this same modal means there is nothing to "go
+// back" from at all.
+function CandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack }: {
+  candidateId: string; isSelected: boolean; onToggle: () => void; onBack: () => void;
+}) {
+  const { data: c, loading } = useFetch<any>(`/candidates/${candidateId}`);
+  if (loading || !c) {
+    return <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: 12 }}>Loading profile…</div>;
+  }
+  const skills: string[] = Array.isArray(c.skills) ? c.skills : [];
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '12px 18px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', fontSize: 12, fontWeight: 600, padding: 0 }}>
+          <ArrowLeft size={13} /> Back to list
+        </button>
+        <a href={`/candidates/${candidateId}`} target="_blank" rel="noreferrer"
+          style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#2563eb', textDecoration: 'none' }}>
+          Open Full Profile <ExternalLink size={11} />
+        </a>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+        <div style={{ width: 48, height: 48, borderRadius: '50%', background: '#1e40af', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+          {(c.full_name || '?').charAt(0).toUpperCase()}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1e293b' }}>{c.full_name}</div>
+          <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+            {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ') || '—'}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6, fontSize: 11, color: '#64748b' }}>
+            {c.total_exp_mo > 0 && <span>{fmtExpMonths(c.total_exp_mo)} experience</span>}
+            {c.location && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><MapPin size={11} /> {c.location}</span>}
+            {c.email && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Mail size={11} /> {c.email}</span>}
+            {c.phone && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Phone size={11} /> {c.phone}</span>}
+          </div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #bfdbfe', background: isSelected ? '#eff6ff' : '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#1e40af' }}>
+          <input type="checkbox" checked={isSelected} onChange={onToggle} />
+          {isSelected ? 'Selected for pipeline' : 'Select for pipeline'}
+        </label>
+        {c.latest_resume_file_id && (
+          <button onClick={() => downloadResume(c.latest_resume_file_id, c.latest_resume_file_name)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+            <Download size={12} /> Download Resume
+          </button>
+        )}
+      </div>
+      {skills.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Skills</div>
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+            {skills.map((sk: string) => (
+              <span key={sk} style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 5, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' }}>{sk}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      {c.resume_text && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Resume Extract</div>
+          <div style={{ fontSize: 11.5, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-wrap', maxHeight: 220, overflowY: 'auto', background: '#f8fafc', border: '1px solid #f1f5f9', borderRadius: 8, padding: 10 }}>
+            {c.resume_text.slice(0, 3000)}{c.resume_text.length > 3000 ? '…' : ''}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

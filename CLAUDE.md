@@ -9552,3 +9552,87 @@ View Profile / checkbox-independence UI check). Full regression sweep
 (S1/S2/S8/S13/S16/S20/S22/S30/S38/S40/S42/S47/S48, 84 tests) passed
 clean. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0 external API
 refs).
+
+
+## Follow-up same day: "View Profile" navigation loses the AI Match modal
+## context — rebuilt as an inline preview, plus a real "Back" bug fixed
+## project-wide, 2026-08-21
+User reported: clicking "View Profile" on Rahul opened his profile
+correctly, but clicking that page's own "Back" button afterward landed
+on the plain Candidates list, not back on the AI Matched Candidates
+modal — "it should go same page not to other page."
+
+**Root cause, confirmed by reading the actual code, not guessed**: the
+Candidate 360 page's "← Back to Candidates" button (`candidates/[id]/
+page.tsx`, two occurrences) was `router.push('/candidates')` — a
+hardcoded navigation, not real browser-history back. It always lands on
+the generic Candidates list regardless of how the page was actually
+reached (this AI Match modal, Resume Inbox, JD Match ranked list, the
+pipeline board, search results...). "View Profile" itself opened
+correctly in a new tab (`target="_blank"`), so the original modal was
+never actually disturbed — but nobody navigating via that page's own
+"Back" button could tell, since it always discarded their real path.
+
+**Two complementary fixes, not one:**
+1. **General, project-wide fix**: `goBack()` in `candidates/[id]/
+   page.tsx` now uses real browser history (`router.back()`) whenever
+   there's genuinely something to go back to (`window.history.length >
+   1`), falling back to `/candidates` only for a genuinely history-less
+   entry (direct URL, a fresh tab with nothing else in its history).
+   Fixes this for every current and future path into a candidate profile,
+   not just the one reported.
+2. **Specific, more direct fix for the reported flow**: rather than rely
+   on navigation-and-back at all, "View Profile" inside the AI Match
+   modal (`requisitions/page.tsx`) now opens a real inline preview panel
+   — INSIDE the same modal, no navigation anywhere. New `CandidatePreviewPanel`
+   component: fetches `GET /candidates/{id}` on demand (only when a
+   recruiter actually clicks, not eagerly for all 50 ranked matches),
+   shows name/designation/employer/experience/location/email/phone, a
+   "Select for pipeline" checkbox synced with the modal's real selection
+   state, a real "Download Resume" button (same auth-gated blob-fetch
+   pattern the Candidate 360 page's own button already uses, duplicated
+   here rather than cross-page-imported — matching this file's existing
+   AiMatchModal/AddCandidateModal precedent), the full skills list, and
+   a resume-text extract — plus a "← Back to list" button (returns to the
+   ranked list, still the same modal, matches/filters/selection all
+   intact) and an "Open Full Profile ↗" escape hatch (still opens the
+   real page in a new tab, for anyone who wants the complete view).
+
+**A real, separate test-hygiene bug found and fixed while verifying
+this, unrelated to today's actual code changes**: re-running the fixed
+S48 suite still occasionally added a real candidate ("Shivam Singh") to
+the REAL production "Associate Managing Consultant - SAP FICO"
+requisition — confirmed live, 3 times, via direct DB checks before and
+after each run. Traced to S48's own test relying on a fixed
+`waitForTimeout(800)` after filling the search box, with no hard
+assertion that the search had genuinely narrowed the list before
+proceeding — a real race under load. Fixed by replacing the timeout with
+a real, auto-retrying assertion that the throwaway card's title is
+visible AND the real card's title is absent before any further
+interaction. **A second, independent, actually pre-existing instance of
+the identical bug class was found in the process**: S20 (built
+2026-08-20, unrelated to today's session) selected `optValues[1]` —
+"whichever real open requisition happens to be the 2nd option in the
+live dropdown" — to assign a real, top-ranked candidate into. This has
+been silently polluting real client-facing pipeline data every single
+time that test ran, since the day it was written, not something today's
+changes introduced — just newly noticed because today's careful
+before/after checks on this exact requisition finally caught it
+red-handed. Fixed by giving S20 its own throwaway requisition (created
+via a real API call, selected in the dropdown by resolving its real
+`<option>` value from its known title, cleaned up afterward along with
+the application it creates) instead of touching an arbitrary real one.
+
+Verified for real end-to-end, not code review: real screenshots
+confirming the inline preview panel renders correctly (real name, real
+skills, real resume extract, Select-for-pipeline checkbox, Download
+Resume button) while the URL stays on `/requisitions` throughout; a
+real headless-browser check confirming clicking "View Profile" causes
+zero navigation and "Back to list" genuinely restores the ranked list;
+confirmed via direct DB queries before and after every single test run
+in this investigation that the real production requisition's pipeline
+count stayed at 0 once both S48 and S20 were fixed (it had drifted to 1
+three separate times before the fixes landed, each time cleaned up by
+hand and re-verified). Full regression sweep (S1/S2/S8/S13/S16/S20/S22/
+S30/S38/S40/S42/S47/S48, 79 tests) passed clean. Zero-token audit:
+`CONFIRMED CLEAN` (381 files, 0 external API refs).

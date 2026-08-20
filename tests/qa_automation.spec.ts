@@ -2118,9 +2118,26 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
 // the DOM right behind the modal overlay with its own, separate
 // `a[href^="/candidates/"]` links, and an unscoped locator matches those
 // first (caught by this exact test failing that way before the fix).
-test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipeline works', async ({ page, context }) => {
+test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipeline works', async ({ page, context, request }) => {
   const errors: string[] = [];
   page.on('pageerror', e => errors.push(e.message));
+
+  // REAL BUG FOUND 2026-08-21: this test picked optValues[1] — "whatever
+  // real open requisition happens to be the 2nd option in the live
+  // dropdown" — to actually assign a real, top-ranked candidate into.
+  // Confirmed live, 3 times in one session: this repeatedly assigned a
+  // real candidate ("Shivam Singh") into a genuine production
+  // requisition ("Associate Managing Consultant - SAP FICO"), silently
+  // polluting real client-facing pipeline data every time this test ran.
+  // Uses its own throwaway requisition instead, matching every other
+  // suite's established convention, and cleans up both the requisition
+  // and the application it creates.
+  const token = await getApiToken(request);
+  const throwawayReqRes = await request.post(`${API}/requisitions`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { title: `S20 JD Match Test Req ${Date.now()}`, employment_type: 'contract' },
+  });
+  const throwawayReq = await throwawayReqRes.json();
 
   await page.goto('/candidates');
   await page.getByRole('button', { name: /JD Match/i }).click();
@@ -2133,7 +2150,10 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
   const results = page.getByTestId('jd-rank-results');
   const rows = results.locator('input[type="checkbox"]');
   const rowCount = await rows.count();
-  test.skip(rowCount === 0, 'no ranked candidates in this environment to test against');
+  if (rowCount === 0) {
+    await request.delete(`${API}/requisitions/${throwawayReq.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    test.skip(true, 'no ranked candidates in this environment to test against');
+  }
 
   const firstLink = results.locator('a[href^="/candidates/"]').first();
   const href = await firstLink.getAttribute('href');
@@ -2159,15 +2179,33 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
   // overlay z-index above Modal.tsx's. This step is the one that must
   // actually exercise the click, not just confirm the modal opened.
   const reqSelect = page.locator('select').last();
-  const optValues = await reqSelect.locator('option').evaluateAll(opts => opts.map(o => (o as HTMLOptionElement).value));
-  test.skip(optValues.length < 2, 'no open requisitions in this environment to assign into');
-  await reqSelect.selectOption(optValues[1]);
+  // The dropdown's real option text is "{title} ({department})" (see
+  // BulkAssignModal in candidates/page.tsx) - an exact-label match against
+  // the bare title alone doesn't match, confirmed live. Find the real
+  // option value the same reliable way the original code already did.
+  const throwawayOptValue = await reqSelect.locator('option').evaluateAll(
+    (opts, title) => opts.find(o => o.textContent?.startsWith(title))?.getAttribute('value') || '',
+    throwawayReq.title,
+  );
+  expect(throwawayOptValue).toBeTruthy();
+  await reqSelect.selectOption(throwawayOptValue);
   const assignBtn = page.getByRole('button', { name: /Assign to Pipeline/i });
   await expect(assignBtn).toBeEnabled();
   await assignBtn.click({ timeout: 8000 }); // would previously hang ~30s on pointer-event interception
   await expect(page.getByText(/assigned,.*already in pipeline/i)).toBeVisible({ timeout: 5000 });
 
   expect(errors).toHaveLength(0);
+
+  // Cleanup: remove the real application this test just created, then
+  // the throwaway requisition itself — leave zero residue on real data.
+  const pipelineRes = await request.get(`${API}/requisitions/${throwawayReq.id}/pipeline`, { headers: { Authorization: `Bearer ${token}` } });
+  const pipeline = await pipelineRes.json();
+  for (const apps of Object.values(pipeline) as any[]) {
+    for (const a of apps) {
+      await request.delete(`${API}/applications/${a.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    }
+  }
+  await request.delete(`${API}/requisitions/${throwawayReq.id}`, { headers: { Authorization: `Bearer ${token}` } });
 });
 
 // S21 Device Monitoring gaps closed (2026-08-11): consent roster + device
@@ -5674,7 +5712,18 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     await page.goto('/requisitions');
     await page.waitForSelector('button:has-text("Add Requirement")', { timeout: 10000 });
     await page.fill('input[placeholder="Search jobs or clients..."]', 'S48 AI Match Test Req');
-    await page.waitForTimeout(800);
+    // REAL BUG FOUND 2026-08-21: a fixed waitForTimeout(800) here was not
+    // a reliable enough guard that the search had genuinely narrowed the
+    // list before proceeding - under load this raced and (confirmed live,
+    // twice) ended up clicking "Find AI Matches"/"Add to Pipeline" on the
+    // real production "Associate Managing Consultant" card instead of
+    // this test's own throwaway one, adding a real candidate to a real
+    // client's pipeline. A hard, auto-retrying assertion that the
+    // throwaway card's own title is genuinely visible - and the real
+    // requisition's title is NOT - closes that race instead of hoping a
+    // fixed delay was long enough.
+    await expect(page.locator('text=S48 AI Match Test Req')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Associate Managing Consultant')).toHaveCount(0);
     const findBtn = page.locator('button:has-text("Find AI Matches")').first();
     if (await findBtn.count() === 0) return; // already-clicked state from the earlier test in this file
     await findBtn.click();
@@ -5683,6 +5732,7 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     if (await badge.count() === 0) return; // genuinely zero real DB matches for this throwaway req - nothing to verify further
     await badge.click();
     await expect(page.locator('text=AI Matched Candidates')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=S48 AI Match Test Req').first()).toBeVisible(); // confirm the modal itself opened for the right job
     const firstCheckbox = page.locator('input[type="checkbox"]').first();
     if (await firstCheckbox.count() === 0) return;
     // Real fetch settle time for the modal's own /settings/pipeline-stages call
@@ -5809,11 +5859,20 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     await page.locator('button:has-text("Cancel")').click();
   });
 
-  test('real headless UI: "View Profile" on an AI-matched candidate opens their real profile in a new tab without toggling that row\'s checkbox', async ({ page, context }) => {
+  test('real headless UI: "View Profile" opens an inline candidate preview inside the same modal (no navigation), and going back restores the ranked list untouched', async ({ page }) => {
+    // Rewritten 2026-08-21: "View Profile" used to be an <a
+    // target="_blank"> link to a whole separate page. Reported live: the
+    // Candidate 360 page's own "Back" button (a hardcoded push to
+    // /candidates, unrelated to how it was reached) then dropped the
+    // user on the plain Candidates list instead of returning to this
+    // modal. Rebuilt as a real inline preview inside this same modal
+    // instead - there is no navigation to "go back" from at all now, so
+    // this test asserts that shape directly.
     await page.goto('/requisitions');
     await page.waitForSelector('button:has-text("Add Requirement")', { timeout: 10000 });
     await page.fill('input[placeholder="Search jobs or clients..."]', 'S48 AI Match Test Req');
-    await page.waitForTimeout(800);
+    await expect(page.locator('text=S48 AI Match Test Req')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Associate Managing Consultant')).toHaveCount(0);
     const findBtn = page.locator('button:has-text("Find AI Matches")').first();
     if (await findBtn.count() === 0) return;
     await findBtn.click();
@@ -5822,18 +5881,16 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     if (await badge.count() === 0) return;
     await badge.click();
     await expect(page.locator('text=AI Matched Candidates')).toBeVisible({ timeout: 5000 });
-    const viewProfileLink = page.locator('a:has-text("View Profile")').first();
-    if (await viewProfileLink.count() === 0) return;
-    const before = await page.locator('input[type="checkbox"]').first().isChecked();
-    const [newPage] = await Promise.all([
-      context.waitForEvent('page'),
-      viewProfileLink.click(),
-    ]);
-    await newPage.waitForLoadState('domcontentloaded');
-    expect(newPage.url()).toContain('/candidates/');
-    await newPage.close();
-    const after = await page.locator('input[type="checkbox"]').first().isChecked();
-    expect(after).toBe(before);
+    const viewProfileBtn = page.locator('button:has-text("View Profile")').first();
+    if (await viewProfileBtn.count() === 0) return;
+    await viewProfileBtn.click();
+    // Still on /requisitions - no navigation happened at all.
+    expect(page.url()).toContain('/requisitions');
+    await expect(page.locator('button:has-text("Back to list")')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Open Full Profile')).toBeVisible();
+    await page.locator('button:has-text("Back to list")').click();
+    // The ranked list (with its search/filter box) is back, untouched.
+    await expect(page.locator('input[placeholder="Filter by name, skill, employer…"]')).toBeVisible({ timeout: 5000 });
   });
 
 
