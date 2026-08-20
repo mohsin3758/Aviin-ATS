@@ -5507,3 +5507,67 @@ test.describe.serial('S46 Resume Inbox: Job Match / Match % no longer hidden by 
   });
 
 });
+
+test.describe.serial('S47 New Requirement: deadline/expected_start_date save correctly', () => {
+  let token: string;
+  let reqId: string;
+
+  test('setup: get a real auth token', async ({ request }) => {
+    token = await getApiToken(request);
+    expect(token).toBeTruthy();
+  });
+
+  test('POST /requisitions with deadline + expected_start_date set succeeds (was a 500: asyncpg needs a real date, not a plain string)', async ({ request }) => {
+    const res = await request.post(`${API}/requisitions`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: {
+        title: 'S47 Date Fields Test Req',
+        client_name: 'S47 Test Client',
+        employment_type: 'contract',
+        priority: 'critical',
+        expected_start_date: '2026-08-25',
+        deadline: '2026-08-30',
+      },
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    const body = await res.json();
+    expect(body.deadline).toBe('2026-08-30');
+    expect(body.expected_start_date).toBe('2026-08-25');
+    reqId = body.id;
+  });
+
+  test('PATCH /requisitions/{id} updating just the date fields also succeeds', async ({ request }) => {
+    const res = await request.patch(`${API}/requisitions/${reqId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { deadline: '2026-09-15', expected_start_date: '2026-09-01' },
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    const body = await res.json();
+    expect(body.deadline).toBe('2026-09-15');
+    expect(body.expected_start_date).toBe('2026-09-01');
+  });
+
+  test('real headless UI: the "New Client Requirement" form saves successfully with both date fields filled, no "Request failed" banner', async ({ page }) => {
+    await page.goto('/requisitions');
+    await page.waitForSelector('button:has-text("Add Requirement")', { timeout: 10000 });
+    await page.locator('button:has-text("Add Requirement")').first().click();
+    await expect(page.locator('text=New Client Requirement')).toBeVisible();
+    await page.getByPlaceholder('e.g. Senior Python Developer').fill('S47 UI Date Fields Test');
+    const dateInputs = page.locator('input[type="date"]');
+    await dateInputs.nth(0).fill('2026-08-25');
+    await dateInputs.nth(1).fill('2026-08-30');
+    await page.locator('button:has-text("Save Requirement")').click();
+    await page.waitForTimeout(1500);
+    await expect(page.locator('text=/Request failed/i')).toHaveCount(0);
+    await expect(page.locator('text=New Client Requirement')).toHaveCount(0);
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: { Authorization: `Bearer ${token}` } });
+    // clean up the real UI-created one too
+    const list = await request.get(`${API}/requisitions?limit=500`, { headers: { Authorization: `Bearer ${token}` } });
+    const reqs = await list.json();
+    const uiReq = (reqs || []).find((r: any) => r.title === 'S47 UI Date Fields Test');
+    if (uiReq) await request.delete(`${API}/requisitions/${uiReq.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+});

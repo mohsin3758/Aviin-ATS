@@ -80,8 +80,8 @@ class RequisitionCreate(BaseModel):
     bill_rate: Optional[float] = None
     work_mode: Optional[str] = "onsite"
     priority: Optional[str] = "medium"
-    deadline: Optional[str] = None
-    expected_start_date: Optional[str] = None
+    deadline: Optional[date] = None
+    expected_start_date: Optional[date] = None
     education_required: Optional[str] = None
     shift_type: Optional[str] = "day"
     notice_period_max: Optional[int] = 60
@@ -107,8 +107,8 @@ class RequisitionUpdate(BaseModel):
     bill_rate: Optional[float] = None
     work_mode: Optional[str] = None
     priority: Optional[str] = None
-    deadline: Optional[str] = None
-    expected_start_date: Optional[str] = None
+    deadline: Optional[date] = None
+    expected_start_date: Optional[date] = None
     education_required: Optional[str] = None
     shift_type: Optional[str] = None
     notice_period_max: Optional[int] = None

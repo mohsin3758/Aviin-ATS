@@ -9229,3 +9229,58 @@ the concrete width this bug reproduced at, not just the 1366/1600px
 pair the suite already covered. Full regression sweep (S32/S39/S40/S41/
 S44/S45/S46, 20 tests) passed clean. Zero-token audit: `CONFIRMED CLEAN`
 (381 files, 0 external API refs).
+
+
+## New Client Requirement form: "Request failed" on save — real, long-
+## standing asyncpg date bug found and fixed, 2026-08-20
+User reported a screenshot of the "New Client Requirement" modal showing
+a generic red "Request failed" banner after filling in Expected Start
+Date and Deadline / Close By and clicking Save. Investigated rather than
+guessed: the frontend's "Request failed" is `useFetch.ts`'s apiFetch()
+generic fallback, which fires whenever the backend's error response has
+no plain-string `detail` field — a strong hint the backend was returning
+a raw, non-JSON 500 rather than a clean validation error.
+
+**Root-caused before touching any code**: `RequisitionCreate`/
+`RequisitionUpdate` (`backend/schemas.py`) typed `deadline`/
+`expected_start_date` as plain `Optional[str]`, while the real DB columns
+are `date` (confirmed via `information_schema.columns`) — the exact
+"asyncpg needs a real date/time object, not a plain string" bug class
+already documented dozens of times elsewhere in this project (ERP
+timesheets, Shift Scheduling, KAE retention tracking, etc.), just never
+caught here before. Checked how long this has been broken, not assumed:
+**0 of 943 real requisitions in production have ever had a non-null
+`deadline` or `expected_start_date`** — this field has silently failed
+every single time a user tried to set it, since it was added.
+
+Reproduced directly via a real API call with the exact payload from the
+screenshot before fixing anything: a genuine 500, with the backend log
+confirming `asyncpg.exceptions.DataError: invalid input for query
+argument $18: '2026-08-21' ('str' object has no attribute 'toordinal')`
+— exactly the hypothesis, and exactly why the frontend only ever showed
+a generic message (`res.json()` on a raw "Internal Server Error" body
+parses to `{}`, so `data?.detail` is undefined).
+
+Fixed by changing both Pydantic fields to `Optional[date]` in both
+`RequisitionCreate` and `RequisitionUpdate` — Pydantic natively parses
+an ISO `YYYY-MM-DD` string into a real `datetime.date`, and the frontend
+already sends exactly that shape (a native `<input type="date">`, whose
+underlying value is always ISO regardless of the browser's locale
+display — the "20-08-2026" shown in the screenshot is just Chrome's
+locale-formatted display, the real value sent is "2026-08-20"). No
+frontend change needed.
+
+Verified for real end-to-end, not code review: re-ran the exact same
+failing curl payload post-deploy — 200 OK, `deadline`/`expected_start_
+date` correctly persisted; verified the PATCH/update path too with a
+second real call; then a genuine headless-browser run through the
+actual "Add Requirement" button → filled both date fields → Save →
+confirmed zero "Request failed" banner, modal closed, and the app
+correctly landed on Job Distribution (the established post-create flow
+for a new open requisition) with the real title pre-selected — matching
+the user's exact reported flow, not just the API in isolation. All
+throwaway test requisitions cleaned up via the real DELETE API after
+each check. New permanent "S47" suite (4 tests: create, update, and a
+real UI click-through) added to `qa_automation.spec.ts`. Regression
+sweep (S1/S2/S8/S13/S16/S22, 39 tests) passed clean. Zero-token audit:
+`CONFIRMED CLEAN` (381 files, 0 external API refs).
