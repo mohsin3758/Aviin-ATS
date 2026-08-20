@@ -527,7 +527,6 @@ function ResumeInboxPageInner() {
   const [toast, setToast] = useState('');
   const [toastOk, setToastOk] = useState(true);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [limit, setLimit] = useState(100);
   const [dedupTarget, setDedupTarget] = useState<string|null>(null);
   const [sortByMatch, setSortByMatch] = useState(false);
   // Real bug fix (2026-08-20): this was a plain boolean "is newest-first
@@ -539,9 +538,40 @@ function ResumeInboxPageInner() {
 
   const { data: stats, refetch: reloadStats } = useFetch<any>('/resume-intake/stats');
   const { data: reqs } = useFetch<any>('/requisitions?limit=200&status=open');
-  const { data: queueData, refetch: reloadQueue, loading: isLoading } = useFetch<any>(
-    `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}&limit=${limit}`
-  );
+  // Real bug fix (2026-08-20): "Load more" used to grow a single `limit`
+  // param and re-fetch from offset 0 every click — wasteful (re-downloads
+  // everything already shown) AND fundamentally broken past 500 items,
+  // since the backend hard-caps `limit` at 500 (le=500). Past that point
+  // every click silently 422'd with no visible error, so "Load more"
+  // just stopped working with no explanation — exactly the reported
+  // symptom. Real offset-based pagination instead: this fetch is always
+  // just the first page; loadMore() below fetches subsequent pages by
+  // offset and appends, which has no upper bound.
+  const PAGE_SIZE = 100;
+  const queueUrl = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}&limit=${PAGE_SIZE}&offset=0`;
+  const { data: queueData, refetch: reloadQueue, loading: isLoading } = useFetch<any>(queueUrl);
+  const [accumItems, setAccumItems] = useState<ResumeItem[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  useEffect(() => { setAccumItems((queueData?.items || []) as ResumeItem[]); }, [queueData]);
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try {
+      const url = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}&limit=${PAGE_SIZE}&offset=${accumItems.length}`;
+      const more = await apiFetch(url);
+      setAccumItems(prev => [...prev, ...((more?.items || []) as ResumeItem[])]);
+    } catch (e: any) { showToast('Error loading more: ' + e.message, false); }
+    finally { setLoadingMore(false); }
+  };
+  // Per-item actions remove the affected row(s) locally instead of a full
+  // reloadQueue() — a server refetch would always land back on page 1
+  // (the primary fetch is pinned to offset=0), silently discarding
+  // anything brought in via Load More. reloadQueue() is still used for
+  // runProcessing below, where a full page-1 reset is the correct
+  // behavior for a "rescan everything" action.
+  const removeFromQueue = (ids: string | string[]) => {
+    const idSet = new Set(Array.isArray(ids) ? ids : [ids]);
+    setAccumItems(prev => prev.filter(i => !idSet.has(i.id)));
+  };
 
   const showToast = (msg: string, ok = true) => { setToast(msg); setToastOk(ok); setTimeout(() => setToast(''), 4000); };
 
@@ -559,7 +589,7 @@ function ResumeInboxPageInner() {
     try {
       await apiFetch(`/resume-intake/${id}/${action}`, { method: 'POST', body: body ? JSON.stringify(body) : undefined });
       showToast(`✓ ${action === 'approve' ? 'Approved' : action === 'reject' ? 'Rejected' : 'Done'}`);
-      reloadQueue(); setSelected(null); setEditItem(null);
+      removeFromQueue(id); reloadStats(); setSelected(null); setEditItem(null);
     } catch (e: any) { showToast('Error: ' + e.message, false); }
   };
 
@@ -568,7 +598,7 @@ function ResumeInboxPageInner() {
     try {
       await apiFetch(`/resume-intake/${editItem.id}/update-and-approve`, { method: 'POST', body: JSON.stringify(form) });
       showToast('✓ Saved & Approved');
-      reloadQueue(); setEditItem(null); setSelected(null);
+      removeFromQueue(editItem.id); reloadStats(); setEditItem(null); setSelected(null);
     } catch (e: any) {
       await doAction(editItem.id, 'approve');
     }
@@ -577,18 +607,19 @@ function ResumeInboxPageInner() {
   const bulkAction = async (action: 'approve' | 'reject') => {
     if (!selectedIds.size) return;
     let done = 0;
+    const doneIds: string[] = [];
     for (const id of selectedIds) {
-      try { await apiFetch(`/resume-intake/${id}/${action}`, { method: 'POST' }); done++; } catch (e) {}
+      try { await apiFetch(`/resume-intake/${id}/${action}`, { method: 'POST' }); done++; doneIds.push(id); } catch (e) {}
     }
     showToast(`✓ ${action === 'approve' ? 'Approved' : 'Rejected'} ${done} resumes`);
-    setSelectedIds(new Set()); reloadQueue();
+    setSelectedIds(new Set()); removeFromQueue(doneIds); reloadStats();
   };
 
   const toggleSelect = (id: string) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const reqList: any[] = reqs?.requisitions || reqs?.data?.requisitions || [];
 
-  const baseItems: ResumeItem[] = ((queueData?.items || []) as ResumeItem[]).filter(r => {
+  const baseItems: ResumeItem[] = accumItems.filter(r => {
     if (search) { const s = search.toLowerCase(); if (![r.full_name, r.email, r.file_name, r.email_subject, r.source_email].some(f => (f || '').toLowerCase().includes(s))) return false; }
     if (jobFilter && jobFilter !== 'unmatched') { /* server-filtered via req_id param */ }
     if (jobFilter === 'unmatched') { if (r.requisition_id || r.matched_requisition_id) return false; }
@@ -723,7 +754,12 @@ function ResumeInboxPageInner() {
                 <ArrowUpDown size={11} /> {sortByMatch ? 'Sorted: Match %' : 'Sort by Match %'}
               </button>
               {withNearDup > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '3px 8px', borderRadius: 6, fontWeight: 600 }}><AlertTriangle size={10} style={{ display: 'inline', marginRight: 3 }} />{withNearDup} near-dup{withNearDup !== 1 ? 's' : ''}</span>}
-              {queueData?.total > limit && <button onClick={() => setLimit(l => l + 100)} style={{ marginLeft: 'auto', fontSize: 12, color: '#1e40af', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>Load more ({queueData.total - limit} remaining)</button>}
+              {queueData?.total > accumItems.length && (
+                <button data-testid="resume-inbox-load-more" onClick={loadMore} disabled={loadingMore}
+                  style={{ marginLeft: 'auto', fontSize: 12, color: '#1e40af', background: 'none', border: 'none', cursor: loadingMore ? 'wait' : 'pointer', fontWeight: 600, opacity: loadingMore ? 0.6 : 1 }}>
+                  {loadingMore ? 'Loading…' : `Load more (${queueData.total - accumItems.length} remaining)`}
+                </button>
+              )}
             </div>
             {/* Real bug fix (2026-08-20): this wrapper had no horizontal
                 scroll at all - a table this wide (12 columns) hard-clipped

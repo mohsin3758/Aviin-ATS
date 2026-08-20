@@ -9009,3 +9009,61 @@ and usable after a real scroll, not just present in a false-positive
 `isVisible()` DOM check. Full regression sweep (42 tests, listed above)
 passed clean. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0 external
 API refs).
+
+## Resume Inbox: "Load more" silently stopped working past ~500 items —
+## real offset-based pagination built, 2026-08-20
+User reported "Load more (1930 remaining)" never completing no matter
+how many times they clicked it. Checked the real request/response
+instead of guessing, and found a genuine, previously-undiscovered design
+bug: "Load more" worked by growing a single `limit` query param and
+re-fetching everything from offset 0 on every click (100→200→300...) —
+wasteful even when it worked (re-downloading the same first N items each
+time), but more importantly, the backend hard-caps this param at 500
+(`Query(100, le=500)`, `resume_intake.py`). The 6th click (100→600)
+always sent a value past that cap, the backend cleanly 422'd, and the
+frontend never surfaced that error anywhere — "Load more" just silently
+stopped doing anything past ~500 items, with zero indication why.
+Confirmed directly: `curl .../queue?limit=600` returns a real 422
+("Input should be less than or equal to 500"); `limit=500` returns 200.
+
+**Real fix, not a bigger cap**: converted to genuine offset-based
+pagination, which has no upper bound. The primary page fetch is now
+pinned to a fixed first page (`limit=100&offset=0`); a new `loadMore()`
+fetches the *next* page (`offset=<items already loaded>`) and appends to
+a local `accumItems` array, rather than re-fetching and replacing
+everything with an ever-growing limit. `baseItems`/the rendered list now
+derive from `accumItems`.
+
+**A second, real problem found and fixed in the same pass, not just the
+reported symptom**: per-item actions (approve/reject, bulk approve/
+reject, edit-and-save) previously called a full `reloadQueue()` after
+succeeding — with the new pinned-to-page-1 primary fetch, that would
+have silently discarded any progress from "Load more" the instant a
+user approved or rejected a single item deep in a large loaded list.
+Switched those to a local `removeFromQueue()` (splices the acted-on
+id(s) out of `accumItems` directly) instead — correct either way, since
+an approved/rejected item genuinely no longer belongs in the queue
+regardless of which page it was on, and it's also strictly better UX
+(instant removal, no flash-reset). `runProcessing` (the "Process
+Pending" bulk rescan) and the manual "Refresh" button both intentionally
+keep the old full-`reloadQueue()` behavior — a real page-1 reset is the
+correct outcome for "rescan/refresh everything."
+
+Verified for real end-to-end, not code review: clicked the real,
+now-fixed "Load more" button 6 times against the live 2030-row queue —
+every single click returned a genuine 200 (not the old silent 422) and
+correctly appended 100 more rows each time, reaching 700 loaded with
+"1330 remaining" still shown and still clickable, confirmed via a real
+pulled screenshot, not just a status-code check. Separately verified the
+action-handler fix without touching real production data: loaded 2 pages
+(200 rows), intercepted the real `approve` network call to return a
+mocked success (proving the *frontend's* removal logic specifically,
+not a real backend mutation), and confirmed the row count went from 200
+to exactly 199 — pagination progress survived, where the old
+`reloadQueue()` would have reset it to ≤100. New permanent "S45" suite
+(2 tests) covering both the 6-click-past-the-old-cap case and the
+approve-preserves-pagination case (also using route interception, so
+repeated CI runs never mutate real candidate records). Full regression
+sweep (S1/S2/S32/S39/S41/S44, 19 tests touching Resume Inbox and the
+adjacent Candidates fix from the same day) passed clean. Zero-token
+audit: `CONFIRMED CLEAN` (381 files, 0 external API refs).

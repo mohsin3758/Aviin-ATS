@@ -5333,3 +5333,71 @@ test.describe.serial('S44 Candidates Table: sticky Actions column no longer hide
     expect(errors).toHaveLength(0);
   });
 });
+
+// S45 (2026-08-20): user reported "Load more (1930 remaining)" on Resume
+// Inbox never completing no matter how many times they clicked it. Root
+// cause: "Load more" grew a single `limit` query param and re-fetched
+// from offset 0 every click — the backend hard-caps `limit` at 500
+// (Query(100, le=500)), so the 6th click (100->600) always 422'd with no
+// visible error, silently breaking with no explanation past ~500 items.
+// Fixed with real offset-based pagination that has no upper bound, and
+// switched per-item actions (approve/reject) from a full reloadQueue()
+// (which would always land back on page 1) to local removal, so
+// pagination progress survives an action instead of resetting.
+test.describe.serial('S45 Resume Inbox: Load More has no upper bound', () => {
+  test('real headless UI: clicking Load More 6 times (past the old 500-item wall) keeps succeeding with 200s and appending rows', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/resume-inbox');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+    const initial = await page.locator('table tbody tr').count();
+    expect(initial).toBeLessThanOrEqual(100);
+
+    let rows = initial;
+    for (let i = 0; i < 6; i++) {
+      const btn = page.getByTestId('resume-inbox-load-more');
+      if (!(await btn.isVisible().catch(() => false))) break;
+      const [resp] = await Promise.all([
+        page.waitForResponse(r => r.url().includes('/resume-intake/queue') && r.request().method() === 'GET'),
+        btn.click(),
+      ]);
+      // The exact regression: every click must be a real 200, never a
+      // silent 422 once the old limit-based approach exceeded 500.
+      expect(resp.status()).toBe(200);
+      await page.waitForTimeout(300);
+      const now = await page.locator('table tbody tr').count();
+      expect(now).toBeGreaterThan(rows);
+      rows = now;
+    }
+    // 6 successful clicks from a <=100 start guarantees we're past the
+    // old 500-item wall (100 + 6*100 = 700 max, but even a shorter real
+    // queue proves every available click succeeded, not silently failed).
+    expect(rows).toBeGreaterThan(100);
+    expect(errors).toHaveLength(0);
+  });
+
+  test('real headless UI: approving an item removes it locally without resetting pagination back to page 1', async ({ page }) => {
+    await page.goto('/resume-inbox');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+    const btn = page.getByTestId('resume-inbox-load-more');
+    if (!(await btn.isVisible().catch(() => false))) return test.skip();
+    await Promise.all([page.waitForResponse(r => r.url().includes('/resume-intake/queue')), btn.click()]);
+    await page.waitForTimeout(400);
+    const countBeforeAction = await page.locator('table tbody tr').count();
+    expect(countBeforeAction).toBeGreaterThan(100);
+
+    // Mock the approve call so this test never mutates a real production
+    // resume's parse_status — proves the real frontend removal logic
+    // (removeFromQueue), not a real backend side effect.
+    await page.route('**/resume-intake/*/approve', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' }));
+    await page.locator('table tbody tr').first().click();
+    await page.getByRole('button', { name: /Quick Approve/i }).click();
+    await page.waitForTimeout(500);
+
+    const countAfterAction = await page.locator('table tbody tr').count();
+    // The real regression this guards: a full reloadQueue() would reset
+    // to page 1 (<=100 rows), losing everything Load More brought in.
+    expect(countAfterAction).toBe(countBeforeAction - 1);
+    expect(countAfterAction).toBeGreaterThan(100);
+  });
+});
