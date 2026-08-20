@@ -5656,6 +5656,94 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     const eitherVisible = (await badge.count()) > 0 || (await noneFound.count()) > 0;
     expect(eitherVisible).toBe(true);
   });
+  test('real headless UI: clicking the AI Match badge opens an inline modal with score/skill-chip candidates, defaults the stage picker to the tenant\'s real configured default (not a premature fallback), and submits that exact stage', async ({ page, request }) => {
+    // Regression test for 2 real bugs found while manually verifying this
+    // feature: (1) clicking the badge used to redirect to an empty Kanban
+    // board instead of showing the matched list right there; (2) the
+    // stage picker's default-selection effect fired on the very first
+    // render (before the real /settings/pipeline-stages fetch resolved),
+    // locking in the literal 'sourced' fallback forever even after the
+    // tenant's real default (e.g. 'interested') loaded - the dropdown
+    // then visually showed a DIFFERENT stage than what actually got
+    // submitted, since a <select> with a value matching no real <option>
+    // silently falls back to displaying whichever option renders first.
+    let capturedBody: string | null = null;
+    page.on('request', req => {
+      if (req.url().includes('/candidates/bulk-assign')) capturedBody = req.postData();
+    });
+    await page.goto('/requisitions');
+    await page.waitForSelector('button:has-text("Add Requirement")', { timeout: 10000 });
+    await page.fill('input[placeholder="Search jobs or clients..."]', 'S48 AI Match Test Req');
+    await page.waitForTimeout(800);
+    const findBtn = page.locator('button:has-text("Find AI Matches")').first();
+    if (await findBtn.count() === 0) return; // already-clicked state from the earlier test in this file
+    await findBtn.click();
+    await page.waitForTimeout(2500);
+    const badge = page.locator('button', { hasText: /AI Match/i }).first();
+    if (await badge.count() === 0) return; // genuinely zero real DB matches for this throwaway req - nothing to verify further
+    await badge.click();
+    await expect(page.locator('text=AI Matched Candidates')).toBeVisible({ timeout: 5000 });
+    const firstCheckbox = page.locator('input[type="checkbox"]').first();
+    if (await firstCheckbox.count() === 0) return;
+    // Real fetch settle time for the modal's own /settings/pipeline-stages call
+    await page.waitForTimeout(1500);
+    const modalSelect = page.locator('select').last();
+    const selectValue = await modalSelect.inputValue();
+    // Fetch the tenant's real configured default directly, independent of the UI
+    const stagesRes = await request.get(`${API}/settings/pipeline-stages`, { headers: { Authorization: `Bearer ${token}` } });
+    const stages = await stagesRes.json();
+    const realDefault = stages.find((s: any) => s.is_default_add)?.stage_key;
+    expect(selectValue).toBe(realDefault);
+
+    await firstCheckbox.check();
+    await page.waitForTimeout(300);
+    const addBtn = page.locator('button', { hasText: /^Add \d+ to/ }).first();
+    await addBtn.click();
+    await page.waitForTimeout(2000);
+    expect(capturedBody).toBeTruthy();
+    const parsed = JSON.parse(capturedBody!);
+    expect(parsed.stage).toBe(realDefault);
+
+    // Clean up: remove whatever candidate this just added, so the S48
+    // fixture requisition is left empty for its own afterAll delete.
+    const pipelineRes = await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: { Authorization: `Bearer ${token}` } });
+    const pipeline = await pipelineRes.json();
+    for (const apps of Object.values(pipeline) as any[]) {
+      for (const a of apps) {
+        await request.delete(`${API}/applications/${a.id}`, { headers: { Authorization: `Bearer ${token}` } });
+      }
+    }
+  });
+
+  test('GET /pipeline/req-stage-counts excludes soft-removed applications and soft-deleted candidates from the total', async ({ request }) => {
+    // Regression test for the real bug found in the same verification
+    // pass: this endpoint (backs the Jobs & Requisitions list's Inbox/
+    // Pipeline counts) had no is_active filter at all, so a candidate
+    // removed via "Remove from Pipeline" kept inflating "N in pipeline"
+    // on this page forever, even though the real Kanban board correctly
+    // excluded them.
+    const candRes = await request.post(`${API}/candidates`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { full_name: 'S48 Stage-Counts Test Candidate', email: `s48stagecounts_${Date.now()}@test.com`, phone: `9${Date.now()}`.slice(0, 10) },
+    });
+    const cand = await candRes.json();
+    const appRes = await request.post(`${API}/applications`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { candidate_id: cand.id, requisition_id: reqId, stage: 'interested' },
+    });
+    const app = await appRes.json();
+
+    const before = await (await request.get(`${API}/pipeline/req-stage-counts`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(before[reqId]?.total).toBe(1);
+
+    await request.delete(`${API}/applications/${app.id}`, { headers: { Authorization: `Bearer ${token}` } });
+
+    const after = await (await request.get(`${API}/pipeline/req-stage-counts`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(after[reqId]?.total ?? 0).toBe(0);
+
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+
 
   test.afterAll(async ({ request }) => {
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: { Authorization: `Bearer ${token}` } });

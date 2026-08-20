@@ -963,11 +963,20 @@ async def req_stage_counts(actor: Actor = Depends(get_actor)):
         if not stage_cfg:
             stage_cfg = [(st, st.replace("_", " ").title(), "#64748b") for st in STAGES]
 
+        # REAL BUG FIX (2026-08-20): no is_active filter at all - a soft-
+        # removed application ("Remove from Pipeline", built earlier the
+        # same day) or a soft-deleted candidate kept inflating this exact
+        # page's Pipeline/Inbox counts forever, even though both are
+        # correctly excluded from the real Kanban board underneath. Found
+        # live while verifying the new AI-match "Add to Pipeline" flow -
+        # a just-removed candidate still showed as "1 in pipeline" here.
         rows = await conn.fetch("""
             SELECT r.id::text AS req_id, a.stage AS stage, COUNT(*) AS cnt
             FROM requisitions r
             JOIN applications a ON a.requisition_id = r.id
+            JOIN candidates c ON c.id = a.candidate_id
             WHERE r.tenant_id = $1 AND r.status = 'open'
+              AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
             GROUP BY r.id, a.stage
         """, actor.tenant_id)
         inbox_rows = await conn.fetch("""

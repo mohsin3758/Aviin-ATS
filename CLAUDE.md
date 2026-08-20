@@ -9378,3 +9378,82 @@ requisition's `jd_embedding` genuinely gets filled rather than staying
 permanently null, and a real UI click-through). Regression sweep (S1/S2/
 S8/S13/S16/S22/S47, 43 tests) passed clean. Zero-token audit: `CONFIRMED
 CLEAN` (381 files, 0 external API refs).
+
+
+## Follow-up same day: "Find AI Matches" made a real inline experience,
+## plus 2 more real bugs found while building/verifying it, 2026-08-20
+User reported, from screenshots: clicking "Find AI Matches" correctly
+showed "50+ AI Match", but clicking THAT redirected to an empty Kanban
+board with no visible list — asked for the AI-matched list with score to
+show right there, so they can add candidates to the pipeline directly.
+
+**Root cause**: the "done"-state badge linked to `/pipeline?job={id}`,
+landing on a genuinely empty board — the ranked, scored candidate list
+only ever lived inside that page's separate "Add Candidate" modal, one
+more click away and not obviously connected to what was just found.
+
+**Built**: a new `AiMatchModal` (`requisitions/page.tsx`), opened inline
+by clicking the "N ✨ AI Match" badge — no navigation. Visually matches
+the Pipeline board's existing `AddCandidateModal` (kept as a separate
+component rather than cross-page-imported, since that one is coupled to
+the board's own local state) but built from scratch to reuse the exact
+same already-fetched `matches` data (no duplicate API call) and the same
+`/candidates/bulk-assign` endpoint: real score badge (color-graded),
+matched-skill chips (blue) and missing-skill chips (red, "✕ Skill"),
+experience/employer/location, a searchable filter, a stage picker, and
+select-and-add. `stageCounts`'s `useFetch` now also exposes `refetch`,
+threaded down through JobCard/JobListRow/JobTableView/AiMatchFinder so
+adding a candidate live-updates the card's Pipeline count with no page
+reload — verified via a real before/after screenshot (card went from
+"50+ AI Match" to "1 PIPELINE" instantly after Add).
+
+**A real, previously-unnoticed bug found while manually verifying the
+new modal end-to-end**: the added candidate landed in the hidden
+`sourced` stage instead of the tenant's real configured default
+(`interested`), despite the dropdown visually showing "Interested"
+selected. Root-caused via real network-request interception (not
+guessed): the `useEffect` that sets the stage picker's default fired on
+the component's very FIRST render — before the real `/settings/
+pipeline-stages` fetch had resolved, `defaultAddStageKey` falls back to
+the literal `'sourced'` — and its guard (`if (!targetStage && ...)`)
+never let it re-fire once the real default loaded, since `targetStage`
+was already (wrongly) truthy. Since `sourced` isn't in the visible
+option list, the `<select>` (an unmatched `value`) silently displayed
+whichever option rendered first instead, masking the real, wrong
+underlying state. Fixed by gating the effect on `stageConfig` having
+genuinely loaded (`stageConfig.length > 0`), not on the always-truthy
+fallback-masked value. Verified via the exact same request-interception
+method after the fix: `select value: interested`, real POST body
+`{"stage":"interested"}`, and the candidate genuinely landed in
+`interested` in the DB.
+
+**A second, separate, real bug found in the same verification pass**:
+soft-removing that same test candidate via "Remove from Pipeline" (built
+earlier the same day) correctly emptied the real Kanban board, but the
+Jobs & Requisitions list's own "N in pipeline" count (`GET /pipeline/
+req-stage-counts`, the exact endpoint behind this whole feature) stayed
+at 1 — this specific query had no `is_active` filter at all, a gap the
+"Remove from Pipeline" feature's own same-day rollout listed as
+deliberately-scoped-out-for-now but never actually revisited. Fixed by
+joining `candidates` and filtering `a.is_active IS NOT FALSE AND
+c.is_active IS NOT FALSE`, matching every sibling query already fixed
+that same day. Verified live: total dropped from 1 back to 0 the instant
+the fix deployed, with the soft-removed row still correctly counted as
+"existed, just excluded" not silently vanished from the underlying data.
+
+Verified for real end-to-end throughout, not code review: a full curl-
+driven cycle reproducing then fixing the stage-lock-in bug via real
+network interception (not assumption from the UI alone, which had
+already misled the diagnosis once); a full curl-driven cycle reproducing
+then fixing the `req-stage-counts` leak; and a final, clean real
+headless-browser pass confirming the whole flow end-to-end (Find AI
+Matches → inline modal with real score/skill chips → select → Add →
+correct stage → live count update) with zero console errors. All
+throwaway applications/candidates created during verification removed
+via the real APIs. New/extended permanent "S48" suite (now 6 tests: the
+original 4 plus a real modal-interaction test asserting the stage picker
+matches the tenant's actual configured default and that exact stage is
+what gets submitted, and a dedicated `req-stage-counts` soft-removal
+regression test). Broader regression sweep (S1/S2/S8/S13/S16/S20/S22/
+S30/S38/S40/S42/S47/S48, 74 tests) passed clean. Zero-token audit:
+`CONFIRMED CLEAN` (381 files, 0 external API refs).

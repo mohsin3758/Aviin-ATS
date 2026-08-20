@@ -115,9 +115,10 @@ function InboxBadge({ reqId, count, iconOnly }: { reqId: string; count: number; 
 // (not eager per-row) since a cosine-similarity scan is materially more
 // expensive than the plain aggregate /pipeline/req-stage-counts query
 // this page already runs for every row on load.
-function AiMatchFinder({ reqId }: { reqId: string }) {
+function AiMatchFinder({ reqId, reqTitle, onAdded }: { reqId: string; reqTitle?: string; onAdded?: () => void }) {
   const [state, setState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const [matches, setMatches] = useState<any[]>([]);
+  const [modalOpen, setModalOpen] = useState(false);
 
   const find = async (e: React.MouseEvent) => {
     e.stopPropagation(); e.preventDefault();
@@ -137,12 +138,29 @@ function AiMatchFinder({ reqId }: { reqId: string }) {
       return <span style={{ fontSize: '11px', color: '#94a3b8' }}>No AI matches found</span>;
     }
     return (
-      <a href={`/pipeline?job=${reqId}`} title="Open the pipeline board to review and add these AI-matched candidates" style={{ textDecoration: 'none' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, background: '#059669', cursor: 'pointer' }}>
+      <>
+        {/* REAL FIX (2026-08-20): this used to link to /pipeline?job=<id>,
+            which lands on an empty Kanban board — the matched-candidate
+            list itself only ever lived inside that page's separate "Add
+            Candidate" modal, one more click away and not obviously
+            connected to what was just found here. Opens the same
+            ranked-list-with-AI-score UI right on this page instead, so
+            "Find AI Matches" -> "see the list" -> "add to pipeline" is
+            one flow, not a redirect into a different feature. */}
+        <button onClick={e => { e.stopPropagation(); e.preventDefault(); setModalOpen(true); }}
+          title="Review these AI-matched candidates and add them to the pipeline"
+          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, background: '#059669', border: 'none', cursor: 'pointer' }}>
           <span style={{ fontSize: '11px', fontWeight: 800, color: '#fff' }}>{matches.length}{matches.length === 50 ? '+' : ''}</span>
           <span style={{ fontSize: '9px', fontWeight: 600, color: '#a7f3d0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>✨ AI Match</span>
-        </div>
-      </a>
+        </button>
+        {modalOpen && (
+          <AiMatchModal
+            reqId={reqId} reqTitle={reqTitle} matches={matches}
+            onClose={() => setModalOpen(false)}
+            onAdded={() => { setModalOpen(false); onAdded?.(); }}
+          />
+        )}
+      </>
     );
   }
 
@@ -158,6 +176,169 @@ function AiMatchFinder({ reqId }: { reqId: string }) {
       }}>
       {state === 'loading' ? '⏳ Searching…' : state === 'error' ? 'Retry AI Match' : '🔍 Find AI Matches'}
     </button>
+  );
+}
+
+// Shares the exact visual language (score badge, skill chips, stage
+// picker) and the same /candidates/bulk-assign call as the Pipeline
+// board's AddCandidateModal — kept as its own component rather than
+// imported cross-page since that one is coupled to the pipeline board's
+// own board/state, but built to match it closely on purpose so a
+// recruiter sees one consistent "AI match" UI everywhere it appears.
+function aiScoreColor(s: number | null) {
+  if (!s) return '#94a3b8';
+  if (s >= 80) return '#16a34a';
+  if (s >= 65) return '#0891b2';
+  if (s >= 50) return '#f59e0b';
+  return '#dc2626';
+}
+function aiScoreBg(s: number | null) {
+  if (!s) return '#f8fafc';
+  if (s >= 80) return '#f0fdf4';
+  if (s >= 65) return '#ecfeff';
+  if (s >= 50) return '#fffbeb';
+  return '#fef2f2';
+}
+function fmtExpMonths(mo: number) {
+  if (!mo) return '0mo';
+  const y = Math.floor(mo / 12), m = mo % 12;
+  return y > 0 ? `${y}y${m > 0 ? ` ${m}m` : ''}` : `${m}m`;
+}
+
+function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
+  reqId: string; reqTitle?: string; matches: any[]; onClose: () => void; onAdded: () => void;
+}) {
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [saving, setSaving] = useState(false);
+  const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
+  const visibleStages = (stageConfig || []).filter((s: any) => s.is_visible)
+    .sort((a: any, b: any) => a.display_order - b.display_order);
+  const defaultAddStageKey = (stageConfig || []).find((s: any) => s.is_default_add)?.stage_key || 'sourced';
+  const [targetStage, setTargetStage] = useState('');
+  // REAL BUG FOUND 2026-08-20: firing this the instant defaultAddStageKey
+  // is truthy locked in the 'sourced' fallback on the very first render
+  // (stageConfig is still null/[] then, so defaultAddStageKey falls back
+  // to the literal 'sourced' before the real /settings/pipeline-stages
+  // fetch ever resolves) - and since the guard only checks `!targetStage`,
+  // it never re-fired once the real tenant default (e.g. 'interested')
+  // loaded. Confirmed live via a real network-request interception: the
+  // dropdown visually showed "Interested" (a <select> with an unmatched
+  // value silently falls back to displaying the first real <option>) while
+  // the actual submitted stage was "sourced" - a hidden stage - the whole
+  // time. Gated on stageConfig actually having loaded, not just on the
+  // (always-truthy) fallback-masked defaultAddStageKey.
+  useEffect(() => {
+    if (!targetStage && stageConfig && stageConfig.length > 0) setTargetStage(defaultAddStageKey);
+  }, [stageConfig, defaultAddStageKey, targetStage]);
+
+  const q = search.trim().toLowerCase();
+  const items = (matches || []).filter((c: any) =>
+    !q ||
+    c.full_name?.toLowerCase().includes(q) ||
+    c.current_designation?.toLowerCase().includes(q) ||
+    c.current_employer?.toLowerCase().includes(q) ||
+    c.skills?.some((s: string) => s.toLowerCase().includes(q))
+  );
+
+  function toggle(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function submit() {
+    if (selected.size === 0) return;
+    setSaving(true);
+    try {
+      await apiFetch('/candidates/bulk-assign', {
+        method: 'POST',
+        body: JSON.stringify({ candidate_ids: Array.from(selected), requisition_id: reqId, stage: targetStage || undefined }),
+      });
+      onAdded();
+    } catch (e: any) {
+      alert(String(e?.message || 'Failed to add candidates'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div style={{ width: 560, maxWidth: '94vw', maxHeight: '84vh', background: '#fff', borderRadius: 14, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '16px 18px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#1e293b' }}>✨ AI Matched Candidates{reqTitle ? ` — ${reqTitle}` : ''}</div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>Ranked by JD match score — highest first</div>
+          </div>
+          <button onClick={onClose} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94a3b8' }}><X size={14} /></button>
+        </div>
+        <div style={{ padding: '12px 18px 0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '7px 10px' }}>
+            <Search size={13} color="#94a3b8" />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter by name, skill, employer…" autoFocus
+              style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', flex: 1 }} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#64748b', flexShrink: 0 }}>Add into stage:</span>
+            <select value={targetStage} onChange={e => setTargetStage(e.target.value)}
+              style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '5px 8px', fontSize: 12, fontWeight: 600, color: '#1e293b', background: '#fff' }}>
+              {visibleStages.map((s: any) => <option key={s.stage_key} value={s.stage_key}>{s.label}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '10px 18px' }}>
+          {items.length === 0 && <div style={{ textAlign: 'center', color: '#cbd5e1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>No matching candidates found</div>}
+          {items.map((c: any) => {
+            const isSelected = selected.has(c.candidate_id);
+            return (
+              <label key={c.candidate_id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 8px', borderRadius: 10, cursor: 'pointer', background: isSelected ? '#eff6ff' : 'transparent', marginBottom: 2 }}>
+                <input type="checkbox" checked={isSelected} onChange={() => toggle(c.candidate_id)} style={{ marginTop: 3 }} />
+                <div style={{ width: 40, height: 40, borderRadius: '50%', border: `2px solid ${aiScoreColor(c.fit_score)}`, background: aiScoreBg(c.fit_score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 900, color: aiScoreColor(c.fit_score), flexShrink: 0 }}>
+                  {Math.round(c.fit_score || 0)}%
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: '#1e293b' }}>{c.full_name}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>
+                    {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ') || '—'}
+                    {c.total_exp_mo > 0 && ` · ${fmtExpMonths(c.total_exp_mo)} exp`}
+                    {c.location && ` · ${c.location}`}
+                  </div>
+                  {c.missing_skills?.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
+                      {(c.skills || []).slice(0, 4).map((sk: string) => (
+                        <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' }}>{sk}</span>
+                      ))}
+                      {c.missing_skills.slice(0, 3).map((sk: string) => (
+                        <span key={'m-' + sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca' }}>✕ {sk}</span>
+                      ))}
+                    </div>
+                  )}
+                  {!(c.missing_skills?.length > 0) && c.skills?.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
+                      {c.skills.slice(0, 5).map((sk: string) => (
+                        <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' }}>{sk}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </label>
+            );
+          })}
+        </div>
+        <div style={{ padding: '12px 18px', borderTop: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>{selected.size} selected</span>
+          <button onClick={submit} disabled={selected.size === 0 || saving}
+            style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || saving ? '#94a3b8' : '#2563eb', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || saving ? 'not-allowed' : 'pointer' }}>
+            {saving ? 'Adding…' : `Add ${selected.size || ''} to ${visibleStages.find((s: any) => s.stage_key === targetStage)?.label || 'Pipeline'}`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -208,7 +389,7 @@ function ShareButton({ reqId, size = 'normal' }: { reqId: string; size?: 'normal
   );
 }
 
-function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any }) {
+function JobCard({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any; onCandidatesAdded?: () => void }) {
   const [hover, setHover] = useState(false);
   const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
   const wm = WORK_MODE_CONFIG[req.work_mode] || WORK_MODE_CONFIG.onsite;
@@ -416,7 +597,7 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
 
       {!(counts && (counts.inbox_count > 0 || counts.total > 0)) && (
         <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 10, marginTop: 4 }}>
-          <AiMatchFinder reqId={req.id} />
+          <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />
         </div>
       )}
 
@@ -510,7 +691,7 @@ function JobCardCompact({ req, onEdit, onDelete, counts }: { req: any; onEdit: (
   );
 }
 
-function JobListRow({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any }) {
+function JobListRow({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req: any; onEdit: (r: any) => void; onDelete: (id: string) => void; counts?: any; onCandidatesAdded?: () => void }) {
   const [hover, setHover] = useState(false);
   const pri = PRIORITY_CONFIG[req.priority] || PRIORITY_CONFIG.medium;
   const [clientNow, setClientNow] = useState<number | undefined>(undefined);
@@ -547,7 +728,7 @@ function JobListRow({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: a
         <Users size={11} /> {req.positions_count} pos.
       </span>
       <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
-      {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} />}
+      {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />}
       {counts && counts.total > 0 && (
         <a href={`/pipeline?job=${req.id}`} style={{ textDecoration: 'none', flexShrink: 0 }}>
           <span style={{ fontSize: '12px', fontWeight: 700, color: '#1e40af' }}>{counts.total} in pipeline</span>
@@ -575,7 +756,7 @@ function JobListRow({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: a
   );
 }
 
-function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; onEdit: (r: any) => void; onDelete: (id: string) => void; stageCounts: any }) {
+function JobTableView({ reqs, onEdit, onDelete, stageCounts, onCandidatesAdded }: { reqs: any[]; onEdit: (r: any) => void; onDelete: (id: string) => void; stageCounts: any; onCandidatesAdded?: () => void }) {
   const [clientNow, setClientNow] = useState<number | undefined>(undefined);
   useEffect(() => { setClientNow(Date.now()); }, []);
   return (
@@ -613,7 +794,7 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; on
                 </td>
                 <td style={{ padding: '10px 14px' }}>
                   <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
-                  {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} />}
+                  {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />}
                 </td>
                 <td style={{ padding: '10px 14px', maxWidth: '260px' }}>
                   {counts?.total > 0 ? (
@@ -737,7 +918,7 @@ function RequisitionsPageInner() {
   }
 
   const { data: rawReqs, loading, refetch } = useFetch<any>('/requisitions');
-  const { data: stageCounts } = useFetch<any>('/pipeline/req-stage-counts');
+  const { data: stageCounts, refetch: refetchCounts } = useFetch<any>('/pipeline/req-stage-counts');
   const reqs: any[] = Array.isArray(rawReqs) ? rawReqs : (rawReqs?.items || []);
 
   const clientOptions = Array.from(new Set(reqs.map(r => r.client_name).filter(Boolean))).sort();
@@ -1007,12 +1188,12 @@ function RequisitionsPageInner() {
         </div>
       ) : viewMode === 'table' ? (
         <div data-testid="req-view-content">
-          <JobTableView reqs={filtered} onEdit={openEdit} onDelete={handleDelete} stageCounts={stageCounts} />
+          <JobTableView reqs={filtered} onEdit={openEdit} onDelete={handleDelete} stageCounts={stageCounts} onCandidatesAdded={refetchCounts} />
         </div>
       ) : viewMode === 'list' ? (
         <div data-testid="req-view-content" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {filtered.map((req: any) => (
-            <JobListRow key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} />
+            <JobListRow key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} onCandidatesAdded={refetchCounts} />
           ))}
         </div>
       ) : viewMode === 'compact' ? (
@@ -1024,7 +1205,7 @@ function RequisitionsPageInner() {
       ) : (
         <div data-testid="req-view-content" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(380px,1fr))', gap: '16px' }}>
           {filtered.map((req: any) => (
-            <JobCard key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} />
+            <JobCard key={req.id} req={req} onEdit={openEdit} onDelete={handleDelete} counts={stageCounts?.[req.id]} onCandidatesAdded={refetchCounts} />
           ))}
         </div>
       )}
