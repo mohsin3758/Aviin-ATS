@@ -941,7 +941,7 @@ export default function CandidatesPage() {
           </div>
         ) : (
           <>
-          <div style={{overflowX:'auto'}}>
+          <div data-testid="candidates-table-scroll" style={{overflowX:'auto'}}>
             <table style={{width:'100%',minWidth:'1220px',borderCollapse:'collapse'}}>
               <thead>
                 <tr style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0'}}>
@@ -958,7 +958,16 @@ export default function CandidatesPage() {
                   <SortTh label="Activity" col="last_activity" sort={sort} onSort={handleSort}/>
                   <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Source</th>
                   <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Owner</th>
-                  <th style={{padding:'10px 14px',position:'sticky',right:0,background:'#f8fafc',boxShadow:'-2px 0 4px rgba(0,0,0,0.06)',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',textAlign:'center'}}>Actions</th>
+                  {/* Real bug fix (2026-08-20): position:sticky here visually
+                      overlapped the Owner column entirely (and the tail end of
+                      Source) at every real viewport width tested — sticky's
+                      "stuck" paint position is pulled left onto whatever
+                      content naturally sits there, not just onto empty space,
+                      the same sticky-column-overlap class already found and
+                      reverted twice on Resume Inbox earlier the same day.
+                      Plain scroll instead — no overlap risk, matches that
+                      established fix. */}
+                  <th style={{padding:'10px 14px',background:'#f8fafc',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',textAlign:'center'}}>Actions</th>
                 </tr>
               </thead>
               <tbody data-testid="candidate-list">
@@ -1068,7 +1077,7 @@ export default function CandidatesPage() {
                         )}
                       </td>
                       {/* Actions */}
-                      <td style={{padding:'10px 14px',position:'sticky',right:0,background:isSel?'#eff6ff':'white',boxShadow:'-2px 0 4px rgba(0,0,0,0.05)'}}>
+                      <td style={{padding:'10px 14px'}}>
                         <div style={{display:'flex',gap:'4px',justifyContent:'center'}}>
                           <button onClick={()=>setDrawer(d)} title="Quick view" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #bfdbfe',background:'#eff6ff',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',padding:0}}><Eye size={12} style={{color:'#2563eb'}}/></button>
                           <button onClick={()=>openEdit(d)} title="Edit" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',padding:0}}><Edit size={12} style={{color:'#64748b'}}/></button>

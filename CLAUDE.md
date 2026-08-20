@@ -8923,3 +8923,89 @@ manual verification in this entry; all changes are deployed and the
 `assign KAE...`/role-gate/scorecard-and-retention tests in S43 already
 passed clean before the limit was hit, flagged honestly rather than
 claimed complete without the final confirmation.
+
+## Follow-up: full suite confirmed clean, plus a real bug found and fixed
+## in the 10-client cap's own cap-check query, 2026-08-20
+Rate limit cleared; re-ran the pending S43 suite (6/6 clean) — but a
+broader regression sweep afterward hit a genuine, reproducible failure
+in an unrelated suite (S30's "Generate & Submit" KAE-submission test),
+not a rate-limit flake. Investigated rather than dismissed, since it
+reproduced consistently even in a clean isolated re-run.
+
+**Root cause, found directly, not guessed**: that test calls `POST
+/kae/owners` to stand the real admin user up as a throwaway KAE — and
+the brand-new 10-client cap-check query (built the same day) counted
+`client_owners.is_active=true` rows regardless of whether the CLIENT
+itself was still active. `DELETE /clients/{id}` only deactivates the
+client, never its `client_owners` rows (no cascade, by design — matches
+this codebase's soft-delete convention everywhere, and `DELETE /kae/
+owners/{id}` is a genuinely separate action). Confirmed live: the real
+admin account had **224 stale active `client_owners` rows pointing at
+already-soft-deleted clients**, accumulated across this project's own
+test history (many suites use the admin as a stand-in KAE), silently
+maxing out their cap on day one of the feature existing. This is the
+exact "missing is_active filter on a joined entity" bug class documented
+dozens of times elsewhere in this project — just newly reintroduced in
+code written earlier the same day. The `GET /owners/by-kae/{id}` display
+endpoint already had the correct `cl.is_active IS NOT FALSE` filter
+(copied from the by-client endpoint); the cap-*check* inside
+`assign_owner` was the one place that didn't.
+
+**Fixed**: joined `clients` into the cap-check query with the same
+filter. **Cleaned up the data too, not just the code** — deactivated all
+224 stale rows directly (`UPDATE client_owners SET is_active=false ...
+WHERE cl.is_active=false`, no bulk endpoint exists for this), since
+leaving them `is_active=true` would keep them one query away from
+causing the identical bug anywhere else that might someday aggregate
+across a KAE's clients without the same join.
+
+Verified for real: reproduced the exact `POST /kae/owners` 400 the
+failing test hit via a direct curl replay before touching any code;
+confirmed the fix + cleanup together resolve it (a fresh assign for the
+real admin now succeeds); re-ran S30 clean (9/9). New permanent S43 test
+— creates a real client, assigns a KAE, soft-deletes the client without
+touching the ownership row (reproducing the exact real-world path that
+produced the 224 stale rows), confirms `by-kae` correctly shows 0, and
+confirms the KAE can still take on a genuinely new client afterward, not
+silently blocked by the stale one. Full regression sweep (S1/S2/S16/S20/
+S35/S38/S43/S44, 42 tests) passed clean. Zero-token audit: `CONFIRMED
+CLEAN` (381 files, 0 external API refs).
+
+## Separate, same-day report: Candidates table hiding real columns —
+## the Owner ("Claim") feature was completely invisible in production
+User reported the Candidates list table cutting off content (Source
+column truncated to "SOU", values truncated to 3 characters). Checked
+the real page directly rather than guessing, and found something more
+serious than the reported symptom: at every real viewport width tested
+(1366px through 1600px), the entire **Owner column — the real
+individual-recruiter-ownership "Claim" feature, live since 2026-08-11 —
+was completely invisible**, not just truncated, silently overlapped by
+the sticky Actions column.
+
+**Root cause, confirmed via real element geometry, not assumed**: the
+Actions column used `position:sticky, right:0` with no reserved buffer
+space. `position:sticky` keeps an element in the table's layout flow at
+its *natural* (unstuck) position, but *paints* it at a different screen
+location once "stuck" — and that painted location can genuinely overlap
+whatever other content happens to occupy those same screen coordinates.
+Measured directly: Owner's natural box (x=1410–1486) sat entirely inside
+Actions' stuck box (x=1395–1547) — full overlap, confirmed identical at
+both 1366px and 1600px viewports (the columns don't move with viewport
+width once the table needs any horizontal scroll at all, which it always
+does with 12 real columns). This is the exact same sticky-column-overlap
+class already found and reverted twice on Resume Inbox earlier the same
+day — just not yet checked on this page.
+
+**Fixed the same way**: removed `position:sticky` from both the Actions
+`<th>` and `<td>` — plain, honest horizontal scroll, matching the
+Resume Inbox precedent. Verified via real element geometry (both headers
+now `position:static`, zero overlap) and a real scrolled screenshot: the
+full Source, the real Owner column (showing actual "Claim" buttons and
+real "Admin User · 27d left" ownership displays for the first time), and
+Actions all render cleanly with nothing hidden. New permanent "S44"
+suite — asserts the real computed `position` isn't sticky (the exact
+mechanism that caused this) and that both columns are genuinely visible
+and usable after a real scroll, not just present in a false-positive
+`isVisible()` DOM check. Full regression sweep (42 tests, listed above)
+passed clean. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0 external
+API refs).

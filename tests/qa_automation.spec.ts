@@ -5135,6 +5135,50 @@ test.describe.serial('S43 KAE Module: Assign forms + role gates', () => {
     await request.delete(`${API}/users/${uWId}`, { headers: auth }).catch(() => {});
   });
 
+  // Real bug found the same day this cap was built, via a genuine S30
+  // test failure (not code review): the cap-check counted
+  // client_owners.is_active=true regardless of whether the CLIENT
+  // itself was still active. DELETE /clients/{id} only deactivates the
+  // client, never the ownership row (no cascade, by design — matches
+  // this codebase's soft-delete convention elsewhere) — so a client
+  // soft-deleted after being assigned left a permanently-active
+  // ownership row that kept counting against the KAE's cap forever.
+  // Confirmed live: the real admin user had 224 such stale rows from
+  // accumulated test history, silently maxing out their cap.
+  test('a soft-deleted client\'s leftover ownership row does not count toward the 10-client cap', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const uF = await request.post(`${API}/users`, {
+      headers: auth, data: { full_name: `QA S43 StaleClient KAE ${stamp}`, email: `qa.s43.staleclient.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    const uFId = (await uF.json()).id;
+
+    const cStale = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S43 Stale Client ${stamp}` } });
+    const cStaleId = (await cStale.json()).id;
+    const own = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: cStaleId, user_id: uFId, owner_type: 'kae' } });
+    expect(own.ok()).toBeTruthy();
+
+    // Soft-delete the client WITHOUT removing the ownership row — this is
+    // exactly the real-world scenario (DELETE /clients/{id} never touches
+    // client_owners) that produced the 224 stale rows found live.
+    await request.delete(`${API}/clients/${cStaleId}`, { headers: auth });
+
+    const byKae = await (await request.get(`${API}/kae/owners/by-kae/${uFId}`, { headers: auth })).json();
+    expect(byKae.client_count).toBe(0);
+
+    // The real regression case: this KAE must still be able to take on
+    // real, new clients up to the full cap — the stale row must not
+    // silently consume any of their 10 slots.
+    const cReal = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S43 Real Client ${stamp}` } });
+    const cRealId = (await cReal.json()).id;
+    const assign = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: cRealId, user_id: uFId, owner_type: 'kae' } });
+    expect(assign.ok()).toBeTruthy();
+    ownerIds.push((await assign.json()).id);
+
+    await request.delete(`${API}/clients/${cRealId}`, { headers: auth }).catch(() => {});
+    await request.delete(`${API}/users/${uFId}`, { headers: auth }).catch(() => {});
+  });
+
   test('a plain recruiter is blocked (403) from assigning/removing owners, setting visibility, creating/approving scorecards, or tracking retention — reads still work', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -5235,6 +5279,57 @@ test.describe.serial('S43 KAE Module: Assign forms + role gates', () => {
     expect(resp.status()).toBe(200);
     ownerIds.push((await resp.json()).id);
     await expect(page.locator('table').getByText(`QA S43 KAE Test Client ${stamp}`).first()).toBeVisible();
+    expect(errors).toHaveLength(0);
+  });
+});
+
+// S44 (2026-08-20): user reported the Candidates table's Source column
+// truncated to "SOU" with cut-off values ("lin"/"job"/"ref"). Root cause,
+// found by checking real column geometry, not guessing: the sticky
+// Actions column's "stuck" paint position visually overlapped whatever
+// content naturally sat there — completely hiding the entire Owner
+// column (the real "Claim" individual-recruiter-ownership feature, in
+// production since 2026-08-11) at every real viewport width tested, plus
+// the tail end of Source. Same sticky-column-overlap class already found
+// and reverted twice on Resume Inbox earlier the same day — fixed the
+// same way: removed position:sticky, plain honest scroll instead.
+test.describe.serial('S44 Candidates Table: sticky Actions column no longer hides Owner/Source', () => {
+  test('Owner and Actions headers do not overlap at a real narrow laptop width, and both are genuinely reachable', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await page.goto('/candidates');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+
+    const geom = await page.evaluate(() => {
+      const ths = Array.from(document.querySelectorAll('thead th'));
+      const owner = ths.find(t => t.textContent.trim() === 'Owner');
+      const actions = ths.find(t => t.textContent.trim() === 'Actions');
+      if (!owner || !actions) return null;
+      const o = owner.getBoundingClientRect(), a = actions.getBoundingClientRect();
+      return {
+        ownerPosition: getComputedStyle(owner).position,
+        actionsPosition: getComputedStyle(actions).position,
+        overlap: !(o.right <= a.left || o.left >= a.right),
+      };
+    });
+    expect(geom).toBeTruthy();
+    // Real regression guard: neither header may be sticky (the exact
+    // mechanism that caused the overlap), and their real rendered boxes
+    // must not intersect at all.
+    expect(geom!.ownerPosition).toBe('static');
+    expect(geom!.actionsPosition).toBe('static');
+    expect(geom!.overlap).toBe(false);
+
+    // Scroll the table's own container fully right and confirm Owner AND
+    // Actions are both genuinely visible and usable — not just present
+    // in the DOM (which isVisible() would report as true even when
+    // silently covered, the exact false-positive that let this bug
+    // through undetected the first time).
+    await page.getByTestId('candidates-table-scroll').evaluate(el => { el.scrollLeft = el.scrollWidth; });
+    await expect(page.locator('th:has-text("Owner")')).toBeVisible();
+    const firstRowEdit = page.locator('table tbody tr').first().locator('button[title="Edit"]');
+    await expect(firstRowEdit).toBeVisible();
     expect(errors).toHaveLength(0);
   });
 });

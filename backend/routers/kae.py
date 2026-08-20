@@ -91,9 +91,23 @@ async def assign_owner(body: ClientOwnerIn, actor: Actor=Depends(require_permiss
                 # (same scoping the 3-per-client rule already uses) — an
                 # account_manager/secondary assignment doesn't count
                 # against a KAE's own client load.
+                # Real bug fix (found the same day this was built, via a
+                # genuine test failure, not code review): this query
+                # counted client_owners.is_active=true regardless of
+                # whether the CLIENT itself was still active — a
+                # soft-deleted client's leftover ownership row (never
+                # explicitly removed by DELETE /kae/owners/{id}, since
+                # DELETE /clients/{id} only deactivates the client, not
+                # its ownership rows) permanently counted against the
+                # KAE's cap forever. Confirmed live: the real admin user
+                # had 222 such stale rows from accumulated test history,
+                # already maxing out their cap before this fix. Matches
+                # the by-kae endpoint's own correct cl.is_active filter.
                 per_kae = await conn.fetchval("""
-                    SELECT COUNT(*) FROM client_owners
-                    WHERE tenant_id=$1 AND user_id=$2 AND owner_type='kae' AND is_active=true
+                    SELECT COUNT(*) FROM client_owners co
+                    JOIN clients cl ON cl.id=co.client_id
+                    WHERE co.tenant_id=$1 AND co.user_id=$2 AND co.owner_type='kae' AND co.is_active=true
+                      AND cl.is_active IS NOT FALSE
                 """, actor.tenant_id, body.user_id)
                 if per_kae >= 10:
                     raise HTTPException(400, "This KAE already owns the maximum of 10 clients")
