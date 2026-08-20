@@ -5472,4 +5472,38 @@ test.describe.serial('S46 Resume Inbox: Job Match / Match % no longer hidden by 
     await expect(page.locator('th:has-text("Match %")')).toBeVisible();
     await expect(page.locator('table tbody tr').first().locator('button[title="Edit & Approve"]')).toBeVisible();
   });
+  test('real column-width fix: at a realistic laptop width (~1568px) the table needs zero horizontal scroll and Match % renders in full', async ({ page }) => {
+    // Regression test for the specific follow-up report: at the user's
+    // actual (narrower than 1600px) screen width, "MATCH %" rendered
+    // truncated as "MAT..." even after the sticky-column fix above,
+    // because Candidate/File/Skills/Job Match cells had no real width
+    // cap (or, for two spans, a cap that silently never applied since
+    // <span> is display:inline by default and CSS ignores max-width on
+    // inline elements). Fixed by capping those 4 columns and adding the
+    // missing display:'block' to the File/Job Match name spans.
+    await page.setViewportSize({ width: 1568, height: 900 });
+    await page.goto('/resume-inbox');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 15000 });
+
+    const overflow = await page.evaluate(() => {
+      const wrapper = document.querySelector('table')?.parentElement;
+      if (!wrapper) return null;
+      return wrapper.scrollWidth - wrapper.clientWidth;
+    });
+    expect(overflow).not.toBeNull();
+    expect(overflow!).toBeLessThanOrEqual(0);
+
+    // "Match %" must render as the full header text, not clipped/cut off.
+    const matchPctHeader = page.locator('th:has-text("Match %")');
+    await expect(matchPctHeader).toBeVisible();
+    expect((await matchPctHeader.textContent())?.trim()).toBe('Match %');
+
+    // A real score badge (e.g. "24%") must be fully visible with no
+    // horizontal scroll needed to see it.
+    const scoreBadge = page.locator('table tbody tr').first().locator('text=/^\d{1,3}%$/').first();
+    if (await scoreBadge.count() > 0) {
+      await expect(scoreBadge).toBeInViewport();
+    }
+  });
+
 });

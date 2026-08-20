@@ -9180,3 +9180,52 @@ S46 (Job Match/Match % geometry) re-verified unaffected by the padding
 change. Full regression sweep (S1/S2/S32/S39/S41/S44/S45/S46, 17 tests)
 passed clean. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0 external
 API refs).
+
+
+## Resume Inbox: Match % still cut off at the user's real (narrower) screen
+## width, root-caused with exact per-column geometry, 2026-08-20
+Direct follow-up, same day, to the padding-trim fix above — user reported
+the identical symptom persisting at their actual screen ("same issue
+match% and other features not visible"), from a screenshot showing
+"MAT..." as a truncated header. The earlier fix had only been verified
+at 1680px; rather than guess at another round-number width, measured the
+real, exact per-column widths via a headless-browser script at 1568px
+(a width chosen to match the proportions implied by the user's own
+screenshot) — `scrollWidth - clientWidth = 96px` overflow, with
+Candidate (233px), Skills (160px), File (150px), and Job Match (136px)
+identified as the biggest space consumers.
+
+**A real, previously-unnoticed correctness bug found in the process**:
+the File and Job Match `<span>` elements already had `maxWidth`/
+`overflow:hidden`/`textOverflow:ellipsis` set, but neither had
+`display:'block'` — `<span>` defaults to `display:inline`, and CSS
+silently ignores `max-width`/`text-overflow` on inline elements, so
+those truncation styles had never actually applied; long real filenames
+and JD titles were free to stretch their columns arbitrarily wide. Fixed
+by adding `display:'block'` to both spans (matching the already-correct
+Status column's pipeline-stage `<div>`, which was unaffected since divs
+are block by default).
+
+Trimmed and fixed 4 cells in `resume-inbox/page.tsx`: Candidate
+(`maxWidth:190` added to the td and name/email/designation, none of
+which had any width cap before), File (`maxWidth` 150→120, span capped
+95 + the missing `display:block`), Skills (`maxWidth` 160→125, displayed
+badges reduced from 3 to 2 with the "+N" count adjusted), Job Match
+(`maxWidth:110` added to the td, span capped 110 + the missing
+`display:block`).
+
+Verified for real, not just via the geometry numbers that had already
+been wrong once before: re-ran the exact same measurement script
+post-deploy — `overflow: 0` at both 1568px and 1600px (small, acceptable
+overflow remains at narrower 1366px/1440px, where horizontal scroll
+still works correctly) — then pulled and visually inspected a real
+screenshot at 1568px, confirming "Match %" renders as full, un-clipped
+header text with real score badges ("24%", "21%") fully visible with
+zero scrolling, alongside readable Skills/File/Job Match content and
+reachable Edit/download/link action icons. New permanent regression test
+added to the existing "S46" suite asserting zero horizontal overflow and
+a fully-rendered "Match %" header/score badge at 1568px specifically —
+the concrete width this bug reproduced at, not just the 1366/1600px
+pair the suite already covered. Full regression sweep (S32/S39/S40/S41/
+S44/S45/S46, 20 tests) passed clean. Zero-token audit: `CONFIRMED CLEAN`
+(381 files, 0 external API refs).

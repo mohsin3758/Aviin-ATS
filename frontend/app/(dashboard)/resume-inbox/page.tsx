@@ -880,13 +880,13 @@ function ResumeInboxPageInner() {
                           rest of the cell while fixing the checkbox itself. */}
                       <td style={{ padding: '10px 8px' }} onClick={e => { e.stopPropagation(); toggleSelect(r.id); }}><input type="checkbox" data-testid={`resume-inbox-checkbox-${r.id}`} checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} onClick={e => e.stopPropagation()} style={{ cursor: 'pointer' }} /></td>
                       {/* Candidate cell — shows name + near-dup warning */}
-                      <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}>
+                      <td style={{ padding: '10px 8px', maxWidth: 190 }} onClick={() => setSelected(r)}>
                         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
-                          <span style={{ fontWeight: 700, color: '#1e293b', fontSize: 13 }}>{r.full_name || r.parsed_data?.name || '—'}</span>
+                          <span style={{ fontWeight: 700, color: '#1e293b', fontSize: 13, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 190 }}>{r.full_name || r.parsed_data?.name || '—'}</span>
                           {nearDup && <NearDupBadge dup={nearDup} />}
                         </div>
-                        <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{r.email || r.source_email || '—'}</div>
-                        {r.current_designation && <div style={{ fontSize: 10, color: '#94a3b8' }}>{r.current_designation}</div>}
+                        <div style={{ fontSize: 11, color: '#64748b', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 190 }}>{r.email || r.source_email || '—'}</div>
+                        {r.current_designation && <div style={{ fontSize: 10, color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 190 }}>{r.current_designation}</div>}
                       </td>
                       <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}>
                         <StatusBadge status={r.parse_status || 'pending'} />
@@ -898,19 +898,19 @@ function ResumeInboxPageInner() {
                         )}
                       </td>
                       <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}><SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} /></td>
-                      <td style={{ padding: '10px 8px', maxWidth: 150 }} onClick={() => setSelected(r)}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#374151' }}><FileText size={12} color="#6366f1" /><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{r.file_name || r.email_subject || '—'}</span></div>
+                      <td style={{ padding: '10px 8px', maxWidth: 120 }} onClick={() => setSelected(r)}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#374151' }}><FileText size={12} color="#6366f1" style={{ flexShrink: 0 }} /><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 95 }}>{r.file_name || r.email_subject || '—'}</span></div>
                         {r.file_size > 0 && <div style={{ fontSize: 10, color: '#94a3b8' }}>{fsize(r.file_size)}</div>}
                       </td>
-                      <td style={{ padding: '10px 8px', maxWidth: 160 }} onClick={() => setSelected(r)}>
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>{skills.slice(0, 3).map((sk: string) => <span key={sk} style={{ fontSize: 10, background: '#eff6ff', color: '#1e40af', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>{sk}</span>)}{skills.length > 3 && <span style={{ fontSize: 10, color: '#94a3b8' }}>+{skills.length - 3}</span>}</div>
+                      <td style={{ padding: '10px 8px', maxWidth: 125 }} onClick={() => setSelected(r)}>
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>{skills.slice(0, 2).map((sk: string) => <span key={sk} style={{ fontSize: 10, background: '#eff6ff', color: '#1e40af', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>{sk}</span>)}{skills.length > 2 && <span style={{ fontSize: 10, color: '#94a3b8' }}>+{skills.length - 2}</span>}</div>
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 12, color: '#374151', fontWeight: 600, whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{gx(r.total_exp_mo || 0)}</td>
                       <td style={{ padding: '10px 8px', fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.email_received_at || r.created_at)}</td>
                       <td style={{ padding: '10px 8px', fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }} onClick={() => setSelected(r)}>{fdt(r.created_at)}</td>
                       {/* Job Match column — entire cell is clickable when JD is known */}
                       <td
-                        style={{ padding: '10px 8px', cursor: (r.requisition_title || r.matched_jd_title) ? 'pointer' : 'default' }}
+                        style={{ padding: '10px 8px', maxWidth: 110, cursor: (r.requisition_title || r.matched_jd_title) ? 'pointer' : 'default' }}
                         onClick={e => {
                           e.stopPropagation();
                           const reqId = r.requisition_id || r.matched_requisition_id;
@@ -919,10 +919,18 @@ function ResumeInboxPageInner() {
                       >
                         {(r.requisition_title || r.matched_jd_title) ? (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            {/* Real bug fix (2026-08-20): a bare <span> is
+                                inline by default and CSS ignores max-width
+                                on inline elements — this "truncation" never
+                                actually applied, so a long real JD title
+                                could silently stretch this column far wider
+                                than intended. display:'block' makes the
+                                existing maxWidth/ellipsis genuinely take
+                                effect. */}
                             <span style={{
                               fontSize: 11, fontWeight: 700,
                               color: r.requisition_title ? '#1e40af' : '#166534',
-                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120,
+                              display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110,
                             }}>
                               {r.requisition_title || r.matched_jd_title}
                             </span>
