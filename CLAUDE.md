@@ -9284,3 +9284,97 @@ each check. New permanent "S47" suite (4 tests: create, update, and a
 real UI click-through) added to `qa_automation.spec.ts`. Regression
 sweep (S1/S2/S8/S13/S16/S22, 39 tests) passed clean. Zero-token audit:
 `CONFIRMED CLEAN` (381 files, 0 external API refs).
+
+
+## Jobs & Requisitions: "Inbox" empty for a new job explained + a real
+## on-demand AI Match feature built, plus a foundational embedding-
+## pipeline gap found and fixed, 2026-08-20
+User asked, from a screenshot of the Jobs & Requisitions Table view: why
+does a newly-posted job show an empty INBOX/PIPELINE while older jobs
+show real numbers — shouldn't posting a job automatically show total
+candidates already in the database matching via AI JD score?
+
+**Investigated before building anything**: the "INBOX" column
+(`pipeline_p2.py`'s `req-stage-counts`) counts `candidates.
+matched_requisition_id = r.id` — resumes that arrived via email/WhatsApp
+AFTER the job existed and got auto-matched to it at intake time. It's a
+real, live-accumulating counter, not a database-wide AI match — a
+brand-new job correctly starts at 0 and stays there until new resumes
+happen to come in. The two older jobs in the screenshot (294/3 inbox)
+had simply been open for weeks, accumulating real intake matches; the
+new one had existed for minutes. This part was working as designed, not
+a bug — but the user's actual expectation (an immediate AI match against
+everyone already in the system) turned out to be a real, legitimate,
+previously-unmet feature: `GET /requisitions/{id}/match-candidates`
+already exists (real pgvector cosine similarity + skill overlap,
+`match_candidates()` in `sql/04_phase3_ai_engine.sql`) but was only ever
+reachable buried inside the Pipeline board's "Add Candidate" modal —
+invisible from this list, which is exactly where a recruiter would look
+for it right after posting a role.
+
+**Built**: a new `AiMatchFinder` component (`requisitions/page.tsx`) —
+a "🔍 Find AI Matches" button wherever the Inbox count is 0, across all
+3 views that show it (Cards, List, Table — Compact deliberately stays
+dense per its 2026-08-11 design decision). On click, calls the existing
+`match-candidates?limit=50` endpoint on demand (not eager per-row on
+page load — a pgvector cosine scan across the whole candidate table is
+materially more expensive than the plain aggregate `/pipeline/
+req-stage-counts` query this page already runs for every row) and shows
+a real "N ✨ AI Match" badge (or an honest "No AI matches found"),
+linking into `/pipeline?job={id}` to actually review and add them —
+reusing the exact same, already-correct backend logic, no duplicated
+matching code.
+
+**A much deeper, foundational bug found while verifying this against the
+user's real requisition, not hypothetical**: every result came back with
+`cosine_similarity: 0.0`, even for genuinely strong SAP FICO matches with
+real skill overlap. Traced to `match_candidates()`'s own SQL —
+`COALESCE(1 - (c.resume_embedding <=> req.jd_embedding), 0)` — meaning a
+NULL `jd_embedding` silently degrades the whole semantic half to 0, not
+an error. Confirmed the real requisition's `jd_embedding` was NULL, then
+checked how it's ever supposed to get populated: `backend/embed_writer.py`
+computes both `resume_embedding` and `jd_embedding` (Tier 1 of the
+zero-token cascade, BGE-small via the local embed service, HARD RULE #3)
+— but **it was never wired into `scheduler.py`, docker-compose, or any
+crontab, on either the app-user or root crontab, anywhere**. It only ever
+ran when someone manually typed `docker compose exec backend python
+embed_writer.py`. Confirmed live: 3 of 4 real requisitions had an
+embedding (from some past manual run), the 4th (created that same day)
+did not, and a real, non-trivial backlog existed on the candidate side
+too (100 real active candidates with no `resume_embedding` at all). This
+meant the whole pgvector-based semantic-matching half of `match_
+candidates()`/`/candidates/{id}/match-open-jobs` had been silently
+running keyword-overlap-only for any candidate or requisition created
+since whenever that last manual run happened — a structural gap in the
+AI Router's own Tier-1 cascade, not a one-off.
+
+**Fixed properly, not just for this one job**: new `fill_missing_
+embeddings()` in `scheduler.py`, wired as a real "interval" job every
+10 minutes (`id="fill_missing_embeddings"`) — reuses `embed_writer.py`'s
+exact fill logic, but through `ai_router.embed_text()` (the shared
+Tier-1 entry point every other embed call in the app already goes
+through, instead of the standalone script's own separate httpx client)
+and this file's own established per-tenant `system_conn()`/`tenant_conn()`
+pattern instead of a bare asyncpg pool. Capped at 50 rows per type per
+tenant per tick, so a large historical backlog can't block one scheduler
+tick for long — the next tick picks up where it left off; one row
+failing to embed never blocks the rest of the batch or the next tenant.
+
+Verified for real end-to-end, not code review: reproduced the exact
+`cosine_similarity: 0.0` result against the real user-reported
+requisition before touching anything; ran the new function directly
+inside the backend container (bypassing the 10-minute wait) and
+confirmed `jd_embedding` went from NULL to real (4/4 requisitions now
+embedded) and the exact same `match-candidates` call now returned
+genuine cosine scores (0.88, 0.87, 0.87...) instead of flat zeros; ran
+it 2 more times and confirmed the real 100-candidate backlog cleared to
+0. A real headless-browser click-through confirmed the actual "Find AI
+Matches" button on the live page reveals a real "50+ ✨ AI Match" badge
+for the exact requisition from the user's screenshot — pulled and
+visually inspected both before/after screenshots, not just checked for
+a passing locator. New permanent "S48" suite (4 tests: a real DB-wide
+match against a fresh requisition, a poll-based check that a brand-new
+requisition's `jd_embedding` genuinely gets filled rather than staying
+permanently null, and a real UI click-through). Regression sweep (S1/S2/
+S8/S13/S16/S22/S47, 43 tests) passed clean. Zero-token audit: `CONFIRMED
+CLEAN` (381 files, 0 external API refs).

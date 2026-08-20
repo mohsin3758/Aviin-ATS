@@ -102,6 +102,65 @@ function InboxBadge({ reqId, count, iconOnly }: { reqId: string; count: number; 
   );
 }
 
+// The "Inbox" badge above only ever counts resumes that arrived via
+// email/WhatsApp AFTER this job existed and got auto-matched to it at
+// intake time — it's a real, live-accumulating count, not a snapshot of
+// the whole candidate database. A brand-new job genuinely starts at 0
+// and stays there until new resumes come in, which reads as "broken" to
+// a user expecting an immediate AI match against everyone already in the
+// system. That AI match already exists (GET /requisitions/{id}/
+// match-candidates — pgvector cosine similarity + skill overlap, the
+// same endpoint the Pipeline board's "Add Candidate" modal already
+// uses) — it just wasn't reachable from this list. Made on-demand
+// (not eager per-row) since a cosine-similarity scan is materially more
+// expensive than the plain aggregate /pipeline/req-stage-counts query
+// this page already runs for every row on load.
+function AiMatchFinder({ reqId }: { reqId: string }) {
+  const [state, setState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [matches, setMatches] = useState<any[]>([]);
+
+  const find = async (e: React.MouseEvent) => {
+    e.stopPropagation(); e.preventDefault();
+    if (state === 'loading') return;
+    setState('loading');
+    try {
+      const data = await apiFetch(`/requisitions/${reqId}/match-candidates?limit=50`);
+      setMatches(Array.isArray(data) ? data : []);
+      setState('done');
+    } catch {
+      setState('error');
+    }
+  };
+
+  if (state === 'done') {
+    if (matches.length === 0) {
+      return <span style={{ fontSize: '11px', color: '#94a3b8' }}>No AI matches found</span>;
+    }
+    return (
+      <a href={`/pipeline?job=${reqId}`} title="Open the pipeline board to review and add these AI-matched candidates" style={{ textDecoration: 'none' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, background: '#059669', cursor: 'pointer' }}>
+          <span style={{ fontSize: '11px', fontWeight: 800, color: '#fff' }}>{matches.length}{matches.length === 50 ? '+' : ''}</span>
+          <span style={{ fontSize: '9px', fontWeight: 600, color: '#a7f3d0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>✨ AI Match</span>
+        </div>
+      </a>
+    );
+  }
+
+  return (
+    <button onClick={find} disabled={state === 'loading'}
+      title="Search the existing candidate database for AI-based JD matches"
+      style={{
+        display: 'flex', alignItems: 'center', gap: '4px', padding: '3px 8px', borderRadius: 20,
+        background: state === 'error' ? '#fef2f2' : '#eff6ff',
+        border: `1px solid ${state === 'error' ? '#fecaca' : '#bfdbfe'}`,
+        color: state === 'error' ? '#dc2626' : '#2563eb',
+        fontSize: '10px', fontWeight: 600, cursor: state === 'loading' ? 'wait' : 'pointer', whiteSpace: 'nowrap',
+      }}>
+      {state === 'loading' ? '⏳ Searching…' : state === 'error' ? 'Retry AI Match' : '🔍 Find AI Matches'}
+    </button>
+  );
+}
+
 function ShareButton({ reqId, size = 'normal' }: { reqId: string; size?: 'normal' | 'icon' }) {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -355,6 +414,12 @@ function JobCard({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: any)
         );
       })()}
 
+      {!(counts && (counts.inbox_count > 0 || counts.total > 0)) && (
+        <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 10, marginTop: 4 }}>
+          <AiMatchFinder reqId={req.id} />
+        </div>
+      )}
+
             {/* Actions */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: '8px',
@@ -482,6 +547,7 @@ function JobListRow({ req, onEdit, onDelete, counts }: { req: any; onEdit: (r: a
         <Users size={11} /> {req.positions_count} pos.
       </span>
       <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
+      {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} />}
       {counts && counts.total > 0 && (
         <a href={`/pipeline?job=${req.id}`} style={{ textDecoration: 'none', flexShrink: 0 }}>
           <span style={{ fontSize: '12px', fontWeight: 700, color: '#1e40af' }}>{counts.total} in pipeline</span>
@@ -547,7 +613,7 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts }: { reqs: any[]; on
                 </td>
                 <td style={{ padding: '10px 14px' }}>
                   <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
-                  {!(counts?.inbox_count > 0) && <span style={{ fontSize: '12px', color: '#94a3b8' }}>—</span>}
+                  {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} />}
                 </td>
                 <td style={{ padding: '10px 14px', maxWidth: '260px' }}>
                   {counts?.total > 0 ? (

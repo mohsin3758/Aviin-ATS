@@ -8,6 +8,7 @@ import httpx
 import logging
 from datetime import date, datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import ai_router
 import db
 
 logger = logging.getLogger(__name__)
@@ -653,6 +654,80 @@ async def process_duplicate_scan():
         logger.error(f"process_duplicate_scan error: {e}")
 
 
+async def fill_missing_embeddings():
+    """Every 10 min: computes resume_embedding / jd_embedding (BGE-small,
+    vector(384), Tier 1 of the zero-token cascade) for any candidate or
+    requisition that doesn't have one yet.
+
+    REAL GAP FOUND 2026-08-20: `embed_writer.py` (the script that fills
+    these two columns) was never wired into scheduler.py, docker-compose,
+    or any crontab — it only ever ran when someone manually typed
+    `docker compose exec backend python embed_writer.py`. Confirmed live:
+    3 of 4 real requisitions had a jd_embedding, the 4th (created that
+    same day) did not — meaning any candidate or requisition created
+    since the last manual run silently had NO real semantic signal in
+    match_candidates()/match-open-jobs, just the keyword-overlap half of
+    the fit_score formula (cosine_similarity always computed to 0 via the
+    function's own COALESCE fallback, not an error). Found while building
+    the Jobs & Requisitions list's new on-demand "Find AI Matches" button
+    — that button calls match_candidates() directly, so it would have
+    silently shipped as "AI Match" in name only for any freshly-posted
+    job. Reuses embed_writer.py's exact same fill logic, just through
+    ai_router.embed_text() (the shared Tier-1 embed entry point, same
+    HARD RULE #3/#4 module every other embed call in the app already
+    goes through) and this file's own established per-tenant
+    system_conn()/tenant_conn() pattern instead of a standalone asyncpg
+    pool. Capped at 50 rows per type per tenant per tick so a large
+    backlog can't block one scheduler tick for long — the next tick
+    picks up where this one left off. One candidate/requisition failing
+    to embed (a transient embed-service hiccup, e.g.) never blocks the
+    rest of the batch or the next tenant.
+    """
+    logger.info("scheduler: filling missing resume/JD embeddings")
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        total_cand = total_req = 0
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    cand_rows = await conn.fetch(
+                        "SELECT id, resume_text FROM candidates "
+                        "WHERE resume_embedding IS NULL AND resume_text IS NOT NULL "
+                        "AND is_active IS NOT FALSE ORDER BY created_at DESC LIMIT 50")
+                    for r in cand_rows:
+                        try:
+                            vec = await ai_router.embed_text(r["resume_text"])
+                            await conn.execute(
+                                "UPDATE candidates SET resume_embedding=$1::vector WHERE id=$2",
+                                ai_router._vector_literal(vec), r["id"])
+                            total_cand += 1
+                        except Exception as e:
+                            logger.error(f"embed fill failed for candidate {r['id']}: {e}")
+
+                    req_rows = await conn.fetch(
+                        "SELECT id, title, description, skills_required FROM requisitions "
+                        "WHERE jd_embedding IS NULL AND is_active IS NOT FALSE "
+                        "ORDER BY created_at DESC LIMIT 50")
+                    for r in req_rows:
+                        try:
+                            text = (f"{r['title']}. {r['description'] or ''} Skills: "
+                                    f"{', '.join(r['skills_required'] or [])}.")
+                            vec = await ai_router.embed_text(text)
+                            await conn.execute(
+                                "UPDATE requisitions SET jd_embedding=$1::vector WHERE id=$2",
+                                ai_router._vector_literal(vec), r["id"])
+                            total_req += 1
+                        except Exception as e:
+                            logger.error(f"embed fill failed for requisition {r['id']}: {e}")
+            except Exception as e:
+                logger.error(f"embed fill failed for tenant {tid}: {e}")
+        if total_cand or total_req:
+            logger.info(f"scheduler: embedded {total_cand} candidates, {total_req} requisitions")
+    except Exception as e:
+        logger.error(f"fill_missing_embeddings error: {e}")
+
+
 async def process_ownership_expiry():
     """Daily 04:00 IST: flip candidate_ownership.status from 'active' to
     'expired' for locks past their 30-day window (2026-08-11, individual
@@ -1129,6 +1204,11 @@ def start_scheduler():
     # alerts automatically instead of waiting for a human to open the panel,
     # and auto-reassign after a grace period if still unresolved.
     scheduler.add_job(process_sla_escalations, "interval", minutes=30, id="sla_escalations", replace_existing=True)
+    # Every 10 min — real gap found 2026-08-20: fills resume_embedding/
+    # jd_embedding (Tier-1 semantic matching) for anything created since
+    # the last run of the previously-manual-only embed_writer.py script.
+    scheduler.add_job(fill_missing_embeddings, "interval", minutes=10,
+                      id="fill_missing_embeddings", replace_existing=True)
     # Daily at 03:00 IST — data-minimization purge for device monitoring
     # (active-window log + browsing history). Consent/device/enrollment
     # rows are kept (they're the audit trail of who agreed to what), only
