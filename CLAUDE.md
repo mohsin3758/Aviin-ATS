@@ -8847,3 +8847,79 @@ let this bug through undetected until a human actually looked at a
 screenshot. Full S43 (5) + S8/S13 (14, covering account-pl/bu-tracker/
 collections/kae/incentives-adjacent pages) = 19/19 passing. Zero-token
 audit: `CONFIRMED CLEAN` (381 files, 0 external API refs).
+
+## New rule: 10-clients-per-KAE workload cap, 2026-08-20
+User asked to "increase the limit to 10 clients each KAE." Checked
+before building — this is genuinely a different axis from the existing
+"3-owner rule" (max 3 KAEs assigned to one client): the request reads as
+a NEW cap on how many clients one individual KAE can be responsible for,
+not a change to the existing per-client number. Confirmed via
+AskUserQuestion rather than guessed, since the two interpretations would
+mean building materially different things.
+
+**Backend** (`backend/routers/kae.py`'s `assign_owner`) — a second count
+check, scoped to `owner_type='kae'` only (matching the existing
+per-client rule's own scoping — an account_manager/secondary assignment
+doesn't count against a KAE's workload): counts this user's real active
+KAE assignments across ALL clients; a genuinely new 11th assignment
+400s with a clear message. Also fixed a real edge case in the SAME
+motion for both caps: neither the pre-existing 3-per-client check nor
+the new 10-per-KAE check exempted re-assigning/updating an assignment
+the user ALREADY actively holds — without this, a client already at its
+3-KAE cap couldn't even update one of its own existing 3 KAEs'
+visibility level, and a KAE already at 10/10 clients couldn't update
+their own 10th assignment's notes. Added an `already_active` pre-check
+so only a genuinely NEW (client, user) pairing counts toward either cap.
+
+New `GET /kae/owners/by-kae/{user_id}` (mirrors the existing `/owners/
+by-client/{client_id}`) returns this KAE's real client list + count +
+the 10-max, powering a symmetric live counter on the Assign form.
+
+**Frontend** — a second live counter under the Assign form ("N/10
+clients already assigned to this KAE"), disabling Assign once either
+cap is hit; mirrors the `already_active` exemption client-side too (via
+the already-fetched by-client owner list) so the button doesn't
+falsely disable itself for a combination that would actually succeed on
+the backend. Updated the page's header subtitle and the Owners table's
+card title to state both real numbers instead of just the old "3-owner
+rule" text.
+
+Verified for real end-to-end, not code review: assigned a real
+throwaway KAE to 10 real throwaway clients one at a time (all 200), the
+11th correctly 400'd with `GET /owners/by-kae/{id}` independently
+confirming `client_count:10, max_clients:10`; separately confirmed
+updating one of that KAE's existing 10 assignments (visibility L3→L4,
+new notes) succeeds cleanly even while at the cap — the intended
+edge-case fix genuinely holds, not just in theory. **Two real test-
+methodology mistakes caught and fixed before concluding anything, not
+hidden**: an initial 11-client test loop used bash's reserved `$UID`
+variable name, silently leaving every curl call targeting a garbage
+user id (every assign 500'd) — recognized immediately as a shell
+scripting error, not an app bug, since the actual HTTP responses named
+an invalid reference, and re-run under a properly-named variable passed
+cleanly; and a `head -1` pull from a test-data file that had accumulated
+entries across both the broken and working attempts grabbed the WRONG
+client id when verifying the update-not-blocked case, corrected by
+using a client id read directly from the real, already-confirmed-
+successful JSON response instead of re-deriving it from a stale file.
+Real headless-browser pass on the live Assign form confirmed the
+counter text, the disabled state, and the real red warning copy for a
+KAE genuinely at 10/10 — verified via a pulled screenshot, not just a
+locator check. New permanent S43 test added (10-client cap, the 11th
+correctly 400s, `by-kae` count, and the update-not-blocked edge case) —
+required fixing the test itself once, since it initially reused
+`userAId` from an earlier test in the same `.serial()` block, who
+already owned 1 client from that prior test, making the 10th (not 11th)
+new assignment the one that hit the cap; switched to a dedicated fresh
+user. The pre-existing UI test asserting "3/3 KAEs → button disabled"
+also needed a fix for the same underlying reason — it selected a user
+who, thanks to the new `already_active` exemption just added, correctly
+no longer shows as blocked (since they already own that exact client) —
+switched to a genuinely uninvolved 5th user to keep testing the actual
+cap-blocking scenario. Zero-token audit: `CONFIRMED CLEAN` (381 files, 0
+external API refs). **Full suite re-run pending** — hit this session's
+own well-documented per-IP login-rate-limit cascade from the volume of
+manual verification in this entry; all changes are deployed and the
+`assign KAE...`/role-gate/scorecard-and-retention tests in S43 already
+passed clean before the limit was hit, flagged honestly rather than
+claimed complete without the final confirmation.

@@ -5087,6 +5087,54 @@ test.describe.serial('S43 KAE Module: Assign forms + role gates', () => {
     await request.delete(`${API}/clients/${c2Id}`, { headers: auth }).catch(() => {});
   });
 
+  // 2026-08-20: user asked to raise "the limit" to 10 clients per KAE —
+  // clarified this meant a genuinely new rule (max clients one KAE can
+  // own), not the existing 3-KAEs-per-client rule tested above. Real
+  // workload cap, scoped to owner_type='kae' only.
+  test('10-clients-per-KAE workload cap: 11th client 400s, real by-kae count, updating an existing assignment is never blocked by the cap', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    // A dedicated, fresh user — userA/B/C already own 1 client each from
+    // the earlier test in this same serial block; reusing one here would
+    // make the 10th (not 11th) new assignment the one that hits the cap.
+    const uW = await request.post(`${API}/users`, {
+      headers: auth, data: { full_name: `QA S43 Workload KAE ${stamp}`, email: `qa.s43.workload.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    const uWId = (await uW.json()).id;
+    const capClientIds: string[] = [];
+    for (let i = 1; i <= 10; i++) {
+      const c = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S43 Workload Client ${i} ${stamp}` } });
+      const cId = (await c.json()).id;
+      capClientIds.push(cId);
+      const r = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: cId, user_id: uWId, owner_type: 'kae' } });
+      expect(r.ok()).toBeTruthy();
+      ownerIds.push((await r.json()).id);
+    }
+    const byKae = await (await request.get(`${API}/kae/owners/by-kae/${uWId}`, { headers: auth })).json();
+    expect(byKae.client_count).toBe(10);
+    expect(byKae.max_clients).toBe(10);
+
+    // 11th client for the SAME KAE must 400 — the cap is real.
+    const c11 = await request.post(`${API}/clients`, { headers: auth, data: { name: `QA S43 Workload Client 11 ${stamp}` } });
+    const c11Id = (await c11.json()).id;
+    const over = await request.post(`${API}/kae/owners`, { headers: auth, data: { client_id: c11Id, user_id: uWId, owner_type: 'kae' } });
+    expect(over.status()).toBe(400);
+    expect((await over.json()).detail).toContain('10 clients');
+    await request.delete(`${API}/clients/${c11Id}`, { headers: auth }).catch(() => {});
+
+    // Updating an EXISTING active assignment (e.g. visibility_lvl) while
+    // already at exactly 10/10 must still succeed — only a genuinely new
+    // assignment counts toward the cap, not a re-upsert of one already held.
+    const update = await request.post(`${API}/kae/owners`, {
+      headers: auth, data: { client_id: capClientIds[0], user_id: uWId, owner_type: 'kae', visibility_lvl: 'L5', notes: 'updated' },
+    });
+    expect(update.ok()).toBeTruthy();
+    expect((await update.json()).visibility_lvl).toBe('L5');
+
+    for (const cId of capClientIds) await request.delete(`${API}/clients/${cId}`, { headers: auth }).catch(() => {});
+    await request.delete(`${API}/users/${uWId}`, { headers: auth }).catch(() => {});
+  });
+
   test('a plain recruiter is blocked (403) from assigning/removing owners, setting visibility, creating/approving scorecards, or tracking retention — reads still work', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -5141,12 +5189,30 @@ test.describe.serial('S43 KAE Module: Assign forms + role gates', () => {
   test('real headless UI: Assign KAE form shows a live 0/3 count, a real assignment renders with the client\'s real name (not a UUID)', async ({ page, request }) => {
     const errors: string[] = [];
     page.on('pageerror', e => errors.push(e.message));
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    // A genuinely uninvolved 5th user — User 1/2/3 already own this exact
+    // client from the earlier test, and the "already owns this client"
+    // exemption (added alongside the 10-clients-per-KAE cap) correctly
+    // means picking one of them would NOT show the cap as blocking. Need
+    // someone with zero prior relationship to this client to prove the
+    // 3/3 cap genuinely disables the button for a real NEW assignment.
+    const uE = await request.post(`${API}/users`, {
+      headers: auth, data: { full_name: `QA S43 KAE User 5 ${stamp}`, email: `qa.s43.kae5.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    const uEId = (await uE.json()).id;
+
     await page.goto('/kae');
     await page.getByTestId('assign-kae-client').selectOption({ label: `QA S43 KAE Test Client ${stamp}` });
-    await page.getByTestId('assign-kae-user').selectOption({ label: `QA S43 KAE User 1 ${stamp}` });
+    await page.getByTestId('assign-kae-user').selectOption({ label: `QA S43 KAE User 5 ${stamp}` });
     // 3 KAEs already assigned from an earlier test in this suite.
     await expect(page.getByText(/3\/3 KAEs already assigned/)).toBeVisible();
     await expect(page.getByTestId('assign-kae-submit')).toBeDisabled();
+    await request.delete(`${API}/users/${uEId}`, { headers: auth }).catch(() => {});
+
+    // Real assignment below still uses User 1 (via account_manager, not
+    // subject to the KAE cap) to prove the client-name rendering.
+    await page.getByTestId('assign-kae-user').selectOption({ label: `QA S43 KAE User 1 ${stamp}` });
 
     // Real regression guard (2026-08-20): the Assign button used
     // bg-[--color-primary], a Tailwind token that tailwind.config.js maps

@@ -54,7 +54,7 @@ export default function KaePage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-lg bg-[--color-primary]/10"><Handshake className="h-5 w-5 text-[--color-primary]"/></div>
-          <div><h1 className="text-2xl font-bold text-gray-900">P16 KAE Module</h1><p className="text-sm text-gray-500">Account ownership · 3-owner rule · L1-L5 visibility</p></div>
+          <div><h1 className="text-2xl font-bold text-gray-900">P16 KAE Module</h1><p className="text-sm text-gray-500">Account ownership · 3 KAEs/client · 10 clients/KAE · L1-L5 visibility</p></div>
         </div>
         <div className="flex gap-2">
           <select value={month} onChange={e=>setMonth(+e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
@@ -83,7 +83,7 @@ export default function KaePage() {
         <div className="space-y-4">
           {canManage&&<AssignOwnerForm clients={clients} users={users} onAssigned={refetchOwners}/>}
         <Card data-testid="owners-panel">
-          <CardHeader><h2 className="font-semibold text-gray-800">Account Ownership — 3-KAE Limit per Client</h2></CardHeader>
+          <CardHeader><h2 className="font-semibold text-gray-800">Account Ownership — max 3 KAEs per client, max 10 clients per KAE</h2></CardHeader>
           <CardContent className="p-0">
             {ownLoading?<div className="flex justify-center py-10"><Spinner size="lg"/></div>:(
               <Table><Thead><tr><Th>KAE</Th><Th>Client</Th><Th>Type</Th><Th>Visibility</Th><Th>Assigned</Th><Th>Actions</Th></tr></Thead>
@@ -236,8 +236,16 @@ function AssignOwnerForm({ clients, users, onAssigned }: { clients: any[]; users
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const { data: byClient } = useFetch<any>(clientId ? `/kae/owners/by-client/${clientId}` : null);
+  const { data: byKae } = useFetch<any>(userId && ownerType === 'kae' ? `/kae/owners/by-kae/${userId}` : null);
   const kaeCount = byClient?.kae_count ?? 0;
-  const kaeLimitHit = ownerType === 'kae' && kaeCount >= 3;
+  const kaeClientLoad = byKae?.client_count ?? 0;
+  // Re-assigning/updating an EXISTING active assignment (same client, same
+  // user) is never blocked by either cap on the backend — mirrored here so
+  // the button doesn't disable itself for a combination that would
+  // actually succeed (e.g. changing visibility on a KAE's 10th client).
+  const alreadyOwnsThisClient = ownerType === 'kae' && (byClient?.owners || []).some((o: any) => o.user_id === userId && o.owner_type === 'kae');
+  const kaeLimitHit = ownerType === 'kae' && !alreadyOwnsThisClient && kaeCount >= 3;
+  const kaeWorkloadHit = ownerType === 'kae' && !alreadyOwnsThisClient && kaeClientLoad >= 10;
 
   async function submit() {
     if (!clientId || !userId) return;
@@ -288,13 +296,18 @@ function AssignOwnerForm({ clients, users, onAssigned }: { clients: any[]; users
           <label className="block text-[10px] font-semibold text-gray-400 mb-1 uppercase">Notes (optional)</label>
           <input value={notes} onChange={e => setNotes(e.target.value)} style={{ ...input, width: '100%' }} placeholder="e.g. backup for maternity leave" />
         </div>
-        <button data-testid="assign-kae-submit" onClick={submit} disabled={!clientId || !userId || busy || kaeLimitHit} className={`${smallBtn} bg-[--color-primary]`}>
+        <button data-testid="assign-kae-submit" onClick={submit} disabled={!clientId || !userId || busy || kaeLimitHit || kaeWorkloadHit} className={`${smallBtn} bg-[--color-primary]`}>
           <Plus className="h-3 w-3 inline mr-1" /> {busy ? 'Assigning…' : 'Assign'}
         </button>
       </div>
       {clientId && ownerType === 'kae' && (
         <div className={`text-xs mt-2 ${kaeLimitHit ? 'text-red-600 font-semibold' : 'text-gray-400'}`}>
           {kaeCount}/3 KAEs already assigned to this client{kaeLimitHit ? ' — remove one before assigning another' : ''}
+        </div>
+      )}
+      {userId && ownerType === 'kae' && (
+        <div data-testid="assign-kae-workload" className={`text-xs mt-1 ${kaeWorkloadHit ? 'text-red-600 font-semibold' : 'text-gray-400'}`}>
+          {kaeClientLoad}/10 clients already assigned to this KAE{kaeWorkloadHit ? ' — remove one of their existing clients before assigning another' : ''}
         </div>
       )}
       {err && <div className="text-xs text-red-600 mt-2">{err}</div>}

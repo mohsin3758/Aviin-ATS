@@ -62,18 +62,41 @@ async def list_owners(client_id: Optional[str]=None, actor: Actor=Depends(requir
 @router.post("/owners")
 async def assign_owner(body: ClientOwnerIn, actor: Actor=Depends(require_permission("kae", "create"))):
     # Account ownership is a business-admin action (who owns this client
-    # relationship, up to the 3-KAE limit), not a self-service one — same
-    # bar as every other write in this module.
+    # relationship, up to the 3-KAE-per-client limit and the 10-client-
+    # per-KAE workload cap below), not a self-service one — same bar as
+    # every other write in this module.
     if actor.role not in ("admin", "super_admin", "manager"):
         raise HTTPException(403, "Assigning account ownership requires manager/admin role")
     async with db.tenant_conn(actor.tenant_id) as conn:
         if body.owner_type == 'kae':
-            count = await conn.fetchval("""
-                SELECT COUNT(*) FROM client_owners
-                WHERE tenant_id=$1 AND client_id=$2 AND owner_type='kae' AND is_active=true
-            """, actor.tenant_id, body.client_id)
-            if count >= 3:
-                raise HTTPException(400, "3-KAE limit reached for this client")
+            # Re-assigning/updating an EXISTING active assignment (same
+            # client, same user — e.g. changing visibility or notes) must
+            # never be blocked by either cap below; only a genuinely new
+            # assignment should count toward them. Without this check, a
+            # client already at its 3-KAE cap couldn't even update one of
+            # its own existing 3 KAEs' visibility level.
+            already_active = await conn.fetchval("""
+                SELECT 1 FROM client_owners
+                WHERE tenant_id=$1 AND client_id=$2 AND user_id=$3 AND owner_type='kae' AND is_active=true
+            """, actor.tenant_id, body.client_id, body.user_id)
+            if not already_active:
+                per_client = await conn.fetchval("""
+                    SELECT COUNT(*) FROM client_owners
+                    WHERE tenant_id=$1 AND client_id=$2 AND owner_type='kae' AND is_active=true
+                """, actor.tenant_id, body.client_id)
+                if per_client >= 3:
+                    raise HTTPException(400, "3-KAE limit reached for this client")
+                # Workload cap: how many clients can one KAE be
+                # responsible for at once. Scoped to owner_type='kae' only
+                # (same scoping the 3-per-client rule already uses) — an
+                # account_manager/secondary assignment doesn't count
+                # against a KAE's own client load.
+                per_kae = await conn.fetchval("""
+                    SELECT COUNT(*) FROM client_owners
+                    WHERE tenant_id=$1 AND user_id=$2 AND owner_type='kae' AND is_active=true
+                """, actor.tenant_id, body.user_id)
+                if per_kae >= 10:
+                    raise HTTPException(400, "This KAE already owns the maximum of 10 clients")
         row = await conn.fetchrow("""
             INSERT INTO client_owners
               (tenant_id,client_id,user_id,owner_type,visibility_lvl,assigned_by,notes)
@@ -114,6 +137,23 @@ async def get_client_owners(client_id: str, actor: Actor=Depends(require_permiss
         """, actor.tenant_id, client_id)
     return {"client_id": client_id, "owners": [dict(r) for r in rows],
             "kae_count": sum(1 for r in rows if r["owner_type"]=="kae"), "max_kae": 3}
+
+@router.get("/owners/by-kae/{user_id}")
+async def get_kae_client_load(user_id: str, actor: Actor=Depends(require_permission("kae", "read"))):
+    """How many clients this specific KAE currently owns — mirrors
+    /owners/by-client, powers the Assign form's live workload counter
+    (max 10 clients per KAE, owner_type='kae' only)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT co.client_id, cl.name AS client_name
+            FROM client_owners co
+            JOIN clients cl ON cl.id=co.client_id
+            WHERE co.tenant_id=$1 AND co.user_id::text=$2 AND co.owner_type='kae' AND co.is_active
+              AND cl.is_active IS NOT FALSE
+            ORDER BY cl.name
+        """, actor.tenant_id, user_id)
+    return {"user_id": user_id, "clients": [dict(r) for r in rows],
+            "client_count": len(rows), "max_clients": 10}
 
 @router.get("/visibility")
 async def list_visibility(actor: Actor=Depends(require_permission("kae", "read"))):
