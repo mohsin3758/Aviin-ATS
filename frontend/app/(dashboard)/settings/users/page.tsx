@@ -1,7 +1,8 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions } from '@/components/ui/Modal';
+import { getTokenPayload } from '@/lib/auth';
 import { Plus, Search, Shield, UserCheck, UserX, Edit, Trash2, Key } from 'lucide-react';
 
 const DEPT_LIST = ['Delivery','Account Management','Sales','Finance','HR','Technology','Leadership','Operations','IT'];
@@ -38,6 +39,17 @@ export default function UsersPage() {
   // admin cleaning up would otherwise need 359 individual delete clicks.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  // Real UX fix (2026-08-22): a user reported "3 of 3 could not be
+  // deleted" reading as broken. Root-caused against real backend logs —
+  // it was the safety checks working exactly as intended: their own
+  // selected row (self-delete is always blocked) plus 2 real accounts
+  // with genuine historical activity (purge is safely refused, not a
+  // bug). The behavior was correct; the generic count-only message
+  // wasn't explaining why. Deferred read (SSR-safe — localStorage
+  // doesn't exist during server render), same pattern used elsewhere in
+  // this app (device-monitoring, recruiter-ops).
+  const [myUserId, setMyUserId] = useState('');
+  useEffect(() => { setMyUserId(getTokenPayload()?.sub || ''); }, []);
   const { data: users, loading, refetch } = useFetch<any[]>('/users');
   const { data: roles } = useFetch<any[]>('/roles');
 
@@ -98,21 +110,33 @@ export default function UsersPage() {
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  const allVisibleSelected = filtered.length > 0 && filtered.every(u => selected.has(u.id));
+  // Own row excluded from "select all" — it can never be bulk-deleted
+  // (self-delete is always blocked), so including it just guarantees
+  // one confusing failure on every select-all click.
+  const selectableFiltered = filtered.filter(u => u.id !== myUserId);
+  const allVisibleSelected = selectableFiltered.length > 0 && selectableFiltered.every(u => selected.has(u.id));
   const toggleSelectAll = () => setSelected(s => {
     if (allVisibleSelected) {
       const next = new Set(s);
-      filtered.forEach(u => next.delete(u.id));
+      selectableFiltered.forEach(u => next.delete(u.id));
       return next;
     }
     const next = new Set(s);
-    filtered.forEach(u => next.add(u.id));
+    selectableFiltered.forEach(u => next.add(u.id));
     return next;
   });
 
   const handleBulkDelete = async () => {
-    const ids = [...selected];
-    if (!ids.length) return;
+    // Real UX fix (2026-08-22): a selection including the logged-in
+    // admin's own row can never succeed for that one row (self-delete is
+    // always blocked) — excluded up front rather than attempted and
+    // reported as a confusing failure.
+    const ids = [...selected].filter(id => id !== myUserId);
+    const skippedSelf = selected.has(myUserId);
+    if (!ids.length) {
+      if (skippedSelf) alert("You can't delete your own account — deselect it first.");
+      return;
+    }
     // Real bug fix (2026-08-22), same reasoning as handleDelete above: an
     // already-inactive selected row (the common case when cleaning up
     // QA/test clutter under "Show Inactive") is a no-op under the soft
@@ -125,6 +149,7 @@ export default function UsersPage() {
     const parts = [];
     if (activeIds.length) parts.push(`${activeIds.length} active user${activeIds.length===1?'':'s'} will be deactivated (reversible)`);
     if (inactiveIds.length) parts.push(`${inactiveIds.length} already-inactive user${inactiveIds.length===1?'':'s'} will be PERMANENTLY deleted (cannot be undone — any with real activity on record will be safely refused instead)`);
+    if (skippedSelf) parts.push(`your own account was excluded (can't self-delete)`);
     if (!confirm(`${parts.join('; ')}. Continue?`)) return;
     setBulkDeleting(true);
     // No bulk-delete backend endpoint exists for users — same real DELETE/
@@ -132,19 +157,33 @@ export default function UsersPage() {
     // small batches so a large (300+) selection doesn't fire everything
     // at once.
     const BATCH = 10;
-    let failed = 0;
+    let hasRealActivity = 0;
+    let otherFailed = 0;
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH);
       const results = await Promise.allSettled(batch.map(id => {
         const endpoint = byId.get(id)?.is_active === false ? `/users/${id}/purge` : `/users/${id}`;
         return apiFetch(endpoint, { method: 'DELETE' });
       }));
-      failed += results.filter(r => r.status === 'rejected').length;
+      for (const r of results) {
+        if (r.status === 'rejected') {
+          // Real, honest categorization (2026-08-22) — a generic count
+          // was indistinguishable from an actual bug when the failures
+          // were really the FK-based "real activity on record" safety
+          // net doing its job correctly, not something broken.
+          const msg = String((r.reason as any)?.message || '');
+          if (/real activity/i.test(msg)) hasRealActivity++;
+          else otherFailed++;
+        }
+      }
     }
     setBulkDeleting(false);
     setSelected(new Set());
     refetch();
-    if (failed > 0) alert(`${failed} of ${ids.length} could not be deleted (e.g. your own account, or a user with real activity on record).`);
+    const msgParts = [];
+    if (hasRealActivity > 0) msgParts.push(`${hasRealActivity} kept (real activity on record — this is a safety check working correctly, not an error)`);
+    if (otherFailed > 0) msgParts.push(`${otherFailed} failed for another reason`);
+    if (msgParts.length) alert(`Bulk delete finished. ${msgParts.join('; ')}.`);
   };
 
   const inputStyle = { width:'100%', border:'1px solid #e2e8f0', borderRadius:'8px', padding:'9px 12px', fontSize:'13px', outline:'none', color:'#1e293b', background:'white', boxSizing:'border-box' as const };
@@ -218,7 +257,9 @@ export default function UsersPage() {
                   onMouseEnter={e=>{ if(!selected.has(u.id)) (e.currentTarget as HTMLElement).style.background='#f8faff'; }}
                   onMouseLeave={e=>{ if(!selected.has(u.id)) (e.currentTarget as HTMLElement).style.background=''; }}>
                   <td style={{ padding:'12px 16px' }}>
-                    <input data-testid={`select-checkbox-${u.id}`} type="checkbox" checked={selected.has(u.id)} onChange={()=>toggleSelect(u.id)} style={{ cursor:'pointer' }} />
+                    <input data-testid={`select-checkbox-${u.id}`} type="checkbox" checked={selected.has(u.id)} onChange={()=>toggleSelect(u.id)}
+                      disabled={u.id===myUserId} title={u.id===myUserId?"This is your own account — it can't be deleted":undefined}
+                      style={{ cursor: u.id===myUserId?'not-allowed':'pointer', opacity: u.id===myUserId?0.35:1 }} />
                   </td>
                   <td style={{ padding:'12px 16px' }}>
                     <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
@@ -243,7 +284,9 @@ export default function UsersPage() {
                       <button onClick={()=>toggleActive(u)} title={u.is_active!==false?'Deactivate':'Activate'} style={{ width:'28px', height:'28px', borderRadius:'6px', border:`1px solid ${u.is_active!==false?'#fee2e2':'#d1fae5'}`, background:u.is_active!==false?'#fef2f2':'#f0fdf4', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
                         {u.is_active!==false?<UserX size={12} style={{ color:'#ef4444' }} />:<UserCheck size={12} style={{ color:'#059669' }} />}
                       </button>
-                      <button data-testid={`delete-btn-${u.id}`} onClick={()=>handleDelete(u)} title={u.is_active===false?'Permanently delete user':'Delete user'} style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #fee2e2', background:'#fef2f2', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
+                      <button data-testid={`delete-btn-${u.id}`} onClick={()=>u.id!==myUserId && handleDelete(u)} disabled={u.id===myUserId}
+                        title={u.id===myUserId?"This is your own account — it can't be deleted":(u.is_active===false?'Permanently delete user':'Delete user')}
+                        style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #fee2e2', background:'#fef2f2', display:'flex', alignItems:'center', justifyContent:'center', cursor: u.id===myUserId?'not-allowed':'pointer', padding:0, opacity: u.id===myUserId?0.35:1 }}>
                         <Trash2 size={12} style={{ color:'#ef4444' }} />
                       </button>
                     </div>

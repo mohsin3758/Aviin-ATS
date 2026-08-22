@@ -10125,3 +10125,48 @@ active, or genuinely referenced) - so repeated runs of this suite no
 longer add to the same clutter the suite exists to fix. Regression-
 checked S31/S33 (7/7 clean). Zero-token audit: `CONFIRMED CLEAN` (389
 files, 0 external API refs).
+
+## Users & Roles, same day, third pass: "3 of 3 could not be deleted"
+## turned out to be the new purge safety net working correctly — fixed
+## the confusing UX instead of the (non-existent) bug
+User reported bulk-delete still failing, screenshot showing "3 of 3
+could not be deleted" against a selection that visibly included "Admin
+User," "Meer Mohsin Ali Khan," and a "Manager" row. Checked real backend
+logs for the actual requests rather than assuming another backend bug —
+confirmed precisely: the 3 selected were the currently logged-in admin's
+own account (self-delete always blocked, HTTP 400) plus two genuinely
+real accounts with real historical activity (Meer Mohsin Ali Khan,
+Neha Joshi — both correctly refused permanent deletion by the FK-
+violation safety net built earlier the same day, HTTP 409 each). **All
+3 failures were the safety mechanisms doing exactly their job** — not a
+bug in the purge/delete logic, which was independently re-verified
+still working correctly on a fresh test row in the same investigation.
+
+The real problem was UX, not backend correctness: a generic "N of M
+could not be deleted" count is indistinguishable from an actual failure
+when the truth is "this worked exactly as designed to protect a real
+person's history." Fixed three ways:
+1. **The logged-in admin's own row is now excluded from selection
+   entirely** — checkbox and delete button both disabled with a clear
+   tooltip ("This is your own account — it can't be deleted"), and
+   "select all" no longer scoops it up, so the guaranteed-to-fail case
+   can't even be attempted anymore.
+2. **Bulk-delete's failure message is now honest and specific** —
+   captures each rejection's real error text and categorizes it (`real
+   activity on record` vs. anything else) instead of a bare count, so
+   "N kept (real activity on record — this is a safety check working
+   correctly, not an error)" reads as protection, not breakage.
+3. Single "you can't delete yourself" case (all selected were self) now
+   gets a direct, immediate message instead of silently no-op'ing.
+
+Verified for real, not code review: real headless-browser pass confirmed
+the admin's own row is genuinely disabled (checkbox + button) and stays
+unchecked after clicking "select all" across all 181 real users; a
+real mixed-selection bulk-delete (1 genuinely fresh throwaway + Neha
+Joshi, a known real-history account) purged the fresh one silently and
+produced the exact new message — "1 kept (real activity on record...)"
+— confirmed via a real `page.on('dialog')` capture, not assumed from
+the code. New permanent S51 test added covering the disabled-own-row
+state and the select-all exclusion. Regression-checked S31/S33/S51
+(13/13 clean). Zero-token audit: `CONFIRMED CLEAN` (389 files, 0
+external API refs).

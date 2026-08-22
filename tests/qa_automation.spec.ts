@@ -6278,6 +6278,30 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     createdIds.push(referenced.id); // still is_active:false (blocked purge) — soft-deleted state is the correct end state
   });
 
+  test('BUG FIX: bulk-delete selection that includes the logged-in admin\'s own account is excluded up front (real UX fix — a "3 of 3 could not be deleted" report turned out to be self + 2 real accounts with real history, all correctly protected, just confusingly reported)', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/settings/users');
+    await page.waitForTimeout(1000);
+    const adminRow = page.locator('[data-testid^="user-row-"]', { hasText: 'Admin User' }).first();
+    const adminCheckbox = adminRow.locator('input[type="checkbox"]');
+    await expect(adminCheckbox).toBeDisabled();
+    const adminDeleteBtn = adminRow.locator('[data-testid^="delete-btn-"]');
+    await expect(adminDeleteBtn).toBeDisabled();
+
+    // select-all must never include the logged-in admin's own row.
+    await page.getByTestId('toggle-show-inactive').click();
+    await page.waitForTimeout(800);
+    await page.getByTestId('select-all-checkbox').click();
+    await page.waitForTimeout(500);
+    await expect(adminCheckbox).not.toBeChecked();
+    expect(errors).toHaveLength(0);
+    // Deselect everything again rather than leaving a huge real selection
+    // sitting in component state for whatever runs next in this browser
+    // context.
+    await page.getByTestId('select-all-checkbox').click();
+  });
+
   test.afterAll(async ({ request }) => {
     for (const id of createdIds) {
       // Try a real purge first (matches this suite's whole point — don't
