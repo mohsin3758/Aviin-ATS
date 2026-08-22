@@ -1,4 +1,5 @@
 """User Management — staffing industry roles, user CRUD, permissions."""
+import asyncpg
 import bcrypt
 import json
 from typing import Optional
@@ -304,6 +305,47 @@ async def delete_user(user_id: str, actor: Actor = Depends(require_role("admin",
         if not row:
             raise HTTPException(404, "User not found")
     return {"ok": True, "deleted": dict(row)}
+
+
+@router.delete("/{user_id}/purge")
+async def purge_user(user_id: str, actor: Actor = Depends(require_role("admin"))):
+    """Real gap fix (2026-08-22): soft-delete (above) has no effect on a
+    user who's already inactive — an admin re-clicking Delete on an
+    already-`is_active:false` row (e.g. leftover QA/test fixtures) gets a
+    real 200 back but the row visibly doesn't change, reading as "delete
+    failed" even though the API call succeeded. This is the genuine,
+    permanent removal such a row needs.
+
+    Admin-only (stricter than the manager-allowed soft-delete above —
+    this is irreversible). Requires the user to already be inactive, so
+    an active real employee can never be purged in one step — they must
+    be deactivated first, giving a deliberate pause before an
+    irreversible action. Attempts a real hard DELETE; if this user has
+    any genuine historical activity (they created a candidate, were
+    assigned work, appear in audit_log, etc. — dozens of tables FK-
+    reference users.id), Postgres rejects it with a ForeignKeyViolation,
+    caught here and returned as a clear, honest 409 rather than a raw
+    500 — that user's history is real and stays intact, only visible
+    under Show Inactive forever, same as before. A genuinely fresh QA/
+    test fixture with zero real references purges cleanly."""
+    if user_id == actor.user_id:
+        raise HTTPException(400, "Cannot delete yourself")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT id, is_active FROM users WHERE id=$1 AND tenant_id=$2", user_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "User not found")
+        if row["is_active"] is not False:
+            raise HTTPException(400, "Deactivate this user first before permanently deleting them")
+        try:
+            await conn.execute("DELETE FROM users WHERE id=$1 AND tenant_id=$2", user_id, actor.tenant_id)
+        except asyncpg.exceptions.ForeignKeyViolationError:
+            raise HTTPException(
+                409,
+                "This user has real activity on record (candidates, assignments, audit history, etc.) "
+                "and can't be permanently deleted — they'll stay hidden as Inactive instead.",
+            )
+    return {"ok": True, "purged": user_id}
 
 
 @router.get("/stats/summary")

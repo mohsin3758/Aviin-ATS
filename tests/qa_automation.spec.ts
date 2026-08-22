@@ -6229,15 +6229,65 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
 
     // Confirm real, not just visually-filtered: both are genuinely
     // is_active=false in the database, not merely hidden by the search.
-    const check1 = await (await request.get(`${API}/users/${(await r1.json()).id}`, { headers: { Authorization: `Bearer ${token}` } })).json();
-    const check2 = await (await request.get(`${API}/users/${(await r2.json()).id}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const id1 = (await r1.json()).id, id2 = (await r2.json()).id;
+    const check1 = await (await request.get(`${API}/users/${id1}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const check2 = await (await request.get(`${API}/users/${id2}`, { headers: { Authorization: `Bearer ${token}` } })).json();
     expect(check1.is_active).toBe(false);
     expect(check2.is_active).toBe(false);
+    // Purge for real rather than leaving them as permanent inactive
+    // clutter — matches the same real cleanup fix this whole suite is
+    // about (a soft-deleted fixture that's never purged accumulates
+    // forever, exactly the 387-row clutter the user reported).
+    createdIds.push(id1, id2);
+  });
+
+  test('BUG FIX: DELETE /users/{id}/purge permanently removes an already-inactive user; refuses (409) one with real FK-referenced activity, without ever needing a raw 500', async ({ request }) => {
+    // Case 1: a genuinely fresh, unreferenced user purges cleanly.
+    const stamp2 = Date.now();
+    const fresh = await (await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Purge Fresh ${stamp2}`, email: `qa_s51_purgefresh_${stamp2}@aviintech.com`, role: 'recruiter' } })).json();
+    await request.patch(`${API}/users/${fresh.id}/deactivate`, { headers: { Authorization: `Bearer ${token}` } });
+    const purgeRes = await request.delete(`${API}/users/${fresh.id}/purge`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(purgeRes.status()).toBe(200);
+    const getAfter = await request.get(`${API}/users/${fresh.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(getAfter.status()).toBe(404);
+
+    // Case 2: purging a still-ACTIVE user is refused with a clean 400
+    // (must be deactivated first — a deliberate pause before an
+    // irreversible action).
+    const stamp3 = Date.now();
+    const active = await (await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Purge Active ${stamp3}`, email: `qa_s51_purgeactive_${stamp3}@aviintech.com`, role: 'recruiter' } })).json();
+    const activePurgeRes = await request.delete(`${API}/users/${active.id}/purge`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(activePurgeRes.status()).toBe(400);
+    createdIds.push(active.id); // still exists (still active) — real cleanup below
+
+    // Case 3: a user with genuine FK-referenced activity is refused with
+    // a real 409, not a raw 500 — their history stays intact.
+    const stamp4 = Date.now();
+    const referenced = await (await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Purge Referenced ${stamp4}`, email: `qa_s51_purgeref_${stamp4}@aviintech.com`, role: 'recruiter' } })).json();
+    await request.patch(`${API}/users/${referenced.id}/deactivate`, { headers: { Authorization: `Bearer ${token}` } });
+    const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: { Authorization: `Bearer ${token}` } });
+    const reqId = (await reqRes.json())[0].id;
+    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Purge Ref Candidate ${stamp4}`, email: `qa_s51_purgerefcand_${stamp4}@aviinjobs.com`, phone: `999000${String(stamp4).slice(-4)}` } })).json();
+    const app = await (await request.post(`${API}/applications`, { headers: { Authorization: `Bearer ${token}` }, data: { candidate_id: cand.id, requisition_id: reqId, assigned_recruiter_id: referenced.id } })).json();
+    const refPurgeRes = await request.delete(`${API}/users/${referenced.id}/purge`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(refPurgeRes.status()).toBe(409);
+
+    // Cleanup this case's own fixtures (FK-safe order).
+    await request.delete(`${API}/applications/${app.id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    createdIds.push(referenced.id); // still is_active:false (blocked purge) — soft-deleted state is the correct end state
   });
 
   test.afterAll(async ({ request }) => {
     for (const id of createdIds) {
-      await request.delete(`${API}/users/${id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+      // Try a real purge first (matches this suite's whole point — don't
+      // leave permanent inactive clutter behind); if it's still active
+      // or genuinely FK-referenced, fall back to the reversible soft
+      // delete so nothing is left dangling either way.
+      const purgeRes = await request.delete(`${API}/users/${id}/purge`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null);
+      if (!purgeRes || !purgeRes.ok()) {
+        await request.delete(`${API}/users/${id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+      }
     }
   });
 });

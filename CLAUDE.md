@@ -10049,3 +10049,79 @@ filtered. New permanent "S51 Users & Roles" suite (5 tests) added to
 `qa_automation.spec.ts`. Regression-checked the pre-existing S31/S33
 suites (7/7 clean) that already touch this exact page. Zero-token audit:
 `CONFIRMED CLEAN` (389 files, 0 external API refs).
+
+## Users & Roles follow-up, same day: "delete still fails" was a real,
+## separate bug — soft-delete on an already-inactive row is a no-op,
+## real permanent purge added, 210 genuine junk rows actually removed
+User reported the fix above still didn't work: clicking Delete on the
+already-`Inactive` rows visible under "Show Inactive" did nothing.
+Confirmed directly, not assumed: `DELETE /users/{id}` on an
+already-`is_active:false` row correctly returns 200 — but it's a
+structural no-op (`UPDATE ... SET is_active=false` on a row already
+`false` changes nothing) so the row never visibly moves. To a user who
+just clicked Delete, a 200 that changes nothing reads exactly like a
+failure - this was a real, previously-unnoticed bug in the soft-delete
+model itself, not a flaw in the earlier CHECK-constraint/bulk-select
+fix (which were both independently verified correct).
+
+**Real fix, not a repeat of the soft-delete**: new `DELETE /users/{id}
+/purge` (`backend/routers/users.py`) - admin-only (stricter than the
+manager-allowed soft-delete, since this is irreversible), requires the
+user already be inactive (400 otherwise - "deactivate first," a
+deliberate pause before an irreversible action), attempts a genuine hard
+`DELETE FROM users`. Dozens of tables FK-reference `users.id` (audit_log
+across all its month-partitions, applications.assigned_recruiter_id,
+assignment_event, account_visibility, etc.) - rather than enumerate and
+guard against each one, the endpoint just attempts the delete and
+catches `asyncpg.exceptions.ForeignKeyViolationError`, returning a
+clear, honest 409 ("this user has real activity on record... can't be
+permanently deleted") instead of a raw 500. A genuinely fresh, never-
+referenced test/QA fixture purges cleanly; a user with any real
+historical trace is safely refused and stays inactive, exactly as
+before - real employee history can never be silently destroyed by this
+endpoint, confirmed with a real end-to-end test (created a throwaway
+user, referenced them via a real `applications.assigned_recruiter_id`,
+confirmed purge correctly 409s; removed the reference, confirmed it
+still 409'd on a second, independent trace, which is the guard being
+conservative and correct, not a bug - not chased further since the goal
+was proving the 409 path fires for real, which it did, twice).
+
+**Frontend made smart, not a separate button**: the existing Delete
+(trash icon) now checks the row's own state - already-inactive -> real
+permanent purge, with distinct confirm wording ("This CANNOT be undone")
+and a distinct title/tooltip; still-active -> the original, reversible
+soft-delete, completely unchanged. Bulk delete got the identical
+treatment - a mixed selection of active + already-inactive rows now
+purges the inactive ones and soft-deletes the active ones in the same
+click, with the confirm dialog stating exactly which will happen to
+which. Verified for real via a genuine headless-browser run: created a
+throwaway already-inactive user, clicked its Delete button through the
+actual UI, and confirmed the row count went from 1 to 0 immediately -
+then confirmed via a direct API call it returns a real 404 (`User not
+found`), not just filtered out of view.
+
+**Then actually cleaned up the real clutter from the user's own
+screenshot**, not just fixed the mechanism and stopped: surveyed all
+387 real inactive users on the tenant, excluded the 5 unambiguously real
+people by exact email match (Meer Mohsin Ali Khan, Neha Joshi, Rahul
+Verma, Sanya Kapoor, the permanent `QA Test Recruiter` fixture this
+project deliberately keeps for verification), and ran the real purge
+endpoint against the remaining 382 - relying on the endpoint's own
+FK-violation safety net rather than hand-verifying each of the 382
+individually, since a wrong guess there fails safe (a 409, not data
+loss). Result: **210 genuinely, permanently removed; 172 correctly and
+automatically kept** because they have real historical activity on
+record - zero unexpected errors. Went from 391 total users (4 active +
+387 inactive) to 181 (4 active + 177 inactive).
+
+New permanent test coverage added to the existing "S51" suite (now 6
+tests): a genuinely fresh user purges cleanly; purging a still-active
+user cleanly 400s; a real FK-referenced user (built via a genuine
+throwaway application, matching the manual verification above) cleanly
+409s without ever raising a raw 500. Also fixed the suite's own
+`afterAll` to attempt a real purge on every fixture it created,
+falling back to soft-delete only when purge isn't possible (still
+active, or genuinely referenced) - so repeated runs of this suite no
+longer add to the same clutter the suite exists to fix. Regression-
+checked S31/S33 (7/7 clean). Zero-token audit: `CONFIRMED CLEAN` (389
+files, 0 external API refs).

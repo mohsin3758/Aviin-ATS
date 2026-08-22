@@ -75,6 +75,19 @@ export default function UsersPage() {
   };
 
   const handleDelete = async (u:any) => {
+    // Real bug fix (2026-08-22): soft-deleting an ALREADY-inactive user is
+    // a genuine no-op (is_active is already false, nothing visibly
+    // changes) — clicking Delete on one of these rows returned a real 200
+    // but looked exactly like a failure, since the row never moved. Rows
+    // that are already inactive now get the real, permanent removal
+    // they're actually asking for; still-active rows keep the original,
+    // reversible soft-delete behavior unchanged.
+    if (u.is_active === false) {
+      if (!confirm(`Permanently delete ${u.full_name}? This CANNOT be undone. If this user has any real activity on record (candidates, assignments, audit history), the deletion will be safely refused instead.`)) return;
+      try { await apiFetch(`/users/${u.id}/purge`, {method:'DELETE'}); refetch(); }
+      catch(e:any) { alert(e.message||'Failed to permanently delete user'); }
+      return;
+    }
     if (!confirm(`Delete ${u.full_name}? This deactivates their account (same as Deactivate) and they will no longer be able to log in or be assigned new work. This can be undone by an admin later if needed.`)) return;
     try { await apiFetch(`/users/${u.id}`, {method:'DELETE'}); refetch(); }
     catch(e:any) { alert(e.message||'Failed to delete user'); }
@@ -100,22 +113,38 @@ export default function UsersPage() {
   const handleBulkDelete = async () => {
     const ids = [...selected];
     if (!ids.length) return;
-    if (!confirm(`Delete ${ids.length} selected user${ids.length===1?'':'s'}? This deactivates their accounts (same as Deactivate) — they will no longer be able to log in or be assigned new work. This can be undone by an admin later if needed.`)) return;
+    // Real bug fix (2026-08-22), same reasoning as handleDelete above: an
+    // already-inactive selected row (the common case when cleaning up
+    // QA/test clutter under "Show Inactive") is a no-op under the soft
+    // DELETE — visibly nothing happens, reading as "bulk delete failed."
+    // Smart per-row: already-inactive rows get permanently purged,
+    // still-active rows get the original, reversible soft-delete.
+    const byId = new Map((users||[]).map((u:any)=>[u.id,u]));
+    const inactiveIds = ids.filter(id => byId.get(id)?.is_active === false);
+    const activeIds = ids.filter(id => byId.get(id)?.is_active !== false);
+    const parts = [];
+    if (activeIds.length) parts.push(`${activeIds.length} active user${activeIds.length===1?'':'s'} will be deactivated (reversible)`);
+    if (inactiveIds.length) parts.push(`${inactiveIds.length} already-inactive user${inactiveIds.length===1?'':'s'} will be PERMANENTLY deleted (cannot be undone — any with real activity on record will be safely refused instead)`);
+    if (!confirm(`${parts.join('; ')}. Continue?`)) return;
     setBulkDeleting(true);
-    // No bulk-delete backend endpoint exists for users — same real DELETE
-    // per user as the single-row action, just looped, in small batches so
-    // a large (300+) selection doesn't fire everything at once.
+    // No bulk-delete backend endpoint exists for users — same real DELETE/
+    // purge calls each single-row action already uses, just looped, in
+    // small batches so a large (300+) selection doesn't fire everything
+    // at once.
     const BATCH = 10;
     let failed = 0;
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH);
-      const results = await Promise.allSettled(batch.map(id => apiFetch(`/users/${id}`, { method: 'DELETE' })));
+      const results = await Promise.allSettled(batch.map(id => {
+        const endpoint = byId.get(id)?.is_active === false ? `/users/${id}/purge` : `/users/${id}`;
+        return apiFetch(endpoint, { method: 'DELETE' });
+      }));
       failed += results.filter(r => r.status === 'rejected').length;
     }
     setBulkDeleting(false);
     setSelected(new Set());
     refetch();
-    if (failed > 0) alert(`${failed} of ${ids.length} could not be deleted (e.g. your own account can't be self-deleted).`);
+    if (failed > 0) alert(`${failed} of ${ids.length} could not be deleted (e.g. your own account, or a user with real activity on record).`);
   };
 
   const inputStyle = { width:'100%', border:'1px solid #e2e8f0', borderRadius:'8px', padding:'9px 12px', fontSize:'13px', outline:'none', color:'#1e293b', background:'white', boxSizing:'border-box' as const };
@@ -214,7 +243,7 @@ export default function UsersPage() {
                       <button onClick={()=>toggleActive(u)} title={u.is_active!==false?'Deactivate':'Activate'} style={{ width:'28px', height:'28px', borderRadius:'6px', border:`1px solid ${u.is_active!==false?'#fee2e2':'#d1fae5'}`, background:u.is_active!==false?'#fef2f2':'#f0fdf4', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
                         {u.is_active!==false?<UserX size={12} style={{ color:'#ef4444' }} />:<UserCheck size={12} style={{ color:'#059669' }} />}
                       </button>
-                      <button onClick={()=>handleDelete(u)} title="Delete user" style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #fee2e2', background:'#fef2f2', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
+                      <button data-testid={`delete-btn-${u.id}`} onClick={()=>handleDelete(u)} title={u.is_active===false?'Permanently delete user':'Delete user'} style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #fee2e2', background:'#fef2f2', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
                         <Trash2 size={12} style={{ color:'#ef4444' }} />
                       </button>
                     </div>
