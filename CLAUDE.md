@@ -10385,3 +10385,94 @@ permanent "S51" test (now 10 tests) covers the same flow against a real
 throwaway fixture rather than touching Shahana's own record. Regression-
 checked S31/S33 (7/7 clean). Zero-token audit: `CONFIRMED CLEAN` (389
 files, 0 external API refs).
+
+## Stage Email Notifications made genuinely per-stage, and its "Manual"
+## mode actually wired up for the first time ever, 2026-08-22
+User reported "Email Send Mode" applying the same Automatic/Manual choice
+to every pipeline stage at once and asked for real per-stage control.
+Investigating first (this project's established discipline) found the
+real situation was bigger than the reported symptom: the toggle had
+never been wired to anything at all — the actual stage-move flow
+hardcoded exactly 3 stages (`l1_interview`/`l2_interview`/`rejected`) as
+always-auto-send regardless of this setting, and every other stage
+(9 of 12, including 6 this tenant had already written real custom
+templates for) silently sent nothing, ever. "Manual" mode's promised
+"a modal appears so you can edit before sending" had never existed
+anywhere in the app's history. Given the scope difference, asked the
+user directly whether to fix just the settings UI or also make the
+setting genuinely work — they chose both.
+
+**Data model**: `send_mode` ('auto'|'manual') now lives inside each
+stage's own `email_settings.stage_templates[stage]` entry — no new
+column needed, `stage_templates` was already a passthrough JSONB dict.
+`sql/73_per_stage_email_send_mode.sql` seeds the real tenant's existing
+13-stage config explicitly: the 3 stages that already genuinely
+auto-sent keep doing so (zero behavior change for what already worked);
+every other stage defaults to 'manual' — a real, working capability for
+the first time, matching the tenant's own already-selected (but
+previously inert) global "manual" preference.
+
+**Backend** (`backend/routers/applications.py`) — hoisted the per-stage
+subject/message hardcoded defaults (`MSGS`/`SUBJS`) to module level and
+extracted `_compute_jd_block()`/`_resolve_email_template()` out of
+`_notify_stage_change_bg()`, so the real send path and a new preview
+endpoint always resolve identically — what an admin previews can never
+drift from what actually gets sent. New `GET /applications/{id}/
+stage-preview?stage=X` resolves the real subject/message a stage-move
+would send (DB template override > hardcoded default, `{name}`
+substituted, JD auto-send block appended for `contacted`) without
+sending anything — pure preview. **Found and fixed a real, previously-
+unnoticed bug in the same refactor**: WhatsApp already substituted
+`{name}` in its resolved message (`wa_text.replace('{name}', ...)`) but
+email never did — any stage template using `{name}` (this codebase's
+own default templates all do, e.g. "Hi {name},") sent the literal,
+unsubstituted placeholder text to every real candidate, for as long as
+this feature has existed. Fixed by applying the same substitution to the
+resolved email body.
+
+**Frontend** — Settings > Email Configuration's global "Email Send Mode"
+card removed; each stage in the Stage Message Templates editor now gets
+its own Automatic/Manual picker, with a ⚡/✍️ indicator next to every
+stage name in the sidebar list so the whole configuration is scannable
+at a glance. `pipeline/page.tsx` and `requisitions/[id]/page.tsx` (two
+separate, parallel board implementations, matching this codebase's
+established convention for these two pages) both replace the old
+hardcoded 3-stage allowlist with a real per-stage mode check: an
+Automatic-mode stage move sends and completes instantly, unchanged from
+before; a Manual-mode stage move fetches the real preview and opens a
+new `StageEmailReviewModal` — editable subject/message, "Send & Move"
+(sends the edited text via the existing `custom_message` field the
+backend already supported), "Move Without Sending" (moves the stage,
+no email), or Cancel (nothing happens — the optimistic board update is
+deliberately deferred until the modal resolves, so there's nothing to
+revert).
+
+Verified for real end-to-end, not code review: called the new preview
+endpoint against a real application and confirmed the exact real
+"Interested" template resolved correctly with the candidate's real name
+substituted (`{name}` -> `Venkatesh.C`) — the same DB-stored template
+visible in the user's own screenshot. A full real headless-browser
+click-through on the live board: moving a real throwaway candidate to
+"NDA" (manual) showed the actual review modal pre-filled with the real
+NDA template and real name; editing the message and clicking "Send &
+Move" genuinely moved the stage AND sent a real email through the
+tenant's real production Hostinger SMTP relay with the edited text —
+confirmed via the real `candidate_messages` row, not assumed. Moving to
+"Screened" (manual) via "Move Without Sending" correctly moved the stage
+with zero message logged. Moving to "L1 Interview" (auto) showed no
+modal at all and sent instantly, exactly matching the pre-existing real
+behavior. Repeated the same NDA-modal check on the requisition detail
+page's own embedded board — same result via that page's separate
+implementation. New permanent "S52" suite (6 tests) covers the per-stage
+save/read round-trip, the preview endpoint's real `{name}` substitution,
+the `custom_message` override (fixed to poll rather than check
+immediately once a race was caught against the real fire-and-forget
+`asyncio.create_task` send — not a bug, a real test-timing lesson,
+matching this suite's own established pattern for this exact background-
+task shape), the no-message "Move Without Sending" case, and the real
+modal-appears-vs-no-modal UI distinction. Broad regression sweep across
+every suite touching applications/pipeline/requisitions (108 tests
+including S37, which exercises this exact refactored backend function
+via its own KAE-submission trigger) plus S31/S33/S51 (17 tests, today's
+earlier Users & Roles work) — all clean. Zero-token audit: `CONFIRMED
+CLEAN` (390 files, 0 external API refs).

@@ -368,64 +368,94 @@ async def restore_application(application_id: str, actor: Actor = Depends(requir
     return dict(row)
 
 
+MSGS = {
+    "contacted":      f"We have reviewed your profile and would like to connect with you regarding an exciting opportunity. Our recruitment team will reach out shortly to discuss the role in detail.",
+    "interested":     f"Thank you for your interest! We are pleased to inform you that we are moving forward with your application. Our team will be in touch very soon to discuss the next steps.",
+    "nda":            f"As part of our recruitment process, we require you to review and sign an NDA/Pre-contract agreement before we can share further details about this opportunity. Please respond at your earliest convenience.",
+    "screened":       f"Congratulations! Your profile has been shortlisted and you have successfully cleared our initial screening process. Our recruiter will contact you shortly to discuss the next steps.",
+    "submitted":      f"We are pleased to inform you that your profile has been submitted to our client for consideration. We will keep you posted and revert as soon as we receive feedback.",
+    "l1_interview":   f"Congratulations! You have been selected for the L1 Interview. Our team will share the interview schedule shortly. Please ensure your availability and prepare well. All the best!",
+    "l2_interview":   f"Excellent news! You have successfully cleared the L1 Interview and have been selected for the L2 Final Interview. Our team will reach out with the schedule shortly. All the best!",
+    "interview":      f"Congratulations! You have been selected for an interview. Our team will share the details shortly. All the best!",
+    "offer":          f"Great news! Our client is preparing an offer for you. Our team will be in touch shortly to discuss the offer details. Congratulations on making it this far!",
+    "offer_accepted": f"Congratulations on accepting the offer! We are thrilled to have you placed. Our team will coordinate with you for the documentation and onboarding process. Please confirm your joining date at the earliest.",
+    "placed":         f"Congratulations on your successful placement! It has been a pleasure being a part of your career journey. We wish you great success in your new role. Feel free to reach out anytime.",
+    "hold":           f"We wanted to keep you informed that your application is currently on hold. We appreciate your patience and will update you as soon as there is any movement. Thank you for your understanding.",
+    "rejected":       f"Thank you for your interest and the time you invested in this process. After careful consideration, we are unable to move forward with your application for this particular role at this time. We encourage you to stay connected as we regularly have new opportunities.",
+}
+SUBJS = {
+    "contacted":      "AVIIN Jobs - We Have Reviewed Your Profile",
+    "interested":     "AVIIN Jobs - Moving Forward with Your Application",
+    "nda":            "AVIIN Jobs - NDA / Pre-Contract Agreement Required",
+    "screened":       "AVIIN Jobs - Profile Shortlisted",
+    "submitted":      "AVIIN Jobs - Your Profile Has Been Submitted to Client",
+    "l1_interview":   "AVIIN Jobs - L1 Interview Scheduled - Congratulations!",
+    "l2_interview":   "AVIIN Jobs - L2 Final Interview - You Are Almost There!",
+    "interview":      "AVIIN Jobs - Interview Scheduled",
+    "offer":          "AVIIN Jobs - Offer in Progress - Congratulations!",
+    "offer_accepted": "AVIIN Jobs - Offer Accepted - Welcome Aboard!",
+    "placed":         "AVIIN Jobs - Placement Confirmation - Congratulations!",
+    "hold":           "AVIIN Jobs - Application Status Update",
+    "rejected":       "AVIIN Jobs - Update on Your Application",
+}
+
+
+async def _compute_jd_block(tenant_id, stage, requisition_id):
+    """JD auto-send: "contacted" is the moment a candidate is actually
+    being reached out to about a specific role, so that's where the JD
+    content rides along on both channels — not every stage, which would
+    just be repeating it."""
+    if stage != "contacted" or not requisition_id:
+        return ""
+    try:
+        async with db.tenant_conn(tenant_id) as _jconn:
+            _req = await _jconn.fetchrow(
+                "SELECT title, description, location, employment_type FROM requisitions WHERE id=$1",
+                requisition_id)
+        if _req and _req["description"]:
+            return (
+                f"\n\n--- Job Description: {_req['title']} ---\n"
+                f"{_req['location'] or ''}{' · ' if _req['location'] else ''}{(_req['employment_type'] or '').replace('_',' ').title()}\n\n"
+                f"{_req['description']}"
+            )
+    except Exception as _jex:
+        print(f"JD auto-send fetch failed: {_jex}")
+    return ""
+
+
+async def _resolve_email_template(tenant_id, stage):
+    """This tenant's configured email_settings.stage_templates entry for
+    the stage, or (None, None, None) if nothing's been configured —
+    caller falls back to the hardcoded SUBJS/MSGS defaults. Factored out
+    so the real send path and the /stage-preview endpoint (below) always
+    resolve identically — what an admin previews in the manual-review
+    modal is guaranteed to be exactly what gets sent."""
+    async with db.tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow("SELECT stage_templates FROM email_settings WHERE tenant_id=$1", tenant_id)
+    tmpl = {}
+    if row and row["stage_templates"]:
+        raw = row["stage_templates"]
+        if isinstance(raw, str):
+            raw = json.loads(raw or "{}")
+        tmpl = (raw or {}).get(stage, {}) or {}
+    return tmpl.get("subject"), tmpl.get("message"), tmpl.get("attachment")
+
+
 async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, custom_msg=None, requisition_id=None, application_id=None):
     """Background: WhatsApp + email + n8n on stage change."""
     import httpx, smtplib, os
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
 
-    # JD auto-send: "contacted" is the moment a candidate is actually being
-    # reached out to about a specific role, so that's where the JD content
-    # rides along on both channels — not every stage, which would just be
-    # repeating it.
-    jd_block = ""
-    if stage == "contacted" and requisition_id:
-        try:
-            async with db.tenant_conn(tenant_id) as _jconn:
-                _req = await _jconn.fetchrow(
-                    "SELECT title, description, location, employment_type FROM requisitions WHERE id=$1",
-                    requisition_id)
-            if _req and _req["description"]:
-                jd_block = (
-                    f"\n\n--- Job Description: {_req['title']} ---\n"
-                    f"{_req['location'] or ''}{' · ' if _req['location'] else ''}{(_req['employment_type'] or '').replace('_',' ').title()}\n\n"
-                    f"{_req['description']}"
-                )
-        except Exception as _jex:
-            print(f"JD auto-send fetch failed: {_jex}")
-
-    MSGS = {
-        "contacted":      f"We have reviewed your profile and would like to connect with you regarding an exciting opportunity. Our recruitment team will reach out shortly to discuss the role in detail.",
-        "interested":     f"Thank you for your interest! We are pleased to inform you that we are moving forward with your application. Our team will be in touch very soon to discuss the next steps.",
-        "nda":            f"As part of our recruitment process, we require you to review and sign an NDA/Pre-contract agreement before we can share further details about this opportunity. Please respond at your earliest convenience.",
-        "screened":       f"Congratulations! Your profile has been shortlisted and you have successfully cleared our initial screening process. Our recruiter will contact you shortly to discuss the next steps.",
-        "submitted":      f"We are pleased to inform you that your profile has been submitted to our client for consideration. We will keep you posted and revert as soon as we receive feedback.",
-        "l1_interview":   f"Congratulations! You have been selected for the L1 Interview. Our team will share the interview schedule shortly. Please ensure your availability and prepare well. All the best!",
-        "l2_interview":   f"Excellent news! You have successfully cleared the L1 Interview and have been selected for the L2 Final Interview. Our team will reach out with the schedule shortly. All the best!",
-        "interview":      f"Congratulations! You have been selected for an interview. Our team will share the details shortly. All the best!",
-        "offer":          f"Great news! Our client is preparing an offer for you. Our team will be in touch shortly to discuss the offer details. Congratulations on making it this far!",
-        "offer_accepted": f"Congratulations on accepting the offer! We are thrilled to have you placed. Our team will coordinate with you for the documentation and onboarding process. Please confirm your joining date at the earliest.",
-        "placed":         f"Congratulations on your successful placement! It has been a pleasure being a part of your career journey. We wish you great success in your new role. Feel free to reach out anytime.",
-        "hold":           f"We wanted to keep you informed that your application is currently on hold. We appreciate your patience and will update you as soon as there is any movement. Thank you for your understanding.",
-        "rejected":       f"Thank you for your interest and the time you invested in this process. After careful consideration, we are unable to move forward with your application for this particular role at this time. We encourage you to stay connected as we regularly have new opportunities.",
-    }
-    msg_text = custom_msg if custom_msg else MSGS.get(stage, "")
-    # Note: stage_templates from DB will override msg_text inside the email block if configured
-    SUBJS = {
-        "contacted":      "AVIIN Jobs - We Have Reviewed Your Profile",
-        "interested":     "AVIIN Jobs - Moving Forward with Your Application",
-        "nda":            "AVIIN Jobs - NDA / Pre-Contract Agreement Required",
-        "screened":       "AVIIN Jobs - Profile Shortlisted",
-        "submitted":      "AVIIN Jobs - Your Profile Has Been Submitted to Client",
-        "l1_interview":   "AVIIN Jobs - L1 Interview Scheduled - Congratulations!",
-        "l2_interview":   "AVIIN Jobs - L2 Final Interview - You Are Almost There!",
-        "interview":      "AVIIN Jobs - Interview Scheduled",
-        "offer":          "AVIIN Jobs - Offer in Progress - Congratulations!",
-        "offer_accepted": "AVIIN Jobs - Offer Accepted - Welcome Aboard!",
-        "placed":         "AVIIN Jobs - Placement Confirmation - Congratulations!",
-        "hold":           "AVIIN Jobs - Application Status Update",
-        "rejected":       "AVIIN Jobs - Update on Your Application",
-    }
+    jd_block = await _compute_jd_block(tenant_id, stage, requisition_id)
+    # custom_msg (an admin's edited-in-the-manual-review-modal text)
+    # always wins outright, for both channels. Otherwise each channel
+    # checks its OWN settings table (email_settings vs whatsapp_settings
+    # — genuinely separate per-channel templates) before falling back to
+    # the hardcoded per-stage default.
+    base_msg = custom_msg if custom_msg else MSGS.get(stage, "")
+    custom_override = bool(custom_msg)
+    email_tmpl_subj, email_tmpl_msg, attach_choice = await _resolve_email_template(tenant_id, stage)
 
     # WhatsApp via WAHA — HARD RULE #7/#12: consent-gated, real recipient,
     # real per-stage template (previously broadcast a placeholder to a fixed
@@ -443,7 +473,8 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
             wa_templates = wa_row["stage_templates"]
             if isinstance(wa_templates, str):
                 wa_templates = json.loads(wa_templates)
-        wa_text = (wa_templates.get(stage, {}) or {}).get("message") or msg_text
+        wa_tmpl_msg = (wa_templates.get(stage, {}) or {}).get("message")
+        wa_text = base_msg if custom_override else (wa_tmpl_msg or base_msg)
         if wa_text:
             wa_text = wa_text.replace("{name}", str(name)) + jd_block
 
@@ -485,7 +516,8 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
     # Email notification for key stages - reads SMTP from email_settings DB.
     # Uses db.tenant_conn (not a raw asyncpg connection) because it also
     # needs to read document_templates, which has FORCE ROW LEVEL SECURITY.
-    if email and stage in SUBJS and msg_text:
+    email_msg = base_msg if custom_override else (email_tmpl_msg or base_msg)
+    if email and stage in SUBJS and email_msg:
         try:
             from email import encoders as _encoders
             from email.mime.base import MIMEBase as _MIMEBase
@@ -493,7 +525,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
 
             async with db.tenant_conn(tenant_id) as _conn:
                 _cfg = await _conn.fetchrow(
-                    "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls,stage_templates "
+                    "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls "
                     "FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE LIMIT 1", tenant_id)
                 if _cfg and _cfg["smtp_host"]:
                     _h=_cfg["smtp_host"]; _p=_cfg["smtp_port"] or 587
@@ -501,14 +533,13 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _f=_cfg["smtp_from"] or _u; _fn=_cfg["smtp_from_name"] or "AVIIN ATS"
                     _tls=_cfg["smtp_tls"] if _cfg["smtp_tls"] is not None else True
                     _em=MIMEMultipart()
-                    _raw_tmpls = _cfg["stage_templates"]
-                    if isinstance(_raw_tmpls, str):
-                        _raw_tmpls = json.loads(_raw_tmpls or "{}")
-                    _tmpl=(_raw_tmpls or {}).get(stage,{})
-                    _subj=_tmpl.get("subject") or SUBJS.get(stage,"AVIIN Jobs - Update")
-                    if not msg_text or msg_text==MSGS.get(stage,""):
-                        _tmpl_msg=_tmpl.get("message","")
-                        if _tmpl_msg: msg_text=_tmpl_msg
+                    _subj = email_tmpl_subj or SUBJS.get(stage,"AVIIN Jobs - Update")
+                    # BUG FIX (2026-08-22): {name} was substituted for WhatsApp
+                    # (see wa_text.replace above) but never for email — any
+                    # stage template using {name} (the settings page's own
+                    # default templates do, e.g. "Hi {name},") sent the
+                    # literal, unsubstituted text to every real candidate.
+                    msg_text = email_msg.replace("{name}", str(name)) if email_msg else email_msg
                     _em["Subject"]=_subj
                     _em["From"]=f"{_fn} <{_f}>"
                     _em["To"]=email
@@ -536,7 +567,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     else:
                         _em.attach(MIMEText(_body, "plain"))
 
-                    _attach_choice = _tmpl.get("attachment")
+                    _attach_choice = attach_choice
                     if _attach_choice in ("nda_template", "contract_template"):
                         _doc_type = "nda" if _attach_choice == "nda_template" else "contract"
                         _doc = await _conn.fetchrow(
@@ -566,6 +597,36 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     print("Stage email: no active SMTP config found")
         except Exception as _ex:
             print(f"Stage email failed [{stage}] to {email}: {_ex}")
+
+@router.get("/{application_id}/stage-preview")
+async def stage_email_preview(
+    application_id: str,
+    stage: str,
+    actor: Actor = Depends(get_actor),
+    _perm: Actor = Depends(require_permission("pipeline", "read")),
+):
+    """Real gap fix (2026-08-22): per-stage 'Manual' email send mode needs
+    a real preview to show before the user edits/confirms — resolves the
+    exact same subject/message/attachment _notify_stage_change_bg would
+    actually send (DB template override > hardcoded default, {name}
+    substituted, JD block appended for 'contacted'), via the same shared
+    helpers, so what's previewed here can never drift from what's sent."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        app = await conn.fetchrow(
+            "SELECT candidate_id, requisition_id FROM applications WHERE id=$1 AND tenant_id=$2",
+            application_id, actor.tenant_id)
+        if not app:
+            raise HTTPException(404, "Application not found")
+        cand = await conn.fetchrow("SELECT full_name FROM candidates WHERE id=$1", app["candidate_id"])
+    name = (cand["full_name"] if cand else None) or "Candidate"
+    jd_block = await _compute_jd_block(actor.tenant_id, stage, app["requisition_id"])
+    tmpl_subj, tmpl_msg, attachment = await _resolve_email_template(actor.tenant_id, stage)
+    subject = tmpl_subj or SUBJS.get(stage, "AVIIN Jobs - Update")
+    message = tmpl_msg or MSGS.get(stage, "")
+    message = message.replace("{name}", name) if message else message
+    message = (message or "") + jd_block
+    return {"subject": subject, "message": message, "attachment": attachment}
+
 
 @router.patch("/{application_id}/stage")
 async def update_stage(

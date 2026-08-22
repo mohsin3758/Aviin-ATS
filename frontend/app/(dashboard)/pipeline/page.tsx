@@ -30,10 +30,6 @@ const DEFAULT_STAGES = [
   { key: 'rejected',       label: 'Rejected',       color: '#DC2626', light: '#FEF2F2' },
 ];
 
-// Stages that auto-notify the candidate (email + WhatsApp) on entry — the
-// backend (_notify_stage_change_bg) already supports every stage, this is
-// deliberately scoped to just the 3 the business asked for.
-const _AUTO_NOTIFY_STAGES = new Set(['l1_interview', 'l2_interview', 'rejected']);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function gx(mo: number) {
@@ -152,6 +148,15 @@ function PipelineInner() {
   }, []);
   const [pendingRemove, setPendingRemove] = useState<{ appId: string; fromStage: string; candidateName: string } | null>(null);
 
+  // Real per-stage "Manual" email send mode (2026-08-22) — see
+  // getSendMode/moveStage below. Holds the real, resolved preview
+  // (fetched from /applications/{id}/stage-preview) while the user
+  // reviews/edits it; the actual stage PATCH is deferred until they
+  // confirm, matching the setting's own description ("edit the message
+  // before sending").
+  const { data: emailSettings } = useFetch<any>('/settings/email');
+  const [pendingEmailReview, setPendingEmailReview] = useState<{ appId: string; fromStage: string; toStage: string; extra: Record<string, any>; candidateName: string; subject: string; message: string } | null>(null);
+
   // Bulk multi-select — checkboxes on cards, a floating action bar for
   // bulk stage-move (via the existing /pipeline/bulk-action endpoint,
   // previously only reachable outside the board itself) and comparison.
@@ -211,11 +216,21 @@ function PipelineInner() {
     router.replace(`/pipeline?job=${id}`, { scroll: false });
   }
 
-  // L1/L2/Rejected auto-notify the candidate (email + WhatsApp, backend
-  // already supports both — it just was never triggered here before).
-  const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, extra: Record<string, any> = {}) => {
-    if (fromStage === toStage) return;
-    const sendEmail = _AUTO_NOTIFY_STAGES.has(toStage);
+  // Real UX fix (2026-08-22): "Email Send Mode" used to be one global
+  // Automatic/Manual toggle applying to every stage — now genuinely
+  // per-stage (backend/routers/email_settings.py's stage_templates[stage
+  // ].send_mode). A stage set to Manual shows a real review-and-edit
+  // popup (StageEmailReviewModal below) before anything sends; Automatic
+  // stages keep sending instantly, unchanged from before. Falls back to
+  // 'manual' (the safer default) if a stage has no explicit setting yet.
+  const getSendMode = useCallback((stage: string) => {
+    return emailSettings?.stage_templates?.[stage]?.send_mode || 'manual';
+  }, [emailSettings]);
+
+  // The actual API call + optimistic board update + success/error
+  // handling — shared by the immediate-auto path and the manual-review
+  // modal's own confirm handlers, so both commit a move identically.
+  const commitStageMove = useCallback(async (appId: string, fromStage: string, toStage: string, extra: Record<string, any>, sendEmail: boolean, customMessage?: string) => {
     setBoard(prev => {
       const app = prev[fromStage]?.find((a: any) => a.id === appId);
       if (!app) return prev;
@@ -227,7 +242,9 @@ function PipelineInner() {
     });
     if (selected?.id === appId) setSelected((s: any) => s ? { ...s, stage: toStage } : s);
     try {
-      await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify({ stage: toStage, send_email: sendEmail, ...extra }) });
+      const body: Record<string, any> = { stage: toStage, send_email: sendEmail, ...extra };
+      if (customMessage !== undefined) body.custom_message = customMessage;
+      await apiFetch(`/applications/${appId}/stage`, { method: 'PATCH', body: JSON.stringify(body) });
       showToast(`Moved to ${ALL_STAGES.find((s: any) => s.key === toStage)?.label || toStage}`);
       refreshStats();
     } catch (e: any) {
@@ -235,6 +252,19 @@ function PipelineInner() {
       if (rawBoard) setBoard(rawBoard);
     }
   }, [rawBoard, selected, showToast, refreshStats, ALL_STAGES]);
+
+  const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, extra: Record<string, any> = {}) => {
+    if (fromStage === toStage) return;
+    if (getSendMode(toStage) === 'manual') {
+      let preview: any = { subject: '', message: '' };
+      try { preview = await apiFetch(`/applications/${appId}/stage-preview?stage=${toStage}`); } catch { /* best-effort */ }
+      const candidateName = board[fromStage]?.find((a: any) => a.id === appId)?.candidate_name
+        || board[fromStage]?.find((a: any) => a.id === appId)?.full_name || 'this candidate';
+      setPendingEmailReview({ appId, fromStage, toStage, extra, candidateName, subject: preview.subject || '', message: preview.message || '' });
+      return;
+    }
+    await commitStageMove(appId, fromStage, toStage, extra, true);
+  }, [getSendMode, board, commitStageMove]);
 
   // Full removal from the pipeline (distinct from Reject, which just
   // moves a card to the Rejected column — see pendingRemove above).
@@ -696,6 +726,19 @@ function PipelineInner() {
           onConfirm={(reason: string) => {
             removeApplication(pendingRemove.appId, pendingRemove.fromStage, reason || undefined);
             setPendingRemove(null);
+          }} />
+      )}
+
+      {/* ── STAGE EMAIL REVIEW MODAL (Manual send mode) ──────────────────── */}
+      {pendingEmailReview && (
+        <StageEmailReviewModal
+          review={pendingEmailReview}
+          stageLabel={ALL_STAGES.find((s: any) => s.key === pendingEmailReview.toStage)?.label || pendingEmailReview.toStage}
+          onCancel={() => setPendingEmailReview(null)}
+          onConfirm={async (customMessage: string | undefined) => {
+            const r = pendingEmailReview;
+            setPendingEmailReview(null);
+            await commitStageMove(r.appId, r.fromStage, r.toStage, r.extra, customMessage !== undefined, customMessage);
           }} />
       )}
 
@@ -1673,6 +1716,47 @@ function ActivityTab({ candidateId }: any) {
 // embedding similarity + 40% skill overlap, pre-sorted highest→lowest), not a
 // plain alphabetical/text search — matches how a recruiter actually shortlists.
 // ── Reject Reason Modal ──────────────────────────────────────────────────────
+// ── Stage Email Review Modal (Manual send mode) ──────────────────────────────
+// Real feature (2026-08-22): a stage configured as "Manual" in Settings >
+// Email Configuration now genuinely shows this before anything sends —
+// previously the setting existed but nothing ever consulted it. Editing
+// here sends via custom_message (always wins server-side); "Move Without
+// Sending" still moves the card, just with send_email:false; Cancel does
+// nothing at all, reverting the optimistic board move already made.
+function StageEmailReviewModal({ review, stageLabel, onCancel, onConfirm }: any) {
+  const [subject, setSubject] = useState(review.subject);
+  const [message, setMessage] = useState(review.message);
+  const [sending, setSending] = useState(false);
+
+  const send = async () => { setSending(true); await onConfirm(message); };
+  const moveWithoutSending = async () => { setSending(true); await onConfirm(undefined); };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
+      <div style={{ width: 520, maxWidth: '92vw', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B', marginBottom: 4 }}>Review Email — Moving to {stageLabel}</div>
+        <div style={{ fontSize: 12, color: '#64748B', marginBottom: 16 }}>To {review.candidateName} — edit before sending, or move without an email.</div>
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>SUBJECT</label>
+        <input value={subject} onChange={e => setSubject(e.target.value)}
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 12px', color: '#1E293B', boxSizing: 'border-box' }} />
+
+        <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em' }}>MESSAGE</label>
+        <textarea value={message} onChange={e => setMessage(e.target.value)} rows={8}
+          style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 13, margin: '4px 0 12px', resize: 'vertical', fontFamily: 'inherit', boxSizing: 'border-box', lineHeight: 1.5 }} />
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center' }}>
+          <button onClick={onCancel} disabled={sending} style={{ padding: '8px 14px', background: '#F1F5F9', color: '#475569', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer' }}>Cancel</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button data-testid="stage-review-move-only" onClick={moveWithoutSending} disabled={sending} style={{ padding: '8px 14px', background: '#F1F5F9', color: '#475569', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer' }}>Move Without Sending</button>
+            <button data-testid="stage-review-send" onClick={send} disabled={sending} style={{ padding: '8px 16px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer' }}>{sending ? 'Sending…' : 'Send & Move'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RejectReasonModal({ onCancel, onConfirm }: any) {
   const { data: reasons } = useFetch<any[]>('/rejection-reasons');
   const [code, setCode] = useState('');

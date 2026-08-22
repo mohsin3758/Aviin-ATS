@@ -79,8 +79,14 @@ export default function EmailSettingsPage() {
   const [testResult, setTestResult] = useState<any>(null);
   const [sendResult, setSendResult] = useState<any>(null);
   const [msg, setMsg] = useState<{ text:string; ok:boolean }|null>(null);
-  const [notifMode, setNotifMode] = useState<'auto'|'manual'>('manual');
-  const [templates, setTemplates] = useState<Record<string, {subject:string;message:string;attachment?:string}>>({});
+  // Real UX fix (2026-08-22): "Email Send Mode" used to be one global
+  // Automatic/Manual toggle applying to every stage at once — an admin
+  // could never make L1 Interview auto-send while keeping, say, Offer
+  // Released manual. send_mode now lives per-stage, inside each stage's
+  // own template entry (templates[stage].send_mode), defaulting to
+  // 'manual' for any stage that hasn't been explicitly set yet — the
+  // safer default (review before send) for a stage nobody's configured.
+  const [templates, setTemplates] = useState<Record<string, {subject:string;message:string;attachment?:string;send_mode?:'auto'|'manual'}>>({});
   const [activeStage, setActiveStage] = useState<string>('contacted');
   const [savingTemplates, setSavingTemplates] = useState(false);
 
@@ -101,7 +107,6 @@ export default function EmailSettingsPage() {
         imap_password:  saved.imap_password  || '',
         is_active:      saved.is_active      || false,
       }));
-      if (saved.notification_mode) setNotifMode(saved.notification_mode as 'auto'|'manual');
       if (saved.stage_templates && typeof saved.stage_templates === 'object') {
         setTemplates(saved.stage_templates);
       }
@@ -148,7 +153,6 @@ export default function EmailSettingsPage() {
     setSavingTemplates(true);
     try {
       await apiFetch('/settings/email', {method:'PUT', body:JSON.stringify({
-        notification_mode: notifMode,
         stage_templates: templates,
       })});
       setMsg({text:'Stage email settings saved!', ok:true});
@@ -157,6 +161,9 @@ export default function EmailSettingsPage() {
       setMsg({text:'Save failed: '+e.message, ok:false});
     } finally { setSavingTemplates(false); }
   };
+
+  const setStageMode = (stage: string, mode: 'auto'|'manual') =>
+    setTemplates(t => ({ ...t, [stage]: { ...(t[stage]||{subject:'',message:''}), send_mode: mode } }));
 
   return (
     <div style={{ maxWidth:'780px' }} className="anim-fade-up">
@@ -329,33 +336,25 @@ export default function EmailSettingsPage() {
         </button>
       </div>
 
-      {/* Mode Toggle */}
-      <div style={{marginBottom:'24px',padding:'16px',background:'#f8fafc',borderRadius:'10px',border:'1px solid #e2e8f0'}}>
-        <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',marginBottom:'12px',textTransform:'uppercase',letterSpacing:'0.05em'}}>Email Send Mode</div>
-        <div style={{display:'flex',gap:'12px'}}>
-          <button onClick={()=>setNotifMode('auto')} style={{flex:1,padding:'12px 16px',borderRadius:'8px',border:`2px solid ${notifMode==='auto'?'#1e40af':'#e2e8f0'}`,background:notifMode==='auto'?'#eff6ff':'white',cursor:'pointer',textAlign:'left'}}>
-            <div style={{fontSize:'13px',fontWeight:'700',color:notifMode==='auto'?'#1e40af':'#374151',marginBottom:'4px'}}>⚡ Automatic</div>
-            <div style={{fontSize:'11px',color:'#64748b'}}>Email sends instantly on every stage change using saved messages. No confirmation needed.</div>
-          </button>
-          <button onClick={()=>setNotifMode('manual')} style={{flex:1,padding:'12px 16px',borderRadius:'8px',border:`2px solid ${notifMode==='manual'?'#1e40af':'#e2e8f0'}`,background:notifMode==='manual'?'#eff6ff':'white',cursor:'pointer',textAlign:'left'}}>
-            <div style={{fontSize:'13px',fontWeight:'700',color:notifMode==='manual'?'#1e40af':'#374151',marginBottom:'4px'}}>✍️ Manual</div>
-            <div style={{fontSize:'11px',color:'#64748b'}}>A modal appears on each stage change so you can edit the message before sending.</div>
-          </button>
-        </div>
-      </div>
-
       {/* Stage Message Templates */}
-      <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',marginBottom:'12px',textTransform:'uppercase',letterSpacing:'0.05em'}}>Stage Message Templates</div>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'12px'}}>
+        <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',textTransform:'uppercase',letterSpacing:'0.05em'}}>Stage Message Templates</div>
+        <div style={{fontSize:'11px',color:'#94a3b8'}}>⚡ = sends instantly · ✍️ = review before sending — set per stage below</div>
+      </div>
       <div style={{display:'flex',gap:'0',border:'1px solid #e2e8f0',borderRadius:'10px',overflow:'hidden'}}>
         {/* Stage list */}
-        <div style={{width:'160px',flexShrink:0,borderRight:'1px solid #e2e8f0',background:'#f8fafc'}}>
+        <div style={{width:'180px',flexShrink:0,borderRight:'1px solid #e2e8f0',background:'#f8fafc'}}>
           {EMAIL_STAGES_LIVE.map(st=>{
             const hasCustom=!!(templates[st.key]?.message||templates[st.key]?.subject||(templates[st.key]?.attachment&&templates[st.key]?.attachment!=='none'));
+            const stMode = templates[st.key]?.send_mode || 'manual';
             return(
               <button key={st.key} onClick={()=>setActiveStage(st.key)}
-                style={{width:'100%',padding:'10px 12px',textAlign:'left',border:'none',borderBottom:'1px solid #e2e8f0',background:activeStage===st.key?'white':'transparent',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                style={{width:'100%',padding:'10px 12px',textAlign:'left',border:'none',borderBottom:'1px solid #e2e8f0',background:activeStage===st.key?'white':'transparent',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between',gap:'6px'}}>
                 <span style={{fontSize:'12px',fontWeight:activeStage===st.key?'700':'500',color:activeStage===st.key?'#1e40af':'#374151'}}>{st.label}</span>
-                {hasCustom&&<span style={{width:'6px',height:'6px',borderRadius:'50%',background:'#22c55e',flexShrink:0}}/>}
+                <span style={{display:'flex',alignItems:'center',gap:'5px',flexShrink:0}}>
+                  <span title={stMode==='auto'?'Automatic':'Manual'} style={{fontSize:'11px'}}>{stMode==='auto'?'⚡':'✍️'}</span>
+                  {hasCustom&&<span style={{width:'6px',height:'6px',borderRadius:'50%',background:'#22c55e'}}/>}
+                </span>
               </button>
             );
           })}
@@ -365,6 +364,26 @@ export default function EmailSettingsPage() {
           {EMAIL_STAGES_LIVE.filter((s: any)=>s.key===activeStage).map((st: any)=>(
             <div key={st.key}>
               <div style={{fontSize:'13px',fontWeight:'700',color:'#1e293b',marginBottom:'14px'}}>{st.label} — Email Template</div>
+
+              {/* Per-stage send mode — real fix (2026-08-22): this used to
+                  be one global toggle for all 12+ stages; each stage now
+                  has its own independent Automatic/Manual choice. */}
+              <div style={{marginBottom:'16px',padding:'12px',background:'#f8fafc',borderRadius:'8px',border:'1px solid #e2e8f0'}}>
+                <div style={{fontSize:'11px',fontWeight:'700',color:'#374151',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'0.05em'}}>Send Mode for {st.label}</div>
+                <div style={{display:'flex',gap:'10px'}}>
+                  <button data-testid={`send-mode-auto-${st.key}`} onClick={()=>setStageMode(st.key,'auto')}
+                    style={{flex:1,padding:'10px 12px',borderRadius:'8px',border:`2px solid ${(templates[st.key]?.send_mode||'manual')==='auto'?'#1e40af':'#e2e8f0'}`,background:(templates[st.key]?.send_mode||'manual')==='auto'?'#eff6ff':'white',cursor:'pointer',textAlign:'left'}}>
+                    <div style={{fontSize:'12px',fontWeight:'700',color:(templates[st.key]?.send_mode||'manual')==='auto'?'#1e40af':'#374151',marginBottom:'2px'}}>⚡ Automatic</div>
+                    <div style={{fontSize:'10px',color:'#64748b'}}>Sends instantly when a candidate moves to {st.label}</div>
+                  </button>
+                  <button data-testid={`send-mode-manual-${st.key}`} onClick={()=>setStageMode(st.key,'manual')}
+                    style={{flex:1,padding:'10px 12px',borderRadius:'8px',border:`2px solid ${(templates[st.key]?.send_mode||'manual')==='manual'?'#1e40af':'#e2e8f0'}`,background:(templates[st.key]?.send_mode||'manual')==='manual'?'#eff6ff':'white',cursor:'pointer',textAlign:'left'}}>
+                    <div style={{fontSize:'12px',fontWeight:'700',color:(templates[st.key]?.send_mode||'manual')==='manual'?'#1e40af':'#374151',marginBottom:'2px'}}>✍️ Manual</div>
+                    <div style={{fontSize:'10px',color:'#64748b'}}>Shows a review popup to edit before sending</div>
+                  </button>
+                </div>
+              </div>
+
               <div style={{marginBottom:'12px'}}>
                 <label style={LBL}>Subject Line</label>
                 <input style={INP} value={templates[st.key]?.subject||''} placeholder={DEFAULT_SUBJS[st.key]||'Subject...'}

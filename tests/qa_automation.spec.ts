@@ -6419,3 +6419,140 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     }
   });
 });
+
+test.describe.serial('S52 Per-Stage Email Send Mode (Automatic vs Manual)', () => {
+  let token: string;
+  let reqId: string;
+  let candId: string;
+  let appId: string;
+  const stamp = Date.now();
+
+  test('setup: real auth token + throwaway candidate on a real open requisition', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: { Authorization: `Bearer ${token}` } });
+    reqId = (await reqRes.json())[0].id;
+    const cand = await (await request.post(`${API}/candidates`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { full_name: `QA S52 SendMode ${stamp}`, email: `qa_s52_sendmode_${stamp}@aviinjobs.com`, phone: `999006${String(stamp).slice(-3)}` },
+    })).json();
+    candId = cand.id;
+    const app = await (await request.post(`${API}/applications`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { candidate_id: candId, requisition_id: reqId, stage: 'interested' },
+    })).json();
+    appId = app.id;
+    expect(appId).toBeTruthy();
+  });
+
+  test('BUG FIX: this used to be one global Automatic/Manual toggle for every stage — each stage now has its own independent send_mode, saved and read back correctly', async ({ request }) => {
+    // Real round-trip: set 2 different stages to opposite modes in one
+    // save, confirm both persist independently.
+    const before = await (await request.get(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const stageTemplates = { ...(before.stage_templates || {}) };
+    const origScreened = stageTemplates.screened?.send_mode;
+    const origNda = stageTemplates.nda?.send_mode;
+    stageTemplates.screened = { ...(stageTemplates.screened || {}), send_mode: 'auto' };
+    stageTemplates.nda = { ...(stageTemplates.nda || {}), send_mode: 'manual' };
+    await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: stageTemplates } });
+
+    const after = await (await request.get(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(after.stage_templates.screened.send_mode).toBe('auto');
+    expect(after.stage_templates.nda.send_mode).toBe('manual');
+
+    // Restore exactly what was there before this test touched it.
+    stageTemplates.screened = { ...stageTemplates.screened, send_mode: origScreened };
+    stageTemplates.nda = { ...stageTemplates.nda, send_mode: origNda };
+    await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: stageTemplates } });
+  });
+
+  test('GET /applications/{id}/stage-preview resolves the real DB template with {name} genuinely substituted — the exact bug this pass fixed (email never substituted {name} before, only WhatsApp did)', async ({ request }) => {
+    const res = await request.get(`${API}/applications/${appId}/stage-preview?stage=interested`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.subject).toBeTruthy();
+    expect(body.message).toContain(`QA S52 SendMode ${stamp}`);
+    expect(body.message).not.toContain('{name}');
+  });
+
+  test('PATCH .../stage with custom_message overrides the template outright — the exact payload the review modal sends on "Send & Move"', async ({ request }) => {
+    const editedText = `QA S52 EDITED MESSAGE ${stamp} — please review.`;
+    const res = await request.patch(`${API}/applications/${appId}/stage`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { stage: 'nda', send_email: true, custom_message: editedText },
+    });
+    expect(res.status()).toBe(200);
+    // The actual send is a real fire-and-forget asyncio.create_task, not
+    // awaited inside the PATCH request (WAHA check + n8n webhook + real
+    // SMTP send all happen after the response already returned) — poll
+    // rather than check immediately, same lesson already documented
+    // elsewhere in this suite for this exact background-task shape.
+    await expect.poll(async () => {
+      const thread = await (await request.get(`${API}/communications/thread/${candId}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+      return !!thread.messages.find((m: any) => m.stage_at_send === 'nda');
+    }, { timeout: 10000 }).toBe(true);
+    const thread = await (await request.get(`${API}/communications/thread/${candId}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const msg = thread.messages.find((m: any) => m.stage_at_send === 'nda');
+    expect(msg.body).toContain(editedText);
+  });
+
+  test('send_email:false ("Move Without Sending") moves the stage but logs no message', async ({ request }) => {
+    const before = await (await request.get(`${API}/communications/thread/${candId}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const beforeCount = before.messages.length;
+    const res = await request.patch(`${API}/applications/${appId}/stage`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { stage: 'screened', send_email: false },
+    });
+    expect(res.status()).toBe(200);
+    expect((await res.json()).stage).toBe('screened');
+    const after = await (await request.get(`${API}/communications/thread/${candId}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(after.messages.length).toBe(beforeCount);
+  });
+
+  test('real headless UI: a stage set to Manual shows the real review-and-edit popup before moving; a stage set to Automatic does not', async ({ page, request }) => {
+    // Force a known state for this test, restored exactly afterward —
+    // regardless of what the real tenant currently has configured.
+    const settingsRes = await request.get(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` } });
+    const settings = await settingsRes.json();
+    const stageTemplates = { ...(settings.stage_templates || {}) };
+    const origNda = stageTemplates.nda?.send_mode;
+    const origL1 = stageTemplates.l1_interview?.send_mode;
+    stageTemplates.nda = { ...(stageTemplates.nda || {}), send_mode: 'manual' };
+    stageTemplates.l1_interview = { ...(stageTemplates.l1_interview || {}), send_mode: 'auto' };
+    await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: stageTemplates } });
+
+    try {
+      // Move the app back to 'interested' via API so the UI test starts clean.
+      await request.patch(`${API}/applications/${appId}/stage`, { headers: { Authorization: `Bearer ${token}` }, data: { stage: 'interested', send_email: false } });
+
+      const errors: string[] = [];
+      page.on('pageerror', e => errors.push(e.message));
+      await page.goto(`/pipeline?job=${reqId}`);
+      await page.waitForTimeout(2000);
+      await page.locator('text=QA S52 SendMode').first().click();
+      await page.waitForTimeout(1000);
+
+      // Manual stage -> real review modal appears.
+      await page.locator('button', { hasText: 'NDA' }).first().click();
+      await page.waitForTimeout(1500);
+      await expect(page.locator('text=Review Email')).toBeVisible();
+      await page.getByTestId('stage-review-move-only').click();
+      await page.waitForTimeout(1500);
+
+      // Automatic stage -> no modal, moves straight through.
+      await page.locator('button', { hasText: 'L1 Interview' }).first().click();
+      await page.waitForTimeout(1500);
+      await expect(page.locator('text=Review Email')).not.toBeVisible();
+
+      expect(errors).toHaveLength(0);
+    } finally {
+      stageTemplates.nda = { ...stageTemplates.nda, send_mode: origNda };
+      stageTemplates.l1_interview = { ...stageTemplates.l1_interview, send_mode: origL1 };
+      await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: stageTemplates } });
+    }
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+  });
+});
