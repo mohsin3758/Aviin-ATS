@@ -9636,3 +9636,171 @@ three separate times before the fixes landed, each time cleaned up by
 hand and re-verified). Full regression sweep (S1/S2/S8/S13/S16/S20/S22/
 S30/S38/S40/S42/S47/S48, 79 tests) passed clean. Zero-token audit:
 `CONFIRMED CLEAN` (381 files, 0 external API refs).
+
+
+## Advanced Reminder, Follow-Up & Notification Management System — Phase 1
+## built end-to-end, 2026-08-21/22
+User pasted a large 15-section spec (Smart Follow-Up Management, a
+Reminder Dashboard, Real-Time Notifications across in-app/email/
+WhatsApp/SMS/push, WhatsApp Reminder Automation, To-Do Management,
+Candidate/Interview Reminder Modules, NDA & Document Expiry Tracking,
+4-Level Escalation, a Recurring Reminder Engine, Calendar Integration,
+Reports & Analytics, AI-Powered Smart Reminders, Role-Based Permissions,
+and an Audit Trail) and asked to check what exists and build it.
+
+**Audit first, matching this project's established discipline** — the
+agent tool hit a weekly usage-limit mid-run, so the audit was completed
+directly (Grep/Read/psql against the live schema) instead. Found this
+codebase already had real, substantial infrastructure covering large
+chunks of the spec: `recruiter_tasks` (a genuine follow-up entity,
+title/description/priority/due_at/status/notes, already wired into
+Recruiter Ops "My Day", load-balanced auto-assign — real production
+usage confirmed 208 real rows), `notifications` (in-app + WhatsApp +
+email + **a real, working MSG91 SMS integration** —
+`backend/services/sms_service.py`/`backend/routers/sms.py`/a real
+`/sms` page all already exist, just needs a live API key, not new
+code), the SLA-escalation tier1/tier2 pattern (`sla_escalations`, real
+and working, just scoped to staffing SLA breaches not generic
+follow-ups), daily interview-reminder email (fixed 24h lead time only),
+`audit_log`, and a 73-feature RBAC taxonomy with `kae`/`kam`/
+`sales_manager`/`hr_manager`/`admin` already real, distinct roles in
+`role_definitions` (28 roles total). Confirmed genuine gaps: zero
+document-expiry tracking anywhere (`nda_documents` has no `expires_at`
+column at all, no `compliance_records`/`bgv_documents` equivalent
+either), only 2 escalation tiers (not 4), no recurrence concept, no
+configurable interview-reminder lead times, no AI-suggested-reminder
+engine. **Hard blocker flagged upfront, not discovered after building**:
+Google/Outlook/Teams/Zoom 2-way calendar sync needs real OAuth app
+credentials this project doesn't have — same category as the
+Naukri/LinkedIn/MS-Teams-Graph-API blockers already documented
+elsewhere in this file. The existing one-way `.ics` subscribe feed
+(built 2026-08-11) is the realistic ceiling without those.
+
+**Architecture decision**: extended `recruiter_tasks` into the real
+Follow-Up entity instead of building a second, competing table — the
+same "one shared engine, not two" principle applied throughout this
+project's history (Resume Generator, skill-matching, etc.). Everything
+new hangs off the one table real usage and the existing dashboards
+already depend on.
+
+`sql/70_reminder_followup_system.sql` — extends `recruiter_tasks` with
+`client_id`, `follow_up_reason`, `reminder_at`/`reminder_sent_at`,
+`rescheduled_from`/`reschedule_count`, `created_by`, `recurrence_rule`,
+`recurrence_parent_id`, `ai_suggested`; widens `priority` (validated
+low/medium/high/critical — confirmed via direct query only low/medium
+were ever actually used in production, so this is a genuine tightening
+not a breaking change) and `status` (adds 'rescheduled'; 'overdue'
+deliberately stays computed at read time, never stored, to avoid a
+second driftable source of truth for the same fact). New tables:
+`task_escalations` (generalized 4-tier version of the proven
+`sla_escalations` pattern — tier1=assigned user, tier2=reporting
+manager via `users.reporting_to`, tier3=the linked client's KAE/KAM via
+`client_owners`, tier4=admin), `escalation_config` (tenant-tunable
+grace hours per tier + a critical-priority speed multiplier, seeded
+sensible defaults for every tenant), `document_expiry_tracking` (one
+generic table covering NDA/contract/visa/certification/offer_letter/
+KYC rather than one-off columns bolted onto unrelated tables — 90/30/
+7/1-day tiered alert timestamps), `interview_reminder_config` +
+`interview_reminder_log` (tenant-configurable multi-lead-time
+reminders, e.g. 24h/2h/30min, idempotent per interview×lead-time pair).
+
+**Backend** — `backend/routers/recruiter_ops.py`'s `tasks_router`
+extended: `TaskIn` gains the new fields, priority/recurrence validated
+server-side, a new `PATCH /recruiter-tasks/{id}/reschedule` (real audit
+trail via `rescheduled_from`/`reschedule_count`, resolves any in-flight
+escalation since a legitimately-rescheduled task shouldn't keep
+escalating against a deadline that no longer applies), a new
+`DELETE /recruiter-tasks/{id}` (didn't exist at all before — genuinely
+safe as a hard delete, confirmed nothing else FKs to a task except this
+table's own self-reference and the new `task_escalations`, both set
+`ON DELETE CASCADE`/`SET NULL`), and `update_task_status` now spawns
+the next occurrence of a completed recurring task (`_next_recurrence`
+using pure-stdlib month arithmetic — confirmed live that
+`python-dateutil` is NOT installed in this backend image, matching an
+already-documented finding elsewhere in this project where a dateutil
+import was dead code, never an installed package).
+
+New `backend/routers/reminders.py` — the cross-cutting pieces:
+`GET /reminders/dashboard` (Due Today/This Week/Overdue/Critical/
+Upcoming Interviews (48h)/Expiring Documents (30d), with a `team_view`
+toggle gated to manager-ish roles), `GET /reminders/reports`
+(completion rate, overdue, avg response time, by-recruiter breakdown —
+plain SQL aggregates, zero-token), full `document-expiry` CRUD, and
+GET/PUT for both `escalation-config` and `interview-reminder-config`.
+Registered in `app.py`. Added a "reminders" feature key to
+`permissions.py`'s `FEATURE_GROUPS` — reused the EXISTING, uniform
+5-action taxonomy (create/read/update/delete/export) rather than
+inventing a one-off "manage_escalations" action, which would have
+broken the consistent, single-action-set-across-all-73-features shape
+the whole RBAC UI matrix is built around.
+
+**5 new scheduler jobs** (`backend/scheduler.py`): `process_task_
+escalations` (every 30 min, 4-tier, reuses the exact notifications-
+table insert shape `_handle_escalation_alert` already established),
+`process_reminder_sends` (every 15 min, the pre-due `reminder_at`
+notification — distinct from escalation, which only fires after a task
+is already overdue), `process_configurable_interview_reminders` (every
+15 min, additive to — not replacing — the existing daily-8am email
+job), `process_document_expiry_alerts` (daily 06:00 IST, 90/30/7/1-day
+tiers, auto-flips a document to `status='expired'` once its date
+passes), `generate_ai_suggested_reminders` (daily 07:00 IST — zero-
+token, rule-based per HARD RULE #1, one clear real signal: a candidate
+genuinely untouched 5+ days in a non-terminal pipeline stage — creates
+a real `recruiter_tasks` row with `ai_suggested=true` rather than a
+separate "suggestion" concept, so an ignored suggestion escalates
+exactly like a manually-created follow-up would; deliberately narrow
+rather than guessing at the spec's other 5 example signals, which would
+need real, separate signal sources — offer-delay tracking, client-
+response-time tracking — not built yet).
+
+**Frontend** — new `/reminders` page (5 tabs: Dashboard, Follow-Ups,
+Document Expiry, Reports, Settings — Settings gated to manager-ish
+roles via the established SSR-safe deferred-`getTokenPayload()`
+pattern), added to the sidebar's CORE group right under Dashboard. New
+Follow-Up creation form (title/description/reason/priority/due date+
+time/reminder date+time/assigned user/related client/related job/
+recurrence), a reschedule modal, inline status change, a Document
+Expiry tracker (create/list/status update), a Reports tab reusing the
+established hand-rolled local `BarChart` convention already used on
+`reports/page.tsx`/`recruiter-ops/page.tsx`, and a Settings tab for
+both new tenant configs.
+
+Verified for real end-to-end throughout, not code review: directly
+invoked all 5 new scheduler jobs inside the backend container against
+real data — confirmed 17 real overdue tasks correctly detected, a real
+tier-1 escalation notification landed for a real throwaway recruiter
+(and correctly did NOT fire for the 17 pre-existing overdue rows that
+have no assigned recruiter — nothing to notify, not a bug), a real
+document expiring in 1 day correctly triggered its 1-day alert, and
+completing a real weekly-recurring task spawned its next occurrence
+exactly 7 days later. Confirmed the AI-suggested-reminder job created
+48 real, sensible follow-ups from genuine candidate staleness (spot-
+checked several — real names, real "no activity for N days" reasoning,
+visible live in the dashboard with a ✨ marker) — left these in
+production as genuine feature output, not test pollution. Real
+headless-browser pass confirmed all 5 tabs render, a real follow-up
+created via the actual form landed correctly in the database with the
+right priority/due date, and both config forms show real pre-seeded
+values. One real test-locator ambiguity caught and fixed along the way
+(not an app bug): "Settings"/the page's own H1 heading both matched a
+broader locator that also hit the sidebar's own gear icon / nav link
+text — rescoped to the specific tab bar / heading role. New permanent
+"S49" suite (8 tests) added to `qa_automation.spec.ts`. Full regression
+sweep (S1/S2/S8/S13/S30/S49, 47 tests) passed clean. Zero-token audit:
+`CONFIRMED CLEAN` (384 files, 0 external API refs).
+
+**Explicitly NOT built in this pass, stated rather than silently
+skipped**: Google/Outlook/Teams/Zoom 2-way calendar sync (real OAuth
+blocker, as above); browser push notifications (genuinely buildable —
+Web Push doesn't need a paid service, just self-generated VAPID keys —
+but a meaningfully separate chunk of frontend infra, service worker +
+permission flow, not started); the other 5 AI-suggested-reminder
+signal types from the spec (offer delays, client response delays,
+missing documents, inactive-candidate variants beyond the one built);
+WhatsApp delivery specifically for the new reminder types (the
+existing `_notify_stage_change_bg`/WAHA machinery could be wired in,
+not done yet — the new notifications currently land in-app only,
+though the `notifications.channel` column already supports whatsapp/
+sms/email for whenever that's wanted); a dedicated screen-flash/
+sticky-until-acknowledged critical-alert UI treatment (the existing
+per-page toast convention was reused as-is, not extended).

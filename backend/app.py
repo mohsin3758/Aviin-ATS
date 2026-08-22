@@ -62,6 +62,7 @@ from routers import (
 )
 from routers import recruiter_tracking
 from routers import recruiter_ops
+from routers import reminders
 from routers import device_monitoring
 from routers import ops_gaps
 from routers import sla_predictions
@@ -299,6 +300,10 @@ app.include_router(recruiter_ops.targets_router)
 app.include_router(recruiter_ops.tasks_router)
 app.include_router(recruiter_ops.hotlist_router)
 app.include_router(recruiter_ops.leave_router)
+app.include_router(reminders.dashboard_router)
+app.include_router(reminders.doc_expiry_router)
+app.include_router(reminders.escalation_config_router)
+app.include_router(reminders.interview_reminder_config_router)
 app.include_router(ops_gaps.alerts_router)
 app.include_router(ops_gaps.config_router)
 app.include_router(ops_gaps.submittals_router)

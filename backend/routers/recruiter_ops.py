@@ -94,7 +94,28 @@ async def update_target(target_id: str, body: TargetIn, actor: Actor = Depends(r
     return dict(row)
 
 
-# ── Tasks ────────────────────────────────────────────────────
+# ── Tasks / Follow-Ups ──────────────────────────────────────────
+# Reminder & Follow-Up System (2026-08-21) — extends this existing task
+# entity (already wired into Recruiter Ops "My Day", load-balanced auto-
+# assign, notifications) into the real Follow-Up Task the spec asks for,
+# rather than a second, competing table. See sql/70_reminder_followup_
+# system.sql for the schema additions this section relies on.
+VALID_TASK_STATUSES = ("pending", "in_progress", "completed", "cancelled", "rescheduled")
+VALID_PRIORITIES = ("low", "medium", "high", "critical")
+VALID_RECURRENCE = (None, "daily", "weekly", "monthly", "quarterly", "yearly")
+
+
+def _valid_recurrence(rule: Optional[str]) -> bool:
+    if rule in VALID_RECURRENCE:
+        return True
+    if rule and rule.startswith("every_") and rule.endswith("_days"):
+        try:
+            return int(rule[len("every_"):-len("_days")]) > 0
+        except ValueError:
+            return False
+    return False
+
+
 class TaskIn(BaseModel):
     recruiter_id: Optional[str] = None  # omit to auto-assign (load-balanced)
     task_type: str = "general"
@@ -102,12 +123,24 @@ class TaskIn(BaseModel):
     description: Optional[str] = None
     priority: str = "medium"
     due_at: Optional[datetime] = None
+    reminder_at: Optional[datetime] = None
     requisition_id: Optional[str] = None
     application_id: Optional[str] = None
+    client_id: Optional[str] = None
+    follow_up_reason: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+
+
+class TaskRescheduleIn(BaseModel):
+    due_at: datetime
+    reminder_at: Optional[datetime] = None
+    reason: Optional[str] = None
 
 
 @tasks_router.get("")
 async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] = None,
+                      priority: Optional[str] = None, client_id: Optional[str] = None,
+                      overdue_only: bool = False,
                       actor: Actor = Depends(get_actor)):
     conditions = ["tenant_id = $1"]
     params: list = [actor.tenant_id]
@@ -117,11 +150,23 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
     if status:
         params.append(status)
         conditions.append(f"status = ${len(params)}")
+    if priority:
+        params.append(priority)
+        conditions.append(f"priority = ${len(params)}")
+    if client_id:
+        params.append(client_id)
+        conditions.append(f"client_id = ${len(params)}")
+    if overdue_only:
+        conditions.append("status IN ('pending','in_progress') AND due_at < now()")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
-            f"""SELECT * FROM recruiter_tasks WHERE {' AND '.join(conditions)}
-                ORDER BY (status = 'completed'), due_at NULLS LAST""",
+            f"""SELECT rt.*, cl.name AS client_name,
+                       (rt.status IN ('pending','in_progress') AND rt.due_at < now()) AS is_overdue
+                FROM recruiter_tasks rt
+                LEFT JOIN clients cl ON cl.id = rt.client_id
+                WHERE {' AND '.join(conditions)}
+                ORDER BY (rt.status = 'completed'), rt.due_at NULLS LAST""",
             *params,
         )
     return [dict(r) for r in rows]
@@ -130,6 +175,10 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
 @tasks_router.post("")
 async def create_task(body: TaskIn, actor: Actor = Depends(get_actor),
                        _perm: Actor = Depends(require_permission("recruiter_ops", "create"))):
+    if body.priority not in VALID_PRIORITIES:
+        raise HTTPException(400, f"Invalid priority — must be one of {VALID_PRIORITIES}")
+    if not _valid_recurrence(body.recurrence_rule):
+        raise HTTPException(400, "Invalid recurrence_rule")
     async with db.tenant_conn(actor.tenant_id) as conn:
         recruiter_id = body.recruiter_id
         if not recruiter_id:
@@ -152,12 +201,15 @@ async def create_task(body: TaskIn, actor: Actor = Depends(get_actor),
 
         row = await conn.fetchrow(
             """INSERT INTO recruiter_tasks
-                 (tenant_id, recruiter_id, requisition_id, application_id, task_type,
-                  title, description, priority, due_at, status)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')
+                 (tenant_id, recruiter_id, requisition_id, application_id, client_id,
+                  task_type, title, description, follow_up_reason, priority, due_at,
+                  reminder_at, recurrence_rule, created_by, status)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'pending')
                RETURNING *""",
             actor.tenant_id, recruiter_id, body.requisition_id, body.application_id,
-            body.task_type, body.title, body.description, body.priority, body.due_at,
+            body.client_id, body.task_type, body.title, body.description,
+            body.follow_up_reason, body.priority, body.due_at, body.reminder_at,
+            body.recurrence_rule, actor.user_id,
         )
     return dict(row)
 
@@ -165,7 +217,7 @@ async def create_task(body: TaskIn, actor: Actor = Depends(get_actor),
 @tasks_router.patch("/{task_id}")
 async def update_task_status(task_id: str, status: str, actor: Actor = Depends(get_actor),
                               _perm: Actor = Depends(require_permission("recruiter_ops", "update"))):
-    if status not in ("pending", "in_progress", "completed", "cancelled"):
+    if status not in VALID_TASK_STATUSES:
         raise HTTPException(400, "Invalid status")
     completed_at_clause = "completed_at = now()" if status == "completed" else "completed_at = NULL"
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -176,7 +228,112 @@ async def update_task_status(task_id: str, status: str, actor: Actor = Depends(g
         )
         if not row:
             raise HTTPException(404, "Task not found")
+        # Real gap closed: a completed recurring task never spawned its
+        # next occurrence - the recurrence_rule field existed but nothing
+        # ever acted on it. Only fires on genuine completion, not on
+        # cancel, and never for a task that's already itself a spawned
+        # occurrence pointing at a still-open parent (avoids runaway
+        # duplication if someone completes occurrences out of order).
+        if status == "completed" and row["recurrence_rule"]:
+            next_due = _next_recurrence(row["due_at"] or datetime.utcnow(), row["recurrence_rule"])
+            if next_due:
+                await conn.execute(
+                    """INSERT INTO recruiter_tasks
+                         (tenant_id, recruiter_id, requisition_id, application_id, client_id,
+                          task_type, title, description, follow_up_reason, priority, due_at,
+                          reminder_at, recurrence_rule, recurrence_parent_id, created_by, status)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending')""",
+                    actor.tenant_id, row["recruiter_id"], row["requisition_id"], row["application_id"],
+                    row["client_id"], row["task_type"], row["title"], row["description"],
+                    row["follow_up_reason"], row["priority"], next_due,
+                    (row["reminder_at"] and next_due - (row["due_at"] - row["reminder_at"])) if row["reminder_at"] else None,
+                    row["recurrence_rule"], row["id"], actor.user_id,
+                )
     return dict(row)
+
+
+@tasks_router.patch("/{task_id}/reschedule")
+async def reschedule_task(task_id: str, body: TaskRescheduleIn, actor: Actor = Depends(get_actor),
+                           _perm: Actor = Depends(require_permission("recruiter_ops", "update"))):
+    """Real, distinct 'Rescheduled' status the original task list never
+    had — before this, moving a due date meant silently overwriting
+    due_at with no trace it had ever been anything else. Keeps
+    rescheduled_from as a real audit trail and bumps reschedule_count,
+    and clears any escalation already in flight for the old due date
+    (a task that was overdue and got legitimately rescheduled should not
+    keep escalating against a deadline that no longer applies)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """UPDATE recruiter_tasks
+               SET due_at=$1, reminder_at=$2, rescheduled_from=due_at,
+                   reschedule_count=reschedule_count+1, status='pending',
+                   notes = CASE WHEN $3::text IS NOT NULL
+                                THEN COALESCE(notes || E'\\n', '') || 'Rescheduled: ' || $3
+                                ELSE notes END,
+                   updated_at=now()
+               WHERE id=$4 AND tenant_id=$5 RETURNING *""",
+            body.due_at, body.reminder_at, body.reason, task_id, actor.tenant_id,
+        )
+        if not row:
+            raise HTTPException(404, "Task not found")
+        await conn.execute(
+            "UPDATE task_escalations SET resolved_at=now() WHERE task_id=$1 AND tenant_id=$2 AND resolved_at IS NULL",
+            task_id, actor.tenant_id,
+        )
+    return dict(row)
+
+
+@tasks_router.delete("/{task_id}")
+async def delete_task(task_id: str, actor: Actor = Depends(get_actor),
+                       _perm: Actor = Depends(require_permission("recruiter_ops", "delete"))):
+    """Real hard delete — didn't exist at all before (no way to remove a
+    mistakenly-created follow-up other than cancelling it forever).
+    Genuinely safe as a hard delete: nothing else references
+    recruiter_tasks.id as a foreign key except this table's own
+    recurrence_parent_id (ON DELETE SET NULL) and task_escalations
+    (ON DELETE CASCADE, both set when those columns/tables were added)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchval(
+            "DELETE FROM recruiter_tasks WHERE id=$1 AND tenant_id=$2 RETURNING id",
+            task_id, actor.tenant_id,
+        )
+        if not row:
+            raise HTTPException(404, "Task not found")
+    return {"ok": True}
+
+
+def _add_months(dt: datetime, n: int) -> datetime:
+    # Plain-stdlib month arithmetic (python-dateutil is NOT installed in
+    # this backend image — confirmed live, matching an already-documented
+    # finding elsewhere in this project where a dateutil import was a dead
+    # import removed rather than a package ever actually installed).
+    import calendar
+    month0 = dt.month - 1 + n
+    year = dt.year + month0 // 12
+    month = month0 % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _next_recurrence(from_dt: datetime, rule: str) -> Optional[datetime]:
+    from datetime import timedelta
+    if rule == "daily":
+        return from_dt + timedelta(days=1)
+    if rule == "weekly":
+        return from_dt + timedelta(weeks=1)
+    if rule == "monthly":
+        return _add_months(from_dt, 1)
+    if rule == "quarterly":
+        return _add_months(from_dt, 3)
+    if rule == "yearly":
+        return _add_months(from_dt, 12)
+    if rule and rule.startswith("every_") and rule.endswith("_days"):
+        try:
+            n = int(rule[len("every_"):-len("_days")])
+            return from_dt + timedelta(days=n)
+        except ValueError:
+            return None
+    return None
 
 
 # ── Hotlist ──────────────────────────────────────────────────

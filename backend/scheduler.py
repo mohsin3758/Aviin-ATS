@@ -475,6 +475,315 @@ async def process_resume_backlog():
         logger.error(f"Scheduled resume backlog error: {e}")
 
 
+async def _reminder_notify(conn, tenant_id, recipient_user_id, title, body, resource=None, resource_id=None, ntype="info"):
+    """Shared insert matching the established notifications-table shape
+    (tenant_id/user_id/recipient_user_id/title/body/type/resource/
+    resource_id/channel — see _handle_escalation_alert above, same
+    'user_id AND recipient_user_id both set' requirement from the
+    notifications_check constraint)."""
+    await conn.execute(
+        """INSERT INTO notifications (tenant_id,user_id,recipient_user_id,title,body,type,resource,resource_id,channel)
+           VALUES ($1,$2,$2,$3,$4,$5,$6,$7,'inapp')""",
+        tenant_id, recipient_user_id, title, body, ntype, resource, resource_id,
+    )
+
+
+async def process_task_escalations():
+    """Every 30 min: generalized 4-level escalation for any overdue
+    follow-up/reminder task (recruiter_tasks) — tier1=assigned user,
+    tier2=reporting manager, tier3=the linked client's KAE/KAM (only when
+    a task actually names a client_id), tier4=admin. Reuses the exact
+    tier1_fired_at/tier2_fired_at pattern _handle_escalation_alert already
+    established for SLA breaches, generalized to 4 tiers in a new
+    task_escalations table so it doesn't collide with that requisition-
+    specific one. Grace periods are tenant-tunable (escalation_config);
+    critical-priority tasks escalate at critical_multiplier speed.
+    """
+    logger.info("scheduler: processing task escalations")
+    try:
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    cfg = await conn.fetchrow("SELECT * FROM escalation_config WHERE tenant_id=$1", tid)
+                    if not cfg:
+                        continue
+                    mult = float(cfg["critical_multiplier"]) if True else 1.0
+                    overdue = await conn.fetch(
+                        """SELECT t.*, u.reporting_to
+                           FROM recruiter_tasks t
+                           LEFT JOIN users u ON u.id = t.recruiter_id
+                           WHERE t.tenant_id=$1 AND t.status IN ('pending','in_progress')
+                             AND t.due_at IS NOT NULL AND t.due_at < now()""",
+                        tid,
+                    )
+                    for t in overdue:
+                        try:
+                            async with conn.transaction():
+                                await _escalate_one_task(conn, tid, t, cfg, mult)
+                        except Exception as e:
+                            logger.warning(f"Task escalation failed for task {t['id']}: {e}")
+            except Exception as e:
+                logger.error(f"Task escalation failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_task_escalations error: {e}")
+
+
+async def _escalate_one_task(conn, tid, t, cfg, mult):
+    speed = mult if t["priority"] == "critical" else 1.0
+    esc = await conn.fetchrow(
+        """INSERT INTO task_escalations (tenant_id, task_id)
+           VALUES ($1,$2) ON CONFLICT (tenant_id, task_id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id
+           RETURNING *""",
+        tid, t["id"],
+    )
+    hours_overdue = (datetime.now(timezone.utc) - t["due_at"]).total_seconds() / 3600
+    title = f"Overdue follow-up: {t['title']}"
+    body = f"Due {t['due_at'].strftime('%d %b %Y %H:%M')} — {t.get('follow_up_reason') or t.get('description') or 'no notes'}"
+
+    if esc["tier1_fired_at"] is None and hours_overdue >= cfg["tier1_grace_hours"] * speed:
+        if t["recruiter_id"]:
+            await _reminder_notify(conn, tid, t["recruiter_id"], title, body, "recruiter_task", str(t["id"]), "warning")
+        await conn.execute("UPDATE task_escalations SET tier1_fired_at=now() WHERE id=$1", esc["id"])
+        return
+
+    if esc["tier1_fired_at"] and esc["tier2_fired_at"] is None and hours_overdue >= cfg["tier2_grace_hours"] * speed:
+        if t["reporting_to"]:
+            await _reminder_notify(conn, tid, t["reporting_to"],
+                                    f"[Escalation] {title}", f"Unresolved {hours_overdue:.0f}h. {body}",
+                                    "recruiter_task", str(t["id"]), "warning")
+        await conn.execute("UPDATE task_escalations SET tier2_fired_at=now() WHERE id=$1", esc["id"])
+        return
+
+    if esc["tier2_fired_at"] and esc["tier3_fired_at"] is None and hours_overdue >= cfg["tier3_grace_hours"] * speed:
+        if t["client_id"]:
+            owners = await conn.fetch(
+                """SELECT user_id FROM client_owners
+                   WHERE tenant_id=$1 AND client_id=$2 AND is_active
+                     AND owner_type IN ('kae','account_manager')""",
+                tid, t["client_id"],
+            )
+            for o in owners:
+                await _reminder_notify(conn, tid, o["user_id"],
+                                        f"[Escalation] {title}", f"Unresolved {hours_overdue:.0f}h, client follow-up. {body}",
+                                        "recruiter_task", str(t["id"]), "critical")
+        await conn.execute("UPDATE task_escalations SET tier3_fired_at=now() WHERE id=$1", esc["id"])
+        return
+
+    if esc["tier3_fired_at"] and esc["tier4_fired_at"] is None and hours_overdue >= cfg["tier4_grace_hours"] * speed:
+        admins = await conn.fetch("SELECT id FROM users WHERE tenant_id=$1 AND role IN ('admin','super_admin') AND is_active", tid)
+        for a in admins:
+            await _reminder_notify(conn, tid, a["id"],
+                                    f"[Critical Escalation] {title}", f"Unresolved {hours_overdue:.0f}h — no action taken. {body}",
+                                    "recruiter_task", str(t["id"]), "critical")
+        await conn.execute("UPDATE task_escalations SET tier4_fired_at=now() WHERE id=$1", esc["id"])
+
+
+async def process_reminder_sends():
+    """Every 15 min: fires the pre-due reminder_at notification for a
+    follow-up task (distinct from escalation, which only fires AFTER a
+    task is already overdue). One-shot per task via reminder_sent_at."""
+    logger.info("scheduler: processing task reminders")
+    try:
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    due = await conn.fetch(
+                        """SELECT * FROM recruiter_tasks
+                           WHERE tenant_id=$1 AND status IN ('pending','in_progress')
+                             AND reminder_at IS NOT NULL AND reminder_at <= now()
+                             AND reminder_sent_at IS NULL""",
+                        tid,
+                    )
+                    for t in due:
+                        try:
+                            async with conn.transaction():
+                                if t["recruiter_id"]:
+                                    body = f"Due {t['due_at'].strftime('%d %b %Y %H:%M') if t['due_at'] else 'soon'} — {t.get('follow_up_reason') or t.get('description') or ''}"
+                                    await _reminder_notify(conn, tid, t["recruiter_id"], f"Reminder: {t['title']}", body,
+                                                            "recruiter_task", str(t["id"]),
+                                                            "critical" if t["priority"] == "critical" else "info")
+                                await conn.execute("UPDATE recruiter_tasks SET reminder_sent_at=now() WHERE id=$1", t["id"])
+                        except Exception as e:
+                            logger.warning(f"Reminder send failed for task {t['id']}: {e}")
+            except Exception as e:
+                logger.error(f"Reminder processing failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_reminder_sends error: {e}")
+
+
+async def process_document_expiry_alerts():
+    """Daily 06:00 IST: 90/30/7/1-day tiered alerts for any tracked
+    document (NDA/contract/visa/certification/offer_letter/kyc) approaching
+    expiry. Zero-token, pure date-math — no AI call needed for "is this
+    document expiring soon"."""
+    logger.info("scheduler: processing document expiry alerts")
+    try:
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        today = date.today()
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    docs = await conn.fetch(
+                        """SELECT d.*, c.full_name AS candidate_name
+                           FROM document_expiry_tracking d
+                           LEFT JOIN candidates c ON c.id = d.candidate_id
+                           WHERE d.tenant_id=$1 AND d.status='active'
+                             AND d.expires_at >= $2 AND d.expires_at <= $2 + INTERVAL '90 days'""",
+                        tid, today,
+                    )
+                    admins = None
+                    for d in docs:
+                        days_left = (d["expires_at"] - today).days
+                        tier = None
+                        if days_left <= 1 and d["alert_1d_sent_at"] is None:
+                            tier = ("alert_1d_sent_at", 1)
+                        elif days_left <= 7 and d["alert_7d_sent_at"] is None:
+                            tier = ("alert_7d_sent_at", 7)
+                        elif days_left <= 30 and d["alert_30d_sent_at"] is None:
+                            tier = ("alert_30d_sent_at", 30)
+                        elif days_left <= 90 and d["alert_90d_sent_at"] is None:
+                            tier = ("alert_90d_sent_at", 90)
+                        if not tier:
+                            continue
+                        try:
+                            async with conn.transaction():
+                                if admins is None:
+                                    admins = await conn.fetch(
+                                        "SELECT id FROM users WHERE tenant_id=$1 AND role IN ('admin','manager','hr_manager') AND is_active",
+                                        tid,
+                                    )
+                                title = f"{d['document_type'].upper()} expiring in {days_left}d — {d['candidate_name'] or d['document_name']}"
+                                for a in admins:
+                                    await _reminder_notify(conn, tid, a["id"], title, d["document_name"],
+                                                            "document_expiry", str(d["id"]),
+                                                            "critical" if days_left <= 7 else "warning")
+                                await conn.execute(
+                                    f"UPDATE document_expiry_tracking SET {tier[0]}=now() WHERE id=$1", d["id"])
+                        except Exception as e:
+                            logger.warning(f"Document expiry alert failed for {d['id']}: {e}")
+                    await conn.execute(
+                        "UPDATE document_expiry_tracking SET status='expired', updated_at=now() WHERE tenant_id=$1 AND status='active' AND expires_at < $2",
+                        tid, today,
+                    )
+            except Exception as e:
+                logger.error(f"Document expiry processing failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_document_expiry_alerts error: {e}")
+
+
+async def process_configurable_interview_reminders():
+    """Every 15 min: multi-lead-time interview reminders (candidate +
+    interviewer), tenant-configurable via interview_reminder_config
+    (default 24h/2h/30min) — additive to, not a replacement for, the
+    existing daily-8am send_interview_reminders() email job below, which
+    stays untouched. interview_reminder_log's unique constraint makes
+    this naturally idempotent across ticks."""
+    logger.info("scheduler: processing configurable interview reminders")
+    try:
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    cfg = await conn.fetchrow("SELECT lead_times_hours FROM interview_reminder_config WHERE tenant_id=$1", tid)
+                    lead_times = list(cfg["lead_times_hours"]) if cfg else [24, 2, 0.5]
+                    for lead in lead_times:
+                        interviews = await conn.fetch(
+                            """SELECT i.*, c.full_name AS candidate_name, u.full_name AS interviewer_name
+                               FROM interview_schedules i
+                               LEFT JOIN candidates c ON c.id = i.candidate_id
+                               LEFT JOIN users u ON u.id = i.interviewer_id
+                               WHERE i.tenant_id=$1 AND i.status='scheduled'
+                                 AND i.scheduled_at BETWEEN now() AND now() + ($2::text || ' hours')::interval
+                                 AND NOT EXISTS (
+                                   SELECT 1 FROM interview_reminder_log l
+                                   WHERE l.tenant_id=$1 AND l.interview_id=i.id AND l.lead_time_hours=$3)""",
+                            tid, str(lead), lead,
+                        )
+                        for i in interviews:
+                            try:
+                                async with conn.transaction():
+                                    when = f"{lead}h" if lead >= 1 else f"{int(lead*60)}min"
+                                    title = f"Interview in {when}: {i['candidate_name'] or 'Candidate'}"
+                                    body = f"{i['interview_type']} at {i['scheduled_at'].strftime('%d %b %H:%M')}"
+                                    if i["interviewer_id"]:
+                                        await _reminder_notify(conn, tid, i["interviewer_id"], title, body,
+                                                                "interview", str(i["id"]), "warning")
+                                    await conn.execute(
+                                        "INSERT INTO interview_reminder_log (tenant_id, interview_id, lead_time_hours) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                                        tid, i["id"], lead,
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Interview reminder failed for {i['id']}: {e}")
+            except Exception as e:
+                logger.error(f"Interview reminder processing failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_configurable_interview_reminders error: {e}")
+
+
+async def generate_ai_suggested_reminders():
+    """Daily 07:00 IST: zero-token, rule-based (no LLM call — HARD RULE #1)
+    "AI-suggested" follow-up tasks from real staleness signals already
+    computed elsewhere in this codebase: a candidate genuinely untouched
+    for 5+ days in an active (non-terminal) stage. Creates a real
+    recruiter_task (ai_suggested=true) rather than a separate "suggestion"
+    concept, so it shows up in the exact same task list/dashboard/
+    escalation machinery everything else does — a suggestion a recruiter
+    ignores escalates exactly like a manually-created one would.
+    Deliberately narrow (one clear signal) rather than guessing at the
+    other 5 examples in the spec, which would need real, separate signal
+    sources (offer-delay tracking, client-response-time tracking) not
+    built yet."""
+    logger.info("scheduler: generating AI-suggested follow-up reminders")
+    try:
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    stale = await conn.fetch(
+                        """SELECT a.id AS application_id, a.candidate_id, a.requisition_id,
+                                  a.assigned_recruiter_id, c.full_name, a.updated_at
+                           FROM applications a
+                           JOIN candidates c ON c.id = a.candidate_id
+                           WHERE a.tenant_id=$1 AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
+                             AND a.stage NOT IN ('placed','rejected','offer_accepted')
+                             AND a.assigned_recruiter_id IS NOT NULL
+                             AND a.updated_at < now() - INTERVAL '5 days'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM recruiter_tasks t
+                               WHERE t.tenant_id=$1 AND t.application_id=a.id AND t.ai_suggested
+                                 AND t.status IN ('pending','in_progress')
+                                 AND t.created_at > a.updated_at)""",
+                        tid,
+                    )
+                    for s in stale:
+                        try:
+                            days = (datetime.now(timezone.utc) - s["updated_at"]).days
+                            async with conn.transaction():
+                                await conn.execute(
+                                    """INSERT INTO recruiter_tasks
+                                         (tenant_id, recruiter_id, requisition_id, application_id, task_type,
+                                          title, description, follow_up_reason, priority, due_at, status, ai_suggested)
+                                       VALUES ($1,$2,$3,$4,'general',$5,$6,$7,'medium', now() + INTERVAL '1 day', 'pending', true)""",
+                                    tid, s["assigned_recruiter_id"], s["requisition_id"], s["application_id"],
+                                    f"Follow up: {s['full_name']}",
+                                    f"AI-suggested — no activity for {days} days.",
+                                    f"Candidate not contacted for {days} days.",
+                                )
+                        except Exception as e:
+                            logger.warning(f"AI-suggested reminder failed for application {s['application_id']}: {e}")
+            except Exception as e:
+                logger.error(f"AI-suggested reminders failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"generate_ai_suggested_reminders error: {e}")
+
+
 async def send_interview_reminders():
     """Daily 8am: email candidates with interviews in the next 24 hours."""
     logger.info("scheduler: sending interview reminders")
@@ -1204,6 +1513,17 @@ def start_scheduler():
     # alerts automatically instead of waiting for a human to open the panel,
     # and auto-reassign after a grace period if still unresolved.
     scheduler.add_job(process_sla_escalations, "interval", minutes=30, id="sla_escalations", replace_existing=True)
+    # Reminder & Follow-Up System (2026-08-21) — 4 new jobs.
+    scheduler.add_job(process_task_escalations, "interval", minutes=30,
+                      id="task_escalations", replace_existing=True)
+    scheduler.add_job(process_reminder_sends, "interval", minutes=15,
+                      id="reminder_sends", replace_existing=True)
+    scheduler.add_job(process_configurable_interview_reminders, "interval", minutes=15,
+                      id="configurable_interview_reminders", replace_existing=True)
+    scheduler.add_job(process_document_expiry_alerts, "cron", hour=6, minute=0,
+                      id="document_expiry_alerts", replace_existing=True)
+    scheduler.add_job(generate_ai_suggested_reminders, "cron", hour=7, minute=0,
+                      id="ai_suggested_reminders", replace_existing=True)
     # Every 10 min — real gap found 2026-08-20: fills resume_embedding/
     # jd_embedding (Tier-1 semantic matching) for anything created since
     # the last run of the previously-manual-only embed_writer.py script.

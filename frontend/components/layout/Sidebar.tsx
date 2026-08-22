@@ -16,12 +16,13 @@ import {
   ChevronDown, ChevronLeft, ChevronRight,
   FileSignature, Send, GitMerge, ExternalLink, Activity, Workflow,
   Users2, CalendarDays, Smile, Video, FileBarChart, UserPlus, Sliders,
-  Laptop, KeyRound, MapPin, CalendarClock, HeartPulse,
+  Laptop, KeyRound, MapPin, CalendarClock, HeartPulse, Bell,
 } from 'lucide-react';
 
 const NAV_GROUPS = [
   { id:'core', label:'CORE', defaultOpen:true, items:[
     { icon:LayoutDashboard, href:'/dashboard',    label:'Dashboard' },
+    { icon:Bell,            href:'/reminders',    label:'Reminders & Follow-Ups' },
     { icon:Users,           href:'/candidates',   label:'Candidates' },
     { icon:Building2,       href:'/companies',    label:'Companies', roles:['admin','super_admin','kae','kae_manager','lead_recruiter'] },
     { icon:Briefcase,       href:'/requisitions', label:'Jobs / Requisitions', roles:['admin','super_admin','kae','kae_manager','lead_recruiter'] },
