@@ -6352,6 +6352,33 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     createdIds.push(financeUser.id);
   });
 
+  test('BUG FIX: the Invite/Edit User modal no longer closes (and discards typed input) on an accidental click outside the box — only the X and Cancel buttons close it', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/settings/users');
+    await page.click('button:has-text("Invite User")');
+    await page.waitForTimeout(500);
+    await page.getByPlaceholder('e.g. Rahul Sharma').fill('S51 Backdrop Click Test');
+
+    // A real click on the backdrop (far outside the modal box).
+    await page.mouse.click(20, 20);
+    await page.waitForTimeout(400);
+    await expect(page.locator('text=Invite New User')).toBeVisible();
+    await expect(page.getByPlaceholder('e.g. Rahul Sharma')).toHaveValue('S51 Backdrop Click Test');
+
+    // The explicit close controls must still work.
+    await page.getByTestId('modal-close-btn').click();
+    await page.waitForTimeout(400);
+    await expect(page.locator('text=Invite New User')).not.toBeVisible();
+
+    await page.click('button:has-text("Invite User")');
+    await page.waitForTimeout(400);
+    await page.locator('button:has-text("Cancel")').click();
+    await page.waitForTimeout(400);
+    await expect(page.locator('text=Invite New User')).not.toBeVisible();
+    expect(errors).toHaveLength(0);
+  });
+
   test.afterAll(async ({ request }) => {
     for (const id of createdIds) {
       // Try a real purge first (matches this suite's whole point — don't

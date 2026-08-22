@@ -317,7 +317,7 @@ export default function UsersPage() {
       </div>
 
       {/* Invite/Edit Modal */}
-      <Modal open={showModal} onClose={()=>setShowModal(false)} title={editId?'Edit User':'Invite New User'} subtitle={editId?'Update user profile and role':'Send an invitation to join your team'} size="lg">
+      <Modal open={showModal} onClose={()=>setShowModal(false)} title={editId?'Edit User':'Invite New User'} subtitle={editId?'Update user profile and role':'Send an invitation to join your team'} size="lg" closeOnBackdropClick={false}>
         {error && <div style={{ marginBottom:'16px', padding:'10px 14px', background:'#fef2f2', border:'1px solid #fecaca', borderRadius:'8px', fontSize:'13px', color:'#dc2626' }}>⚠️ {error}</div>}
         <FormRow>
           <FormField label="Full Name" required><input style={inputStyle} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))} /></FormField>

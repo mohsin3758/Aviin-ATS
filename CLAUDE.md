@@ -10319,3 +10319,35 @@ compensation/approval-chain records attached, under any circumstance.
 If that's ever genuinely needed (e.g. a compliance-approved account
 purge), it would need its own deliberate, separately-reasoned decision
 — not a flag on this endpoint.
+
+## Shared Modal component: real gap fix — a single accidental click
+## outside a form silently discarded everything typed in, 2026-08-22
+User reported the Invite New User modal closing (and losing every typed
+field) on an accidental click outside the box. Checked the shared
+`Modal` component (`frontend/components/ui/Modal.tsx`, used across most
+of this app's forms/dialogs) — confirmed a real, longstanding UX gap:
+the backdrop `<div>` had an unconditional `onClick={e => e.target ===
+e.currentTarget && onClose()}`, with no way to opt out, on a component
+that already has both a real X button and a real Cancel button (both
+already correctly wired to `onClose`) — the backdrop click was pure
+redundant risk, not adding any real capability.
+
+Fixed with a new `closeOnBackdropClick` prop, **defaulting to `true`**
+(the original behavior) so every other page using this same shared
+component is completely unaffected — only the Users & Roles Invite/Edit
+modal was switched to `closeOnBackdropClick={false}`, since that's the
+one reported. Added a real `data-testid="modal-close-btn"` to the X
+button while there (had none before, making it hard to target reliably
+in a test — the same "give the test a real hook" precedent used
+throughout this project).
+
+Verified for real via a genuine headless-browser run, not code review:
+opened the Invite modal, typed into the Full Name field, clicked the
+actual page backdrop (top-left corner, well outside the modal box), and
+confirmed both that the modal stayed open AND the typed value was still
+there — then separately confirmed the X button and the Cancel button
+both still close it correctly, exactly as before. New permanent test
+added to "S51" (now 9 tests) covering all three cases in one flow.
+Regression-checked S31/S33 (7/7 clean — neither exercises a modal
+backdrop click, confirming no other page's behavior shifted). Zero-token
+audit: `CONFIRMED CLEAN` (389 files, 0 external API refs).

@@ -10,9 +10,16 @@ interface ModalProps {
   children: React.ReactNode;
   footer?: React.ReactNode;
   size?: 'sm' | 'md' | 'lg' | 'xl';
+  // Real UX fix (2026-08-22): a form with several filled-in fields (e.g.
+  // Invite User) closed and discarded everything on a single accidental
+  // click outside the box — no confirmation, no undo. Defaults to the
+  // original behavior (true) so every other caller of this shared modal
+  // is unaffected; pass false on any form where an accidental backdrop
+  // click shouldn't be able to silently throw away real input.
+  closeOnBackdropClick?: boolean;
 }
 
-export function Modal({ open, onClose, title, subtitle, children, footer, size = 'md' }: ModalProps) {
+export function Modal({ open, onClose, title, subtitle, children, footer, size = 'md', closeOnBackdropClick = true }: ModalProps) {
   useEffect(() => {
     if (open) document.body.style.overflow = 'hidden';
     else document.body.style.overflow = '';
@@ -25,7 +32,7 @@ export function Modal({ open, onClose, title, subtitle, children, footer, size =
 
   return createPortal(
     <div
-      onClick={e => e.target === e.currentTarget && onClose()}
+      onClick={e => closeOnBackdropClick && e.target === e.currentTarget && onClose()}
       style={{
         position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
         zIndex: 9999,
@@ -62,6 +69,7 @@ export function Modal({ open, onClose, title, subtitle, children, footer, size =
             {subtitle && <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0 0' }}>{subtitle}</p>}
           </div>
           <button
+            data-testid="modal-close-btn"
             onClick={onClose}
             style={{
               width: '32px', height: '32px', borderRadius: '8px',
