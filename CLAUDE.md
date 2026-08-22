@@ -9982,3 +9982,70 @@ none has recurred yet to actually catch); and the ~11 untracked ad-hoc
 scripts at the repo root (`fix_stages.py`/`sync_all.py`/
 `sync_missing.py`/etc., dated June 2026) whose actual bodies were
 flagged as unread and never revisited.
+
+## Users & Roles: real 500 on any non-default role, plus no bulk
+## select/delete — both fixed, 2026-08-22
+User reported (3 screenshots): Invite New User failing with "Request
+failed" (role=kae), no way to select/bulk-delete users, and asked for a
+full deep audit of the Users & Roles page. Investigated before touching
+anything — root-caused a real, severe, longstanding bug, not the surface
+symptom alone.
+
+**The real bug**: `users.role` had a stale DB-level CHECK constraint —
+`CHECK (role IN ('admin','recruiter','manager','client','candidate'))` —
+never widened since it was written, while `role_definitions` (the real
+taxonomy this entire RBAC/KAE-ownership/job-visibility-scope system is
+built around) has grown to 28 real roles. `create_user()`/`update_user()`
+already correctly validate a role against `role_definitions` at the
+application layer — that part was fine — but the actual INSERT/UPDATE
+still hit the stale constraint underneath and raised a raw 500 for any
+of the other 23 real roles (kae, kam, hr_manager, ceo, coo, cto,
+delivery_head, sales_manager, vp_sales, vp_delivery, etc.). **Every one
+of those roles has been completely uncreatable via Invite/Edit User this
+entire time** — confirmed by reproducing the exact screenshot request
+(`role:"kae"`) against the live API before touching any code. Fixed
+(`sql/72_fix_users_role_check_constraint.sql`) by dropping the
+constraint entirely rather than widening it to a static 28-value list —
+`role_definitions` is dynamic (`POST /roles` lets an admin create custom
+roles), so a fixed DB-level list is the wrong mechanism and would just
+go stale again the next time a custom role is created; role validity is
+already correctly enforced where it belongs, at the application layer.
+Verified for real: the exact failing request now succeeds, plus 3 more
+previously-blocked roles (ceo/sales_manager/delivery_head), plus editing
+an existing user's role to a non-default value.
+
+**A second, related, real bug found in the same investigation**: the
+Invite/Edit modal's Role dropdown was a hardcoded, incomplete 17-role
+list (`ROLES_LIST`) that had silently drifted from the real 28-role
+catalog — missing `bd_manager`, `client_partner`, `coo`, `delivery_head`,
+`manager`, `operations_manager`, `sourcing_specialist`, `vp_delivery`,
+`vp_sales`, `accounts_executive`. The component already fetched the
+real, complete list (`const { data: roles } = useFetch('/roles')`) for
+an unrelated purpose and just never used it here. Rebuilt the dropdown
+to render from that real data (sorted by `role_name`), so it can never
+drift out of sync with the actual catalog again.
+
+**The bulk-select/delete gap**: no way to select multiple rows at
+all — with 359+ inactive users visible in the user's own screenshot
+(mostly QA-test-suite residue, the same well-documented leak pattern
+this project has hit many times), cleaning up meant hundreds of
+individual delete clicks. Added a real checkbox column (header
+select-all + per-row), a bulk-action bar ("N selected · Delete N
+Selected · Clear selection") that appears once anything is checked, and
+`handleBulkDelete()` — no bulk-delete backend endpoint exists for users,
+so this loops the same real `DELETE /users/{id}` each single-row delete
+already uses, in batches of 10 (so a 300+ selection doesn't fire
+everything at once), inheriting the existing self-delete protection and
+soft-delete semantics for free.
+
+Verified for real end-to-end, not code review: a genuine headless-
+browser pass confirmed the Role dropdown now shows exactly 28 options
+(matching a live `GET /roles` count) including "Delivery Head"; selected
+2 real throwaway users via the actual checkboxes, confirmed the bulk bar
+showed "2 selected", clicked "Delete 2 Selected" through the real
+button, and confirmed via direct API calls afterward that both were
+genuinely `is_active:false` in the database — not just visually
+filtered. New permanent "S51 Users & Roles" suite (5 tests) added to
+`qa_automation.spec.ts`. Regression-checked the pre-existing S31/S33
+suites (7/7 clean) that already touch this exact page. Zero-token audit:
+`CONFIRMED CLEAN` (389 files, 0 external API refs).

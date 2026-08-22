@@ -4,10 +4,6 @@ import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions } from '@/components/ui/Modal';
 import { Plus, Search, Shield, UserCheck, UserX, Edit, Trash2, Key } from 'lucide-react';
 
-const ROLES_LIST = [
-  'admin','recruiter','senior_recruiter','lead_recruiter','recruitment_manager','talent_acquisition','technical_recruiter',
-  'kae','kam','account_director','sales_executive','sales_manager','finance_manager','hr_manager','compliance_officer','ceo','cto',
-];
 const DEPT_LIST = ['Delivery','Account Management','Sales','Finance','HR','Technology','Leadership','Operations','IT'];
 const EMPTY_USER = { email:'', full_name:'', role:'recruiter', department:'Delivery', designation:'', phone:'', employee_id:'', location:'', capacity_weekly:40, password:'Welcome@2026', reporting_to:'' };
 
@@ -36,6 +32,12 @@ export default function UsersPage() {
   // them QA test-suite leftovers, permanently cluttering this page.
   // Defaults to hidden, matching the rest of the app's convention.
   const [showInactive, setShowInactive] = useState(false);
+  // Real gap fix (2026-08-22): no way to select+remove multiple users at
+  // once — with 359+ inactive rows (mostly QA-test-suite residue, the
+  // same well-documented leak pattern elsewhere in this project), an
+  // admin cleaning up would otherwise need 359 individual delete clicks.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const { data: users, loading, refetch } = useFetch<any[]>('/users');
   const { data: roles } = useFetch<any[]>('/roles');
 
@@ -45,6 +47,7 @@ export default function UsersPage() {
     (!search || u.full_name?.toLowerCase().includes(search.toLowerCase()) || u.email?.toLowerCase().includes(search.toLowerCase())) &&
     (!deptFilter || u.department === deptFilter)
   );
+  const sortedRoles = [...(roles||[])].sort((a,b)=>(a.role_name||a.role_code||'').localeCompare(b.role_name||b.role_code||''));
 
   const openCreate = () => { setForm({...EMPTY_USER}); setEditId(null); setError(''); setShowModal(true); };
   const openEdit = (u:any) => {
@@ -75,6 +78,44 @@ export default function UsersPage() {
     if (!confirm(`Delete ${u.full_name}? This deactivates their account (same as Deactivate) and they will no longer be able to log in or be assigned new work. This can be undone by an admin later if needed.`)) return;
     try { await apiFetch(`/users/${u.id}`, {method:'DELETE'}); refetch(); }
     catch(e:any) { alert(e.message||'Failed to delete user'); }
+  };
+
+  const toggleSelect = (id:string) => setSelected(s => {
+    const next = new Set(s);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const allVisibleSelected = filtered.length > 0 && filtered.every(u => selected.has(u.id));
+  const toggleSelectAll = () => setSelected(s => {
+    if (allVisibleSelected) {
+      const next = new Set(s);
+      filtered.forEach(u => next.delete(u.id));
+      return next;
+    }
+    const next = new Set(s);
+    filtered.forEach(u => next.add(u.id));
+    return next;
+  });
+
+  const handleBulkDelete = async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} selected user${ids.length===1?'':'s'}? This deactivates their accounts (same as Deactivate) — they will no longer be able to log in or be assigned new work. This can be undone by an admin later if needed.`)) return;
+    setBulkDeleting(true);
+    // No bulk-delete backend endpoint exists for users — same real DELETE
+    // per user as the single-row action, just looped, in small batches so
+    // a large (300+) selection doesn't fire everything at once.
+    const BATCH = 10;
+    let failed = 0;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH);
+      const results = await Promise.allSettled(batch.map(id => apiFetch(`/users/${id}`, { method: 'DELETE' })));
+      failed += results.filter(r => r.status === 'rejected').length;
+    }
+    setBulkDeleting(false);
+    setSelected(new Set());
+    refetch();
+    if (failed > 0) alert(`${failed} of ${ids.length} could not be deleted (e.g. your own account can't be self-deleted).`);
   };
 
   const inputStyle = { width:'100%', border:'1px solid #e2e8f0', borderRadius:'8px', padding:'9px 12px', fontSize:'13px', outline:'none', color:'#1e293b', background:'white', boxSizing:'border-box' as const };
@@ -111,6 +152,19 @@ export default function UsersPage() {
         </button>
       </div>
 
+      {selected.size > 0 && (
+        <div data-testid="bulk-action-bar" style={{ display:'flex', alignItems:'center', gap:'12px', padding:'10px 16px', background:'#fef2f2', border:'1px solid #fecaca', borderRadius:'10px' }}>
+          <span style={{ fontSize:'13px', fontWeight:'700', color:'#991b1b' }}>{selected.size} selected</span>
+          <button data-testid="bulk-delete-btn" onClick={handleBulkDelete} disabled={bulkDeleting}
+            style={{ display:'flex', alignItems:'center', gap:'6px', padding:'7px 14px', background:'#dc2626', color:'white', border:'none', borderRadius:'8px', fontSize:'12px', fontWeight:'600', cursor: bulkDeleting?'default':'pointer', opacity: bulkDeleting?0.6:1 }}>
+            <Trash2 size={12} /> {bulkDeleting ? 'Deleting…' : `Delete ${selected.size} Selected`}
+          </button>
+          <button onClick={()=>setSelected(new Set())} style={{ padding:'7px 14px', background:'white', color:'#64748b', border:'1px solid #e2e8f0', borderRadius:'8px', fontSize:'12px', fontWeight:'600', cursor:'pointer' }}>
+            Clear selection
+          </button>
+        </div>
+      )}
+
       <div style={{ background:'white', borderRadius:'12px', border:'1px solid #e2e8f0', overflow:'hidden' }}>
         {loading ? <div style={{ padding:'32px' }}>{[1,2,3].map(i=><div key={i} className="skeleton" style={{ height:'52px', borderRadius:'8px', marginBottom:'8px' }} />)}</div> :
         filtered.length === 0 ? (
@@ -122,15 +176,21 @@ export default function UsersPage() {
         ) : (
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead><tr style={{ background:'#f8fafc', borderBottom:'1px solid #e2e8f0' }}>
+              <th style={{ padding:'10px 16px', width:'36px' }}>
+                <input data-testid="select-all-checkbox" type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAll} style={{ cursor:'pointer' }} />
+              </th>
               {['User','Role','Department','Employee ID','Status','Actions'].map(h=>(
                 <th key={h} style={{ padding:'10px 16px', textAlign:'left', fontSize:'11px', fontWeight:'600', textTransform:'uppercase', letterSpacing:'0.05em', color:'#64748b' }}>{h}</th>
               ))}
             </tr></thead>
             <tbody>
               {filtered.map((u:any)=>(
-                <tr key={u.id} style={{ borderBottom:'1px solid #f1f5f9', transition:'background 0.1s' }}
-                  onMouseEnter={e=>(e.currentTarget as HTMLElement).style.background='#f8faff'}
-                  onMouseLeave={e=>(e.currentTarget as HTMLElement).style.background=''}>
+                <tr key={u.id} data-testid={`user-row-${u.id}`} style={{ borderBottom:'1px solid #f1f5f9', transition:'background 0.1s', background: selected.has(u.id) ? '#fef2f2' : undefined }}
+                  onMouseEnter={e=>{ if(!selected.has(u.id)) (e.currentTarget as HTMLElement).style.background='#f8faff'; }}
+                  onMouseLeave={e=>{ if(!selected.has(u.id)) (e.currentTarget as HTMLElement).style.background=''; }}>
+                  <td style={{ padding:'12px 16px' }}>
+                    <input data-testid={`select-checkbox-${u.id}`} type="checkbox" checked={selected.has(u.id)} onChange={()=>toggleSelect(u.id)} style={{ cursor:'pointer' }} />
+                  </td>
                   <td style={{ padding:'12px 16px' }}>
                     <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
                       <div style={{ width:'36px', height:'36px', borderRadius:'50%', background:getColor(u.full_name), display:'flex', alignItems:'center', justifyContent:'center', fontSize:'13px', fontWeight:'700', color:'white', flexShrink:0 }}>{getInitials(u.full_name)}</div>
@@ -176,7 +236,7 @@ export default function UsersPage() {
         <FormRow>
           <FormField label="Role" required>
             <select style={{ ...inputStyle }} value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}>
-              {ROLES_LIST.map(r=><option key={r} value={r}>{r.replace(/_/g,' ').replace(/\w/g,c=>c.toUpperCase())}</option>)}
+              {sortedRoles.map((r:any)=><option key={r.role_code} value={r.role_code}>{r.role_name || r.role_code.replace(/_/g,' ').replace(/\w/g,(ch:string)=>ch.toUpperCase())}</option>)}
             </select>
           </FormField>
           <FormField label="Department">

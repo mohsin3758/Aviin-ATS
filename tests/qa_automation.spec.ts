@@ -6148,3 +6148,96 @@ test.describe.serial('S50 Reminder System Phase 2: Push Notifications + Multi-Ch
     expect(errors).toHaveLength(0);
   });
 });
+
+test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk select/delete', () => {
+  let token: string;
+  const stamp = Date.now();
+  const createdIds: string[] = [];
+
+  test('setup: real auth token', async ({ request }) => {
+    token = await getApiToken(request);
+    expect(token).toBeTruthy();
+  });
+
+  test('BUG FIX: POST /users with a non-default role (kae) used to 500 on a stale DB CHECK constraint — now succeeds', async ({ request }) => {
+    // users.role's CHECK constraint only ever allowed ('admin','recruiter',
+    // 'manager','client','candidate') — a stale 5-value list never widened
+    // when the real 28-role catalog (role_definitions) was introduced, so
+    // every one of the other 23 real roles (kae, kam, hr_manager, ceo,
+    // sales_manager, etc.) was structurally uncreatable via Invite/Edit
+    // User despite app-level validation against role_definitions already
+    // correctly accepting them. Constraint dropped (2026-08-22); role
+    // validity is enforced at the application layer instead.
+    for (const role of ['kae', 'ceo', 'sales_manager', 'delivery_head']) {
+      const res = await request.post(`${API}/users`, {
+        headers: { Authorization: `Bearer ${token}` },
+        data: { full_name: `QA S51 ${role} ${stamp}`, email: `qa_s51_${role}_${stamp}@aviintech.com`, role, password: 'Test1234' },
+      });
+      expect(res.status(), `role=${role}`).toBe(200);
+      const u = await res.json();
+      expect(u.role).toBe(role);
+      createdIds.push(u.id);
+    }
+  });
+
+  test('PUT /users/{id} can also change a user TO a non-default role', async ({ request }) => {
+    const res = await request.put(`${API}/users/${createdIds[0]}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { role: 'kam' },
+    });
+    expect(res.status()).toBe(200);
+    expect((await res.json()).role).toBe('kam');
+  });
+
+  test('real headless UI: Invite User role dropdown lists the real, complete role catalog (was a stale hardcoded 17-role list missing 11 real roles)', async ({ page, request }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/settings/users');
+    await page.locator('button:has-text("Invite User")').click();
+    await page.waitForTimeout(500);
+    const roleSelect = page.locator('select').first();
+    const optionTexts = await roleSelect.locator('option').allTextContents();
+    const rolesRes = await request.get(`${API}/roles`, { headers: { Authorization: `Bearer ${token}` } });
+    const realRoleCount = (await rolesRes.json()).length;
+    expect(optionTexts.length).toBe(realRoleCount);
+    expect(optionTexts.some((t: string) => /delivery head/i.test(t))).toBe(true);
+    await page.locator('button:has-text("Cancel")').click().catch(() => {});
+    expect(errors).toHaveLength(0);
+  });
+
+  test('real headless UI: select two real rows, bulk-delete bar appears with correct count, real delete via the actual button soft-deletes both', async ({ page, request }) => {
+    // A 5th throwaway, created fresh so this test's own filter+select+
+    // delete cycle is isolated from the fixture users created above.
+    const uiStamp = Date.now();
+    const r1 = await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 UI Bulk A ${uiStamp}`, email: `qa_s51_bulka_${uiStamp}@aviintech.com`, role: 'recruiter' } });
+    const r2 = await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 UI Bulk B ${uiStamp}`, email: `qa_s51_bulkb_${uiStamp}@aviintech.com`, role: 'recruiter' } });
+    expect(r1.status()).toBe(200); expect(r2.status()).toBe(200);
+
+    page.once('dialog', d => d.accept());
+    await page.goto('/settings/users');
+    await page.getByPlaceholder(/Search by name or email/i).fill(`QA S51 UI Bulk`);
+    await expect.poll(async () => page.locator('[data-testid^="user-row-"]').count()).toBe(2);
+
+    const checkboxes = page.locator('[data-testid^="select-checkbox-"]');
+    await checkboxes.nth(0).click();
+    await checkboxes.nth(1).click();
+    await expect(page.getByTestId('bulk-action-bar')).toBeVisible();
+    await expect(page.getByTestId('bulk-action-bar')).toContainText('2 selected');
+
+    await page.getByTestId('bulk-delete-btn').click();
+    await expect.poll(async () => page.locator('[data-testid^="user-row-"]').count()).toBe(0);
+
+    // Confirm real, not just visually-filtered: both are genuinely
+    // is_active=false in the database, not merely hidden by the search.
+    const check1 = await (await request.get(`${API}/users/${(await r1.json()).id}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const check2 = await (await request.get(`${API}/users/${(await r2.json()).id}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(check1.is_active).toBe(false);
+    expect(check2.is_active).toBe(false);
+  });
+
+  test.afterAll(async ({ request }) => {
+    for (const id of createdIds) {
+      await request.delete(`${API}/users/${id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    }
+  });
+});

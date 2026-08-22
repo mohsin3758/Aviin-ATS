@@ -1,0 +1,19 @@
+-- Real, longstanding bug found 2026-08-22: users.role's CHECK constraint
+-- only ever allowed ('admin','recruiter','manager','client','candidate')
+-- — a stale 5-value list from an early migration, never widened when the
+-- real 28-role catalog (role_definitions) was introduced. create_user()/
+-- update_user() (backend/routers/users.py) already correctly validate a
+-- role against role_definitions at the application layer, but every
+-- INSERT/UPDATE for any of the other 23 real roles (kae, kam, hr_manager,
+-- sales_manager, ceo, coo, cto, delivery_head, vp_sales, vp_delivery,
+-- etc.) still crashed with a raw CheckViolationError -> 500, meaning none
+-- of those roles could ever actually be assigned via Invite User or Edit
+-- User, despite the entire Settings > Permissions / KAE-ownership /
+-- job-visibility-scope system being built around this exact taxonomy.
+--
+-- Dropped rather than widened to a static 28-value list: role_definitions
+-- is dynamic (POST /roles lets an admin create custom roles), so a fixed
+-- DB-level CHECK constraint is the wrong mechanism here and would just
+-- go stale again the next time a custom role is created. Role validity
+-- is already correctly enforced at the application layer.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
