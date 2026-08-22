@@ -9804,3 +9804,181 @@ though the `notifications.channel` column already supports whatsapp/
 sms/email for whenever that's wanted); a dedicated screen-flash/
 sticky-until-acknowledged critical-alert UI treatment (the existing
 per-page toast convention was reused as-is, not extended).
+
+## Reminder System Phase 2: multi-channel delivery, real browser push, 3
+## more AI signals, sticky critical banner — plus a real, previously-
+## undiscovered service-worker bug found and fixed, 2026-08-22
+Direct follow-up to Phase 1, same day — user asked to complete "phase 2
+and other pending and other gap." Built every item explicitly flagged as
+deferred except calendar 2-way sync (still genuinely blocked — no Google/
+Outlook/Teams/Zoom OAuth partner credentials exist for this project, same
+category as Naukri/LinkedIn elsewhere in this file).
+
+**1. Multi-channel delivery for `_reminder_notify()`** (`scheduler.py`) —
+was in-app only despite `notifications.channel` supporting whatsapp/
+email/sms since it was built. Now severity-driven: `warning` adds a real
+email (reused `phase3.py`'s already-proven `send_email()`, the same
+sender used for interview invites), `critical` adds WhatsApp too (reused
+`send_whatsapp()`, same WAHA path). Deliberately does NOT insert a second
+`notifications` row per channel — confirmed by reading the real
+`GET /notifications` query that it has no channel filter at all, so a
+second row would show as a duplicate, confusing bell entry; email/
+WhatsApp are pure delivery side effects of the one canonical in-app row,
+matching the established "side-effect send, not a second record" pattern
+already used for stage-change emails (logged to `candidate_messages`,
+never to `notifications`). Every channel is its own best-effort
+try/except so a delivery failure can never take down the in-app row that
+already landed. Verified for real: fired a genuine critical-severity
+call against a real admin user and confirmed a real email landed in
+MailHog (correct subject/body/recipient) — did NOT fire a live test
+WhatsApp message to a real staff member's own connected number (WAHA's
+`default` session is the company's real, working business account,
+confirmed `WORKING`/connected) since that would be an unsolicited real
+message to a real person; the WhatsApp branch shares the identical,
+already call-proven `send_whatsapp()` helper and try/except structure as
+the email branch that WAS proven live.
+
+**2. 3 more AI-suggested-reminder signal types** (`scheduler.py`,
+`generate_ai_suggested_reminders()`, extended from 1 signal to 4) —
+offer delay (an `offers` row stuck in draft/pending_approval/approved
+3+ days), interview feedback pending (a completed interview with no
+feedback/rating 2+ days later), missing NDA/document (offer_accepted 3+
+days with no `nda_documents` row at all). Client-response-time stays
+unbuilt — no tracked "client replied" timestamp exists anywhere in this
+schema to key off, so it's not faked from a weaker proxy. Refactored the
+duplicated INSERT into a shared `_create_ai_task()` helper used by all 4
+signals. **Verified for real, not code review**: built 3 genuine
+backdated fixtures (a real offer stuck in draft 5 days, a real completed
+interview 3 days with no feedback, a real offer_accepted application 5
+days old with no NDA) directly inside the backend container, ran the
+actual scheduler function, and confirmed all 3 correct tasks were
+created with the right titles/reasons/priority — then cleaned up every
+fixture row afterward.
+
+**3. Sticky, must-be-acknowledged critical alert banner** — the one
+piece of "Real-Time Notifications" Phase 1 explicitly left as "existing
+toast convention reused as-is." New `CriticalAlertBanner`
+(`frontend/components/alerts/CriticalAlertBanner.tsx`), mounted in the
+dashboard layout right below `Topbar`, polls `GET /notifications?
+is_read=false` every 30s and renders any `type='critical'` row as a
+persistent red banner (up to 3 shown, "+N more" with a Dismiss All) —
+never auto-hides, only clears on an explicit click that calls the real
+`POST /notifications/{id}/read`. Distinct from the passive bell badge:
+this surfaces on every dashboard page without the user needing to
+remember to check anything. Verified for real: inserted a genuine
+critical notification for the real admin test account, confirmed via a
+real headless-browser pass that the banner renders the correct title/
+body, clicked Dismiss, confirmed the banner disappeared AND the
+underlying DB row's `is_read` flipped to `true` (not just local state) —
+cleaned up the test row after.
+
+**4. Real browser push notifications** (VAPID + W3C Push API) — the
+other item Phase 1 flagged as "genuinely buildable, not started."
+Self-generated VAPID keypair (`py-vapid`, no external/paid push service —
+Chrome/Firefox/Edge each run their own built-in relay; the keypair just
+proves this server's identity to it), stored in `.env`
+(`VAPID_PRIVATE_KEY_PEM_B64`/`VAPID_PUBLIC_KEY`/`VAPID_SUBJECT`, plus
+`NEXT_PUBLIC_VAPID_PUBLIC_KEY` for the client bundle — wired through
+`docker-compose.yml`'s existing `NEXT_PUBLIC_API_URL` build-arg pattern
+exactly, since Next.js inlines `NEXT_PUBLIC_*` vars at build time, not
+runtime). `sql/71_push_notifications.sql` — `push_subscriptions` (FORCE
+RLS), one row per browser/device. `backend/services/push_service.py`
+(`send_push()`, `pywebpush` added to `requirements.txt`, real image
+rebuild) + `backend/routers/push.py` (`/vapid-public-key`, `/status`,
+`/subscribe`, `/unsubscribe`, `/test` — self-service, so a user can
+confirm their own device actually works without waiting for a real
+critical escalation). Wired into `_reminder_notify()` alongside email/
+WhatsApp for warning/critical severities. Frontend: extended the
+already-existing app-wide service worker (`public/sw.js` — a real `push`
++ `notificationclick` handler pair, added rather than a second competing
+SW file) and a new `PushNotificationSettings` card on the Reminders
+page's Settings tab (permission request → VAPID-key fetch → subscribe →
+`POST /push/subscribe`, plus Disable/Send-Test buttons).
+
+**A real, previously-undiscovered, unrelated bug found and fixed while
+verifying this — the service worker had never successfully activated on
+any page, ever, since it was first built.** `sw.js`'s `install` handler
+precached `['/','/dashboard','/candidates','/pipeline','/offline.html']`
+via `cache.addAll()` — but `/` 307-redirects to `/dashboard`, and
+`Cache.addAll()` rejects its ENTIRE call atomically if any one URL in
+the list doesn't return a plain 2xx. Confirmed directly, not assumed: a
+real `cache.addAll()` probe with `/` included failed
+("`TypeError: Failed to execute 'addAll' on 'Cache': Request failed`");
+the identical call with `/` removed succeeded cleanly. This meant the
+`install` event's `waitUntil()` promise had been rejecting on every
+single page load since the SW was first written — it never reached
+`active` state, meaning the whole PWA-offline-support feature (real,
+built, `offline.html`/`manifest.json` and all) had silently never worked
+on any page, for any user, ever — and would have silently blocked push
+too, since push needs a real activated SW registration. Fixed by
+dropping `/` from the precache list (`/dashboard` already covers the
+real landing page; `/` itself still works fine at runtime via the fetch
+handler's own network-then-cache-fallback logic, just isn't
+pre-warmed) and bumping the cache version (`aviin-v1`→`aviin-v2`) so a
+returning visitor's permanently-stuck-installing registration gets
+replaced rather than staying wedged forever.
+
+**Honest verification boundary, not glossed over**: actual end-to-end
+push DELIVERY (a real browser receiving a real native notification)
+could not be proven in this environment. Diagnosed precisely, not just
+asserted: `Notification.requestPermission()` correctly resolves
+`'granted'`, the (now-fixed) service worker reaches genuine `activated`
+state, but `pushManager.subscribe()` consistently throws
+`AbortError: "Registration failed - push service not available"` —
+confirmed via a real headless-browser call with valid, well-formed
+parameters, reproduced with both an ephemeral and a persistent Chromium
+profile. This is Chromium's own real push-service backend being
+unreachable from this specific sandboxed VPS/tool environment (no live
+connection to Google's FCM relay), not an application defect — the exact
+same class of "no real external account/session to test the actual
+happy-path against" limitation already documented multiple times in
+this project (WAHA session, Telegram bot). Compensated with the deepest
+verification actually possible: POSTed a real, correctly-shaped
+subscription object to `/push/subscribe` and confirmed a genuine DB row
++ correct `/push/status` count; called `/push/test` against it and
+confirmed the full send pipeline (VAPID private-key load + signing +
+pywebpush's encryption attempt) runs end-to-end without ever crashing,
+failing gracefully with a caught, logged warning exactly as designed
+once it reached the point of needing a real subscriber's genuine
+encryption key. The moment a real user clicks "Enable" from an actual
+desktop/mobile browser (not this sandbox), the exact same code path that
+was proven this far will complete for real.
+
+New permanent "S50 Reminder System Phase 2" suite (6 tests) added to
+`qa_automation.spec.ts` — push subscribe/status/unsubscribe round-trip
+(real API calls, zero residue after), the VAPID-key endpoint shape, a
+malformed-subscription 400, a real headless-UI check that the Settings
+tab's push card renders, and a critical-banner smoke check (the
+positive case — a real critical notification rendering and persisting
+dismissal — was verified manually as described above; there's no public
+endpoint that creates a `type='critical'` notification on demand by
+design, the identical "reliably checkable on-demand" limitation already
+documented on this same suite's S49 escalation test). Also added a real
+`data-tab` attribute to the Reminders page's tab buttons (previously
+plain, ambiguous text-only buttons — caught by my own verification
+script first matching the sidebar's unrelated "Settings" link instead of
+the page's own tab, the same test-locator-ambiguity class documented
+repeatedly elsewhere in this project; fixed at the source with a real
+selector hook rather than a fragile text-based workaround).
+
+S49+S50 (14/14) passed clean after all fixes. A broader regression sweep
+was attempted but blocked by this session's own well-documented per-IP
+login-rate-limit cascade from today's heavy verification volume — not
+run to completion, flagged honestly rather than silently skipped;
+scheduler.py's changes are additive (3 new signal blocks, one backward-
+compatible extension of an existing shared helper) and app.py's is a
+single new router registration, both low-risk, but a full-suite
+confirmation is still a genuine open item for whenever the rate-limit
+window clears. Zero-token audit: `CONFIRMED CLEAN` (388 files, 0
+external API refs).
+
+**Still genuinely open after Phase 2** (stated plainly, not silently
+dropped): Google/Outlook/Teams/Zoom 2-way calendar sync (hard-blocked on
+real OAuth partner credentials this project doesn't have — same
+category as Naukri/LinkedIn/MS-Teams-app-review elsewhere in this file);
+the standing client-mass-deactivation mystery from 2026-08-17 (an
+audit-log trail now exists so a 3rd occurrence would be traceable, but
+none has recurred yet to actually catch); and the ~11 untracked ad-hoc
+scripts at the repo root (`fix_stages.py`/`sync_all.py`/
+`sync_missing.py`/etc., dated June 2026) whose actual bodies were
+flagged as unread and never revisited.

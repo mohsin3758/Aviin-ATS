@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 import { getToken } from '@/lib/auth';
 import { apiFetch } from '@/lib/useFetch';
 import { GlobalSearch } from '@/components/GlobalSearch';
+import { CriticalAlertBanner } from '@/components/alerts/CriticalAlertBanner';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -24,6 +25,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <Sidebar />
         <div suppressHydrationWarning style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0, overflow:'hidden' }}>
           <Topbar />
+          <CriticalAlertBanner />
           <main suppressHydrationWarning style={{ flex:1, overflowY:'auto', overflowX:'hidden', padding:'24px 28px', minHeight:0 }}>
             {children}
           </main>

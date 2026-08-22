@@ -61,6 +61,9 @@ services:
       WAHA_URL: http://waha:3000
       WAHA_API_KEY: ${WAHA_API_KEY:-}
       ERP_ENCRYPT_KEY: ${ERP_ENCRYPT_KEY:-erp_demo_key_change_in_prod}
+      VAPID_PRIVATE_KEY_PEM_B64: ${VAPID_PRIVATE_KEY_PEM_B64:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:noreply@aviinjobs.com}
     volumes:
       - resume_uploads:/app/uploads
     ports:
@@ -81,10 +84,12 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+        NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${NEXT_PUBLIC_VAPID_PUBLIC_KEY:-}
     container_name: aviin_frontend
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${NEXT_PUBLIC_VAPID_PUBLIC_KEY:-}
     ports:
       - "${FRONTEND_PORT:-3001}:3001"
     depends_on:

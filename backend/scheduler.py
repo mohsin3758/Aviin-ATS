@@ -480,12 +480,64 @@ async def _reminder_notify(conn, tenant_id, recipient_user_id, title, body, reso
     (tenant_id/user_id/recipient_user_id/title/body/type/resource/
     resource_id/channel — see _handle_escalation_alert above, same
     'user_id AND recipient_user_id both set' requirement from the
-    notifications_check constraint)."""
+    notifications_check constraint).
+
+    Phase 2: also delivers externally, severity-driven — 'warning' gets a
+    real email + browser push on top of the in-app row, 'critical' adds
+    WhatsApp too. Reuses phase3.py's send_whatsapp()/send_email() helpers
+    (already the established, working senders for interview invites —
+    WAHA + SMTP, both graceful no-ops if unconfigured/unreachable) plus
+    the new push_service.send_push() (real W3C Push API + self-generated
+    VAPID keypair — no external/paid service, unlike calendar 2-way sync
+    which stays blocked on real OAuth credentials this project doesn't
+    have) rather than a third copy of the same send logic. Deliberately
+    does NOT insert a second
+    notifications row per channel — GET /notifications has no channel
+    filter at all (confirmed by reading the real query), so a second row
+    here would show as a duplicate, confusing bell entry; email/WhatsApp
+    are pure delivery side effects of the one canonical in-app row, same
+    pattern already established elsewhere in this codebase for stage-
+    change emails (logged to candidate_messages, never to notifications).
+    Never lets a delivery failure take down the in-app notification that
+    already landed above — each channel is its own best-effort try/except."""
     await conn.execute(
         """INSERT INTO notifications (tenant_id,user_id,recipient_user_id,title,body,type,resource,resource_id,channel)
            VALUES ($1,$2,$2,$3,$4,$5,$6,$7,'inapp')""",
         tenant_id, recipient_user_id, title, body, ntype, resource, resource_id,
     )
+    if ntype in ("warning", "critical") and recipient_user_id:
+        try:
+            u = await conn.fetchrow("SELECT email, phone FROM users WHERE id=$1", recipient_user_id)
+        except Exception as e:
+            u = None
+            logger.warning(f"Reminder delivery: could not resolve recipient {recipient_user_id}: {e}")
+        if u:
+            if u["email"]:
+                try:
+                    from routers.phase3 import send_email
+                    await send_email(u["email"], title, body)
+                except Exception as e:
+                    logger.warning(f"Reminder email delivery failed for {recipient_user_id}: {e}")
+            try:
+                from services import push_service
+                if push_service.is_configured():
+                    subs = await conn.fetch(
+                        "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE tenant_id=$1 AND user_id=$2",
+                        tenant_id, recipient_user_id,
+                    )
+                    for s in subs:
+                        await push_service.send_push(
+                            {"endpoint": s["endpoint"], "keys": {"p256dh": s["p256dh"], "auth": s["auth"]}},
+                            title, body, f"/reminders" if resource == "recruiter_task" else "/notifications",
+                        )
+            except Exception as e:
+                logger.warning(f"Reminder push delivery failed for {recipient_user_id}: {e}")
+            if ntype == "critical" and u["phone"]:
+                try:
+                    from routers.phase3 import send_whatsapp
+                    await send_whatsapp(u["phone"], f"*{title}*\n{body}")
+                except Exception as e:
+                    logger.warning(f"Reminder WhatsApp delivery failed for {recipient_user_id}: {e}")
 
 
 async def process_task_escalations():
@@ -726,19 +778,34 @@ async def process_configurable_interview_reminders():
         logger.error(f"process_configurable_interview_reminders error: {e}")
 
 
+async def _create_ai_task(conn, tid, recruiter_id, requisition_id, application_id, title, description, reason, priority="medium"):
+    """Shared insert for every AI-suggested signal below — one real
+    recruiter_task (ai_suggested=true), same task list/dashboard/
+    escalation machinery as any manually-created one."""
+    await conn.execute(
+        """INSERT INTO recruiter_tasks
+             (tenant_id, recruiter_id, requisition_id, application_id, task_type,
+              title, description, follow_up_reason, priority, due_at, status, ai_suggested)
+           VALUES ($1,$2,$3,$4,'general',$5,$6,$7,$8, now() + INTERVAL '1 day', 'pending', true)""",
+        tid, recruiter_id, requisition_id, application_id, title, description, reason, priority,
+    )
+
+
 async def generate_ai_suggested_reminders():
     """Daily 07:00 IST: zero-token, rule-based (no LLM call — HARD RULE #1)
-    "AI-suggested" follow-up tasks from real staleness signals already
-    computed elsewhere in this codebase: a candidate genuinely untouched
-    for 5+ days in an active (non-terminal) stage. Creates a real
-    recruiter_task (ai_suggested=true) rather than a separate "suggestion"
+    "AI-suggested" follow-up tasks from 4 real signals already computed
+    elsewhere in this codebase — creates a real recruiter_task
+    (ai_suggested=true) per signal rather than a separate "suggestion"
     concept, so it shows up in the exact same task list/dashboard/
     escalation machinery everything else does — a suggestion a recruiter
     ignores escalates exactly like a manually-created one would.
-    Deliberately narrow (one clear signal) rather than guessing at the
-    other 5 examples in the spec, which would need real, separate signal
-    sources (offer-delay tracking, client-response-time tracking) not
-    built yet."""
+
+    Phase 2: widened from 1 signal (candidate staleness) to 4, matching
+    4 of the spec's named examples with a genuine, already-existing data
+    source each — deliberately still not all 6 named in the original
+    spec (client-response-time has no tracked "client replied" timestamp
+    anywhere in this schema to key off, so that one signal stays
+    unbuilt rather than faked from a proxy)."""
     logger.info("scheduler: generating AI-suggested follow-up reminders")
     try:
         async with db.system_conn() as sconn:
@@ -746,6 +813,7 @@ async def generate_ai_suggested_reminders():
         for tid in tenant_ids:
             try:
                 async with db.tenant_conn(tid) as conn:
+                    # Signal 1: candidate untouched 5+ days in an active stage.
                     stale = await conn.fetch(
                         """SELECT a.id AS application_id, a.candidate_id, a.requisition_id,
                                   a.assigned_recruiter_id, c.full_name, a.updated_at
@@ -766,18 +834,112 @@ async def generate_ai_suggested_reminders():
                         try:
                             days = (datetime.now(timezone.utc) - s["updated_at"]).days
                             async with conn.transaction():
-                                await conn.execute(
-                                    """INSERT INTO recruiter_tasks
-                                         (tenant_id, recruiter_id, requisition_id, application_id, task_type,
-                                          title, description, follow_up_reason, priority, due_at, status, ai_suggested)
-                                       VALUES ($1,$2,$3,$4,'general',$5,$6,$7,'medium', now() + INTERVAL '1 day', 'pending', true)""",
-                                    tid, s["assigned_recruiter_id"], s["requisition_id"], s["application_id"],
+                                await _create_ai_task(
+                                    conn, tid, s["assigned_recruiter_id"], s["requisition_id"], s["application_id"],
                                     f"Follow up: {s['full_name']}",
                                     f"AI-suggested — no activity for {days} days.",
                                     f"Candidate not contacted for {days} days.",
                                 )
                         except Exception as e:
-                            logger.warning(f"AI-suggested reminder failed for application {s['application_id']}: {e}")
+                            logger.warning(f"AI-suggested (staleness) reminder failed for application {s['application_id']}: {e}")
+
+                    # Signal 2: offer stuck pre-issue (draft/pending_approval/approved)
+                    # 3+ days — the recruiter/approver most likely just forgot it.
+                    stuck_offers = await conn.fetch(
+                        """SELECT o.id AS offer_id, o.application_id, o.status, o.created_at,
+                                  a.requisition_id, a.assigned_recruiter_id, c.full_name
+                           FROM offers o
+                           JOIN applications a ON a.id = o.application_id
+                           JOIN candidates c ON c.id = a.candidate_id
+                           WHERE o.tenant_id=$1 AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
+                             AND o.status IN ('draft','pending_approval','approved')
+                             AND o.created_at < now() - INTERVAL '3 days'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM recruiter_tasks t
+                               WHERE t.tenant_id=$1 AND t.application_id=a.id AND t.ai_suggested
+                                 AND t.status IN ('pending','in_progress')
+                                 AND t.follow_up_reason LIKE 'Offer stuck%')""",
+                        tid,
+                    )
+                    for o in stuck_offers:
+                        try:
+                            days = (datetime.now(timezone.utc) - o["created_at"]).days
+                            async with conn.transaction():
+                                await _create_ai_task(
+                                    conn, tid, o["assigned_recruiter_id"], o["requisition_id"], o["application_id"],
+                                    f"Offer delayed: {o['full_name']}",
+                                    f"AI-suggested — offer has sat in '{o['status']}' for {days} days without moving forward.",
+                                    f"Offer stuck at '{o['status']}' for {days} days.",
+                                    priority="high",
+                                )
+                        except Exception as e:
+                            logger.warning(f"AI-suggested (offer delay) reminder failed for offer {o['offer_id']}: {e}")
+
+                    # Signal 3: interview completed 2+ days ago, no feedback/rating
+                    # captured yet — blocks the next pipeline decision.
+                    pending_feedback = await conn.fetch(
+                        """SELECT i.id AS interview_id, i.application_id, i.interviewer_id, i.scheduled_at,
+                                  a.requisition_id, a.assigned_recruiter_id, c.full_name
+                           FROM interview_schedules i
+                           JOIN applications a ON a.id = i.application_id
+                           JOIN candidates c ON c.id = a.candidate_id
+                           WHERE i.tenant_id=$1 AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
+                             AND i.status = 'completed'
+                             AND (i.feedback IS NULL OR i.feedback = '') AND i.rating IS NULL
+                             AND i.scheduled_at < now() - INTERVAL '2 days'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM recruiter_tasks t
+                               WHERE t.tenant_id=$1 AND t.application_id=a.id AND t.ai_suggested
+                                 AND t.status IN ('pending','in_progress')
+                                 AND t.follow_up_reason LIKE 'Interview feedback%')""",
+                        tid,
+                    )
+                    for f in pending_feedback:
+                        try:
+                            days = (datetime.now(timezone.utc) - f["scheduled_at"]).days
+                            recruiter = f["interviewer_id"] or f["assigned_recruiter_id"]
+                            async with conn.transaction():
+                                await _create_ai_task(
+                                    conn, tid, recruiter, f["requisition_id"], f["application_id"],
+                                    f"Feedback pending: {f['full_name']}",
+                                    f"AI-suggested — interview completed {days} days ago with no feedback/rating captured.",
+                                    f"Interview feedback missing for {days} days.",
+                                    priority="high",
+                                )
+                        except Exception as e:
+                            logger.warning(f"AI-suggested (interview feedback) reminder failed for interview {f['interview_id']}: {e}")
+
+                    # Signal 4: candidate reached offer_accepted 3+ days ago with no
+                    # NDA on file at all — a real, common pre-onboarding gap.
+                    missing_docs = await conn.fetch(
+                        """SELECT a.id AS application_id, a.candidate_id, a.requisition_id,
+                                  a.assigned_recruiter_id, c.full_name, a.updated_at
+                           FROM applications a
+                           JOIN candidates c ON c.id = a.candidate_id
+                           WHERE a.tenant_id=$1 AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
+                             AND a.stage = 'offer_accepted'
+                             AND a.updated_at < now() - INTERVAL '3 days'
+                             AND NOT EXISTS (SELECT 1 FROM nda_documents n WHERE n.tenant_id=$1 AND n.application_id=a.id)
+                             AND NOT EXISTS (
+                               SELECT 1 FROM recruiter_tasks t
+                               WHERE t.tenant_id=$1 AND t.application_id=a.id AND t.ai_suggested
+                                 AND t.status IN ('pending','in_progress')
+                                 AND t.follow_up_reason LIKE 'NDA/document%')""",
+                        tid,
+                    )
+                    for m in missing_docs:
+                        try:
+                            days = (datetime.now(timezone.utc) - m["updated_at"]).days
+                            async with conn.transaction():
+                                await _create_ai_task(
+                                    conn, tid, m["assigned_recruiter_id"], m["requisition_id"], m["application_id"],
+                                    f"Missing NDA: {m['full_name']}",
+                                    f"AI-suggested — offer accepted {days} days ago, no NDA document on file yet.",
+                                    f"NDA/document missing {days} days after offer acceptance.",
+                                    priority="high",
+                                )
+                        except Exception as e:
+                            logger.warning(f"AI-suggested (missing document) reminder failed for application {m['application_id']}: {e}")
             except Exception as e:
                 logger.error(f"AI-suggested reminders failed for tenant {tid}: {e}")
     except Exception as e:

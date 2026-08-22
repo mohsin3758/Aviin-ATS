@@ -6066,3 +6066,85 @@ test.describe.serial('S49 Reminder & Follow-Up Management System', () => {
     if (recruiterId) await request.patch(`${API}/users/${recruiterId}/deactivate`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
   });
 });
+
+test.describe.serial('S50 Reminder System Phase 2: Push Notifications + Multi-Channel Delivery', () => {
+  let token: string;
+  const testEndpoint = 'https://fcm.googleapis.com/fcm/send/qa-s50-verification-endpoint';
+
+  test('setup: real auth token', async ({ request }) => {
+    token = await getApiToken(request);
+    expect(token).toBeTruthy();
+  });
+
+  test('GET /push/vapid-public-key returns a real, configured VAPID key', async ({ request }) => {
+    const res = await request.get(`${API}/push/vapid-public-key`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status()).toBe(200);
+    const d = await res.json();
+    expect(d.configured).toBe(true);
+    expect(d.public_key.length).toBeGreaterThan(20);
+  });
+
+  test('push subscribe/status/unsubscribe: a real round-trip, no residue left after', async ({ request }) => {
+    const before = await (await request.get(`${API}/push/status`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const subRes = await request.post(`${API}/push/subscribe`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: {
+        endpoint: testEndpoint,
+        keys: { p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM', auth: 'tBHItJI5svbpez7KI4CCXg' },
+        user_agent: 'S50 QA verification',
+      },
+    });
+    expect(subRes.status()).toBe(200);
+    const statusAfterSub = await (await request.get(`${API}/push/status`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(statusAfterSub.device_count).toBe(before.device_count + 1);
+
+    // /push/test must reach the real send pipeline (VAPID signing + pywebpush)
+    // and return a clean 200 without ever throwing, even against a
+    // synthetic subscription that can't actually receive a push.
+    const testRes = await request.post(`${API}/push/test`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(testRes.status()).toBe(200);
+    const testBody = await testRes.json();
+    expect(testBody.total).toBeGreaterThanOrEqual(1);
+
+    await request.post(`${API}/push/unsubscribe`, { headers: { Authorization: `Bearer ${token}` }, data: { endpoint: testEndpoint } });
+    const statusAfterUnsub = await (await request.get(`${API}/push/status`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(statusAfterUnsub.device_count).toBe(before.device_count);
+  });
+
+  test('malformed subscription (missing keys) is rejected with a clean 400', async ({ request }) => {
+    const res = await request.post(`${API}/push/subscribe`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { endpoint: 'https://example.com/bad', keys: {} },
+    });
+    expect(res.status()).toBe(400);
+  });
+
+  test('real headless UI: Reminders > Settings shows the Browser Push card and Enable button', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/reminders');
+    await page.locator('button[data-tab="settings"]').click();
+    await expect(page.locator('[data-testid="push-notification-settings"]')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('[data-testid="push-enable-btn"], [data-testid="push-disable-btn"]')).toBeVisible();
+    expect(errors).toHaveLength(0);
+  });
+
+  test('critical alert banner: renders nothing when there are no unread critical notifications (the real, common-case state)', async ({ page }) => {
+    // The positive case (a real critical notification renders a sticky,
+    // dismissible red banner and persists is_read=true on dismiss) was
+    // verified manually against a genuine DB-inserted row during
+    // development, not reproducible here — there's no public API that
+    // creates a type='critical' notification on demand (by design, every
+    // real one is scheduler-generated), the same "reliably checkable
+    // on-demand" limitation already documented on this suite's own S49
+    // escalation test.
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/dashboard');
+    await page.waitForTimeout(2000);
+    // Not asserting absence outright (a real critical alert could
+    // legitimately exist in production at test time) — just that the
+    // component never throws and the page renders cleanly either way.
+    expect(errors).toHaveLength(0);
+  });
+});

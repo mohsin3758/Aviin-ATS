@@ -490,6 +490,126 @@ function ReportsTab() {
 }
 
 // ── Settings tab (admin/manager only) ────────────────────────────────────
+// Reminder System Phase 2 — real browser push subscribe/unsubscribe flow
+// (W3C Push API + the app-wide service worker already registered in
+// app/layout.tsx). Standard VAPID-key conversion boilerplate — the
+// PushManager API requires the base64url public key as a raw Uint8Array,
+// not the string itself.
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+function PushNotificationSettings() {
+  const [mounted, setMounted] = useState(false);
+  const [supported, setSupported] = useState(false);
+  const [permission, setPermission] = useState<NotificationPermission>('default');
+  const [subscribed, setSubscribed] = useState(false);
+  const [deviceCount, setDeviceCount] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const refreshStatus = async () => {
+    try {
+      const s = await apiFetch('/push/status');
+      setSubscribed(!!s.subscribed);
+      setDeviceCount(s.device_count || 0);
+    } catch { /* best-effort */ }
+  };
+
+  useEffect(() => {
+    setMounted(true);
+    const ok = typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+    setSupported(ok);
+    if (ok) setPermission(Notification.permission);
+    refreshStatus();
+  }, []);
+
+  const enable = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const perm = await Notification.requestPermission();
+      setPermission(perm);
+      if (perm !== 'granted') { setMsg('Permission denied — enable notifications for this site in your browser settings.'); setBusy(false); return; }
+      const { public_key, configured } = await apiFetch('/push/vapid-public-key');
+      if (!configured || !public_key) { setMsg('Push is not configured on the server yet.'); setBusy(false); return; }
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(public_key) as BufferSource,
+      });
+      const json: any = sub.toJSON();
+      await apiFetch('/push/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, user_agent: navigator.userAgent }),
+      });
+      setMsg('Push notifications enabled on this device.');
+      await refreshStatus();
+    } catch (e: any) {
+      setMsg(e?.message || 'Could not enable push notifications.');
+    }
+    setBusy(false);
+  };
+
+  const disable = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await apiFetch('/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: sub.endpoint }) });
+        await sub.unsubscribe();
+      }
+      setMsg('Push notifications disabled on this device.');
+      await refreshStatus();
+    } catch (e: any) {
+      setMsg(e?.message || 'Could not disable push notifications.');
+    }
+    setBusy(false);
+  };
+
+  const sendTest = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const r = await apiFetch('/push/test', { method: 'POST' });
+      setMsg(`Test sent to ${r.sent}/${r.total} device(s) — check for a real notification.`);
+    } catch (e: any) {
+      setMsg(e?.message || 'Test send failed.');
+    }
+    setBusy(false);
+  };
+
+  if (!mounted) return null;
+  return (
+    <div style={card} data-testid="push-notification-settings">
+      <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 4 }}>Browser Push Notifications</div>
+      <p style={{ fontSize: 11, color: '#64748B', marginBottom: 10 }}>
+        Get warning/critical reminders as real desktop or mobile browser notifications, even when this tab isn't open.
+      </p>
+      {!supported && <div style={{ fontSize: 12, color: '#B45309' }}>Not supported in this browser.</div>}
+      {supported && (
+        <>
+          <div style={{ fontSize: 12, color: '#334155', marginBottom: 10 }}>
+            Status: {subscribed ? <b style={{ color: '#16A34A' }}>Enabled ({deviceCount} device{deviceCount === 1 ? '' : 's'})</b> : <b style={{ color: '#64748B' }}>Not enabled on this device</b>}
+            {permission === 'denied' && <span style={{ color: '#DC2626' }}> — browser permission denied</span>}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {!subscribed
+              ? <button data-testid="push-enable-btn" onClick={enable} disabled={busy} style={btn}>Enable Push Notifications</button>
+              : <button data-testid="push-disable-btn" onClick={disable} disabled={busy} style={{ ...btn, background: '#EF4444' }}>Disable</button>}
+            {subscribed && <button data-testid="push-test-btn" onClick={sendTest} disabled={busy} style={{ ...btn, background: '#0EA5E9' }}>Send Test</button>}
+          </div>
+          {msg && <div style={{ fontSize: 11, color: '#334155', marginTop: 8 }}>{msg}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function SettingsTab() {
   const { data: esc, refetch: refetchEsc } = useFetch<any>('/escalation-config');
   const { data: ivr, refetch: refetchIvr } = useFetch<any>('/interview-reminder-config');
@@ -524,6 +644,7 @@ function SettingsTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 520 }}>
       {saved && <div style={{ background: '#F0FDF4', color: '#16A34A', padding: '8px 12px', borderRadius: 8, fontSize: 12 }}>{saved}</div>}
+      <PushNotificationSettings />
       <div style={card}>
         <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 4 }}>Escalation Timing</div>
         <p style={{ fontSize: 11, color: '#64748B', marginBottom: 10 }}>How many hours a follow-up must be overdue before escalating to the next level. Critical-priority follow-ups escalate faster by the multiplier below.</p>
@@ -576,7 +697,7 @@ export default function RemindersPage() {
       </div>
       <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #E2E8F0', flexWrap: 'wrap' }}>
         {visibleTabs.map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)}
+          <button key={t.key} data-tab={t.key} onClick={() => setTab(t.key)}
             style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: tab === t.key ? '#2563EB' : '#64748B', borderBottom: tab === t.key ? '2px solid #2563EB' : '2px solid transparent' }}>
             <t.icon size={14} /> {t.label}
           </button>
