@@ -112,10 +112,24 @@ async def create_user(body: UserCreate, actor: Actor = Depends(require_role("adm
         body.joining_date = None
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Check email uniqueness
-        exists = await conn.fetchval(
-            "SELECT id FROM users WHERE email=$1", body.email)
+        exists = await conn.fetchrow(
+            "SELECT id, full_name, is_active FROM users WHERE email=$1", body.email)
         if exists:
-            raise HTTPException(400, "Email already registered")
+            # Real UX fix (2026-08-22): "Email already registered" alone
+            # gave no way forward — a real admin trying to update an
+            # existing person (e.g. change their role) via the Invite
+            # form had no indication that's not the right form, or who
+            # already holds that email. Returns enough for the frontend
+            # to offer a direct "Edit this user instead" action rather
+            # than a dead end.
+            raise HTTPException(400, {
+                "detail": "Email already registered",
+                "existing_user": {
+                    "id": str(exists["id"]),
+                    "full_name": exists["full_name"],
+                    "is_active": exists["is_active"],
+                },
+            })
         # Validate role exists
         valid_role = await conn.fetchrow(
             "SELECT role_code, role_name FROM role_definitions "

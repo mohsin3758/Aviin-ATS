@@ -22,6 +22,14 @@ export default function UsersPage() {
   const [form, setForm] = useState({...EMPTY_USER});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // Real UX fix (2026-08-22): "Email already registered" was a dead end
+  // — a real admin trying to change an existing person's role/details
+  // via the Invite form (the wrong form for that, but an easy mistake)
+  // had no way forward except guessing they should go find and edit
+  // that person separately. Backend now returns who already holds the
+  // email; this offers a direct "Edit them instead" action right in the
+  // same modal.
+  const [existingUserHint, setExistingUserHint] = useState<{id:string; full_name:string; is_active:boolean}|null>(null);
   const [search, setSearch] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
   // Real bug fix (2026-08-16): unlike every other list page in this app
@@ -61,24 +69,39 @@ export default function UsersPage() {
   );
   const sortedRoles = [...(roles||[])].sort((a,b)=>(a.role_name||a.role_code||'').localeCompare(b.role_name||b.role_code||''));
 
-  const openCreate = () => { setForm({...EMPTY_USER}); setEditId(null); setError(''); setShowModal(true); };
+  const openCreate = () => { setForm({...EMPTY_USER}); setEditId(null); setError(''); setExistingUserHint(null); setShowModal(true); };
   const openEdit = (u:any) => {
     setForm({ email:u.email||'', full_name:u.full_name||'', role:u.role||'recruiter', department:u.department||'Delivery',
       designation:u.designation||'', phone:u.phone||'', employee_id:u.employee_id||'',
       location:u.location||'', capacity_weekly:u.capacity_weekly||40, password:'', reporting_to:u.reporting_to||'' });
-    setEditId(u.id); setError(''); setShowModal(true);
+    setEditId(u.id); setError(''); setExistingUserHint(null); setShowModal(true);
+  };
+  // Switches the currently-open modal (still showing the "Email already
+  // registered" error) directly into editing the real existing user,
+  // fetching their real current data first — no need to close this
+  // modal, go find their row, and reopen a second one.
+  const editExistingInstead = async () => {
+    if (!existingUserHint) return;
+    try {
+      const u = await apiFetch(`/users/${existingUserHint.id}`);
+      openEdit(u);
+    } catch(e:any) { setError(e.message||'Could not load that user'); }
   };
 
   const handleSave = async () => {
     if (!form.email || !form.full_name) { setError('Email and name are required'); return; }
-    setSaving(true); setError('');
+    setSaving(true); setError(''); setExistingUserHint(null);
     try {
       const payload:any = {...form}; if (!payload.password) delete payload.password;
       payload.reporting_to = payload.reporting_to || null;
       if (editId) await apiFetch(`/users/${editId}`, { method:'PUT', body:JSON.stringify(payload) });
       else await apiFetch('/users', { method:'POST', body:JSON.stringify(payload) });
       setShowModal(false); refetch();
-    } catch(e:any) { setError(e.message||'Failed to save'); }
+    } catch(e:any) {
+      setError(e.message||'Failed to save');
+      const hint = e.body?.detail?.existing_user;
+      if (hint) setExistingUserHint(hint);
+    }
     finally { setSaving(false); }
   };
 
@@ -318,7 +341,21 @@ export default function UsersPage() {
 
       {/* Invite/Edit Modal */}
       <Modal open={showModal} onClose={()=>setShowModal(false)} title={editId?'Edit User':'Invite New User'} subtitle={editId?'Update user profile and role':'Send an invitation to join your team'} size="lg" closeOnBackdropClick={false}>
-        {error && <div style={{ marginBottom:'16px', padding:'10px 14px', background:'#fef2f2', border:'1px solid #fecaca', borderRadius:'8px', fontSize:'13px', color:'#dc2626' }}>⚠️ {error}</div>}
+        {error && (
+          <div style={{ marginBottom:'16px', padding:'10px 14px', background:'#fef2f2', border:'1px solid #fecaca', borderRadius:'8px', fontSize:'13px', color:'#dc2626' }}>
+            <div>⚠️ {error}</div>
+            {existingUserHint && (
+              <div style={{ marginTop:'8px', display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap' }}>
+                <span style={{ color:'#7f1d1d' }}>
+                  This email belongs to <b>{existingUserHint.full_name}</b> ({existingUserHint.is_active===false?'Inactive':'Active'}).
+                </span>
+                <button data-testid="edit-existing-instead-btn" onClick={editExistingInstead} style={{ padding:'5px 12px', background:'#dc2626', color:'white', border:'none', borderRadius:'6px', fontSize:'12px', fontWeight:'600', cursor:'pointer', whiteSpace:'nowrap' }}>
+                  Edit {existingUserHint.full_name} instead
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <FormRow>
           <FormField label="Full Name" required><input style={inputStyle} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))} /></FormField>
           <FormField label="Email" required><input type="email" style={inputStyle} placeholder="rahul@aviinjobs.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))} /></FormField>

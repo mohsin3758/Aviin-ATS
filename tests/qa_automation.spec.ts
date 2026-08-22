@@ -6379,6 +6379,33 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     expect(errors).toHaveLength(0);
   });
 
+  test('BUG FIX: "Email already registered" now offers a direct "Edit this user instead" action, with their real current data loaded, instead of being a dead end', async ({ page, request }) => {
+    const stamp = Date.now();
+    const existing = await (await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Duplicate Email Test ${stamp}`, email: `qa_s51_dupemail_${stamp}@aviintech.com`, role: 'recruiter', department: 'Delivery' } })).json();
+    createdIds.push(existing.id);
+
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('/settings/users');
+    await page.click('button:has-text("Invite User")');
+    await page.waitForTimeout(500);
+    await page.getByPlaceholder('e.g. Rahul Sharma').fill('Someone New');
+    await page.getByPlaceholder('rahul@aviinjobs.com').fill(existing.email);
+    await page.locator('button:has-text("Send Invitation")').click();
+    await page.waitForTimeout(1500);
+
+    await expect(page.locator('text=Email already registered')).toBeVisible();
+    const hintBtn = page.getByTestId('edit-existing-instead-btn');
+    await expect(hintBtn).toContainText(existing.full_name);
+    await hintBtn.click();
+    await page.waitForTimeout(1000);
+
+    await expect(page.locator('h2', { hasText: 'Edit User' })).toBeVisible();
+    await expect(page.getByPlaceholder('e.g. Rahul Sharma')).toHaveValue(existing.full_name);
+    expect(errors).toHaveLength(0);
+    await page.getByTestId('modal-close-btn').click();
+  });
+
   test.afterAll(async ({ request }) => {
     for (const id of createdIds) {
       // Try a real purge first (matches this suite's whole point — don't

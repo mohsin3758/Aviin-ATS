@@ -10351,3 +10351,37 @@ added to "S51" (now 9 tests) covering all three cases in one flow.
 Regression-checked S31/S33 (7/7 clean — neither exercises a modal
 backdrop click, confirming no other page's behavior shifted). Zero-token
 audit: `CONFIRMED CLEAN` (389 files, 0 external API refs).
+
+## Users & Roles, same day: "Email already registered" was a dead end
+## — now offers a direct "Edit this user instead" action, 2026-08-22
+User hit this trying to update Shahana's role via the Invite form (the
+wrong form for an existing person, but an easy, understandable mistake —
+there was no signal anywhere in the UI pointing them to Edit instead).
+The duplicate-email check itself was already correct (prevents two
+accounts sharing one email) — the gap was that the error gave no way
+forward: no indication of who already holds that email, no path to
+actually do what the admin was trying to do.
+
+`create_user()` (`backend/routers/users.py`) now returns the existing
+user's real `id`/`full_name`/`is_active` alongside the error, using the
+same nested-`detail` shape this codebase already established for the
+"Candidate Already Owned" ownership-conflict messages (`apiFetch`
+already unwraps this correctly — no frontend parsing change needed
+beyond reading the new field). The Invite/Edit modal's error banner now
+shows "This email belongs to X (Active/Inactive)" plus a real "Edit X
+instead" button — clicking it fetches that user's actual current data
+and switches the same open modal straight into editing them, with every
+real field (role, department, designation, etc.) pre-filled, ready to
+change and save through the already-working Update flow. No need to
+close the modal, hunt down their row, and reopen a second one.
+
+Verified for real via a genuine headless-browser run, not code review:
+reproduced the exact reported scenario (typed "Shahana" + her real email
+into Invite User, hit the duplicate error), clicked the new button, and
+confirmed the modal title changed to "Edit User" with her real name and
+real current role loaded from a live `GET /users/{id}` call — from there
+the role (or anything else) can be changed and saved normally. New
+permanent "S51" test (now 10 tests) covers the same flow against a real
+throwaway fixture rather than touching Shahana's own record. Regression-
+checked S31/S33 (7/7 clean). Zero-token audit: `CONFIRMED CLEAN` (389
+files, 0 external API refs).
