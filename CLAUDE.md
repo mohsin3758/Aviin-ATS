@@ -10170,3 +10170,55 @@ the code. New permanent S51 test added covering the disabled-own-row
 state and the select-all exclusion. Regression-checked S31/S33/S51
 (13/13 clean). Zero-token audit: `CONFIRMED CLEAN` (389 files, 0
 external API refs).
+
+## Users & Roles, same day, fourth pass: why ~176 inactive users still
+## can't be purged — investigated, root cause is real, deliberately left
+## as-is per the user's own choice
+User reported bulk-delete "not deleting" again after a large selection
+(most of the remaining ~181 inactive users). Investigated for real
+rather than assuming another backend bug — the purge mechanism itself
+was independently re-confirmed still correct (a genuinely fresh
+throwaway user purged cleanly in the same investigation). Picked one
+concrete refused case ("Debug Test," a junk account) and traced the
+exact blocking row via a read-only diagnostic query (not a raw DELETE,
+which the auto-mode classifier correctly refused as too destructive to
+run outside an application code path) — found a leftover
+`interview_schedules` row from an old S35 test run, itself referencing
+another confirmed-junk candidate ("QA S35 Interview Candidate...",
+`@test.com`), that had never been cleaned up.
+
+Widening the check to all ~176 remaining "kept" users surfaced the real
+scope, via a read-only sweep across every table that FK-references
+`users.id`: **22 different tables** hold real rows referencing these
+same throwaway accounts — `notifications` alone has 2,046 rows,
+plus `recruiter_activity_events`, `recruiter_performance_scores`,
+`recruiter_productivity_daily/hourly`, `recruiter_sla_tracking`,
+`recruiter_kpi_scores`, `kae_kpi_scores`/`kae_incentives`/
+`kae_client_retention`, `client_owners`, `candidate_ownership`/
+`candidate_ownership_history`, `permission_check_log`,
+`account_visibility`, `assignments`, `applications.assigned_recruiter_id`,
+`recruiter_tasks`, `recruiter_targets`, `interview_schedules`,
+`candidate_submissions`. Root cause: over months of building and
+verifying this ATS's recruiter/KAE/permission features (this project's
+entire development history, visible throughout this file), the same
+small pool of throwaway test-fixture users got reused repeatedly across
+many different features' verification passes, and each pass correctly
+wrote real rows to whichever tracking table that feature owns. The
+purge safety net (built earlier the same day) is correctly refusing to
+silently destroy any of that trail — it's just that nearly everything
+left over now has *some* trail, across a genuinely wide set of tables,
+some of which (client_owners, candidate_ownership,
+applications.assigned_recruiter_id) look enough like real business-
+state records that a blind delete sweep across all 22 tables felt like
+a real, avoidable risk rather than a natural continuation of the
+already-completed purge feature.
+
+Presented the finding and the tradeoff directly (AskUserQuestion) rather
+than silently attempting a large, hard-to-reverse cross-table cleanup:
+leave the ~176 rows as-is (already hidden by default, harmless,
+zero risk) vs. a scoped cleanup of pure-metrics tables only vs. a full
+22-table sweep. **User chose to leave them as-is.** No further code or
+data changes made in this pass — this was investigation + a deliberate,
+informed decision, not a fix. Documented here so a future session
+doesn't re-investigate the same "why won't this purge" question from
+scratch: this is expected, understood, and intentionally left alone.
