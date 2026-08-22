@@ -96,8 +96,26 @@ export default function UsersPage() {
     // reversible soft-delete behavior unchanged.
     if (u.is_active === false) {
       if (!confirm(`Permanently delete ${u.full_name}? This CANNOT be undone. If this user has any real activity on record (candidates, assignments, audit history), the deletion will be safely refused instead.`)) return;
-      try { await apiFetch(`/users/${u.id}/purge`, {method:'DELETE'}); refetch(); }
-      catch(e:any) { alert(e.message||'Failed to permanently delete user'); }
+      try {
+        await apiFetch(`/users/${u.id}/purge`, {method:'DELETE'});
+        refetch();
+      } catch(e:any) {
+        // Real admin request (2026-08-22): "give me the option to delete
+        // any user, not just ones with zero history." A real account
+        // often DOES have real work attached — the safe purge above
+        // correctly refuses that. Escalating to force-delete is a
+        // deliberate second step, only offered once the safe path has
+        // already failed, so it's never the accidental first click.
+        if (/real activity on record/i.test(e.message||'')) {
+          if (!confirm(`${u.full_name} has real work on record (candidates, assignments, tasks, etc.) — the safe delete refused to touch it.\n\nFORCE DELETE instead? This unassigns them from everything (the real candidates/applications/interviews/tasks themselves are kept, just no longer attributed to this account) and then permanently deletes the account.\n\nAny financial or compliance-sensitive records (incentive payouts, retention bank, loyalty milestones, KPI scores, approval-chain steps) are NEVER touched — if any exist, force delete will still be safely refused, same as now.\n\nThis cannot be undone. Continue?`)) return;
+          try {
+            await apiFetch(`/users/${u.id}/purge?force=true`, {method:'DELETE'});
+            refetch();
+          } catch(e2:any) { alert(e2.message||'Force delete failed'); }
+        } else {
+          alert(e.message||'Failed to permanently delete user');
+        }
+      }
       return;
     }
     if (!confirm(`Delete ${u.full_name}? This deactivates their account (same as Deactivate) and they will no longer be able to log in or be assigned new work. This can be undone by an admin later if needed.`)) return;

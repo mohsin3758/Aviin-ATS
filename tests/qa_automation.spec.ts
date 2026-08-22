@@ -6302,6 +6302,56 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     await page.getByTestId('select-all-checkbox').click();
   });
 
+  test('BUG FIX: DELETE /users/{id}/purge?force=true unassigns real work from the account then deletes it, WITHOUT ever destroying the underlying candidate/application; still refuses when a financial/compliance record is on file', async ({ request }) => {
+    // Real admin request (2026-08-22): "give me the option to delete any
+    // user I created by mistake" — not just ones with zero history.
+    const stamp = Date.now();
+    const recruiter = await (await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Force Delete ${stamp}`, email: `qa_s51_forcedel_${stamp}@aviintech.com`, role: 'recruiter' } })).json();
+    await request.patch(`${API}/users/${recruiter.id}/deactivate`, { headers: { Authorization: `Bearer ${token}` } });
+
+    const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: { Authorization: `Bearer ${token}` } });
+    const reqId = (await reqRes.json())[0].id;
+    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Force Del Candidate ${stamp}`, email: `qa_s51_forcedelcand_${stamp}@aviinjobs.com`, phone: `999002${String(stamp).slice(-3)}` } })).json();
+    const app = await (await request.post(`${API}/applications`, { headers: { Authorization: `Bearer ${token}` }, data: { candidate_id: cand.id, requisition_id: reqId, assigned_recruiter_id: recruiter.id } })).json();
+    expect(app.assigned_recruiter_id).toBe(recruiter.id);
+
+    // Plain purge must still be refused, unchanged.
+    const plainRes = await request.delete(`${API}/users/${recruiter.id}/purge`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(plainRes.status()).toBe(409);
+
+    // force=true detaches the real application (kept, not deleted) and
+    // then deletes the user for real.
+    const forceRes = await request.delete(`${API}/users/${recruiter.id}/purge?force=true`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(forceRes.status()).toBe(200);
+    const getUserAfter = await request.get(`${API}/users/${recruiter.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(getUserAfter.status()).toBe(404);
+
+    const appAfter = await (await request.get(`${API}/applications/${app.id}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(appAfter.id).toBe(app.id);
+    expect(appAfter.candidate_id).toBe(cand.id);
+    expect(appAfter.assigned_recruiter_id).toBeNull();
+
+    await request.delete(`${API}/applications/${app.id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+
+    // Financial-record guard: force=true must NEVER touch recruiter_kpi_scores
+    // (feeds the real compensation engine) — confirmed via a genuine
+    // scorecard, not a guess.
+    const financeUser = await (await request.post(`${API}/users`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Force Fin Guard ${stamp}`, email: `qa_s51_forcefin_${stamp}@aviintech.com`, role: 'recruiter' } })).json();
+    await request.patch(`${API}/users/${financeUser.id}/deactivate`, { headers: { Authorization: `Bearer ${token}` } });
+    const scoreRes = await request.post(`${API}/incentives/scorecard`, { headers: { Authorization: `Bearer ${token}` }, data: { user_id: financeUser.id, period_month: 8, period_year: 2026, submissions_score: 5, interviews_score: 5, joinings_score: 5, quality_score: 5, attendance_score: 5, client_score: 5 } });
+    expect(scoreRes.status()).toBe(200);
+    const financeForceRes = await request.delete(`${API}/users/${financeUser.id}/purge?force=true`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(financeForceRes.status()).toBe(409);
+    const financeBody = await financeForceRes.json();
+    expect(financeBody.detail).toContain('financial or compliance-sensitive');
+    // Left as an inactive, blocked-from-deletion account by design — the
+    // scorecard is real financial-adjacent data force delete must never
+    // silently remove, matching the same accepted-residue precedent
+    // already established elsewhere in this suite.
+    createdIds.push(financeUser.id);
+  });
+
   test.afterAll(async ({ request }) => {
     for (const id of createdIds) {
       // Try a real purge first (matches this suite's whole point — don't

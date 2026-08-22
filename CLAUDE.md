@@ -10222,3 +10222,100 @@ data changes made in this pass — this was investigation + a deliberate,
 informed decision, not a fix. Documented here so a future session
 doesn't re-investigate the same "why won't this purge" question from
 scratch: this is expected, understood, and intentionally left alone.
+
+## Users & Roles, same day, fifth pass: real "Force Delete" built — full
+## admin control over any user, without ever touching real money or
+## compliance records
+Direct follow-up to the "leave as-is" decision above — user's actual ask
+was broader than one account: "give me the option to delete the user...
+not only shahana... for any user to delete, I need option to delete."
+Checked Shahana specifically first (13 real applications, 3 real
+scheduled interviews attached — not test clutter) before building
+anything, since silently deleting real recruiting history would be a
+real mistake, not a fix.
+
+**The real design problem**: `users.id` is referenced by 107 columns
+across ~90 tables in this schema (every feature attributes its actions
+to a user). A genuinely unrestricted "force delete" would either hard-
+fail on the first NOT-NULL constraint it hit, or — if implemented
+carelessly with a blanket cascade — could silently destroy real
+candidate/application/interview records, or worse, real financial
+records (incentive payouts, retention-bank holds, loyalty milestones).
+Neither is acceptable for a feature whose whole point is giving an
+admin *more* control, not a new way to lose data by accident.
+
+**What was built** — `DELETE /users/{id}/purge?force=true`
+(`backend/routers/users.py`), admin-only, same already-inactive
+precondition as plain purge. Every one of the 107 FK columns was
+individually reasoned about, not swept generically, and sorted into 3
+buckets:
+1. **Nullable columns → `SET NULL`** (68 columns: `applications.
+   assigned_recruiter_id`, `interview_schedules.interviewer_id`,
+   `recruiter_tasks.recruiter_id`, `notifications.*`, `audit_log.
+   actor_user_id`, `offers.approved_by`, etc.) — always safe. The real
+   record (an application, an interview, an audit-log entry) is kept
+   exactly as-is, just unattributed. "No recruiter assigned" is already
+   a normal state this codebase supports everywhere else.
+2. **NOT NULL columns that only exist to describe THIS user →
+   `DELETE`** (29 columns: `recruiter_activity_events`, `recruiter_
+   performance_scores`, `recruiter_productivity_daily/hourly/weekly`,
+   `recruiter_sla_tracking`, `device_*` monitoring tables, `push_
+   subscriptions`, `staff_shifts`, `user_email_accounts`, `user_
+   signatures`, `work_sessions`, `assignments`, `candidate_ownership`,
+   `client_owners`, etc.) — nothing else depends on these rows once the
+   user is gone; deleting them is the correct, not just convenient,
+   outcome.
+3. **NOT NULL columns tied to real money or a compliance trail →
+   deliberately never touched, even with force=true**: `incentive_
+   records`, `retention_bank`, `loyalty_milestones`, `kae_incentives`,
+   `kae_client_retention`, `kae_kpi_scores.user_id`, `recruiter_kpi_
+   scores.user_id`, `recruiter_advanced_kpis`, `candidate_retention_
+   tracking` (feeds the real placement-credit compensation calc),
+   `requisition_approval_steps` (HITL audit trail), `shift_swap_
+   requests.requested_by`. If any of these still reference the user
+   after step 1/2, the final `DELETE FROM users` correctly raises a
+   real `ForeignKeyViolationError`, caught and returned as a specific
+   409 naming exactly what's blocking it — never a raw 500, and never a
+   silent skip.
+
+All of it runs in one transaction — an all-or-nothing detach-then-delete,
+never a half-completed state.
+
+**Frontend**: the existing Delete button now escalates in two deliberate
+steps rather than exposing a permanently-visible "Force Delete" control
+— click Delete, the safe purge is tried first exactly as before; only if
+that's refused with the real "has real activity" message does a second,
+explicit confirm appear offering force delete, with plain-language
+copy explaining exactly what happens (real records kept, un-attributed;
+financial/compliance records never touched, would still be safely
+refused). Force delete stays a single-row action, deliberately not
+wired into bulk-delete — forcing many real accounts' histories apart in
+one blind batch click is a different, much higher-risk operation than
+reviewing and confirming one at a time.
+
+**Verified for real end-to-end, twice — once via direct API calls, once
+through the actual UI**: built a real throwaway recruiter, assigned them
+a real application via `assigned_recruiter_id`, confirmed the plain
+purge still correctly 409s (unchanged), then force-purged them and
+confirmed via a fresh `GET` that **the application survived completely
+intact** (same candidate_id, same application id) with only `assigned_
+recruiter_id` now null — the real record was preserved exactly as
+designed, not destroyed. Separately built a real recruiter, gave them a
+genuine `recruiter_kpi_scores` row via the actual `POST /incentives/
+scorecard` endpoint (not a synthetic row), and confirmed force delete
+correctly refused with a 409 naming `recruiter_kpi_scores` specifically
+— the financial-record guard holds under real, not hypothetical,
+pressure. Repeated the application-survives case through a genuine
+headless-browser click-through (Delete → refused → force-delete
+confirm → row disappears → application confirmed still assigned to its
+real candidate, recruiter unassigned) — same result via the real UI,
+not just the API. New permanent test added to "S51" (now 8 tests)
+covering both cases. Regression-checked S31/S33 (7/7 clean). Zero-token
+audit: `CONFIRMED CLEAN` (389 files, 0 external API refs).
+
+**Explicitly still refused by design, not a gap**: force delete will
+never remove a user with real incentive/retention-bank/loyalty/KAE-
+compensation/approval-chain records attached, under any circumstance.
+If that's ever genuinely needed (e.g. a compliance-approved account
+purge), it would need its own deliberate, separately-reasoned decision
+— not a flag on this endpoint.

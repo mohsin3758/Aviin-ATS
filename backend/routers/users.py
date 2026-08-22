@@ -307,8 +307,90 @@ async def delete_user(user_id: str, actor: Actor = Depends(require_role("admin",
     return {"ok": True, "deleted": dict(row)}
 
 
+# Force-delete detach lists (2026-08-22) — real admin request: "give me
+# the option to delete any user I created by mistake," not just ones
+# with zero history. Deleting a user who has real work attached (a real
+# recruiter with real candidates, e.g.) isn't itself wrong — what would
+# be wrong is silently destroying the CANDIDATE/CLIENT/FINANCIAL records
+# that reference them. So force=true doesn't touch users.id's referenced
+# rows blindly; it makes a specific, reasoned call per table:
+#
+# 1. NULLABLE columns -> SET NULL. Always safe — the referencing record
+#    (a real application, interview, task, audit_log entry, etc.) is
+#    preserved exactly as-is, just no longer attributed to this user.
+#    "unassigned" is already a normal, supported state everywhere this
+#    matters in this codebase.
+# 2. NOT NULL columns where the row's entire reason to exist IS this
+#    user (their own device-monitoring consent, push subscription, leave
+#    record, work session, email account, productivity/activity/SLA
+#    tracking row, operational assignment/ownership link) -> deleted.
+#    Nothing else depends on these rows once the user is gone.
+# 3. NOT NULL columns tied to real money or a compliance audit trail
+#    (incentive payouts, retention-bank holds, loyalty milestones, KAE
+#    incentives/KPI scores that feed those payouts, candidate retention
+#    credit that feeds compensation calc, HITL approval-chain steps) are
+#    deliberately NEVER auto-deleted, even with force=true — these stay
+#    as a genuine, specific 409 naming the exact table, so an admin
+#    force-deleting a real ex-employee can't accidentally erase evidence
+#    of a real payout or a real approval decision. If this ever needs to
+#    be un-blocked, that's a deliberate follow-up, not a default.
+_FORCE_NULLIFY = [
+    ("applications", "assigned_recruiter_id"), ("applications", "removed_by"),
+    ("account_pl", "finalized_by"), ("alert_acknowledgments", "acknowledged_by"),
+    ("application_rejections", "rejected_by"), ("assignment_event", "actor_user_id"),
+    ("audit_log", "actor_user_id"), ("bu_eligibility", "bu_head_user_id"),
+    ("calendar_events", "user_id"), ("candidate_activities", "user_id"),
+    ("candidate_messages", "sent_by"), ("candidate_ownership_history", "performed_by"),
+    ("candidate_ownership_history", "recruiter_id"), ("candidate_submissions", "kae_user_id"),
+    ("candidate_submissions", "sent_by"), ("candidate_tag_map", "tagged_by"),
+    ("client_owners", "assigned_by"), ("client_portal_tokens", "created_by"),
+    ("client_site_geofences", "created_by"), ("clients", "owner_recruiter_id"),
+    ("collection_records", "kae_user_id"), ("contractor_attendance", "manual_override_by"),
+    ("contribution_margins", "user_id"), ("cv_bulk_uploads", "uploaded_by"),
+    ("delivery_pool_allocations", "user_id"), ("device_dlp_policies", "created_by"),
+    ("document_expiry_tracking", "created_by"), ("document_templates", "uploaded_by"),
+    ("duplicate_candidates", "resolved_by"), ("extension_captures", "captured_by"),
+    ("facebook_page_connections", "connected_by"), ("generated_resumes", "generated_by"),
+    ("headcount_plans", "approved_by"), ("interview_schedules", "interviewer_id"),
+    ("interview_scorecards", "interviewer_id"), ("kae_kpi_scores", "approved_by"),
+    ("recruiter_kpi_scores", "approved_by"), ("job_portal_issues", "reported_by"),
+    ("job_portal_issues", "resolved_by"), ("job_shares", "posted_by"),
+    ("monitored_devices", "live_view_requested_by"), ("nda_documents", "uploaded_by"),
+    ("notifications", "recipient_user_id"), ("notifications", "user_id"),
+    ("offers", "approved_by"), ("payroll_export_webhooks", "created_by"),
+    ("payroll_runs", "approved_by"), ("permission_check_log", "user_id"),
+    ("recruiter_client_blocks", "blocked_by"), ("recruiter_leave", "created_by"),
+    ("recruiter_targets", "created_by"), ("recruiter_tasks", "created_by"),
+    ("recruiter_tasks", "recruiter_id"), ("requisitions", "created_by"),
+    ("resume_templates", "created_by"), ("saved_reports", "user_id"),
+    ("scoring_weight_config", "updated_by"), ("screening_notification_settings", "updated_by"),
+    ("shift_swap_requests", "reviewed_by"), ("shift_swap_requests", "target_user_id"),
+    ("shift_templates", "created_by"), ("sla_tier_config", "updated_by"),
+    ("staff_shifts", "created_by"), ("telegram_channel_connections", "connected_by"),
+    ("timesheets", "approved_by"), ("tracking_sheet_templates", "created_by"),
+    ("users", "reporting_to"),
+]
+_FORCE_DELETE_ROWS = [
+    ("account_visibility", "user_id"), ("assignments", "recruiter_id"),
+    ("calendar_feed_tokens", "user_id"), ("candidate_ownership", "recruiter_id"),
+    ("client_owners", "user_id"), ("device_activity_log", "user_id"),
+    ("device_browsing_history", "user_id"), ("device_dlp_events", "user_id"),
+    ("device_enrollment_tokens", "user_id"), ("device_intensity_metrics", "user_id"),
+    ("device_monitoring_consent", "user_id"), ("device_screenshots", "user_id"),
+    ("monitored_devices", "user_id"), ("push_subscriptions", "user_id"),
+    ("recruiter_activity_events", "recruiter_id"), ("recruiter_client_blocks", "recruiter_id"),
+    ("recruiter_leave", "recruiter_id"), ("recruiter_performance_scores", "recruiter_id"),
+    ("recruiter_productivity_daily", "recruiter_id"), ("recruiter_productivity_hourly", "recruiter_id"),
+    ("recruiter_productivity_weekly", "recruiter_id"), ("recruiter_risk_scores", "recruiter_id"),
+    ("recruiter_sla_tracking", "recruiter_id"), ("recruiter_targets", "recruiter_id"),
+    ("referral_links", "referrer_user_id"), ("staff_shifts", "user_id"),
+    ("user_email_accounts", "user_id"), ("user_signatures", "user_id"),
+    ("work_session_breaks", "user_id"), ("work_sessions", "user_id"),
+]
+
+
 @router.delete("/{user_id}/purge")
-async def purge_user(user_id: str, actor: Actor = Depends(require_role("admin"))):
+async def purge_user(user_id: str, force: bool = False, actor: Actor = Depends(require_role("admin"))):
     """Real gap fix (2026-08-22): soft-delete (above) has no effect on a
     user who's already inactive — an admin re-clicking Delete on an
     already-`is_active:false` row (e.g. leftover QA/test fixtures) gets a
@@ -327,7 +409,15 @@ async def purge_user(user_id: str, actor: Actor = Depends(require_role("admin"))
     caught here and returned as a clear, honest 409 rather than a raw
     500 — that user's history is real and stays intact, only visible
     under Show Inactive forever, same as before. A genuinely fresh QA/
-    test fixture with zero real references purges cleanly."""
+    test fixture with zero real references purges cleanly.
+
+    `force=true` (2026-08-22 follow-up): a real admin ask — "let me
+    delete a user regardless of history, I created them by mistake."
+    See _FORCE_NULLIFY/_FORCE_DELETE_ROWS above for the reasoning; this
+    runs the whole detach + delete in one transaction (all-or-nothing —
+    a real user's data is never left half-detached), and still refuses
+    (409, naming the exact table) if anything financial/compliance-
+    sensitive still references them afterward."""
     if user_id == actor.user_id:
         raise HTTPException(400, "Cannot delete yourself")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -337,14 +427,34 @@ async def purge_user(user_id: str, actor: Actor = Depends(require_role("admin"))
             raise HTTPException(404, "User not found")
         if row["is_active"] is not False:
             raise HTTPException(400, "Deactivate this user first before permanently deleting them")
-        try:
-            await conn.execute("DELETE FROM users WHERE id=$1 AND tenant_id=$2", user_id, actor.tenant_id)
-        except asyncpg.exceptions.ForeignKeyViolationError:
-            raise HTTPException(
-                409,
-                "This user has real activity on record (candidates, assignments, audit history, etc.) "
-                "and can't be permanently deleted — they'll stay hidden as Inactive instead.",
-            )
+        if not force:
+            try:
+                await conn.execute("DELETE FROM users WHERE id=$1 AND tenant_id=$2", user_id, actor.tenant_id)
+            except asyncpg.exceptions.ForeignKeyViolationError:
+                raise HTTPException(
+                    409,
+                    "This user has real activity on record (candidates, assignments, audit history, etc.) "
+                    "and can't be permanently deleted — they'll stay hidden as Inactive instead. "
+                    "Use force delete to remove them anyway.",
+                )
+            return {"ok": True, "purged": user_id}
+        async with conn.transaction():
+            for table, col in _FORCE_NULLIFY:
+                await conn.execute(f"UPDATE {table} SET {col}=NULL WHERE {col}=$1", user_id)
+            for table, col in _FORCE_DELETE_ROWS:
+                await conn.execute(f"DELETE FROM {table} WHERE {col}=$1", user_id)
+            try:
+                await conn.execute("DELETE FROM users WHERE id=$1 AND tenant_id=$2", user_id, actor.tenant_id)
+            except asyncpg.exceptions.ForeignKeyViolationError as e:
+                blocking_table = getattr(e, "detail", None) or str(e)
+                raise HTTPException(
+                    409,
+                    "This user still has financial or compliance-sensitive records on file "
+                    "(incentive payouts, retention bank, loyalty milestones, KAE/recruiter KPI "
+                    "scores, or an approval-chain step) that force delete deliberately never "
+                    f"removes. Detail: {blocking_table}",
+                )
+    return {"ok": True, "purged": user_id, "force": True}
     return {"ok": True, "purged": user_id}
 
 
