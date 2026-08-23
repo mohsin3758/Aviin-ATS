@@ -54,7 +54,7 @@ test.describe('S2 Zero-Token AI', () => {
     const reqId = (await reqs.json())[0]?.id;
     if (!reqId) return test.skip();
     const r = await request.get(`${API}/requisitions/${reqId}/match-candidates`, { headers: { 'x-tenant-id': TID } });
-    const matches = await r.json();
+    const matches = (await r.json()).matches;
     expect(matches[0].fit_score).toBeGreaterThanOrEqual(0);
     expect(matches[0].fit_score).toBeLessThanOrEqual(100);
   });
@@ -1146,7 +1146,7 @@ test.describe.serial('S15 Tier-0 Quick Wins', () => {
       headers: { 'Authorization': `Bearer ${token}` },
     });
     expect(r.ok()).toBeTruthy();
-    const rows = await r.json();
+    const rows = (await r.json()).matches;
     const row = rows.find((x: any) => x.candidate_id === candId);
     expect(row).toBeTruthy();
     expect(row.missing_skills.sort()).toEqual(['Docker', 'Kubernetes'].sort());
@@ -2149,78 +2149,87 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
   });
   const throwawayReq = await throwawayReqRes.json();
 
-  await page.goto('/candidates');
-  await page.getByRole('button', { name: /JD Match/i }).click();
-  await page.getByPlaceholder('Paste the full job description here...').fill(
-    'We are hiring a Python developer with AWS and Docker experience. SQL knowledge required.'
-  );
-  await page.getByRole('button', { name: /Rank Candidates/i }).click();
-  await expect(page.getByText(/Ranked \d+ candidates by fit/)).toBeVisible({ timeout: 20000 });
+  // REAL BUG FOUND LIVE (2026-08-23): this whole test body used to run as
+  // plain sequential code after creating the throwaway requisition - any
+  // assertion failing partway through (a real, observed occurrence, not
+  // hypothetical: 2 stray "S20 JD Match Test Req" rows were found sitting
+  // live in production, confirmed via a user screenshot) skipped every
+  // step after it, INCLUDING the cleanup at the very end, permanently
+  // leaking the requisition. Wrapped in try/finally so cleanup always
+  // runs regardless of where the test fails.
+  try {
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /JD Match/i }).click();
+    await page.getByPlaceholder('Paste the full job description here...').fill(
+      'We are hiring a Python developer with AWS and Docker experience. SQL knowledge required.'
+    );
+    await page.getByRole('button', { name: /Rank Candidates/i }).click();
+    await expect(page.getByText(/Ranked \d+ candidates by fit/)).toBeVisible({ timeout: 20000 });
 
-  const results = page.getByTestId('jd-rank-results');
-  const rows = results.locator('input[type="checkbox"]');
-  const rowCount = await rows.count();
-  if (rowCount === 0) {
-    await request.delete(`${API}/requisitions/${throwawayReq.id}`, { headers: { Authorization: `Bearer ${token}` } });
-    test.skip(true, 'no ranked candidates in this environment to test against');
-  }
+    const results = page.getByTestId('jd-rank-results');
+    const rows = results.locator('input[type="checkbox"]');
+    const rowCount = await rows.count();
+    if (rowCount === 0) {
+      test.skip(true, 'no ranked candidates in this environment to test against');
+    }
 
-  const urlBeforePreview = page.url();
-  await results.getByRole('button', { name: 'View Profile' }).first().click();
-  await expect(page.getByText('Back to list')).toBeVisible({ timeout: 10000 });
-  // "Open Full Profile" is a button (router.push), not an <a href> - it
-  // used to be a plain link, changed the same day to same-tab navigation
-  // after a real report that repeated new-tab opens across a review
-  // session were confusing (see S53's dedicated coverage for the actual
-  // navigation-target check). Here just confirm viewing the inline
-  // preview itself caused zero navigation, same as always.
-  await expect(page.getByRole('button', { name: /Open Full Profile/i })).toBeVisible();
-  expect(page.url()).toBe(urlBeforePreview); // confirms zero navigation occurred
-  await page.getByText('Back to list').click();
-  await expect(results).toBeVisible();
+    const urlBeforePreview = page.url();
+    await results.getByRole('button', { name: 'View Profile' }).first().click();
+    await expect(page.getByText('Back to list')).toBeVisible({ timeout: 10000 });
+    // "Open Full Profile" is a button (router.push), not an <a href> - it
+    // used to be a plain link, changed the same day to same-tab navigation
+    // after a real report that repeated new-tab opens across a review
+    // session were confusing (see S53's dedicated coverage for the actual
+    // navigation-target check). Here just confirm viewing the inline
+    // preview itself caused zero navigation, same as always.
+    await expect(page.getByRole('button', { name: /Open Full Profile/i })).toBeVisible();
+    expect(page.url()).toBe(urlBeforePreview); // confirms zero navigation occurred
+    await page.getByText('Back to list').click();
+    await expect(results).toBeVisible();
 
-  await rows.first().check();
-  const addBtn = page.getByRole('button', { name: /Add 1 to Pipeline/i });
-  await expect(addBtn).toBeEnabled();
-  await addBtn.click();
-  await expect(page.getByText(/Assign 1 Candidate to Requisition/i)).toBeVisible({ timeout: 5000 });
+    await rows.first().check();
+    const addBtn = page.getByRole('button', { name: /Add 1 to Pipeline/i });
+    await expect(addBtn).toBeEnabled();
+    await addBtn.click();
+    await expect(page.getByText(/Assign 1 Candidate to Requisition/i)).toBeVisible({ timeout: 5000 });
 
-  // Regression test for a real bug reported live (2026-08-20): BulkAssignModal
-  // rendered with a raw zIndex:1000 overlay while it can be opened ON TOP of
-  // this JD Match modal (the shared Modal component uses 9999/10000) — the
-  // still-mounted ranked-results list underneath silently intercepted every
-  // click meant for "Assign to Pipeline", hanging forever with no visible
-  // error. Fixed by raising BulkAssignModal's (and BulkResumeGenModal's) own
-  // overlay z-index above Modal.tsx's. This step is the one that must
-  // actually exercise the click, not just confirm the modal opened.
-  const reqSelect = page.locator('select').last();
-  // The dropdown's real option text is "{title} ({department})" (see
-  // BulkAssignModal in candidates/page.tsx) - an exact-label match against
-  // the bare title alone doesn't match, confirmed live. Find the real
-  // option value the same reliable way the original code already did.
-  const throwawayOptValue = await reqSelect.locator('option').evaluateAll(
-    (opts, title) => opts.find(o => o.textContent?.startsWith(title))?.getAttribute('value') || '',
-    throwawayReq.title,
-  );
-  expect(throwawayOptValue).toBeTruthy();
-  await reqSelect.selectOption(throwawayOptValue);
-  const assignBtn = page.getByRole('button', { name: /Assign to Pipeline/i });
-  await expect(assignBtn).toBeEnabled();
-  await assignBtn.click({ timeout: 8000 }); // would previously hang ~30s on pointer-event interception
-  await expect(page.getByText(/assigned,.*already in pipeline/i)).toBeVisible({ timeout: 5000 });
+    // Regression test for a real bug reported live (2026-08-20): BulkAssignModal
+    // rendered with a raw zIndex:1000 overlay while it can be opened ON TOP of
+    // this JD Match modal (the shared Modal component uses 9999/10000) — the
+    // still-mounted ranked-results list underneath silently intercepted every
+    // click meant for "Assign to Pipeline", hanging forever with no visible
+    // error. Fixed by raising BulkAssignModal's (and BulkResumeGenModal's) own
+    // overlay z-index above Modal.tsx's. This step is the one that must
+    // actually exercise the click, not just confirm the modal opened.
+    const reqSelect = page.locator('select').last();
+    // The dropdown's real option text is "{title} ({department})" (see
+    // BulkAssignModal in candidates/page.tsx) - an exact-label match against
+    // the bare title alone doesn't match, confirmed live. Find the real
+    // option value the same reliable way the original code already did.
+    const throwawayOptValue = await reqSelect.locator('option').evaluateAll(
+      (opts, title) => opts.find(o => o.textContent?.startsWith(title))?.getAttribute('value') || '',
+      throwawayReq.title,
+    );
+    expect(throwawayOptValue).toBeTruthy();
+    await reqSelect.selectOption(throwawayOptValue);
+    const assignBtn = page.getByRole('button', { name: /Assign to Pipeline/i });
+    await expect(assignBtn).toBeEnabled();
+    await assignBtn.click({ timeout: 8000 }); // would previously hang ~30s on pointer-event interception
+    await expect(page.getByText(/assigned,.*already in pipeline/i)).toBeVisible({ timeout: 5000 });
 
-  expect(errors).toHaveLength(0);
-
+    expect(errors).toHaveLength(0);
+  } finally {
   // Cleanup: remove the real application this test just created, then
   // the throwaway requisition itself — leave zero residue on real data.
   const pipelineRes = await request.get(`${API}/requisitions/${throwawayReq.id}/pipeline`, { headers: { Authorization: `Bearer ${token}` } });
   const pipeline = await pipelineRes.json();
   for (const apps of Object.values(pipeline) as any[]) {
     for (const a of apps) {
-      await request.delete(`${API}/applications/${a.id}`, { headers: { Authorization: `Bearer ${token}` } });
+      await request.delete(`${API}/applications/${a.id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
     }
   }
-  await request.delete(`${API}/requisitions/${throwawayReq.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  await request.delete(`${API}/requisitions/${throwawayReq.id}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+  }
 });
 
 // S21 Device Monitoring gaps closed (2026-08-11): consent roster + device
@@ -5652,7 +5661,8 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status()).toBe(200);
-    const matches = await res.json();
+    const body = await res.json();
+    const matches = Array.isArray(body?.matches) ? body.matches : [];
     expect(Array.isArray(matches)).toBe(true);
     // A brand-new requisition has zero real applications/pipeline candidates,
     // but the DB-wide AI match must still return real candidates - this is
@@ -5677,7 +5687,7 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
       const res = await request.get(`${API}/requisitions/${reqId}/match-candidates?limit=1`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const matches = await res.json();
+      const matches = (await res.json())?.matches ?? [];
       // Once embedded, at least a plausible non-null cosine_similarity field
       // should be present (may legitimately be 0.0 for a genuinely
       // dissimilar top match, so this only checks the field type/presence,
@@ -5840,7 +5850,7 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     const matchRes = await request.get(`${API}/requisitions/${reqId}/match-candidates?limit=50`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    const matches = await matchRes.json();
+    const matches = (await matchRes.json())?.matches ?? [];
     const found = matches.find((m: any) => m.candidate_id === cand.id);
     if (found) {
       expect(found.matched_skills).toContain('Python');

@@ -2009,7 +2009,8 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [targetStage, setTargetStage] = useState(defaultStage || 'sourced');
-  const { data: matches, loading } = useFetch<any[]>(`/requisitions/${jobId}/match-candidates?limit=50`);
+  const { data: matchData, loading } = useFetch<any>(`/requisitions/${jobId}/match-candidates?limit=50`);
+  const matches: any[] = Array.isArray(matchData?.matches) ? matchData.matches : [];
 
   const alreadyIn = new Set<string>(
     Object.values(board || {}).flat().map((a: any) => a.candidate_id)

@@ -385,17 +385,50 @@ async def match_candidates_for_requisition(
     and this endpoint returns up to 50 candidates at once) via the same
     shared ner.compute_skill_similarity() every other missing_skills
     computation in this codebase now uses, so this stays honest and
-    consistent everywhere a recruiter sees a "missing skill" chip."""
+    consistent everywhere a recruiter sees a "missing skill" chip.
+
+    REAL BUG FIX (2026-08-23): match_candidates() (the SQL function this
+    calls) has NO relevance floor at all - it always returns exactly
+    `limit` rows, padding with candidates who share zero real skills if
+    that's what it takes to fill the count. Reported live: the "AI
+    Match" badge showed the exact same "50+" on nearly every role in the
+    tenant regardless of actual fit. Investigated the raw data before
+    picking a fix, not guessed: this tenant's real cosine_similarity
+    range for one genuine SAP FICO role was 0.585-0.886 across EVERY
+    candidate, including totally unrelated ones - general-purpose
+    sentence embeddings cluster tightly on resume-shaped text regardless
+    of actual relevance, so no fixed cosine threshold meaningfully
+    separates real matches from noise here. The SQL function's own
+    `skill_overlap` field is exact-string SQL INTERSECT - useless in
+    practice, since a requisition's skills_required is often phrased
+    differently from how a candidate's own skills array lists the same
+    thing (e.g. this exact tenant's SAP FICO role requires bare "FICO",
+    but real candidates store "SAP FICO" - INTERSECT never matches
+    either). Real relevance instead comes from the SAME word-boundary +
+    resume-text-aware compute_skill_similarity() already used for the
+    matched/missing chips - reusing it as the actual gate: a candidate
+    only counts as a genuine match if at least one required skill is
+    real, checkable evidence (structured skill or resume text mention),
+    not a database-wide default. When a requisition has no
+    skills_required at all, there's no structured signal to gate on -
+    falls back to a small, honestly-bounded top-20-by-cosine shortlist
+    rather than claiming hundreds of "matches" for skills nobody ever
+    specified.
+    `total_matches` is counted within a real, generous (not literally
+    unbounded) candidate pool - stated honestly in the field name, not
+    claimed as an absolute database-wide total."""
     from routers.ner import compute_skill_similarity
+    POOL_SIZE = 300  # generous relevance-ranked pool this endpoint actually checks
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("SELECT * FROM match_candidates($1, $2)", requisition_id, limit)
+        rows = await conn.fetch("SELECT * FROM match_candidates($1, $2)", requisition_id, POOL_SIZE)
         req_skills = await conn.fetchval(
             "SELECT skills_required FROM requisitions WHERE id=$1", requisition_id) or []
         cand_ids = [r["candidate_id"] for r in rows]
         text_rows = await conn.fetch(
             "SELECT id, resume_text FROM candidates WHERE id = ANY($1::uuid[])", cand_ids) if cand_ids else []
         resume_text_by_id = {r["id"]: r["resume_text"] for r in text_rows}
-    out = []
+
+    scored = []
     for r in rows:
         d = dict(r)
         _, matched, missing = compute_skill_similarity(
@@ -404,8 +437,15 @@ async def match_candidates_for_requisition(
         )
         d["missing_skills"] = missing
         d["matched_skills"] = matched
-        out.append(d)
-    return out
+        scored.append(d)
+
+    if req_skills:
+        qualifying = [d for d in scored if len(d["matched_skills"]) > 0]
+    else:
+        qualifying = sorted(scored, key=lambda d: float(d["cosine_similarity"] or 0), reverse=True)[:20]
+
+    total_matches = len(qualifying)
+    return {"total_matches": total_matches, "matches": qualifying[:limit]}
 
 
 @router.get("/{requisition_id}/boolean-search")

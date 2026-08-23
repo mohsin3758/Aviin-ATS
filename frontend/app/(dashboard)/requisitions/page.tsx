@@ -139,15 +139,23 @@ function InboxBadge({ reqId, count, iconOnly }: { reqId: string; count: number; 
 function AiMatchFinder({ reqId, reqTitle, onAdded }: { reqId: string; reqTitle?: string; onAdded?: () => void }) {
   const [state, setState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const [matches, setMatches] = useState<any[]>([]);
+  const [totalMatches, setTotalMatches] = useState(0);
   const [modalOpen, setModalOpen] = useState(false);
 
+  // REAL BUG FIX (2026-08-23): reported live — "AI Match" showed the same
+  // "50+" badge on nearly every role regardless of actual fit. That "50"
+  // was never a real match count, just the query's own display cap - the
+  // backend now applies a genuine relevance check (a real matched skill,
+  // not just hitting a candidate-count limit) and returns an honest
+  // total_matches separate from the display-limited list.
   const find = async (e: React.MouseEvent) => {
     e.stopPropagation(); e.preventDefault();
     if (state === 'loading') return;
     setState('loading');
     try {
       const data = await apiFetch(`/requisitions/${reqId}/match-candidates?limit=50`);
-      setMatches(Array.isArray(data) ? data : []);
+      setMatches(Array.isArray(data?.matches) ? data.matches : []);
+      setTotalMatches(typeof data?.total_matches === 'number' ? data.total_matches : 0);
       setState('done');
     } catch {
       setState('error');
@@ -155,7 +163,7 @@ function AiMatchFinder({ reqId, reqTitle, onAdded }: { reqId: string; reqTitle?:
   };
 
   if (state === 'done') {
-    if (matches.length === 0) {
+    if (totalMatches === 0) {
       return <span style={{ fontSize: '11px', color: '#94a3b8' }}>No AI matches found</span>;
     }
     return (
@@ -171,7 +179,7 @@ function AiMatchFinder({ reqId, reqTitle, onAdded }: { reqId: string; reqTitle?:
         <button onClick={e => { e.stopPropagation(); e.preventDefault(); setModalOpen(true); }}
           title="Review these AI-matched candidates and add them to the pipeline"
           style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, background: '#059669', border: 'none', cursor: 'pointer' }}>
-          <span style={{ fontSize: '11px', fontWeight: 800, color: '#fff' }}>{matches.length}{matches.length === 50 ? '+' : ''}</span>
+          <span style={{ fontSize: '11px', fontWeight: 800, color: '#fff' }}>{totalMatches}</span>
           <span style={{ fontSize: '9px', fontWeight: 600, color: '#a7f3d0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>✨ AI Match</span>
         </button>
         {modalOpen && (
@@ -734,11 +742,16 @@ function JobCard({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req: an
         );
       })()}
 
-      {!(counts && (counts.inbox_count > 0 || counts.total > 0)) && (
-        <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 10, marginTop: 4 }}>
-          <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />
-        </div>
-      )}
+      {/* REAL GAP FIX (2026-08-23): AI Match used to be hidden entirely
+          the moment a role had ANY real Inbox or Pipeline activity -
+          reported live: a recruiter has no way to check the wider
+          candidate database for a role that already has a few real
+          applicants, which is exactly when that check is most useful.
+          Always rendered now, alongside the Mini Pipeline Bar above
+          when one exists, not instead of it. */}
+      <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 10, marginTop: 4 }}>
+        <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />
+      </div>
 
             {/* Actions */}
       <div style={{
@@ -867,7 +880,7 @@ function JobListRow({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req:
         <Users size={11} /> {req.positions_count} pos.
       </span>
       <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
-      {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />}
+      <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />
       {counts && counts.total > 0 && (
         <a href={`/pipeline?job=${req.id}`} style={{ textDecoration: 'none', flexShrink: 0 }}>
           <span style={{ fontSize: '12px', fontWeight: 700, color: '#1e40af' }}>{counts.total} in pipeline</span>
@@ -933,7 +946,7 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts, onCandidatesAdded }
                 </td>
                 <td style={{ padding: '10px 14px' }}>
                   <InboxBadge reqId={req.id} count={counts?.inbox_count || 0} iconOnly />
-                  {!(counts?.inbox_count > 0) && <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />}
+                  <AiMatchFinder reqId={req.id} reqTitle={req.title} onAdded={onCandidatesAdded} />
                 </td>
                 <td style={{ padding: '10px 14px', maxWidth: '260px' }}>
                   {counts?.total > 0 ? (

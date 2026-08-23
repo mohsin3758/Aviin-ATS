@@ -91,7 +91,7 @@ export default function KanbanPage() {
     setMatchError(null);
     try {
       const data = await apiFetch(`/requisitions/${req_id}/match-candidates?limit=5`);
-      setMatches(data);
+      setMatches(Array.isArray(data?.matches) ? data.matches : []);
     } catch (e) {
       setMatchError(String(e));
     } finally {
