@@ -11402,3 +11402,124 @@ reorder of columns happens in Ops Settings' Template management, not
 inline in the send form - a deliberate split between "build the template
 shape" (Ops Settings) and "redact for this send" (the drawer tab), not a
 missing capability.
+
+## Offer Letter e-sign dead-code fix, ad-hoc-scripts audit (with a real live
+## credential exposure found), and a permissions-log review, 2026-08-23
+User asked for all 3 items from a "what's next" menu at once: (1) fix the
+Offer Letter e-sign "already signed" bug flagged-but-not-fixed on 2026-08-23
+when the identical NDA bug was closed; (2) read the ~11 untracked ad-hoc
+scripts at the repo root, flagged repeatedly since 2026-08-17 as never
+actually read; (3) review the real Permissions Activity Log and decide
+whether it's safe to turn enforcement on.
+
+**1. Offer Letter e-sign fix** (`sql/76_fix_offer_already_signed_dead_code.sql`)
+— confirmed, via `pg_get_functiondef()` against the live DB (not
+reconstructed from memory), the exact same dead-code bug already fixed for
+NDA e-sign: `sign_offer_by_token()` nulled `offer_letters.signing_token` on
+success, but `get_offer_by_signing_token()` (the public sign page's own
+re-hit on every load) looks the row up BY that token — once null, the
+lookup returns nothing and the page shows "Invalid or expired link"
+instead of the already-correctly-coded `already_signed: true` branch in
+`offers.py`. Same fix as NDA: stop nulling the token, rely on the UPDATE's
+own `AND status='sent'` guard for single-use instead (a replay with the
+same token matches zero rows once status is no longer `'sent'`, so nulling
+added no real security benefit). Migration needed running as `postgres`
+(function is postgres-owned, same schema-drift/SECURITY DEFINER pattern
+documented repeatedly elsewhere in this project) — noted explicitly in the
+migration file this time.
+
+Verified for real, not code review: reproduced the bug live first — walked
+a genuine throwaway offer through submit-for-approval → approve → issue →
+request-sign → sign via the real public endpoints, confirmed revisiting
+the link 404'd exactly as expected, THEN deployed the fix and confirmed a
+**fresh** offer/sign cycle now correctly returns `already_signed: true`
+(200) on revisit — the first cycle's token stayed broken forever since the
+fix can't retroactively un-null an already-nulled historical row, which is
+expected and fine (nothing depends on old links working). Confirmed the
+replay-sign guard still rejects (400) after the fix — the single-use
+protection genuinely holds. Real headless-browser check confirmed the
+actual `/sign-offer/{token}` page shows a signed confirmation instead of
+"Invalid/Expired". New permanent "S55 Offer Letter e-sign" suite (4 tests)
+added to `qa_automation.spec.ts`. Regression sweep (S1/S8/S55, 16 tests):
+15 passed / 1 pre-existing skip / 0 failed.
+
+**2. Ad-hoc scripts audit — a live, real credential exposure found and
+flagged immediately, separate from the rest of the audit.** Read all 13
+scripts' actual bodies (not inferred from filenames) — 10 gitignored
+(`chk.py`, `chk2.py`, `fix2.py`, `fix_stages.py`, `getcands.py`,
+`qa_seed.py`, `score.py`, `seed_data.py`, `seed_p3.py`, `seed_real.py`)
+plus **3 that turned out to actually be git-tracked** despite being part
+of this same June/July-2026 ad-hoc batch — accidentally committed in
+`693cd11` ("Snapshot pre-review working tree," 2026-07-19) and never
+noticed since: `generate_pdfs.py`, `sync_all.py`, `sync_missing.py`.
+
+`sync_all.py`/`sync_missing.py` (real IMAP-backfill utilities) contain a
+base64-"obfuscated" (not encrypted — trivially reversible) real plaintext
+password for `mohsinkhan@aviintech.com`, hardcoded to log into
+`imap.hostinger.com`. Checked directly: that commit is on `main`,
+currently pushed, and `github.com/mohsin3758/Aviin-ATS` is confirmed
+**public**. This is a real, live, currently-exploitable credential
+exposure — flagged to the user immediately, before any other audit
+findings, rather than buried in a final report; the decoded password was
+never printed anywhere in this conversation. User chose to rotate the
+credential themselves at Hostinger (recommended option) while the rest of
+the audit continued in parallel. Removing the file going forward does
+**not** scrub git history — that's a separate, more destructive decision
+(`git filter-repo`/BFG + force-push) explicitly not taken without further
+instruction.
+
+**Rest of the audit, each finding checked against real production data,
+not assumed**: `chk.py`/`chk2.py`/`getcands.py` — pure read-only
+diagnostics, no mutation risk. `generate_pdfs.py` — a self-contained
+reportlab PDF generator for training material, zero DB/API interaction.
+`score.py` — triggers real AI re-scoring only, non-destructive.
+`fix2.py`/`fix_stages.py` — real stage-mutation scripts scoped to one
+hardcoded requisition ID; checked for residue (zero invalid-stage
+applications found tenant-wide). `qa_seed.py` — depends on a
+`qa_candidates.json` file that no longer exists, not runnable as-is; used
+some invalid stage literals. `seed_data.py` — confirmed as the exact,
+already-known source of the 24 `@aviintest.com` candidates found and
+cleaned up on 2026-08-17 — re-checked: all 24 correctly `is_active=false`,
+nothing new. `seed_p3.py` — a real, previously-undocumented finding: this
+script mutates REAL existing applications (whichever matched a stage
+filter at the time it ran) by scheduling fake interviews and generating a
+fake Ollama-written offer letter — checked its exact hardcoded fingerprint
+(`meeting_link='https://meet.google.com/aviin-demo-test'`) against
+production: **zero rows**, confirmed no residue currently exists.
+`seed_real.py` — another real, previously-undocumented finding: creates
+FAKE APPLICATIONS for REAL candidates (matched by employer name or `.in`
+email, not synthetic identities) against random real requisitions with
+some invalid stage literals (`"offered"`) — checked tenant-wide for any
+`applications.stage` value outside the tenant's real configured stage set:
+**zero rows**, confirmed clean. Net: every mutation fingerprint checked
+came back zero — whatever these scripts once produced has already been
+swept up by the many earlier "deep DB-vs-sidebar" and "test/QA data
+cleanup" audit rounds documented throughout this file, even though nobody
+had previously traced it back to these specific scripts.
+
+Since none of the 13 serve any ongoing purpose and 2 are actively
+dangerous to leave in the working tree, deleted all 13 from the VPS
+(3 as a real, committed `git rm`; the other 10 were never tracked, so
+removing them from disk leaves no git trace).
+
+**3. Permissions Activity Log review — genuinely no real signal to act
+on yet, reported honestly rather than making up a recommendation.**
+Pulled `GET /roles/permission-log`: 8 aggregated rows, 52 raw entries.
+Cross-referenced every single one against `users` — **100% of the
+logged activity traced to QA/test fixture accounts**
+(`qa.s43.kae1.*@test.com`, `qa.s42.rolegate.*@test.com`,
+`qa.kae.rolegate.*@test.com`, `qa.removepipeline.rolegate.*@test.com`,
+and the permanent `QA Test Recruiter` fixture) — mostly from this same
+session's own S43/S54 test runs plus earlier KAE-feature test suites.
+**Zero real production recruiter/manager usage has ever been logged**
+since this soft-launch system was built. Concretely: nothing here can
+inform an enforcement decision right now — enabling enforcement today
+would be a decision made on zero real signal, not a reviewed one. Left
+enforcement OFF (unchanged), matching the soft-launch default. Cleared
+all 86 confirmed-test-generated rows from `permission_check_log` (same
+precedent already established on 2026-08-09, for the same reason — this
+log is what the user will review to make a real decision, so test noise
+shouldn't read as real usage) so the log starts clean and future entries
+genuinely reflect real usage once it happens.
+
+Zero-token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).

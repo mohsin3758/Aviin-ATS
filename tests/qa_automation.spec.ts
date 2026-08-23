@@ -7067,3 +7067,78 @@ test.describe.serial('S54 KAE -> Client/KAM Submission (2nd hop, file templates,
     if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
   });
 });
+
+test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not Invalid/Expired', () => {
+  // Regression for the exact same dead-code bug already fixed for NDA
+  // e-sign (sql/74): sign_offer_by_token() used to null offer_letters.
+  // signing_token on success, so a revisit of the same link (which looks
+  // the row up BY that token) found nothing and 404'd instead of showing
+  // the already-correct "Already Signed" branch. sql/76 fixes this by
+  // relying on the UPDATE's own "AND status='sent'" guard for single-use
+  // instead of nulling the token.
+  let token = '';
+  let candId = '';
+  let appId = '';
+  let offerId = '';
+  let signToken = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+
+  test('setup: walk a real throwaway offer from draft to e_signed via the public sign flow', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqsRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: auth() });
+    const reqs = await reqsRes.json();
+    const reqId = (Array.isArray(reqs) ? reqs : reqs.items)[0].id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S55 OfferSign ${Date.now()}`, email: `qa.s55.${Date.now()}@qatest.example`, phone: '9800000055', skills: ['Python'], total_exp_mo: 24 },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const assign = await request.post(`${API}/candidates/bulk-assign`, { headers: auth(), data: { candidate_ids: [candId], requisition_id: reqId } });
+    expect(assign.ok()).toBeTruthy();
+    const appsRes = await request.get(`${API}/applications?candidate_id=${candId}`, { headers: auth() });
+    const apps = await appsRes.json();
+    appId = (Array.isArray(apps) ? apps : apps.items)[0].id;
+
+    const offer = await request.post(`${API}/offers`, { headers: auth(), data: { application_id: appId, ctc_offered: 1000000, joining_date: '2026-10-01' } });
+    expect(offer.ok()).toBeTruthy();
+    offerId = (await offer.json()).id;
+
+    await request.post(`${API}/offers/${offerId}/submit-for-approval`, { headers: auth() });
+    await request.post(`${API}/offers/${offerId}/approve`, { headers: auth() });
+    const issued = await request.post(`${API}/offers/${offerId}/issue`, { headers: auth() });
+    expect(issued.ok()).toBeTruthy();
+    await request.get(`${API}/offers/${offerId}/letter`, { headers: auth() }); // auto-creates the draft row
+
+    const signRes = await request.post(`${API}/offers/${offerId}/letter/request-sign`, { headers: auth() });
+    expect(signRes.ok()).toBeTruthy();
+    signToken = (await signRes.json()).token;
+
+    const signResult = await request.post(`${API}/offer-sign/sign?token=${signToken}`, { data: { signatory_name: 'QA S55 Signer', agreed: true } });
+    expect(signResult.ok()).toBeTruthy();
+  });
+
+  test('revisiting the same link after signing shows already_signed:true (real 200), not a 404', async ({ request }) => {
+    const res = await request.get(`${API}/offer-sign/public?token=${signToken}`);
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.already_signed).toBe(true);
+  });
+
+  test('a replay sign attempt on the same token still cleanly rejects (single-use guard genuinely holds)', async ({ request }) => {
+    const res = await request.post(`${API}/offer-sign/sign?token=${signToken}`, { data: { signatory_name: 'Replay Attempt', agreed: true } });
+    expect(res.status()).toBe(400);
+  });
+
+  test('real headless UI: the public sign page shows a signed confirmation, not Invalid/Expired', async ({ page }) => {
+    await page.goto(`/sign-offer/${signToken}`);
+    await expect(page.getByText(/Invalid|Expired/i)).not.toBeVisible({ timeout: 10000 });
+    await expect(page.getByText(/Signed|Thank you|already signed/i).first()).toBeVisible({ timeout: 10000 });
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: auth() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+  });
+});
