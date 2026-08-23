@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 from routers.ner import parse_resume
 
 # ── P23: Skills Taxonomy ─────────────────────────────────────
@@ -26,7 +27,7 @@ async def list_skills(category: Optional[str]=None, search: Optional[str]=None,
     return [dict(r) for r in rows]
 
 @skills_router.post("")
-async def add_skill(body: dict, actor: Actor=Depends(get_actor)):
+async def add_skill(body: dict, actor: Actor=Depends(require_permission("skills_taxonomy", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO skills_taxonomy (tenant_id,skill_name,category,aliases)
@@ -62,7 +63,7 @@ async def skill_categories(actor: Actor=Depends(get_actor)):
 bulk_router = APIRouter(prefix="/bulk-cv", tags=["bulk-cv"])
 
 @bulk_router.post("/parse")
-async def bulk_parse(files: List[UploadFile]=File(...), actor: Actor=Depends(get_actor)):
+async def bulk_parse(files: List[UploadFile]=File(...), actor: Actor=Depends(require_permission("resume_inbox", "create"))):
     """Upload multiple CVs (text files), parse with regex NER, detect duplicates."""
     session_id = None
     results = []
@@ -168,7 +169,7 @@ async def get_template(tmpl_id: str, actor: Actor=Depends(get_actor)):
     return dict(row)
 
 @email_router.post("")
-async def create_template(body: dict, actor: Actor=Depends(get_actor)):
+async def create_template(body: dict, actor: Actor=Depends(require_permission("email_templates", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO email_templates (tenant_id,name,category,subject,body_html,variables)
@@ -181,7 +182,7 @@ async def create_template(body: dict, actor: Actor=Depends(get_actor)):
     return dict(row)
 
 @email_router.put("/{tmpl_id}")
-async def update_template(tmpl_id: str, body: dict, actor: Actor=Depends(get_actor)):
+async def update_template(tmpl_id: str, body: dict, actor: Actor=Depends(require_permission("email_templates", "update"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE email_templates SET
@@ -322,7 +323,7 @@ async def suggest_interviewer(scheduled_at: str, duration_mins: int = 45, actor:
 
 
 @interview_router.post("")
-async def schedule_interview(body: InterviewIn, actor: Actor=Depends(get_actor)):
+async def schedule_interview(body: InterviewIn, actor: Actor=Depends(require_permission("interviews", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         interviewer_id = body.interviewer_id
         scheduled_dt = _to_dt(body.scheduled_at)
@@ -354,7 +355,7 @@ async def schedule_interview(body: InterviewIn, actor: Actor=Depends(get_actor))
 
 @interview_router.patch("/{interview_id}/status")
 async def update_interview_status(interview_id: str, body: dict,
-                                   actor: Actor=Depends(get_actor)):
+                                   actor: Actor=Depends(require_permission("interviews", "update"))):
     # BUG FIX (2026-08-10 audit): unconditional SET wiped feedback/rating to
     # NULL on every call, including a bare status-only update (e.g. marking
     # Completed with no feedback field in the request body) — COALESCE
@@ -387,7 +388,7 @@ async def update_interview_status(interview_id: str, body: dict,
 # GET /auto-interview/list (phase3.py), which every UI actually uses.
 
 @interview_router.post("/{interview_id}/send-reminder")
-async def send_interview_reminder(interview_id: str, actor: Actor=Depends(get_actor)):
+async def send_interview_reminder(interview_id: str, actor: Actor=Depends(require_permission("interviews", "create"))):
     """Send an email reminder for a scheduled interview."""
     import smtplib, asyncpg, os as _os
     from email.mime.text import MIMEText
@@ -762,7 +763,7 @@ async def candidate_timeline(candidate_id: str, actor: Actor=Depends(get_actor))
     return [dict(r) for r in rows]
 
 @activity_router.post("/{candidate_id}/note")
-async def add_note(candidate_id: str, body: dict, actor: Actor=Depends(get_actor)):
+async def add_note(candidate_id: str, body: dict, actor: Actor=Depends(require_permission("candidate_engagement", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO candidate_activities
@@ -801,7 +802,7 @@ async def get_jd_template(tmpl_id: str, actor: Actor=Depends(get_actor)):
     return dict(row)
 
 @jd_tmpl_router.post("")
-async def create_jd_template(body: dict, actor: Actor=Depends(get_actor)):
+async def create_jd_template(body: dict, actor: Actor=Depends(require_permission("jd_templates", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO jd_templates

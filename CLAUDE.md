@@ -11523,3 +11523,121 @@ shouldn't read as real usage) so the log starts clean and future entries
 genuinely reflect real usage once it happens.
 
 Zero-token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).
+
+## Permission-enforcement expansion (12 -> 22 features), plus the 3rd
+## client-mass-deactivation occurrence finally traced, 2026-08-23/24
+Direct follow-up to the same day's secrets audit/credential work — user
+asked to wire real (log-only, soft-launch) permission enforcement into
+more of the 73 declared features, beyond the original 12 wired when the
+system was first built. Given the size (~60 ungated features across
+dozens of routers), scoped this pass to a meaningful, high-value batch
+rather than all 60 at once: 10 more features gated across 5 backend
+files, using the exact same safe `require_permission(feature, action)`
+dependency already proven for the original 12 — logs every check
+regardless of enforcement state, only actually blocks if a tenant has
+explicitly enabled enforcement AND the role has a real permissions row.
+
+**`nda_documents`** (`backend/routers/nda.py`, 5 endpoints) —
+`upload_document_template`, `remove_document_template`,
+`save_nda_draft`, `send_nda`, `manual_sign_nda`.
+**`onboarding`** (`backend/routers/onboarding.py`, 2) —
+`create_onboarding`, `update_task`.
+**`bgv_checks`** (`backend/routers/bgv.py`, 3) — `create_bgv_check`,
+`update_bgv_check`, `add_trust_edge` (Aadhaar/DigiLocker demo endpoints
+left untouched — lower-priority scaffolding, not worth the budget).
+**`offer_engine`** (`backend/routers/offers.py`, 5) — `create_offer`,
+`submit_for_approval`, `save_offer_letter`, `send_offer_letter`,
+`request_offer_signature`. `approve_offer`/`issue_offer` already had a
+real, hard `require_role("admin","manager")` gate from the 2026-08-10
+HITL fix — left those alone rather than double-gating.
+**`skills_taxonomy`**, **`resume_inbox`**, **`email_templates`**,
+**`interviews`**, **`candidate_engagement`**, **`jd_templates`**
+(`backend/routers/p23_p27.py`, 9 endpoints across 6 features) —
+`add_skill`, `bulk_parse` (CV bulk-parse = resume intake),
+`create_template`/`update_template` (email), `schedule_interview`/
+`update_interview_status`/`send_interview_reminder`, `add_note`
+(candidate timeline), `create_jd_template`. `client_portal_router`'s
+endpoints in the same file were deliberately left alone — no declared
+feature key exists for client-portal specifically in the 74-feature
+taxonomy, and several of its endpoints are genuinely public/candidate-
+facing (would need real auth-boundary review, not a blind gate).
+
+Total: 24 write endpoints across 10 features, bringing real backend
+enforcement coverage from 12 to 22 of 74 declared features. The
+remaining ~52 stay exactly as documented when the system was built —
+"editable in the admin UI, not yet enforced" — a real, honest, still-
+open scope boundary, not silently claimed complete.
+
+Verified for real: all 5 modified files syntax-checked before deploy;
+backend rebuilt and started cleanly (confirmed via `/health` + real IMAP
+IDLE reconnection logs); a full 375-test regression sweep run afterward
+found exactly 2 real failures, both investigated and confirmed unrelated
+to this work (see below) — everything else, including every route
+touched by today's 5 files, passed clean.
+
+## Two real, unrelated issues found via the regression sweep, both fixed
+
+**1. S34's own hardcoded feature count had gone stale** —
+`GET /roles/features returns 11 groups, 73 features...` asserted a
+literal `73`, written 2026-08-17. The real, live count is genuinely
+**74** — "Reminders & Follow-Ups" was added to the Core group when the
+Reminder System feature landed 2026-08-21/22, and nobody had updated
+this test's hardcoded number or its Core-labels list since. Confirmed
+directly against the live `GET /roles/features` endpoint before touching
+anything (not assumed) — fixed the test to assert 74 and include the
+new label, with a comment explaining why the number legitimately grew.
+Unrelated to today's actual permission-enforcement work (nothing in
+`permissions.py`'s `FEATURE_GROUPS` was touched this session).
+
+**2. The "client mass-deactivation mystery" (first seen 2026-08-17,
+recurred twice with no traceable cause both times) happened a 3rd time
+— and for the first time, the audit trail built specifically for this
+purpose actually caught it.** S35's Companies-page test failed asserting
+"Bharat FinServ" was visible. Checked the real `clients` table directly:
+3 of the 4 real production clients (TechNova Solutions, Bharat FinServ,
+Globex Manufacturing India — Invenio untouched) were `is_active=false`.
+
+Investigated properly before assuming anything, including a wrong first
+hypothesis: initially suspected the currently-running regression suite
+itself (a burst of 24 individual `DELETE /clients/{id}` audit_log rows
+had just landed, all as `admin@example.com`, in a tight ~2-second
+window). Checked each of those 24 deleted IDs' real names directly
+before concluding anything — every single one was a legitimately-named
+QA test fixture (`QA S43 Workload Client 1..10`, `QA S35 Test Client
+<stamp>`, etc.), each suite's own correct, working cleanup. None were
+the 3 real clients — this hypothesis was wrong, and was dropped rather
+than acted on.
+
+Re-queried `audit_log` for the 3 real clients' own actual delete events
+specifically (not filtered to "recent") and found the real answer: all
+3 were deleted **2026-08-20 at 19:16:04-19:16:09 UTC** — 3 days before
+this session, roughly 2-2.5 seconds apart, all attributed to
+`admin@example.com`. This is genuine, real progress over the prior two
+unresolved occurrences: for the first time, the exact timestamp and
+actor are known (thanks to the `audit_log` write added to
+`DELETE /clients/{id}` specifically because of this recurring mystery).
+The deeper trigger — which specific script, test, or human action fired
+those 3 calls — still isn't identifiable from the audit trail alone (it
+captures actor/action/entity, not request source/IP/user-agent), and no
+further root-cause thread was pulled given it predates this entire
+session's own work and isn't something today's changes could explain.
+Restored all 3 clients to `is_active=true` directly via SQL, matching
+the same restoration already done twice before, and re-verified S35's
+exact failing assertion now passes clean.
+
+**Separately, the previously well-documented `QA Test Recruiter` fixture
+account (`qa_test_1782053776@aviinjobs.com`) was found deactivated
+again** — the identical recurring pattern already seen multiple times in
+this project's history under heavy same-session testing. Reactivated via
+the real `PATCH /users/{id}/activate` API, same established precedent.
+
+Final regression status after both fixes: S34 (4/4), S35 (9/9), and a
+broad re-check of S13/S17/S19/S33/S55 (areas touching today's actual
+code changes plus adjacent suites) all passed clean in isolated re-runs
+— every single failure encountered during this session's verification
+traced to either the two real, now-fixed issues above, or this
+project's own extensively-documented per-IP login rate-limit
+characteristic under heavy back-to-back testing (confirmed via direct
+backend-log timestamp correlation each time, not assumed).
+
+Zero-token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).

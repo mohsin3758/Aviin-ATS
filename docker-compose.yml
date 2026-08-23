@@ -119,10 +119,10 @@ services:
     restart: unless-stopped
     environment:
       WAHA_PRINT_QR: "true"
-      WAHA_API_KEY: "aviinATS2026secure"
-      WHATSAPP_API_KEY: "aviinATS2026secure"
-      WAHA_DASHBOARD_USERNAME: "admin"
-      WAHA_DASHBOARD_PASSWORD: "aviinATS2026secure"
+      WAHA_API_KEY: ${WAHA_API_KEY:-}
+      WHATSAPP_API_KEY: ${WAHA_API_KEY:-}
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD:-}
       WAHA_DASHBOARD_ALLOWED_ORIGINS: "*"
     env_file:
       - ./waha.env

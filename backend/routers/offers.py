@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 import db
 import events
 from deps import Actor, get_actor, require_role
+from permissions import require_permission
 from schemas import OfferCreate, OfferRespond
 from routers.p30_p35 import fire_webhook
 from services import activity_events
@@ -45,7 +46,7 @@ async def list_offers(application_id: str | None = None, actor: Actor = Depends(
 
 
 @router.post("")
-async def create_offer(body: OfferCreate, actor: Actor = Depends(get_actor)):
+async def create_offer(body: OfferCreate, actor: Actor = Depends(require_permission("offer_engine", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             f"""INSERT INTO offers (tenant_id, application_id, status, ctc_offered, currency, joining_date)
@@ -95,7 +96,7 @@ async def get_offer(offer_id: str, actor: Actor = Depends(get_actor)):
 
 
 @router.post("/{offer_id}/submit-for-approval")
-async def submit_for_approval(offer_id: str, actor: Actor = Depends(get_actor)):
+async def submit_for_approval(offer_id: str, actor: Actor = Depends(require_permission("offer_engine", "update"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             f"""UPDATE offers SET status = 'pending_approval', updated_at = now()
@@ -460,7 +461,7 @@ async def get_offer_letter(offer_id: str, actor: Actor = Depends(get_actor)):
 
 
 @router.put("/{offer_id}/letter")
-async def save_offer_letter(offer_id: str, body: dict, actor: Actor = Depends(get_actor)):
+async def save_offer_letter(offer_id: str, body: dict, actor: Actor = Depends(require_permission("offer_engine", "update"))):
     """Save/update the letter text for an offer."""
     text = body.get('letter_text', '')
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -510,7 +511,7 @@ async def download_offer_letter_pdf(offer_id: str, actor: Actor = Depends(get_ac
 
 
 @router.post("/{offer_id}/letter/send")
-async def send_offer_letter(offer_id: str, actor: Actor = Depends(get_actor)):
+async def send_offer_letter(offer_id: str, actor: Actor = Depends(require_permission("offer_engine", "create"))):
     """Email the offer letter PDF to the candidate and mark it as issued."""
     import asyncpg as _asyncpg
     import smtplib, ssl as _ssl
@@ -618,7 +619,7 @@ offer_sign_public = APIRouter(prefix='/offer-sign', tags=['offer-sign'])
 
 
 @router.post('/{offer_id}/letter/request-sign')
-async def request_offer_signature(offer_id: str, actor: Actor = Depends(get_actor)):
+async def request_offer_signature(offer_id: str, actor: Actor = Depends(require_permission("offer_engine", "create"))):
     """Generate a signing link for the candidate (idempotent)."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         offer = await _get_offer(conn, offer_id)

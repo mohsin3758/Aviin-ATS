@@ -34,6 +34,7 @@ import db
 import events
 from routers.pipeline_stages import is_valid_stage
 from deps import Actor, get_actor
+from permissions import require_permission
 
 router = APIRouter(prefix="/applications", tags=["nda"])
 nda_router = APIRouter(prefix="/nda", tags=["nda"])
@@ -125,7 +126,7 @@ async def list_document_templates(actor: Actor = Depends(get_actor)):
 
 
 @doc_templates_router.post("/{doc_type}")
-async def upload_document_template(doc_type: str, file: UploadFile = File(...), actor: Actor = Depends(get_actor)):
+async def upload_document_template(doc_type: str, file: UploadFile = File(...), actor: Actor = Depends(require_permission("nda_documents", "update"))):
     if doc_type not in ("nda", "contract"):
         raise HTTPException(400, "doc_type must be 'nda' or 'contract'")
     ext = "." + (file.filename or "").rsplit(".", 1)[-1].lower()
@@ -153,7 +154,7 @@ async def upload_document_template(doc_type: str, file: UploadFile = File(...), 
 
 
 @doc_templates_router.delete("/{doc_type}")
-async def remove_document_template(doc_type: str, actor: Actor = Depends(get_actor)):
+async def remove_document_template(doc_type: str, actor: Actor = Depends(require_permission("nda_documents", "delete"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             "DELETE FROM document_templates WHERE tenant_id=$1 AND doc_type=$2 RETURNING file_path",
@@ -259,7 +260,7 @@ class NdaTextUpdate(BaseModel):
 
 
 @router.put("/{application_id}/nda")
-async def save_nda_draft(application_id: str, body: NdaTextUpdate, actor: Actor = Depends(get_actor)):
+async def save_nda_draft(application_id: str, body: NdaTextUpdate, actor: Actor = Depends(require_permission("nda_documents", "update"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         await _get_or_create_nda(conn, actor.tenant_id, application_id)
         row = await conn.fetchrow(
@@ -351,7 +352,7 @@ class NdaSendRequest(BaseModel):
 
 
 @router.post("/{application_id}/nda/send")
-async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Depends(get_actor)):
+async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Depends(require_permission("nda_documents", "create"))):
     if body.sign_method not in ("type_name", "otp"):
         raise HTTPException(400, "sign_method must be 'type_name' or 'otp'")
     if body.attachment not in ("generated", "nda_template", "contract_template"):
@@ -431,7 +432,7 @@ ALLOWED_MANUAL_EXTS = {".pdf", ".jpg", ".jpeg", ".png", ".doc", ".docx"}
 @router.post("/{application_id}/nda/manual-sign")
 async def manual_sign_nda(application_id: str, file: UploadFile = File(...),
                            signatory_name: Optional[str] = None,
-                           actor: Actor = Depends(get_actor)):
+                           actor: Actor = Depends(require_permission("nda_documents", "update"))):
     ext = "." + (file.filename or "signed").rsplit(".", 1)[-1].lower()
     if ext not in ALLOWED_MANUAL_EXTS:
         raise HTTPException(400, f"Unsupported file type: {ext}")

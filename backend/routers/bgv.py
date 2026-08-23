@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 router = APIRouter(prefix="/bgv", tags=["bgv"])
 
@@ -104,7 +105,7 @@ async def list_bgv_checks(candidate_id: str, actor: Actor = Depends(get_actor)):
 
 
 @router.post("/checks")
-async def create_bgv_check(body: BGVCheckCreate, actor: Actor = Depends(get_actor)):
+async def create_bgv_check(body: BGVCheckCreate, actor: Actor = Depends(require_permission("bgv_checks", "create"))):
     score_pts = BGV_SCORE_POINTS.get(body.check_type, 10)
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
@@ -119,7 +120,7 @@ async def create_bgv_check(body: BGVCheckCreate, actor: Actor = Depends(get_acto
 
 
 @router.patch("/checks/{check_id}")
-async def update_bgv_check(check_id: str, body: BGVCheckUpdate, actor: Actor = Depends(get_actor)):
+async def update_bgv_check(check_id: str, body: BGVCheckUpdate, actor: Actor = Depends(require_permission("bgv_checks", "update"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         completed_at = "now()" if body.status == "completed" else "NULL"
         row = await conn.fetchrow(
@@ -188,7 +189,7 @@ async def list_trust_edges(actor: Actor = Depends(get_actor)):
 
 
 @router.post("/trust-graph/edge")
-async def add_trust_edge(body: TrustEdgeCreate, actor: Actor = Depends(get_actor)):
+async def add_trust_edge(body: TrustEdgeCreate, actor: Actor = Depends(require_permission("bgv_checks", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             """INSERT INTO trust_graph

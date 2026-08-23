@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
+from permissions import require_permission
 
 
 def _to_date(val):
@@ -71,7 +72,7 @@ async def list_templates(actor: Actor = Depends(get_actor)):
     return [_parsed(r) for r in rows]
 
 @router.post("")
-async def create_onboarding(body: OnboardIn, actor: Actor = Depends(get_actor)):
+async def create_onboarding(body: OnboardIn, actor: Actor = Depends(require_permission("onboarding", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Get template tasks
         tasks = []
@@ -123,7 +124,7 @@ async def get_onboarding(onboard_id: str, actor: Actor = Depends(get_actor)):
     return _parsed(row)
 
 @router.patch("/{onboard_id}/task")
-async def update_task(onboard_id: str, body: TaskUpdate, actor: Actor = Depends(get_actor)):
+async def update_task(onboard_id: str, body: TaskUpdate, actor: Actor = Depends(require_permission("onboarding", "update"))):
     """Mark a task complete/incomplete."""
     from datetime import datetime
     async with db.tenant_conn(actor.tenant_id) as conn:

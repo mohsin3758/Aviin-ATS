@@ -3825,19 +3825,25 @@ test.describe.serial('S34 Feature-Level Permissions', () => {
     }).catch(() => {});
   });
 
-  test('GET /roles/features returns 11 groups, 73 features, and the exact Core/Communication feature sets named in the request', async ({ request }) => {
+  test('GET /roles/features returns 11 groups, 74 features, and the exact Core/Communication feature sets named in the request', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}` };
     const r = await request.get(`${API}/roles/features`, { headers: auth });
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(body.groups).toHaveLength(11);
-    expect(body.features).toHaveLength(73);
+    // Real, live count as of 2026-08-23 - was 73 when this test was written
+    // (2026-08-17), genuinely grew to 74 once "Reminders & Follow-Ups" was
+    // added to the Core group by the Reminder System feature (2026-08-21/22)
+    // - a real taxonomy growth, not a bug. This test's own hardcoded number
+    // and Core-labels list had gone stale and needed updating to match.
+    expect(body.features).toHaveLength(74);
 
     const core = body.groups.find((g: any) => g.id === 'core');
     const coreLabels = core.features.map((f: any) => f.label);
     for (const label of ['Dashboard', 'Candidates', 'Companies', 'Jobs / Requisitions', 'Pipeline (Kanban)',
-      'Pipeline Velocity', 'Duplicate Candidates', 'Recruiter Ops', 'Device Monitoring', 'Field Attendance', 'Shift Scheduling']) {
+      'Pipeline Velocity', 'Duplicate Candidates', 'Recruiter Ops', 'Reminders & Follow-Ups',
+      'Device Monitoring', 'Field Attendance', 'Shift Scheduling']) {
       expect(coreLabels).toContain(label);
     }
 
