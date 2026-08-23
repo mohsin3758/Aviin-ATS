@@ -6790,6 +6790,59 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     await expect(detectedLine).toBeVisible();
   });
 
+  test('real headless UI: resume extract highlights matched skill terms, and Open Full Profile carries a real Back to AI Match Results link', async ({ page, context }) => {
+    // Two more real bugs reported live from the same JD Match feature,
+    // same day: (1) the browser's own Ctrl+F searches the WHOLE page
+    // (every candidate row, not just the open resume), so verifying a
+    // term genuinely appears in ONE candidate's resume was impractical -
+    // fixed by highlighting matched/related skill terms directly inside
+    // the Resume Extract, reusing the exact <mark>-wrapping pattern
+    // already proven on the dedicated full-resume-view page. (2) "Open
+    // Full Profile" opens a new tab by design (keeps the ranked results
+    // intact), but that new tab had no way back to those results at
+    // all - fixed with a real localStorage-backed "Back to AI Match
+    // Results" link that re-runs the identical search.
+    //
+    // Real bug caught before shipping, not by the user: the first
+    // attempt used sessionStorage on the (wrong) assumption a
+    // target="_blank" tab clones it - the anchor's own rel="noreferrer"
+    // implicitly forces noopener too, which severs the browsing-context
+    // relationship sessionStorage cloning actually depends on. Confirmed
+    // live the new tab got a fresh, empty sessionStorage. Switched to
+    // localStorage (origin-scoped, not opener-scoped) - the same
+    // mechanism this codebase already uses for the auth token.
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: 'JD Match' }).click();
+    await page.getByPlaceholder('Paste the full job description here...').fill(
+      'SAP FICO\nCredit Management\nClaim Management\nDisaster Management',
+    );
+    await page.getByRole('button', { name: 'Rank Candidates' }).click();
+    const results2 = page.getByTestId('jd-rank-results');
+    await expect(results2).toBeVisible({ timeout: 15000 });
+
+    const rishithRow = results2.locator('div', { hasText: 'Rishith' }).first();
+    await expect(rishithRow).toBeVisible();
+    await rishithRow.getByRole('button', { name: 'View Profile' }).click();
+    await expect(page.getByText('Back to list')).toBeVisible({ timeout: 10000 });
+
+    const marks = page.locator('mark');
+    await expect(marks.first()).toBeVisible({ timeout: 5000 });
+    expect(await marks.count()).toBeGreaterThan(0);
+
+    const [profilePage] = await Promise.all([
+      context.waitForEvent('page'),
+      page.getByRole('link', { name: /Open Full Profile/i }).click(),
+    ]);
+    await profilePage.waitForLoadState();
+    await expect(profilePage.getByRole('button', { name: 'Back to AI Match Results' })).toBeVisible({ timeout: 10000 });
+
+    await profilePage.getByRole('button', { name: 'Back to AI Match Results' }).click();
+    await expect(profilePage.getByTestId('jd-rank-results')).toBeVisible({ timeout: 15000 });
+    await expect(profilePage.getByTestId('jd-detected-requirements').locator('b', { hasText: 'Claim Management' })).toBeVisible();
+    expect(profilePage.url()).not.toContain('reopenJdMatch');
+    await profilePage.close();
+  });
+
   test.afterAll(async ({ request }) => {
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
   });

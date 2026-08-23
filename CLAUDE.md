@@ -10883,3 +10883,98 @@ experience from an unrelated legitimate use of the same word (e.g.
 acknowledged limitation of accepting arbitrarily abbreviated recruiter
 input rather than a bug — the fix's job is to stop *silently dropping*
 what's typed, not to perfectly disambiguate every possible short word.
+
+## AI Match: resume-term highlighting (no more fighting the browser's own
+## Ctrl+F) + a real "Back to AI Match Results" path, plus a real crash
+## caught before shipping, 2026-08-23
+User reported two more real, distinct problems from the same JD Match
+feature, both from live screenshots: (1) using the browser's own Ctrl+F
+to search "claim" inside the candidate preview searched the WHOLE page
+(44 matches, 1/44 shown) — every other candidate row still rendered
+behind the modal, not just the one resume being reviewed; (2) clicking
+"Open Full Profile" landed on the real Candidate 360 page with only a
+"← Back to Candidates" link — no way back to the specific AI Match
+results at all.
+
+**Fix 1 — real in-app term highlighting, not a bigger Ctrl+F.** Rather
+than build a custom find-box (reinventing what Ctrl+F already does, just
+worse), the actual need is "let me see whether this term really appears
+in THIS candidate's resume" — already solved once in this exact
+codebase for the dedicated full-resume-view page
+(`candidates/[id]/resume/page.tsx`, matched-skill `<mark>` highlighting
+built 2026-08-20). Ported the same proven pattern
+(`highlightSkillTerms()`, React node array via `text.split(regex)`, no
+`dangerouslySetInnerHTML`) into the JD Match modal's inline preview
+panel — matched terms highlight green, "related" terms (partial
+evidence, informational tier from earlier the same day) highlight amber,
+with a small legend. The ranked row's own `matched_skills`/
+`related_skills` (already computed server-side, not recalculated) are
+threaded down into the preview panel as new props.
+
+**Fix 2 — a real "Back to AI Match Results" link on the Candidate 360
+page.** "Open Full Profile" intentionally opens in a new tab (keeps the
+ranked-results modal alive, untouched, in the original tab — a
+deliberate design from earlier this project) — but that new tab
+genuinely had no way back to those specific results. Added a real
+mechanism: the exact `jd_text` is persisted right before navigating,
+and the Candidate 360 page shows a second "← Back to AI Match Results"
+button (next to the existing "Back to Candidates") when that context is
+present and recent (30-minute TTL, so it can't linger indefinitely).
+Clicking it returns to `/candidates?reopenJdMatch=1`, which auto-reopens
+the JD Match modal and re-runs the identical search — not just
+navigating back to an empty form the recruiter would have to re-paste
+their JD into.
+
+**A real bug caught mid-build, not shipped**: the first version used
+`sessionStorage`, on the assumption a `target="_blank"` tab clones it.
+Confirmed live it doesn't — the anchor already carries `rel="noreferrer"`
+(prevents the Referer header being sent), which implicitly forces
+`noopener` too in modern browsers, severing the browsing-context
+relationship `sessionStorage` cloning actually depends on per spec; the
+new tab received a genuinely fresh, empty `sessionStorage`, and the
+"Back to AI Match Results" link never appeared. Switched to
+`localStorage` instead — scoped purely by origin, not by opener/
+browsing-session lineage, so it's reliably readable from any tab
+regardless of how it was opened, matching how this exact codebase
+already stores the auth token. Cleaned up (removed) once consumed on
+the landing side, so it can't resurface stale on an unrelated later
+visit even within the 30-minute window.
+
+**A second, real, more disruptive bug also caught before shipping — a
+genuine console crash on every normal "Rank Candidates" click**:
+extending `runJDRank()` with an optional `overrideText` parameter (for
+the auto-reopen flow) broke its OTHER existing call site,
+`<FormActions onSubmit={runJDRank} .../>` — passing the bare function
+reference as an event handler means React invokes it with the click's
+SyntheticEvent as the first argument, which then landed in
+`overrideText`. `text.trim()` on an event object threw `t.trim is not a
+function`, silently breaking the ranked-results view from rendering at
+all. Caught via a real console-error capture during verification (not
+visible from reading the code, and not caught by the earlier, narrower
+unit tests since none of them exercised the actual button click).
+Fixed at both ends: the call site now wraps it (`onClick={() =>
+runJDRank()}`), and the function itself only trusts a genuine string
+argument (`typeof overrideText === 'string'`) as defense in depth
+against the same class of mistake recurring at a future call site.
+
+Verified for real end-to-end, not code review: a real headless-browser
+pass confirmed genuine `<mark>` elements render inside the resume
+extract after opening a real candidate's inline preview; confirmed
+zero console errors on a plain "Rank Candidates" click after the fix
+(was throwing on every single click before it); confirmed "Open Full
+Profile" opens a real new tab that genuinely shows "Back to AI Match
+Results"; confirmed clicking it re-runs the exact same search (the
+detected-requirements line showing "Claim Management" again) and
+leaves a clean URL with no leftover `reopenJdMatch` query param. New
+permanent test added to "S53" (now 10 tests) covering both features
+together in one real click-through. Full regression sweep (S1/S2/S8/
+S13/S16/S20/S30/S38/S48/S53, 78 tests) passed clean: 76 passed, 2
+pre-existing skips, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (391
+files, 0 external API refs).
+
+**Not extended to the Requisitions page's own, separate AI Match modal
+in this pass** — it has the identical "Open Full Profile opens a new
+tab with no way back" shape (confirmed by reading its code), but the
+user's reports were specifically against the Candidates page's JD Match
+feature; flagged here as a real, matching gap for a future explicit
+decision rather than silently carried over unasked.

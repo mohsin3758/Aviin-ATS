@@ -598,6 +598,36 @@ function SortTh({label,col,sort,onSort,style:s}:{label:string;col:string;sort:{b
   );
 }
 
+// Highlights required-skill terms directly inside a resume extract so a
+// recruiter can visually confirm whether a term genuinely appears
+// without resorting to the browser's own Ctrl+F (reported live — the
+// browser's native find searches the WHOLE page, not just this panel,
+// and returns unrelated matches from every other candidate row still
+// rendered behind the modal). Same `<mark>`-wrapping-as-React-nodes
+// pattern already proven on the dedicated full-resume-view page
+// (candidates/[id]/resume/page.tsx) — no dangerouslySetInnerHTML.
+function escapeRe(s: string) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function highlightSkillTerms(text: string, matched: string[], related: string[]): React.ReactNode {
+  if (!text) return text;
+  const m = new Set((matched || []).filter(t => t && t.trim().length > 1).map(t => t.toLowerCase()));
+  const r = new Set((related || []).filter(t => t && t.trim().length > 1 && !m.has(t.toLowerCase())).map(t => t.toLowerCase()));
+  const allTerms = [...new Set([...matched, ...related])].filter(t => t && t.trim().length > 1);
+  if (allTerms.length === 0) return text;
+  const sorted = allTerms.sort((a, b) => b.length - a.length);
+  const re = new RegExp('(' + sorted.map(escapeRe).join('|') + ')', 'gi');
+  const parts = text.split(re);
+  return parts.map((part, i) => {
+    const low = part.toLowerCase();
+    if (m.has(low)) {
+      return <mark key={i} style={{ background: '#bbf7d0', color: '#166534', padding: '0 2px', borderRadius: 3, fontWeight: 700 }}>{part}</mark>;
+    }
+    if (r.has(low)) {
+      return <mark key={i} style={{ background: '#fef3c7', color: '#92400e', padding: '0 2px', borderRadius: 3, fontWeight: 700 }}>{part}</mark>;
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
 // Inline candidate preview inside the JD Match modal — fetched on demand
 // only when a recruiter actually clicks "View Profile" for one candidate,
 // not eagerly for every ranked match. Deliberately does NOT navigate to
@@ -608,21 +638,43 @@ function SortTh({label,col,sort,onSort,style:s}:{label:string;col:string;sort:{b
 // results page to go back TO. Same fix already proven on the
 // Requisitions page's own AiMatchModal (2026-08-21) — staying inside
 // this same modal means there is nothing to "go back" from.
-function JdCandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack }: {
+function JdCandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack, matchedSkills, relatedSkills, jdText }: {
   candidateId: string; isSelected: boolean; onToggle: () => void; onBack: () => void;
+  matchedSkills: string[]; relatedSkills: string[]; jdText: string;
 }) {
   const { data: c, loading } = useFetch<any>(`/candidates/${candidateId}`);
   if (loading || !c) {
     return <div style={{ minHeight: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: 12 }}>Loading profile…</div>;
   }
   const skills: string[] = Array.isArray(c.skills) ? c.skills : [];
+  // REAL BUG FIX (2026-08-23): "Open Full Profile" opens the real
+  // Candidate 360 page in a new tab by design (keeps this modal's
+  // ranked results intact) - but reported live: there was no way back
+  // to these specific results from that page at all.
+  //
+  // First attempt used sessionStorage on the assumption a new tab
+  // opened via <a target="_blank"> clones it - but this anchor also
+  // carries rel="noreferrer", which implicitly forces noopener too,
+  // severing the browsing-context relationship that sessionStorage
+  // cloning actually depends on per spec. Confirmed live: the new tab
+  // received a completely fresh, empty sessionStorage, not a clone -
+  // the "Back to AI Match Results" link never appeared. Switched to
+  // localStorage instead, which is scoped purely by origin, not by
+  // opener/browsing-session lineage - readable from any tab of this
+  // app regardless of how it was opened, matching how this codebase
+  // already stores the auth token.
+  function saveReturnContext() {
+    try {
+      localStorage.setItem('aiMatchReturnCtx', JSON.stringify({ jdText, ts: Date.now() }));
+    } catch {}
+  }
   return (
     <div style={{ maxHeight: 460, overflowY: 'auto', padding: '2px 2px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', fontSize: 12, fontWeight: 600, padding: 0 }}>
           <ArrowLeft size={13} /> Back to list
         </button>
-        <a href={`/candidates/${candidateId}`} target="_blank" rel="noreferrer"
+        <a href={`/candidates/${candidateId}`} target="_blank" rel="noreferrer" onClick={saveReturnContext}
           style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#2563eb', textDecoration: 'none' }}>
           Open Full Profile <ExternalLink size={11} />
         </a>
@@ -668,9 +720,17 @@ function JdCandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack }: 
       )}
       {c.resume_text && (
         <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Resume Extract</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Resume Extract</div>
+            {(matchedSkills.length > 0 || relatedSkills.length > 0) && (
+              <div style={{ display: 'flex', gap: 8, fontSize: 9, color: '#94a3b8' }}>
+                <span><span style={{ background: '#bbf7d0', padding: '0 4px', borderRadius: 2 }}>&nbsp;</span> matched</span>
+                <span><span style={{ background: '#fef3c7', padding: '0 4px', borderRadius: 2 }}>&nbsp;</span> related</span>
+              </div>
+            )}
+          </div>
           <div style={{ fontSize: 11.5, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-wrap', maxHeight: 220, overflowY: 'auto', background: '#f8fafc', border: '1px solid #f1f5f9', borderRadius: 8, padding: 10 }}>
-            {c.resume_text.slice(0, 3000)}{c.resume_text.length > 3000 ? '…' : ''}
+            {highlightSkillTerms(c.resume_text.slice(0, 3000), matchedSkills, relatedSkills)}{c.resume_text.length > 3000 ? '…' : ''}
           </div>
         </div>
       )}
@@ -905,13 +965,47 @@ export default function CandidatesPage() {
     URL.revokeObjectURL(url);
   };
 
-  const runJDRank = async()=>{
-    if(!jdText.trim())return;
+  const runJDRank = async(overrideText?:string)=>{
+    // Defensive: this is also passed as a bare onSubmit handler
+    // elsewhere, which invokes it with a React SyntheticEvent as the
+    // first argument, not a string — a real bug caught before shipping
+    // (that event object has no .trim(), throwing "t.trim is not a
+    // function" on every normal "Rank Candidates" click). Only trust a
+    // genuine string override.
+    const text = typeof overrideText==='string' ? overrideText : jdText;
+    if(!text.trim())return;
     setRanking(true);
-    try{const r=await apiFetch('/candidates/rank',{method:'POST',body:JSON.stringify({jd_text:jdText,limit:20})});setRankResult(r);}
+    try{const r=await apiFetch('/candidates/rank',{method:'POST',body:JSON.stringify({jd_text:text,limit:20})});setRankResult(r);}
     catch(e:any){showStatus('Ranking failed: '+(e?.message||'error'));}
     finally{setRanking(false);}
   };
+
+  // REAL BUG FIX (2026-08-23): "Open Full Profile" inside the JD Match
+  // modal opens the real Candidate 360 page in a new tab, and that page
+  // now offers a real "Back to AI Match Results" link — this is the
+  // landing side of that flow: on arrival via ?reopenJdMatch=1, read the
+  // exact jd_text that was saved to sessionStorage right before
+  // navigating away, and re-run the identical search automatically
+  // rather than dropping the recruiter on an empty modal they'd have to
+  // re-paste their JD into.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('reopenJdMatch') !== '1') return;
+    try {
+      const raw = localStorage.getItem('aiMatchReturnCtx');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.jdText) {
+          setJdText(parsed.jdText);
+          setShowJD(true);
+          runJDRank(parsed.jdText);
+        }
+        localStorage.removeItem('aiMatchReturnCtx'); // one-shot - consumed
+      }
+    } catch {}
+    window.history.replaceState(null, '', '/candidates');
+  }, []);
 
   const applyFilters=()=>{setAppliedFilters({search,skill:skillFilter,location:locationFilter,employer:employerFilter,minExp:minExpYr,maxExp:maxExpYr});};
   const clearFilters=()=>{setSearch('');setSkillFilter('');setLocationFilter('');setEmployerFilter('');setMinExpYr('');setMaxExpYr('');setSrcFilter('');setTagFilter('');setOwnedFilter('');setAppliedFilters({});setSelectedSavedFilter('');};
@@ -1275,7 +1369,7 @@ export default function CandidatesPage() {
       {/* ── JD Match modal ───────────────────────────────────────────────── */}
       <Modal open={showJD} onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());setJdPreviewId(null);}} title="JD Match — AI Ranking" subtitle="Paste a job description to rank your candidates by fit" size="lg"
         footer={!rankResult
-          ? <FormActions onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());setJdPreviewId(null);}} onSubmit={runJDRank} loading={ranking} submitLabel="Rank Candidates"/>
+          ? <FormActions onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());setJdPreviewId(null);}} onSubmit={()=>runJDRank()} loading={ranking} submitLabel="Rank Candidates"/>
           : <div style={{display:'flex',justifyContent:'flex-end',gap:'10px'}}>
               <button onClick={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());setJdPreviewId(null);}} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Close</button>
               <button onClick={()=>setJdBulkAssignOpen(true)} disabled={jdSelected.size===0}
@@ -1288,7 +1382,10 @@ export default function CandidatesPage() {
         ) : jdPreviewId ? (
           <JdCandidatePreviewPanel candidateId={jdPreviewId} isSelected={jdSelected.has(jdPreviewId)}
             onToggle={()=>setJdSelected(prev=>{const n=new Set(prev); n.has(jdPreviewId)?n.delete(jdPreviewId):n.add(jdPreviewId); return n;})}
-            onBack={()=>setJdPreviewId(null)}/>
+            onBack={()=>setJdPreviewId(null)}
+            matchedSkills={((rankResult as any).ranked||[]).find((r:any)=>r.id===jdPreviewId)?.matched_skills||[]}
+            relatedSkills={((rankResult as any).ranked||[]).find((r:any)=>r.id===jdPreviewId)?.related_skills||[]}
+            jdText={jdText}/>
         ) : (
           <div>
             <div style={{padding:'10px 14px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',marginBottom:'8px'}}>✅ Ranked {(rankResult as any).ranked?.length||0} candidates by fit — click "View Profile" to preview before adding, or select candidates to add them straight to a requisition's pipeline.</div>

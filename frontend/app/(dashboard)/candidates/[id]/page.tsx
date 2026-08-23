@@ -1509,6 +1509,34 @@ export default function CandidateProfilePage() {
     if (typeof window !== 'undefined' && window.history.length > 1) router.back();
     else router.push('/candidates');
   };
+  // REAL BUG FIX (2026-08-23): "Open Full Profile" from the Candidates
+  // page's JD Match modal opens this page in a new tab by design (the
+  // ranked results stay intact in the original tab) — but reported live:
+  // there was no way to get back to those SAME AI Match results from
+  // here at all, whichever tab the user ended up on.
+  //
+  // Uses localStorage, not sessionStorage - the anchor also carries
+  // rel="noreferrer", which implicitly forces noopener too, and
+  // sessionStorage only clones into a new tab when a real opener
+  // relationship survives (confirmed live: it doesn't here, the new tab
+  // got a fresh empty sessionStorage). localStorage is scoped by origin
+  // alone, not opener lineage, so it's readable here regardless of how
+  // this tab was opened - matching how this codebase already stores the
+  // auth token. Deferred to a useEffect, not read synchronously during
+  // render — localStorage doesn't exist during Next.js's server render,
+  // the same SSR/hydration guard already established elsewhere in this
+  // project (device-monitoring page, recruiter-ops TargetsTab).
+  const [aiMatchReturn, setAiMatchReturn] = useState<{ jdText: string } | null>(null);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('aiMatchReturnCtx');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed?.jdText && Date.now() - (parsed.ts || 0) < 30 * 60 * 1000) {
+        setAiMatchReturn({ jdText: parsed.jdText });
+      }
+    } catch {}
+  }, []);
   const { data: candRaw, loading, refetch } = useFetch<any>(id ? `/candidates/${id}` : null);
   const { data: apps } = useFetch<any>(id ? `/candidates/${id}/applications` : null);
   const [cand, setCand] = useState<any>(null);
@@ -1622,10 +1650,18 @@ export default function CandidateProfilePage() {
       )}
 
       {/* Back */}
-      <button onClick={goBack}
-        style={{display:'flex',alignItems:'center',gap:'6px',background:'none',border:'none',cursor:'pointer',color:'#64748b',fontSize:'13px',padding:0,width:'fit-content'}}>
-        <ArrowLeft size={15}/> Back to Candidates
-      </button>
+      <div style={{display:'flex',alignItems:'center',gap:'16px',flexWrap:'wrap'}}>
+        <button onClick={goBack}
+          style={{display:'flex',alignItems:'center',gap:'6px',background:'none',border:'none',cursor:'pointer',color:'#64748b',fontSize:'13px',padding:0,width:'fit-content'}}>
+          <ArrowLeft size={15}/> Back to Candidates
+        </button>
+        {aiMatchReturn && (
+          <button onClick={() => router.push('/candidates?reopenJdMatch=1')}
+            style={{display:'flex',alignItems:'center',gap:'6px',background:'none',border:'none',cursor:'pointer',color:'#2563eb',fontSize:'13px',fontWeight:700,padding:0,width:'fit-content'}}>
+            <ArrowLeft size={15}/> Back to AI Match Results
+          </button>
+        )}
+      </div>
 
       {/* Header card */}
       <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'16px',padding:'28px',display:'flex',gap:'24px',alignItems:'flex-start',flexWrap:'wrap'}}>
