@@ -1,7 +1,10 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Star, Pencil, Trophy, Mail } from 'lucide-react';
+import { authHeaders } from '@/lib/auth';
+import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Copy, Power, Star, Pencil, Trophy, Mail } from 'lucide-react';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 const TABS = [
   { key: 'scoring', label: 'Matching Weights', icon: Sliders },
@@ -297,13 +300,28 @@ function BlocksTab() {
   );
 }
 
-function TemplateForm({ initial, columnsReg, clients, onSave, onCancel }: any) {
+function slugifyColumnKey(title: string): string {
+  return 'custom_' + title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'custom_field';
+}
+
+function TemplateForm({ initial, direction, columnsReg, clients, onSave, onCancel }: any) {
   const [name, setName] = useState(initial?.name || '');
   const [clientId, setClientId] = useState(initial?.client_id || '');
   const [isDefault, setIsDefault] = useState(initial?.is_default || false);
+  // Real column model: registry keys are toggled on/off as before, but a
+  // recruiter/KAE can now also type an arbitrary title and add it as a
+  // genuinely custom column — not just a subset of the fixed 27, a real
+  // free-form add/remove/rename table builder as asked. Custom columns
+  // have no auto-value source (nothing in the schema could compute one),
+  // so they always render as manual free-text fields at submit time.
+  const registryKeys = new Set((columnsReg || []).map((c: any) => c.key));
   const [selectedKeys, setSelectedKeys] = useState<string[]>(
     initial?.columns ? initial.columns.map((c: any) => c.key) : (columnsReg || []).map((c: any) => c.key)
   );
+  const [customColumns, setCustomColumns] = useState<{ key: string; label: string }[]>(
+    initial?.columns ? initial.columns.filter((c: any) => !registryKeys.has(c.key)) : []
+  );
+  const [newColTitle, setNewColTitle] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -311,15 +329,26 @@ function TemplateForm({ initial, columnsReg, clients, onSave, onCancel }: any) {
     setSelectedKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
   };
 
+  const addCustomColumn = () => {
+    if (!newColTitle.trim()) return;
+    const key = slugifyColumnKey(newColTitle) + '_' + Math.random().toString(36).slice(2, 6);
+    setCustomColumns(prev => [...prev, { key, label: newColTitle.trim() }]);
+    setNewColTitle('');
+  };
+  const removeCustomColumn = (key: string) => setCustomColumns(prev => prev.filter(c => c.key !== key));
+  const renameCustomColumn = (key: string, label: string) =>
+    setCustomColumns(prev => prev.map(c => c.key === key ? { ...c, label } : c));
+
   const save = async () => {
     if (!name.trim()) { setErr('Name is required'); return; }
-    if (selectedKeys.length === 0) { setErr('Select at least one column'); return; }
+    if (selectedKeys.length === 0 && customColumns.length === 0) { setErr('Add at least one column'); return; }
     setSaving(true); setErr('');
     try {
-      const columns = (columnsReg || [])
-        .filter((c: any) => selectedKeys.includes(c.key))
-        .map((c: any) => ({ key: c.key, label: c.label }));
-      await onSave({ name, client_id: clientId || null, columns, is_default: isDefault });
+      const columns = [
+        ...(columnsReg || []).filter((c: any) => selectedKeys.includes(c.key)).map((c: any) => ({ key: c.key, label: c.label })),
+        ...customColumns,
+      ];
+      await onSave({ name, client_id: clientId || null, columns, is_default: isDefault, direction });
     } catch (e: any) {
       setErr(e.message || 'Save failed');
     } finally {
@@ -340,11 +369,11 @@ function TemplateForm({ initial, columnsReg, clients, onSave, onCancel }: any) {
 
       <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 10, cursor: 'pointer' }}>
         <input type="checkbox" checked={isDefault} onChange={e => setIsDefault(e.target.checked)} />
-        Use as the default fallback template (when a client has no template of its own)
+        Use as the default {clientId ? "template for this client" : "global fallback template"} ({direction === 'kae_to_client' ? 'KAE → Client' : 'Recruiter → KAE'})
       </label>
 
-      <label style={label}>COLUMNS ({selectedKeys.length} selected)</label>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 6, marginBottom: 12 }}>
+      <label style={label}>COLUMNS ({selectedKeys.length + customColumns.length} selected)</label>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 6, marginBottom: 10 }}>
         {(columnsReg || []).map((c: any) => (
           <label key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '5px 8px', borderRadius: 6, background: selectedKeys.includes(c.key) ? '#EFF6FF' : '#F8FAFC', border: `1px solid ${selectedKeys.includes(c.key) ? '#BFDBFE' : '#E2E8F0'}`, cursor: 'pointer' }}>
             <input type="checkbox" checked={selectedKeys.includes(c.key)} onChange={() => toggleKey(c.key)} />
@@ -352,6 +381,23 @@ function TemplateForm({ initial, columnsReg, clients, onSave, onCancel }: any) {
             {!c.auto && <span style={{ fontSize: 9, color: '#94A3B8' }}>(manual)</span>}
           </label>
         ))}
+      </div>
+
+      <label style={label}>CUSTOM COLUMNS (your own title, always manual)</label>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+        {customColumns.map(c => (
+          <div key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input value={c.label} onChange={e => renameCustomColumn(c.key, e.target.value)}
+              style={{ ...input, marginBottom: 0, flex: 1 }} />
+            <button onClick={() => removeCustomColumn(c.key)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }}><Trash2 size={14} /></button>
+          </div>
+        ))}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input value={newColTitle} onChange={e => setNewColTitle(e.target.value)} placeholder="e.g. Internal Reference No."
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomColumn(); } }}
+            style={{ ...input, marginBottom: 0, flex: 1 }} />
+          <button onClick={addCustomColumn} type="button" style={{ ...btn, padding: '7px 12px' }}>+ Add</button>
+        </div>
       </div>
 
       {err && <div style={{ color: '#DC2626', fontSize: 12, marginBottom: 8 }}>{err}</div>}
@@ -363,8 +409,53 @@ function TemplateForm({ initial, columnsReg, clients, onSave, onCancel }: any) {
   );
 }
 
+function TemplateFileUpload({ template, onChanged }: any) {
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const upload = async (file: File) => {
+    setUploading(true); setErr('');
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(`${API_URL}/submission-templates/${template.id}/upload-file`, {
+        method: 'POST', headers: authHeaders(), body: form,
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || 'Upload failed'); }
+      onChanged();
+    } catch (e: any) { setErr(e.message || 'Upload failed'); }
+    finally { setUploading(false); }
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+      {template.template_type === 'file' && template.file_name ? (
+        <span style={{ fontSize: 10.5, color: '#475569', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <FileSpreadsheet size={11} /> {template.file_name}
+        </span>
+      ) : (
+        <span style={{ fontSize: 10.5, color: '#94A3B8' }}>Table Builder (no file uploaded)</span>
+      )}
+      <input ref={inputRef} type="file" accept=".xlsx,.docx,.pdf" style={{ display: 'none' }}
+        onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); if (inputRef.current) inputRef.current.value = ''; }} />
+      <button onClick={() => inputRef.current?.click()} disabled={uploading}
+        style={{ fontSize: 10, fontWeight: 700, color: '#2563EB', background: 'none', border: 'none', cursor: 'pointer' }}>
+        {uploading ? 'Uploading…' : (template.template_type === 'file' ? 'Replace File' : 'Upload .xlsx/.docx/.pdf as this template')}
+      </button>
+      {err && <span style={{ fontSize: 10, color: '#DC2626' }}>{err}</span>}
+    </div>
+  );
+}
+
+const DIRECTIONS = [
+  { key: 'recruiter_to_kae', label: 'Recruiter → KAE' },
+  { key: 'kae_to_client', label: 'KAE → Client' },
+];
+
 function TemplatesTab() {
-  const { data: templates, refetch } = useFetch<any[]>('/submission-templates');
+  const [direction, setDirection] = useState('recruiter_to_kae');
+  const { data: templates, refetch } = useFetch<any[]>(`/submission-templates?direction=${direction}&include_inactive=true`);
   const { data: columnsReg } = useFetch<any[]>('/submission-templates/columns');
   const { data: clientsRaw } = useFetch<any>('/clients');
   const clients = clientsRaw?.items || clientsRaw || [];
@@ -395,39 +486,79 @@ function TemplatesTab() {
     }
   };
 
+  const duplicate = async (t: any) => {
+    setErr('');
+    try {
+      await apiFetch(`/submission-templates/${t.id}/duplicate`, { method: 'POST' });
+      refetch();
+    } catch (e: any) { setErr(e.message || 'Duplicate failed'); }
+  };
+
+  const toggleActive = async (t: any) => {
+    setErr('');
+    try {
+      await apiFetch(`/submission-templates/${t.id}/toggle-active`, { method: 'PATCH' });
+      refetch();
+    } catch (e: any) { setErr(e.message || 'Failed to change active state'); }
+  };
+
   return (
     <div data-testid="templates-panel" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <p style={{ fontSize: 12, color: '#64748B' }}>
-        Column sets used when a recruiter submits a candidate profile + tracking sheet to a KAE. Leave a template's
-        client blank to make it the global default; pin one to a specific client for a fully separate sheet, or just
-        uncheck a few columns to reuse the default with fewer fields — same mechanism either way.
+        Column sets used for the two tracking-sheet hops: a recruiter submitting to the client-owning KAE, and the KAE
+        approving &amp; sending on to the actual client/KAM. Each direction has its own independent default. Leave a
+        template's client blank for a global fallback, pin one to a specific client for a fully separate sheet, add
+        your own custom columns, or upload a real .xlsx/.docx as the template — the same values get merged into it.
       </p>
+
+      <div style={{ display: 'flex', gap: 6 }}>
+        {DIRECTIONS.map(d => (
+          <button key={d.key} data-testid={`tmpl-dir-${d.key}`} onClick={() => setDirection(d.key)}
+            style={{ fontSize: 12, fontWeight: 700, padding: '7px 14px', borderRadius: 8, cursor: 'pointer',
+              border: `1px solid ${direction === d.key ? '#2563EB' : '#E2E8F0'}`,
+              background: direction === d.key ? '#2563EB' : '#fff', color: direction === d.key ? '#fff' : '#475569' }}>
+            {d.label}
+          </button>
+        ))}
+      </div>
+
       <button onClick={openNew} style={{ ...btn, alignSelf: 'flex-start', display: 'flex', gap: 6, alignItems: 'center' }}><Plus size={14} /> New Template</button>
 
       {err && <div style={{ color: '#DC2626', fontSize: 12 }}>{err}</div>}
       {showForm && (
-        <TemplateForm initial={editing} columnsReg={columnsReg} clients={clients} onSave={save} onCancel={() => setShowForm(false)} />
+        <TemplateForm initial={editing} direction={direction} columnsReg={columnsReg} clients={clients} onSave={save} onCancel={() => setShowForm(false)} />
       )}
 
       <div style={card}>
         {(templates || []).map((t: any) => (
-          <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <strong>{t.name}</strong>
-                {t.is_default && (
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 800, padding: '1px 7px', borderRadius: 999, background: '#FFFBEB', color: '#CA8A04', border: '1px solid #FDE68A' }}>
-                    <Star size={9} fill="#CA8A04" /> DEFAULT
-                  </span>
-                )}
+          <div key={t.id} style={{ padding: '10px 0', borderBottom: '1px solid #F1F5F9', opacity: t.is_active === false ? 0.55 : 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <strong>{t.name}</strong>
+                  {t.is_default && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 800, padding: '1px 7px', borderRadius: 999, background: '#FFFBEB', color: '#CA8A04', border: '1px solid #FDE68A' }}>
+                      <Star size={9} fill="#CA8A04" /> DEFAULT
+                    </span>
+                  )}
+                  {t.is_active === false && (
+                    <span style={{ fontSize: 9, fontWeight: 800, padding: '1px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>INACTIVE</span>
+                  )}
+                  {t.template_type === 'file' && (
+                    <span style={{ fontSize: 9, fontWeight: 800, padding: '1px 7px', borderRadius: 999, background: '#EEF2FF', color: '#4338CA' }}>FILE TEMPLATE</span>
+                  )}
+                </div>
+                <div style={{ color: '#64748B', fontSize: 11 }}>{t.client_name ? `Client: ${t.client_name}` : 'Global (any client)'} · {t.columns?.length || 0} columns</div>
               </div>
-              <div style={{ color: '#64748B', fontSize: 11 }}>{t.client_name ? `Client: ${t.client_name}` : 'Global (any client)'} · {t.columns?.length || 0} columns</div>
+              <button onClick={() => duplicate(t)} title="Duplicate" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}><Copy size={14} /></button>
+              <button onClick={() => toggleActive(t)} title={t.is_active === false ? 'Reactivate' : 'Deactivate'} style={{ background: 'none', border: 'none', cursor: 'pointer', color: t.is_active === false ? '#16A34A' : '#64748B' }}><Power size={14} /></button>
+              <button onClick={() => openEdit(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}><Pencil size={14} /></button>
+              <button data-testid={`del-template-${t.id}`} onClick={() => del(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }}><Trash2 size={14} /></button>
             </div>
-            <button onClick={() => openEdit(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}><Pencil size={14} /></button>
-            <button data-testid={`del-template-${t.id}`} onClick={() => del(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }}><Trash2 size={14} /></button>
+            <TemplateFileUpload template={t} onChanged={refetch} />
           </div>
         ))}
-        {!templates?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No templates yet.</div>}
+        {!templates?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No templates yet for this direction.</div>}
       </div>
     </div>
   );

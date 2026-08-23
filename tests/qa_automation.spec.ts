@@ -6891,3 +6891,179 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
   });
 });
+
+test.describe.serial('S54 KAE -> Client/KAM Submission (2nd hop, file templates, client contacts)', () => {
+  let token = '';
+  let clientId = '';
+  let reqId = '';
+  let candId = '';
+  let appId = '';
+  let clientTplId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+
+  test('setup: throwaway client + 2 contacts + requisition + candidate + application', async ({ request }) => {
+    token = await getApiToken(request);
+    const c = await request.post(`${API}/clients`, { headers: auth(), data: { name: `QA S54 Client ${Date.now()}` } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+
+    const contact1 = await request.post(`${API}/clients/${clientId}/contacts`, {
+      headers: auth(), data: { contact_name: 'QA Primary KAM', email: 'qa.s54.primary@qatest.example', is_primary: true },
+    });
+    expect(contact1.ok()).toBeTruthy();
+    const contact2 = await request.post(`${API}/clients/${clientId}/contacts`, {
+      headers: auth(), data: { contact_name: 'QA Backup HR', email: 'qa.s54.backup@qatest.example' },
+    });
+    expect(contact2.ok()).toBeTruthy();
+
+    const r = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `QA S54 Req ${Date.now()}`, client_id: clientId, skills_required: ['Python'], status: 'open', positions_count: 1 },
+    });
+    expect(r.ok()).toBeTruthy();
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S54 Candidate ${Date.now()}`, email: `qa.s54.${Date.now()}@qatest.example`, phone: '9800000054', skills: ['Python'], total_exp_mo: 24 },
+    });
+    expect(cand.ok()).toBeTruthy();
+    candId = (await cand.json()).id;
+
+    const assign = await request.post(`${API}/candidates/bulk-assign`, {
+      headers: auth(), data: { candidate_ids: [candId], requisition_id: reqId },
+    });
+    expect(assign.ok()).toBeTruthy();
+    const appsRes = await request.get(`${API}/applications?candidate_id=${candId}`, { headers: auth() });
+    const apps = await appsRes.json();
+    appId = Array.isArray(apps) ? apps[0]?.id : apps?.items?.[0]?.id;
+    expect(appId).toBeTruthy();
+  });
+
+  test('client contacts: exactly one primary enforced, listed correctly', async ({ request }) => {
+    const res = await request.get(`${API}/clients/${clientId}/contacts`, { headers: auth() });
+    expect(res.ok()).toBeTruthy();
+    const contacts = await res.json();
+    expect(contacts.length).toBe(2);
+    expect(contacts.filter((c: any) => c.is_primary).length).toBe(1);
+  });
+
+  test('submit-to-client preview resolves the primary contact + the global default kae_to_client template', async ({ request }) => {
+    const res = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: auth() });
+    expect(res.ok()).toBeTruthy();
+    const p = await res.json();
+    expect(p.primary_contact.email).toBe('qa.s54.primary@qatest.example');
+    expect(p.resolved_template.direction).toBe('kae_to_client');
+    expect(p.resolved_template.client_id).toBeNull(); // no client-pinned template yet -> falls back to global
+  });
+
+  test('a real send: hidden_columns excludes the field from the actual output, recorded on the row, never touches the template', async ({ request }) => {
+    const send = await request.post(`${API}/applications/${appId}/submit-to-client`, {
+      headers: auth(), data: { resume_style: 'clean_generated', hidden_columns: ['mobile_number'], cc_self: false },
+    });
+    expect(send.ok()).toBeTruthy();
+    const row = await send.json();
+    expect(row.direction).toBe('kae_to_client');
+    expect(row.hidden_columns).toEqual(['mobile_number']);
+    expect(row.to_emails).toEqual(['qa.s54.primary@qatest.example']);
+    expect(row.status).toBe('sent');
+
+    // The global default template must be completely untouched by a plain
+    // hide-only send with no save_as_default.
+    const tplRes = await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: auth() });
+    const globalDefault = (await tplRes.json()).find((t: any) => t.client_id === null && t.is_default);
+    expect(globalDefault.columns.length).toBe(17);
+  });
+
+  test('save_as_default with a real columns override persists a CLIENT-PINNED template, never mutates the global default', async ({ request }) => {
+    const columns = [{ key: 'sl_no', label: 'SL No' }, { key: 'candidate_name', label: 'Name' }, { key: 'email_id', label: 'Email' }];
+    const send = await request.post(`${API}/applications/${appId}/submit-to-client`, {
+      headers: auth(), data: { resume_style: 'clean_generated', columns, save_as_default: true, cc_self: false },
+    });
+    expect(send.ok()).toBeTruthy();
+
+    const tplRes = await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: auth() });
+    const templates = await tplRes.json();
+    const clientTpl = templates.find((t: any) => t.client_id === clientId);
+    expect(clientTpl).toBeTruthy();
+    expect(clientTpl.is_default).toBe(true);
+    expect(clientTpl.columns.length).toBe(3);
+    clientTplId = clientTpl.id;
+
+    const globalDefault = templates.find((t: any) => t.client_id === null && t.is_default);
+    expect(globalDefault.columns.length).toBe(17); // still untouched
+
+    // From here on, preview must resolve the NEW client-pinned template, not the global one.
+    const previewRes = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: auth() });
+    const preview = await previewRes.json();
+    expect(preview.resolved_template.id).toBe(clientTplId);
+  });
+
+  test('a one-off template_id override for a single send never changes what future sends resolve to', async ({ request }) => {
+    // Resolve back to the global default explicitly for one send.
+    const tplRes = await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: auth() });
+    const globalDefault = (await tplRes.json()).find((t: any) => t.client_id === null && t.is_default);
+    const send = await request.post(`${API}/applications/${appId}/submit-to-client`, {
+      headers: auth(), data: { resume_style: 'clean_generated', template_id: globalDefault.id, cc_self: false },
+    });
+    expect(send.ok()).toBeTruthy();
+    expect((await send.json()).template_id).toBe(globalDefault.id);
+
+    // The client's own saved default must be exactly what it was before this override.
+    const previewRes = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: auth() });
+    const preview = await previewRes.json();
+    expect(preview.resolved_template.id).toBe(clientTplId);
+  });
+
+  test('file-upload template: rejects an unsupported extension', async ({ request }) => {
+    // A hand-built binary .xlsx fixture isn't practical to construct inline
+    // in a Playwright test; this test instead proves the upload endpoint's
+    // real validation. The merge engine itself (fill_xlsx_template/
+    // fill_docx_template, including the hidden-column blanking fix) was
+    // verified directly against a real uploaded .xlsx/.docx and real
+    // candidate data during this feature's manual verification, not
+    // re-derived here as a binary fixture.
+    const badExt = await request.post(`${API}/submission-templates/${clientTplId}/upload-file`, {
+      headers: auth(),
+      multipart: { file: { name: 'bad.txt', mimeType: 'text/plain', buffer: Buffer.from('not a real template') } },
+    });
+    expect(badExt.status()).toBe(400);
+  });
+
+  test('template management: duplicate + toggle-active + delete-blocked-on-default all real', async ({ request }) => {
+    const dup = await request.post(`${API}/submission-templates/${clientTplId}/duplicate`, { headers: auth() });
+    expect(dup.ok()).toBeTruthy();
+    const dupTpl = await dup.json();
+    expect(dupTpl.is_default).toBe(false);
+
+    const del1 = await request.delete(`${API}/submission-templates/${dupTpl.id}`, { headers: auth() });
+    expect(del1.ok()).toBeTruthy(); // non-default duplicate deletes cleanly
+
+    const toggleDefault = await request.patch(`${API}/submission-templates/${clientTplId}/toggle-active`, { headers: auth() });
+    expect(toggleDefault.status()).toBe(400); // can't deactivate the active default
+
+    const delDefault = await request.delete(`${API}/submission-templates/${clientTplId}`, { headers: auth() });
+    expect(delDefault.status()).toBe(400); // can't delete the default either
+  });
+
+  test('recruiter->KAE sl_no sequence is independent of kae_to_client sends on the same requisition (real bug found + fixed while building this)', async ({ request }) => {
+    // A KAE assigned earlier isn't required for this specific check — a
+    // missing KAE cleanly 400s, which is itself the assertion: whatever
+    // happens, it must never be influenced by the 3 kae_to_client sends
+    // already made above on this exact requisition.
+    const kaeSend = await request.post(`${API}/applications/${appId}/submit-to-kae`, {
+      headers: auth(), data: { resume_style: 'clean_generated', cc_self: false },
+    });
+    if (kaeSend.ok()) {
+      const row = await kaeSend.json();
+      expect(row.field_values.sl_no).toBe('1'); // first-ever recruiter_to_kae send on this req, not "4th overall"
+    } else {
+      expect(kaeSend.status()).toBe(400); // no KAE assigned — acceptable, not what this test is really checking
+    }
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: auth() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+  });
+});

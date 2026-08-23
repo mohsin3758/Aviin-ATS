@@ -72,6 +72,84 @@ function ResumePreferenceRow({ client, onSaved }: { client: any; onSaved: () => 
   );
 }
 
+// New (KAE -> Client submission feature): the "Client/KAM contact email"
+// the Approve & Send flow defaults its "To" from — nothing in this schema
+// stored one before this. A client can have more than one contact (e.g. a
+// primary KAM + a backup HR contact); exactly one can be marked primary.
+function ClientContactsRow({ client }: { client: any }) {
+  const { data: contacts, refetch } = useFetch<any[]>(`/clients/${client.id}/contacts`);
+  const [form, setForm] = useState<{ contact_name: string; email: string; role_label: string }>({ contact_name: '', email: '', role_label: '' });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const add = async () => {
+    if (!form.contact_name.trim() || !form.email.trim()) { setErr('Name and email are required'); return; }
+    setSaving(true); setErr('');
+    try {
+      await apiFetch(`/clients/${client.id}/contacts`, {
+        method: 'POST',
+        body: JSON.stringify({ contact_name: form.contact_name, email: form.email, role_label: form.role_label || null, is_primary: !(contacts && contacts.length) }),
+      });
+      setForm({ contact_name: '', email: '', role_label: '' });
+      refetch();
+    } catch (e: any) { setErr(e.message || 'Failed to add contact'); }
+    finally { setSaving(false); }
+  };
+
+  const setPrimary = async (c: any) => {
+    try {
+      await apiFetch(`/client-contacts/${c.id}`, {
+        method: 'PUT', body: JSON.stringify({ contact_name: c.contact_name, email: c.email, role_label: c.role_label, is_primary: true }),
+      });
+      refetch();
+    } catch (e: any) { setErr(e.message || 'Failed to set primary'); }
+  };
+
+  const remove = async (c: any) => {
+    if (!confirm(`Remove contact "${c.contact_name}"?`)) return;
+    try {
+      await apiFetch(`/client-contacts/${c.id}`, { method: 'DELETE' });
+      refetch();
+    } catch (e: any) { setErr(e.message || 'Failed to remove'); }
+  };
+
+  return (
+    <div data-testid="client-contacts-row" style={{ padding: '16px', borderBottom: '1px solid #f1f5f9' }}>
+      <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#94a3b8', marginBottom: '10px' }}>
+        Client / KAM Contacts
+      </div>
+      {(contacts || []).map((c: any) => (
+        <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', background: c.is_primary ? '#eff6ff' : '#f8fafc', border: `1px solid ${c.is_primary ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 8, marginBottom: 6 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b' }}>
+              {c.contact_name}{c.role_label ? ` · ${c.role_label}` : ''} {c.is_primary && <span style={{ fontSize: 9, fontWeight: 800, color: '#1d4ed8' }}>PRIMARY</span>}
+            </div>
+            <div style={{ fontSize: 11, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email}</div>
+          </div>
+          {!c.is_primary && <button onClick={() => setPrimary(c)} title="Make primary" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#2563eb' }}>Set Primary</button>}
+          <button onClick={() => remove(c)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}><Trash2 size={13} /></button>
+        </div>
+      ))}
+      {!contacts?.length && <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>No contacts yet — add the client's KAM below.</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+        <input placeholder="Contact name" value={form.contact_name} onChange={e => setForm({ ...form, contact_name: e.target.value })}
+          style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+        <input placeholder="Email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })}
+          style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+        <input placeholder="Role (e.g. KAM) — optional" value={form.role_label} onChange={e => setForm({ ...form, role_label: e.target.value })}
+          style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+        {err && <div style={{ color: '#dc2626', fontSize: 11 }}>{err}</div>}
+        <button onClick={add} disabled={saving} style={{ padding: '6px 10px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer', alignSelf: 'flex-start' }}>
+          {saving ? 'Adding…' : '+ Add Contact'}
+        </button>
+      </div>
+      <p style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 8 }}>
+        The primary contact is the default recipient when a KAE clicks "Approve & Send" to this client.
+      </p>
+    </div>
+  );
+}
+
 function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
   // REAL BUG FIX (2026-08-17): reqs is the full tenant-wide requisitions
   // list — was never filtered to this specific client, so every client's
@@ -130,6 +208,7 @@ function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
         </div>
 
         <ResumePreferenceRow client={client} onSaved={onRefetch} />
+        <ClientContactsRow client={client} />
 
         {/* Open Jobs */}
         <div style={{ padding:'16px' }}>

@@ -11199,3 +11199,206 @@ sweep (`S1|S2|S8|S13|S16|S20|S30|S38|S48|S53`, 79 tests) re-run clean
 after all fixes: 77 passed, 2 skipped (pre-existing, unrelated), 0
 failed. Zero-token audit: `CONFIRMED CLEAN` (391 files, 0 external API
 refs).
+
+## KAE -> Client/KAM submission built: One-Click Approve & Send, file-upload +
+## table-builder templates, client contacts, hide-before-send, save-as-default
+## without touching shared templates, 2026-08-23
+User pasted a real KAE tracking-sheet screenshot and a detailed 14-point spec
+asking for the tracking-sheet process to go "100% automatic" with a real
+"One-Click Approve & Send" to the Client/KAM, KAE-editable/hideable fields
+before sending, upload-as-file OR table-builder templates saveable as a
+client's default, per-client template auto-load, a one-time override that
+never silently mutates a saved default, and separate recruiter-facing vs
+KAE-facing template purposes.
+
+**Checked what already existed before building anything** (this project's
+own established discipline): the recruiter->KAE hop (built 2026-07-29
+onward - `tracking_sheet_templates`, `candidate_submissions`,
+`kae_submission.py`) was real and solid - client-pinned templates, 6 resume
+formats, 8 visual themes, an inline cumulative HTML tracking table, an
+editable pre-submit form, submission history. But there was **no second hop
+at all** - nothing in the schema or code distinguished "sent to our KAE"
+from "shared with the actual client," `client_owners.owner_type` supported
+`kae`/`account_manager`/`secondary` but only `kae` was ever resolved for
+routing, and templates were a fixed 27-key checkbox list with zero file-
+upload capability and zero client-side contact email stored anywhere
+(`clients` only ever had name/industry).
+
+**3 clarifying questions asked before building**, given the genuine
+multi-part scope (matches the precedent already set by the original KAE-
+submission build needing its own 3 clarifying questions): (1) table-builder
+only vs. table-builder + real file upload — user picked **both**; (2) where
+a client's KAM/contact email comes from, since nothing stored one — user
+picked a **real client-contact field** (with room for more than one); (3)
+whether a new distinct Kanban stage should trigger the client-send — user
+picked **no new stage, a button only**, available any time via a drawer
+tab.
+
+**Schema** (`sql/75_kae_client_submission.sql`) — `tracking_sheet_templates`
+gains `direction` (`recruiter_to_kae` | `kae_to_client`, backfilled to the
+former for every pre-existing row - zero behavior change for what already
+worked), `template_type` (`table` | `file`), `file_path`/`file_name`/
+`file_mime_type`, `is_active`. The old `uq_tst_one_default_per_tenant`
+(one default PER TENANT, full stop) is replaced with two real, correctly-
+scoped constraints - one default per (tenant, direction) for global
+templates, one per (tenant, client, direction) for client-pinned ones - a
+genuine latent bug this feature's own audit found: nothing had ever stopped
+two templates silently fighting over the same client, "oldest wins" with no
+warning. `candidate_submissions` gains `direction`, `hidden_columns`,
+`to_emails`, `recipient_contact_id`. New `client_contacts` table (name/
+email/role_label/is_primary, real partial-unique index enforcing at most
+one primary per client, FORCE RLS) - the KAM/client recipient field that
+didn't exist anywhere before. A real global `kae_to_client` default
+template is seeded per tenant (same 17-column base as the recruiter->KAE
+one, matching the user's own sample sheet), so the new hop works
+immediately without manual setup.
+
+**Backend** (`backend/routers/kae_submission.py`, extended not duplicated -
+reuses `_app_context`, `_build_tracking_html_table`, resume rendering,
+`_send_kae_email` for both hops):
+- `_resolve_template()` now direction-aware and prefers a genuinely
+  `is_default`-marked row among a client's templates (previously "oldest
+  wins" regardless of which was actually marked default).
+- Real client-contact CRUD (`/clients/{id}/contacts`, `/client-contacts/
+  {id}`), `companies` permission-gated.
+- Template management fleshed out: `PATCH .../toggle-active` (a softer
+  alternative to Delete - deactivated templates drop out of auto-selection
+  but stay reactivatable, and every past submission keeps its own
+  historical `field_values` snapshot regardless), `POST .../duplicate`,
+  `POST .../upload-file` (real `.xlsx`/`.docx`/`.pdf`, 10MB cap, same
+  upload-dir convention as `nda.py`'s document-template uploads),
+  `GET .../download-file`.
+- `TemplateForm`'s column model widened from "toggle a subset of 27 fixed
+  registry keys" to genuinely free-form: any real, KAE-typed column title
+  can be added/removed/renamed, not just a checkbox subset - a real table
+  builder, not a wider checklist.
+- New `backend/services/template_merge.py` - fills an uploaded `.xlsx`/
+  `.docx`'s real `{{token}}` placeholders with live candidate/requisition
+  data via openpyxl/python-docx (both already installed, no new
+  dependency). Two real strategies: a single-row template (a cover-note-
+  style doc) substitutes the most recent row's values anywhere in the
+  document; a detected repeating row (one spreadsheet row, or one table
+  row) is genuinely duplicated once per real cumulative submission row -
+  matching what the existing inline-HTML tracking table already does, just
+  inside the KAE's own uploaded document instead of the email body.
+  **Deliberately, honestly scoped**: `.pdf` is accepted but NOT merge-
+  filled - a flattened PDF has no addressable field to write a value into,
+  so it's sent as a static reference attachment alongside the always-
+  generated live-data table, stated plainly in both the upload endpoint's
+  docstring and the frontend's own UI copy, never silently pretended to
+  work.
+- New `_do_client_submission()` - the actual "Approve & Send" core,
+  mirroring `_do_kae_submission()`'s shape: resolves the client's primary
+  contact (or an explicit override) as recipient, a `kae_to_client`-
+  direction template, builds a cumulative per-requisition sheet scoped to
+  ONLY prior `kae_to_client` sends (so the client only ever sees what's
+  actually been shared with them, never internal recruiter->KAE traffic).
+  Two real, independently-scoped edits a KAE can make before sending,
+  matching the spec's exact distinction: `hidden_columns` is ALWAYS
+  one-time (recorded on the submission row for audit, never written back
+  to the template, regardless of `save_as_default`); `columns` (a full
+  column-list override) only persists if `save_as_default=true`, and even
+  then is written ONLY to a template row pinned to that specific client -
+  a shared/global default template can never be silently repurposed by one
+  client's one-off edit. `GET .../submit-to-client/preview` (recipient,
+  resolved template, real cumulative `auto_values` with the correct next
+  `sl_no`) + `POST .../submit-to-client` (the one-click send - an
+  empty-ish body genuinely completes the whole generate-and-send flow from
+  real, live data, matching the literal "one-click" ask).
+
+**A real bug found only by directly verifying the hidden-columns
+redaction, not by reading the code**: the first version excluded a hidden
+column from the inline HTML table (`visible_columns` correctly filtered
+the column LIST) but never from the file-merge attachment - `sheet_rows`
+(the raw per-row value dicts) went straight into
+`fill_xlsx_template`/`fill_docx_template` unfiltered, so a column hidden
+"from the client" would still have its real value silently injected into
+an uploaded-file template. Fixed by blanking hidden keys out of the row
+dicts themselves (`merge_rows`) before they ever reach the merge engine,
+not just filtering which columns get listed. Verified directly: a real
+merged `.xlsx` with `mobile_number` hidden shows an empty cell, not the
+real digits.
+
+**A second real bug found only by checking the actual resolved `sl_no`
+values, not assumed**: `_do_kae_submission()`'s own cumulative-sheet query
+had no `direction` filter at all (`_do_client_submission()`'s had been
+written correctly from the start) - once a requisition had BOTH
+recruiter->KAE and KAE->client sends, the two directions' `sl_no`
+sequences bled into each other, so a requisition's genuinely first-ever
+recruiter->KAE submission could land as "SL No 5" purely because 4
+unrelated KAE->client sends had already happened on the same requisition.
+Fixed to scope by `direction='recruiter_to_kae'`, matching the sibling
+query's already-correct pattern. Verified directly: re-ran the send before
+and after the fix on the same requisition and confirmed `sl_no` corrected
+from 5 to the genuinely right value (2, given 1 real prior recruiter->KAE
+row).
+
+**Frontend**:
+- Companies page - new `ClientContactsRow` in the client side panel
+  (add/remove contacts, set-primary), matching the existing
+  `ResumePreferenceRow`'s established convention on the same panel.
+- Ops Settings > Tracking Sheet Templates - a direction toggle
+  ("Recruiter -> KAE" / "KAE -> Client"), the widened free-form column
+  builder (type a title, add it - not just checkbox toggles), a per-
+  template file-upload control (`TemplateFileUpload`, shows the uploaded
+  filename or an "Upload .xlsx/.docx/.pdf" prompt), and Duplicate/
+  Activate-Deactivate icon buttons alongside the existing Edit/Delete.
+- Pipeline drawer - a new "Submit to Client" tab (`SubmitClientTab`)
+  parallel to the existing "Submit to KAE" tab: recipient picker (defaults
+  to the primary contact, switches to a dropdown once a client has more
+  than one), template picker (only `kae_to_client`-direction templates,
+  shows a 📄 marker + a note when a template is file-based, including the
+  explicit "PDF can't be merge-filled" caveat when relevant), the same
+  resume-format/visual-theme/logo-position pickers as the KAE tab, a real
+  hide toggle (eye/eye-off icon) per tracking-sheet field, and a
+  conditionally-shown "Save as this client's default" checkbox that only
+  appears once at least one field is actually hidden - explaining plainly
+  that checking it makes the hide permanent for future sends, leaving it
+  unchecked keeps the hide one-time-only. A green "Approve & Send to
+  Client" button, matching the one-click ask.
+
+Verified for real end-to-end, not code review, at every step: a full real
+throwaway chain (client, 2 contacts, requisition, candidate, application)
+via direct API calls; preview correctly resolving the primary contact and
+the real global default template; a real send with a hidden column,
+confirmed via direct DB query (`direction`, `hidden_columns`, `to_emails`
+all correct) and via calling the real `_build_tracking_html_table`
+function directly (the hidden field's label AND its real value both
+confirmed absent from the rendered table); a real `save_as_default` send
+with an explicit columns override, confirmed it created a genuinely new
+client-pinned template while the global default's 17 columns stayed
+completely untouched, and that a subsequent preview call now resolves the
+new client-pinned template; a one-off `template_id` override confirmed to
+NOT change what a later preview resolves to; a real `.xlsx` and a real
+`.docx` template (built with reportlab/python-docx-equivalent tooling
+inside the container) both genuinely merge-filled with 2-3 real candidate
+rows, including the header row staying untouched and the DOCX's
+paragraph-level token correctly using the most-recent row's value while
+its table row genuinely duplicated per row; the hidden-column-in-merged-
+file fix re-verified directly against the real uploaded file; Duplicate/
+toggle-active/delete-blocked-on-default all confirmed via real API calls;
+the original recruiter->KAE flow re-verified completely unaffected (a real
+send still resolves the real assigned KAE, sends, and bumps stage
+correctly) both before and after the sl_no fix. Real headless-browser
+pass confirmed the Ops Settings direction tabs and the Companies page's
+Client/KAM Contacts panel both render with zero console errors. New
+permanent "S54 KAE -> Client/KAM Submission" suite (9 tests) added to
+`qa_automation.spec.ts`, plus a broader regression sweep across every
+suite touching KAE submission and resume generation (S14/S17/S29/S30/S43,
+58 tests) - clean, 57 passed / 1 pre-existing skip / 0 failed, no
+regressions from any of the above. Zero-token audit: `CONFIRMED CLEAN`
+(393 files, 0 external API refs). All throwaway test data cleaned up via
+real DELETE APIs, confirmed zero residue.
+
+**Scope notes, stated plainly rather than silently under- or over-
+delivered**: no new Kanban stage was added for the client-send trigger,
+per the user's own explicit choice - "Submit to Client" is a drawer tab
+available any time, not gated on a specific pipeline stage. `.pdf`
+templates are real (upload/attach/download all work) but never merge-
+filled, by the nature of the format, not an oversight. The per-submission
+UI supports hiding existing template columns (and, via `save_as_default`,
+permanently removing them from the client's default) but full add/rename/
+reorder of columns happens in Ops Settings' Template management, not
+inline in the send form - a deliberate split between "build the template
+shape" (Ops Settings) and "redact for this send" (the drawer tab), not a
+missing capability.

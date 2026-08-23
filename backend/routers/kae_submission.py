@@ -27,20 +27,31 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+from pathlib import Path
 from typing import Optional
 from xml.sax.saxutils import escape as _esc
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 import db
 import events
 from deps import Actor, get_actor, require_role
+from permissions import require_permission
 from routers.pipeline_stages import is_valid_stage
 from services.resume_formatting import render_resume_pdf, redact_contact, mask_name, _VALID_THEMES, _VALID_LOGO_POSITIONS
+from services import template_merge
 
 router = APIRouter(tags=["kae-submission"])
+
+TEMPLATE_FILE_DIR = Path("/app/uploads/tracking_sheet_templates")
+_TEMPLATE_FILE_EXTS = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pdf": "application/pdf",
+}
+_DIRECTIONS = ("recruiter_to_kae", "kae_to_client")
 
 # Every column a tracking-sheet template can include. auto=True columns are
 # pre-filled from live candidate/requisition/tenant data; the rest are
@@ -203,16 +214,40 @@ async def _resolve_kaes(conn, tenant_id: str, client_id: Optional[str]):
     )
 
 
-async def _resolve_template(conn, tenant_id: str, client_id: Optional[str]):
+async def _resolve_template(conn, tenant_id: str, client_id: Optional[str], direction: str = "recruiter_to_kae"):
+    """Real fix (this feature): a client can now genuinely have more than
+    one active template pinned to it (non-default alternates a KAE can
+    pick from) — the old ORDER BY created_at LIMIT 1 silently picked
+    whichever was oldest with no way to express "this one is the real
+    default." Now prefers the one actually marked is_default among a
+    client's own templates, falling back to the client's oldest only if
+    none is marked (shouldn't happen post-migration, but never 400s over
+    it). direction distinguishes the recruiter->KAE hop from the newer
+    KAE->client hop — each has its own independent default."""
     row = None
     if client_id:
         row = await conn.fetchrow(
-            "SELECT * FROM tracking_sheet_templates WHERE tenant_id=$1 AND client_id=$2 ORDER BY created_at LIMIT 1",
-            tenant_id, client_id)
+            """SELECT * FROM tracking_sheet_templates
+               WHERE tenant_id=$1 AND client_id=$2 AND direction=$3 AND is_active
+               ORDER BY is_default DESC, created_at LIMIT 1""",
+            tenant_id, client_id, direction)
     if row is None:
         row = await conn.fetchrow(
-            "SELECT * FROM tracking_sheet_templates WHERE tenant_id=$1 AND is_default LIMIT 1", tenant_id)
+            """SELECT * FROM tracking_sheet_templates
+               WHERE tenant_id=$1 AND is_default AND client_id IS NULL AND direction=$2 AND is_active LIMIT 1""",
+            tenant_id, direction)
     return row
+
+
+async def _resolve_client_contacts(conn, tenant_id: str, client_id: Optional[str]):
+    if not client_id:
+        return []
+    return await conn.fetch(
+        """SELECT id, contact_name, email, role_label, is_primary
+           FROM client_contacts WHERE tenant_id=$1 AND client_id=$2
+           ORDER BY is_primary DESC, contact_name""",
+        tenant_id, client_id,
+    )
 
 
 # ─────────────────────────── Templates CRUD ───────────────────────────
@@ -222,6 +257,26 @@ class TemplateIn(BaseModel):
     client_id: Optional[str] = None
     columns: list[dict]
     is_default: bool = False
+    direction: str = "recruiter_to_kae"
+
+
+async def _unset_other_defaults(conn, tenant_id: str, client_id: Optional[str], direction: str, exclude_id: Optional[str] = None):
+    """A default is scoped to (tenant, direction, client_id-or-global) —
+    setting a new one only clears the OTHER template that shared that exact
+    scope, never a different client's or a different direction's default
+    (the real bug this feature's own audit found: the old single
+    tenant-wide UNIQUE let two different clients silently fight over one
+    "the" default)."""
+    if client_id is None:
+        q = "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND direction=$2 AND client_id IS NULL"
+        args = [tenant_id, direction]
+    else:
+        q = "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND direction=$2 AND client_id=$3"
+        args = [tenant_id, direction, client_id]
+    if exclude_id:
+        q += f" AND id != ${len(args) + 1}"
+        args.append(exclude_id)
+    await conn.execute(q, *args)
 
 
 @router.get("/submission-templates/columns")
@@ -230,33 +285,43 @@ async def list_columns(actor: Actor = Depends(get_actor)):
 
 
 @router.get("/submission-templates")
-async def list_templates(actor: Actor = Depends(get_actor)):
+async def list_templates(direction: Optional[str] = None, include_inactive: bool = False, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        where = ["tst.tenant_id=$1"]
+        args = [actor.tenant_id]
+        if direction:
+            where.append(f"tst.direction=${len(args) + 1}")
+            args.append(direction)
+        if not include_inactive:
+            where.append("tst.is_active")
         rows = await conn.fetch(
-            """SELECT tst.*, cl.name AS client_name
-               FROM tracking_sheet_templates tst LEFT JOIN clients cl ON cl.id = tst.client_id
-               WHERE tst.tenant_id=$1 ORDER BY tst.is_default DESC, tst.name""",
-            actor.tenant_id)
+            f"""SELECT tst.*, cl.name AS client_name
+                FROM tracking_sheet_templates tst LEFT JOIN clients cl ON cl.id = tst.client_id
+                WHERE {' AND '.join(where)} ORDER BY tst.is_default DESC, tst.name""",
+            *args)
     return [_template_out(r) for r in rows]
 
 
 @router.post("/submission-templates")
 async def create_template(body: TemplateIn, actor: Actor = Depends(get_actor)):
+    if body.direction not in _DIRECTIONS:
+        raise HTTPException(400, f"direction must be one of {_DIRECTIONS}")
     if not body.columns:
         raise HTTPException(400, "Template must include at least one column")
     async with db.tenant_conn(actor.tenant_id) as conn:
         if body.is_default:
-            await conn.execute(
-                "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1", actor.tenant_id)
+            await _unset_other_defaults(conn, actor.tenant_id, body.client_id, body.direction)
         row = await conn.fetchrow(
-            """INSERT INTO tracking_sheet_templates (tenant_id, client_id, name, columns, is_default, created_by)
-               VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""",
-            actor.tenant_id, body.client_id, body.name, json.dumps(body.columns), body.is_default, actor.user_id)
+            """INSERT INTO tracking_sheet_templates (tenant_id, client_id, name, columns, is_default, direction, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
+            actor.tenant_id, body.client_id, body.name, json.dumps(body.columns), body.is_default, body.direction, actor.user_id)
     return _template_out(row)
 
 
 @router.put("/submission-templates/{template_id}")
 async def update_template(template_id: str, body: TemplateIn, actor: Actor = Depends(get_actor)):
+    if body.direction not in _DIRECTIONS:
+        raise HTTPException(400, f"direction must be one of {_DIRECTIONS}")
     if not body.columns:
         raise HTTPException(400, "Template must include at least one column")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -265,13 +330,12 @@ async def update_template(template_id: str, body: TemplateIn, actor: Actor = Dep
         if not existing:
             raise HTTPException(404, "Template not found")
         if body.is_default:
-            await conn.execute(
-                "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND id != $2",
-                actor.tenant_id, template_id)
+            await _unset_other_defaults(conn, actor.tenant_id, body.client_id, body.direction, exclude_id=template_id)
         row = await conn.fetchrow(
-            """UPDATE tracking_sheet_templates SET name=$1, client_id=$2, columns=$3, is_default=$4, updated_at=now()
-               WHERE id=$5 RETURNING *""",
-            body.name, body.client_id, json.dumps(body.columns), body.is_default, template_id)
+            """UPDATE tracking_sheet_templates
+               SET name=$1, client_id=$2, columns=$3, is_default=$4, direction=$5, updated_at=now()
+               WHERE id=$6 RETURNING *""",
+            body.name, body.client_id, json.dumps(body.columns), body.is_default, body.direction, template_id)
     return _template_out(row)
 
 
@@ -279,14 +343,112 @@ async def update_template(template_id: str, body: TemplateIn, actor: Actor = Dep
 async def delete_template(template_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT is_default FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2",
+            "SELECT is_default, file_path FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2",
             template_id, actor.tenant_id)
         if not row:
             raise HTTPException(404, "Template not found")
         if row["is_default"]:
             raise HTTPException(400, "Cannot delete the default template — set another template as default first")
         await conn.execute("DELETE FROM tracking_sheet_templates WHERE id=$1", template_id)
+    if row["file_path"]:
+        try:
+            (Path("/app") / row["file_path"].lstrip("/")).unlink(missing_ok=True)
+        except Exception:
+            pass
     return {"ok": True}
+
+
+@router.patch("/submission-templates/{template_id}/toggle-active")
+async def toggle_template_active(template_id: str, actor: Actor = Depends(get_actor)):
+    """Softer alternative to Delete — a deactivated template drops out of
+    _resolve_template()'s auto-selection and the picker lists, but stays
+    editable/reactivatable and every past submission that used it keeps its
+    own historical field_values snapshot untouched (candidate_submissions
+    never depends on the template row still being active)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT is_active, is_default FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2",
+            template_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "Template not found")
+        if row["is_active"] and row["is_default"]:
+            raise HTTPException(400, "Cannot deactivate the default template — set another template as default first")
+        new_row = await conn.fetchrow(
+            "UPDATE tracking_sheet_templates SET is_active = NOT is_active, updated_at=now() WHERE id=$1 RETURNING *",
+            template_id)
+    return _template_out(new_row)
+
+
+@router.post("/submission-templates/{template_id}/duplicate")
+async def duplicate_template(template_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        src = await conn.fetchrow(
+            "SELECT * FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2", template_id, actor.tenant_id)
+        if not src:
+            raise HTTPException(404, "Template not found")
+        row = await conn.fetchrow(
+            """INSERT INTO tracking_sheet_templates
+                 (tenant_id, client_id, name, columns, is_default, direction, template_type,
+                  file_path, file_name, file_mime_type, created_by)
+               VALUES ($1,$2,$3,$4,false,$5,$6,$7,$8,$9,$10) RETURNING *""",
+            actor.tenant_id, src["client_id"], f"{src['name']} (copy)", src["columns"],
+            src["direction"], src["template_type"], src["file_path"], src["file_name"],
+            src["file_mime_type"], actor.user_id,
+        )
+    return _template_out(row)
+
+
+@router.post("/submission-templates/{template_id}/upload-file")
+async def upload_template_file(template_id: str, file: UploadFile = File(...), actor: Actor = Depends(get_actor)):
+    """Uploads a real .xlsx/.docx/.pdf as this template's document — from
+    this point on, a send using this template merges real candidate data
+    into the file's own {{token}} placeholders (see services/
+    template_merge.py) instead of building the plain inline HTML table.
+    .pdf is accepted but NOT merge-filled (a flattened PDF has no
+    addressable field to write into) — it's sent as a static reference
+    attachment alongside the always-generated live data table; this is a
+    real, stated limitation, not silently pretended away."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        existing = await conn.fetchval(
+            "SELECT id FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2", template_id, actor.tenant_id)
+        if not existing:
+            raise HTTPException(404, "Template not found")
+
+    ext = "." + (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in _TEMPLATE_FILE_EXTS:
+        raise HTTPException(400, "Unsupported file type — use .xlsx, .docx, or .pdf")
+    file_bytes = await file.read()
+    if len(file_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(400, "File too large (max 10MB)")
+
+    folder = TEMPLATE_FILE_DIR / actor.tenant_id
+    folder.mkdir(parents=True, exist_ok=True)
+    rel_path = f"/uploads/tracking_sheet_templates/{actor.tenant_id}/{template_id}{ext}"
+    (folder / f"{template_id}{ext}").write_bytes(file_bytes)
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """UPDATE tracking_sheet_templates
+               SET template_type='file', file_path=$1, file_name=$2, file_mime_type=$3, updated_at=now()
+               WHERE id=$4 RETURNING *""",
+            rel_path, file.filename or f"template{ext}", _TEMPLATE_FILE_EXTS[ext], template_id,
+        )
+    return _template_out(row)
+
+
+@router.get("/submission-templates/{template_id}/download-file")
+async def download_template_file(template_id: str, actor: Actor = Depends(get_actor)):
+    from fastapi.responses import FileResponse
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT file_path, file_name, file_mime_type FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2",
+            template_id, actor.tenant_id)
+    if not row or not row["file_path"]:
+        raise HTTPException(404, "No file uploaded for this template")
+    abs_path = Path("/app") / row["file_path"].lstrip("/")
+    if not abs_path.exists():
+        raise HTTPException(404, "File missing from disk")
+    return FileResponse(abs_path, media_type=row["file_mime_type"], filename=row["file_name"])
 
 
 # ─────────────────────────── Screening notification settings ───────────────────────────
@@ -650,8 +812,17 @@ async def _do_kae_submission(
             raise HTTPException(400, "No tracking sheet template available — create one under Ops Settings > Templates")
         columns = _jsonb(template["columns"], [])
 
+        # Real bug fix, found while building the KAE->Client hop: this query
+        # had no direction filter at all — once a requisition had BOTH
+        # recruiter->KAE and KAE->client submissions, the two directions'
+        # sl_no sequences bled into each other (a requisition's 1st real
+        # recruiter->KAE send could land as "SL No 5" purely because 4
+        # unrelated KAE->client sends had already happened on the same
+        # requisition). Each direction is its own cumulative sheet with its
+        # own independent sl_no count, matching how _do_client_submission's
+        # own query was already correctly scoped from the start.
         prior_rows = await conn.fetch(
-            "SELECT field_values FROM candidate_submissions WHERE requisition_id=$1 ORDER BY sent_at",
+            "SELECT field_values FROM candidate_submissions WHERE requisition_id=$1 AND direction='recruiter_to_kae' ORDER BY sent_at",
             row["requisition_id"])
         client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
         recruiter_email = actor.email
@@ -821,3 +992,323 @@ async def submission_history(application_id: str, actor: Actor = Depends(get_act
         d["field_values"] = _jsonb(d["field_values"], {})
         out.append(d)
     return out
+
+
+# ══════════════════════ KAE -> Client / KAM submission (2nd hop) ══════════════════════
+# Everything above this line is the recruiter -> KAE hop, built 2026-07-29
+# onward. There was no second hop at all: nothing routed a candidate onward
+# from the KAE to the actual client/KAM, and nothing distinguished "sent to
+# our KAE" from "shared with the client" anywhere in the schema. This
+# section adds that hop as its own real, tracked, one-click action —
+# direction='kae_to_client' throughout — reusing every shared piece above
+# (COLUMN_REGISTRY, _app_context, _build_tracking_html_table, resume
+# rendering, _send_kae_email) rather than a second, parallel system.
+
+@router.get("/clients/{client_id}/contacts")
+async def list_client_contacts(client_id: str, actor: Actor = Depends(require_permission("companies", "read"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await _resolve_client_contacts(conn, actor.tenant_id, client_id)
+    return [dict(r) for r in rows]
+
+
+class ClientContactIn(BaseModel):
+    contact_name: str
+    email: str
+    role_label: Optional[str] = None
+    is_primary: bool = False
+
+
+@router.post("/clients/{client_id}/contacts", status_code=201)
+async def create_client_contact(client_id: str, body: ClientContactIn, actor: Actor = Depends(require_permission("companies", "update"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        exists = await conn.fetchval("SELECT 1 FROM clients WHERE id=$1 AND tenant_id=$2", client_id, actor.tenant_id)
+        if not exists:
+            raise HTTPException(404, "Client not found")
+        if body.is_primary:
+            await conn.execute(
+                "UPDATE client_contacts SET is_primary=false WHERE tenant_id=$1 AND client_id=$2",
+                actor.tenant_id, client_id)
+        row = await conn.fetchrow(
+            """INSERT INTO client_contacts (tenant_id, client_id, contact_name, email, role_label, is_primary, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
+            actor.tenant_id, client_id, body.contact_name, body.email, body.role_label, body.is_primary, actor.user_id)
+    return dict(row)
+
+
+@router.put("/client-contacts/{contact_id}")
+async def update_client_contact(contact_id: str, body: ClientContactIn, actor: Actor = Depends(require_permission("companies", "update"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        existing = await conn.fetchrow(
+            "SELECT client_id FROM client_contacts WHERE id=$1 AND tenant_id=$2", contact_id, actor.tenant_id)
+        if not existing:
+            raise HTTPException(404, "Contact not found")
+        if body.is_primary:
+            await conn.execute(
+                "UPDATE client_contacts SET is_primary=false WHERE tenant_id=$1 AND client_id=$2 AND id != $3",
+                actor.tenant_id, existing["client_id"], contact_id)
+        row = await conn.fetchrow(
+            """UPDATE client_contacts SET contact_name=$1, email=$2, role_label=$3, is_primary=$4, updated_at=now()
+               WHERE id=$5 RETURNING *""",
+            body.contact_name, body.email, body.role_label, body.is_primary, contact_id)
+    return dict(row)
+
+
+@router.delete("/client-contacts/{contact_id}")
+async def delete_client_contact(contact_id: str, actor: Actor = Depends(require_permission("companies", "update"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.execute("DELETE FROM client_contacts WHERE id=$1 AND tenant_id=$2", contact_id, actor.tenant_id)
+    return {"ok": True, "deleted": row != "DELETE 0"}
+
+
+@router.get("/applications/{application_id}/submit-to-client/preview")
+async def submit_to_client_preview(application_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row, auto_values = await _app_context(conn, application_id)
+        contacts = await _resolve_client_contacts(conn, actor.tenant_id, row["client_id"])
+        template = await _resolve_template(conn, actor.tenant_id, row["client_id"], "kae_to_client")
+        templates = await conn.fetch(
+            """SELECT tst.id, tst.name, tst.client_id, tst.is_default, tst.template_type, tst.file_name, cl.name AS client_name
+               FROM tracking_sheet_templates tst LEFT JOIN clients cl ON cl.id = tst.client_id
+               WHERE tst.tenant_id=$1 AND tst.direction='kae_to_client' AND tst.is_active
+               ORDER BY tst.is_default DESC, tst.name""",
+            actor.tenant_id)
+        prior_count = await conn.fetchval(
+            "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
+            row["requisition_id"])
+    return {
+        "client_id": str(row["client_id"]) if row["client_id"] else None,
+        "primary_contact": dict(contacts[0]) if contacts and contacts[0]["is_primary"] else None,
+        "contacts": [dict(c) for c in contacts],
+        "resolved_template": _template_out(template) if template else None,
+        "templates": [_template_out(t) for t in templates],
+        "auto_values": {**auto_values, "sl_no": str((prior_count or 0) + 1)},
+        "has_resume_text": bool((row["resume_text"] or "").strip()),
+        "stage": row["stage"],
+    }
+
+
+class SubmitToClientIn(BaseModel):
+    template_id: Optional[str] = None
+    to_emails: Optional[list[str]] = None
+    columns: Optional[list[dict]] = None
+    hidden_columns: list[str] = []
+    field_values: dict = {}
+    resume_style: str = "clean_generated"
+    manual_resume: Optional[dict] = None
+    visual_theme: Optional[str] = None
+    logo_position: Optional[str] = None
+    cc_self: bool = True
+    save_as_default: bool = False
+
+
+async def _do_client_submission(
+    tenant_id: str, application_id: str, actor: Actor,
+    resume_bytes: bytes, resume_filename: str, resume_style: str, resume_style_label: str,
+    template_id: Optional[str], columns_override: Optional[list], hidden_columns: list,
+    field_values: Optional[dict], to_emails_override: Optional[list], cc_self: bool, save_as_default: bool,
+) -> dict:
+    """The KAE->Client hop: mirrors _do_kae_submission's shape (same
+    _app_context, same resume attachment, same audit/outbox discipline) but
+    resolves a client contact (not a KAE) as the recipient, a
+    direction='kae_to_client' template, and supports two real, independent
+    edits a KAE can make before sending without ever silently mutating the
+    saved default:
+      - hidden_columns: ALWAYS one-time — recorded on this submission row
+        for audit, never written back to the template, regardless of
+        save_as_default.
+      - columns_override: the effective column list for THIS send. Only
+        persisted if save_as_default=True, and even then only ever written
+        to a template row pinned to THIS client — a shared/global default
+        template is never silently repurposed by one client's edit."""
+    async with db.tenant_conn(tenant_id) as conn:
+        row, auto_values = await _app_context(conn, application_id)
+        client_id = row["client_id"]
+        if not client_id:
+            raise HTTPException(400, "This requisition has no client linked — cannot resolve a recipient")
+        contacts = await _resolve_client_contacts(conn, tenant_id, client_id)
+        primary_contact = contacts[0] if contacts else None
+        if not to_emails_override and not primary_contact:
+            raise HTTPException(400, "No client contact is configured — add one under Companies > this client > Contacts")
+
+        template = None
+        if template_id:
+            template = await conn.fetchrow(
+                "SELECT * FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2 AND direction='kae_to_client'",
+                template_id, tenant_id)
+            if not template:
+                raise HTTPException(404, "Tracking sheet template not found")
+        else:
+            template = await _resolve_template(conn, tenant_id, client_id, "kae_to_client")
+        if not template and not columns_override:
+            raise HTTPException(400, "No client tracking sheet template available — create one under Ops Settings > Templates")
+        columns = columns_override if columns_override else _jsonb(template["columns"], [])
+        visible_columns = [c for c in columns if c["key"] not in (hidden_columns or [])]
+
+        prior_rows = await conn.fetch(
+            """SELECT field_values FROM candidate_submissions
+               WHERE requisition_id=$1 AND direction='kae_to_client' ORDER BY sent_at""",
+            row["requisition_id"])
+        client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
+        recruiter_email = actor.email
+
+        if save_as_default and columns_override:
+            # Persists ONLY as a client-pinned template for this exact
+            # client — never overwrites a global/shared default, and never
+            # fires from hidden_columns (that stays a per-send redaction).
+            existing_client_default = await conn.fetchrow(
+                """SELECT id FROM tracking_sheet_templates
+                   WHERE tenant_id=$1 AND client_id=$2 AND direction='kae_to_client' AND is_default""",
+                tenant_id, client_id)
+            if existing_client_default:
+                await conn.execute(
+                    "UPDATE tracking_sheet_templates SET columns=$1, updated_at=now() WHERE id=$2",
+                    json.dumps(columns_override), existing_client_default["id"])
+            else:
+                await _unset_other_defaults(conn, tenant_id, client_id, "kae_to_client")
+                new_tpl = await conn.fetchrow(
+                    """INSERT INTO tracking_sheet_templates
+                         (tenant_id, client_id, name, columns, is_default, direction, created_by)
+                       VALUES ($1,$2,$3,$4,true,'kae_to_client',$5) RETURNING id""",
+                    tenant_id, client_id, f"{client_row['name'] if client_row else 'Client'} — Client Tracking Sheet",
+                    json.dumps(columns_override), actor.user_id)
+                template_id = template_id or str(new_tpl["id"])
+
+    sl_no = len(prior_rows) + 1
+    overrides = {k: v for k, v in (field_values or {}).items() if v not in (None, "")}
+    final_values = {**auto_values, **overrides, "sl_no": str(sl_no)}
+    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    # Hidden columns must never leak into ANY output for this send — not
+    # just the inline table. A file-template merge (xlsx/docx) reads
+    # straight from a row dict by key, so the real fix is blanking the
+    # hidden keys out of the dict itself before it ever reaches the merge
+    # engine, not just filtering which columns get *listed*.
+    hidden_set = set(hidden_columns or [])
+    merge_rows = [{k: ("" if k in hidden_set else v) for k, v in r.items()} for r in sheet_rows] if hidden_set else sheet_rows
+
+    attachments = [(resume_filename, resume_bytes,
+                     "pdf" if resume_filename.lower().endswith(".pdf") else
+                     "vnd.openxmlformats-officedocument.wordprocessingml.document")]
+    body_html_extra = ""
+    if template and template["template_type"] == "file" and template["file_path"]:
+        abs_path = Path("/app") / template["file_path"].lstrip("/")
+        if abs_path.exists():
+            raw = abs_path.read_bytes()
+            ext = abs_path.suffix.lower()
+            if ext == ".xlsx":
+                merged = template_merge.fill_xlsx_template(raw, merge_rows)
+                attachments.append((f"Tracking_Sheet_{client_row['name'] if client_row else ''}.xlsx".replace(" ", "_"),
+                                     merged, "vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+            elif ext == ".docx":
+                merged = template_merge.fill_docx_template(raw, merge_rows)
+                attachments.append((template["file_name"] or "Tracking_Sheet.docx", merged,
+                                     "vnd.openxmlformats-officedocument.wordprocessingml.document"))
+            else:  # .pdf — attached as a static reference only, never merged (see upload_template_file docstring)
+                attachments.append((template["file_name"] or "Tracking_Sheet_Template.pdf", raw, "pdf"))
+                body_html_extra = _build_tracking_html_table(visible_columns, sheet_rows)
+    else:
+        body_html_extra = _build_tracking_html_table(visible_columns, sheet_rows)
+
+    if to_emails_override:
+        to_recipients = list(to_emails_override)
+        cc_recipients = [c["email"] for c in contacts if c["email"] not in to_recipients] + \
+                         ([recruiter_email] if cc_self and recruiter_email else [])
+        greeting = "Hi Team,"
+    else:
+        to_recipients = [primary_contact["email"]]
+        cc_recipients = [c["email"] for c in contacts[1:] if c["email"]] + \
+                         ([recruiter_email] if cc_self and recruiter_email else [])
+        greeting = f"Hi {primary_contact['contact_name'] or ''},"
+
+    subject = f"Candidate Submission — {row['full_name']} for {row['role_title']}"
+    body_text = (
+        f"{greeting}\n\n"
+        f"Please find attached the profile for {row['full_name']} against \"{row['role_title']}\""
+        f"{' (' + client_row['name'] + ')' if client_row else ''}. "
+        f"{'The tracking sheet is attached.' if attachments and len(attachments) > 1 and body_html_extra == '' else 'The tracking sheet is below.'}\n\n"
+        f"Resume attached: {resume_style_label}.\n\n"
+        f"Regards,\n{actor.full_name or 'AVIIN ATS'}"
+    )
+    email_sent, email_error = await _send_kae_email(
+        tenant_id, to_recipients, cc_recipients, subject, body_text, attachments,
+        body_html_extra=body_html_extra,
+    )
+
+    async with db.tenant_conn(tenant_id) as conn:
+        sub_row = await conn.fetchrow(
+            """INSERT INTO candidate_submissions
+                 (tenant_id, application_id, candidate_id, requisition_id, client_id, template_id,
+                  resume_style, field_values, recipient_emails, to_emails, status, error_message, sent_by,
+                  direction, hidden_columns, recipient_contact_id, trigger_source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'kae_to_client',$14,$15,'manual') RETURNING *""",
+            tenant_id, application_id, row["candidate_id"], row["requisition_id"], client_id,
+            template["id"] if template else None, resume_style, json.dumps(final_values),
+            list(dict.fromkeys(to_recipients + cc_recipients)), to_recipients,
+            "sent" if email_sent else "failed", email_error, actor.user_id,
+            hidden_columns or [], primary_contact["id"] if (primary_contact and not to_emails_override) else None,
+        )
+
+        await events.write_outbox(
+            conn, tenant_id, "candidate.submitted_to_client",
+            {"application_id": application_id, "candidate_id": str(row["candidate_id"]),
+             "client_id": str(client_id), "email_sent": email_sent},
+            f"candidate.submitted_to_client:{sub_row['id']}",
+        )
+        await events.write_audit(
+            conn, tenant_id, actor.user_id, "submit_to_client", "application", application_id,
+            before={"stage": row["stage"]},
+            after={"to": to_recipients, "cc": cc_recipients, "resume_style": resume_style,
+                   "email_sent": email_sent, "sl_no": sl_no, "hidden_columns": hidden_columns,
+                   "saved_as_default": bool(save_as_default and columns_override)},
+        )
+
+    out = dict(sub_row)
+    out["field_values"] = _jsonb(out["field_values"], {})
+    out["email_sent"] = email_sent
+    out["email_error"] = email_error
+    out["recipient_name"] = primary_contact["contact_name"] if (primary_contact and not to_emails_override) else "Client/KAM"
+    return out
+
+
+@router.post("/applications/{application_id}/submit-to-client")
+async def submit_to_client(application_id: str, body: SubmitToClientIn, actor: Actor = Depends(get_actor)):
+    """One-Click Approve & Send: everything defaults from real, live data
+    (auto_values, the client's configured default template, clean_generated
+    resume) — a caller that sends an empty-ish body genuinely completes the
+    whole "generate + send" flow in one call. Every field is still
+    independently editable first via the /preview endpoint's data."""
+    if body.resume_style not in _RESUME_STYLES:
+        raise HTTPException(400, f"resume_style must be one of {', '.join(_RESUME_STYLES)}")
+    if body.resume_style == "manual" and not body.manual_resume:
+        raise HTTPException(400, "manual_resume is required when resume_style is 'manual'")
+    if body.visual_theme is not None and body.visual_theme not in _VALID_THEMES:
+        raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID_THEMES)}")
+    if body.logo_position is not None and body.logo_position not in _VALID_LOGO_POSITIONS:
+        raise HTTPException(400, f"logo_position must be one of {sorted(_VALID_LOGO_POSITIONS)}")
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row, _ = await _app_context(conn, application_id)
+    candidate = {
+        "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
+        "location": row["location"], "current_employer": row["current_employer"],
+        "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
+        "skills": row["skills"], "resume_text": row["resume_text"],
+    }
+    if body.resume_style == "manual":
+        resume_bytes = _build_manual_resume_pdf(body.manual_resume or {})
+    else:
+        cfg = {**_STYLE_CONFIGS[body.resume_style]}
+        if body.visual_theme:
+            cfg["visual_theme"] = body.visual_theme
+        if body.logo_position:
+            cfg["logo_position"] = body.logo_position
+        resume_bytes = render_resume_pdf(candidate, cfg)
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
+    return await _do_client_submission(
+        actor.tenant_id, application_id, actor, resume_bytes,
+        f"Resume_{safe_name}_{body.resume_style}.pdf", body.resume_style,
+        _RESUME_LABELS.get(body.resume_style, body.resume_style),
+        template_id=body.template_id, columns_override=body.columns, hidden_columns=body.hidden_columns,
+        field_values=body.field_values, to_emails_override=body.to_emails, cc_self=body.cc_self,
+        save_as_default=body.save_as_default,
+    )
