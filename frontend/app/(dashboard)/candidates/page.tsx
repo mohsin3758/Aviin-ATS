@@ -590,7 +590,7 @@ function BulkCVModal({onClose,onDone}:{onClose:()=>void;onDone:()=>void}) {
 function SortTh({label,col,sort,onSort,style:s}:{label:string;col:string;sort:{by:string;dir:string};onSort:(c:string)=>void;style?:any}) {
   const active = sort.by===col;
   return (
-    <th onClick={()=>onSort(col)} style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:active?'#1e40af':'#64748b',cursor:'pointer',userSelect:'none',whiteSpace:'nowrap',...s}}>
+    <th onClick={()=>onSort(col)} style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:active?'#1e40af':'#64748b',cursor:'pointer',userSelect:'none',whiteSpace:'nowrap',...s}}>
       <div style={{display:'flex',alignItems:'center',gap:'4px'}}>
         {label}
         {active ? (sort.dir==='asc'?<ArrowUp size={11}/>:<ArrowDown size={11}/>) : <ArrowUpDown size={11} style={{opacity:0.3}}/>}
@@ -1133,19 +1133,19 @@ export default function CandidatesPage() {
             <table style={{width:'100%',minWidth:'1220px',borderCollapse:'collapse'}}>
               <thead>
                 <tr style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0'}}>
-                  <th style={{padding:'10px 14px',width:'36px'}}>
+                  <th style={{padding:'8px 10px',width:'36px'}}>
                     <input type="checkbox" checked={allSelected} onChange={toggleAll} style={{accentColor:'#1e40af',cursor:'pointer',width:'15px',height:'15px'}}/>
                   </th>
                   <SortTh label="Name"     col="full_name"    sort={sort} onSort={handleSort}/>
-                  <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Phone</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Phone</th>
                   <SortTh label="Exp"      col="total_exp_mo" sort={sort} onSort={handleSort}/>
                   <SortTh label="Exp CTC"  col="expected_ctc" sort={sort} onSort={handleSort}/>
-                  <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Company</th>
-                  <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Skills</th>
-                  <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Pipeline</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Company</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Skills</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Pipeline</th>
                   <SortTh label="Activity" col="last_activity" sort={sort} onSort={handleSort}/>
-                  <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Source</th>
-                  <th style={{padding:'10px 14px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Owner</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Source</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Owner</th>
                   {/* Real bug fix (2026-08-20): position:sticky here visually
                       overlapped the Owner column entirely (and the tail end of
                       Source) at every real viewport width tested — sticky's
@@ -1155,7 +1155,7 @@ export default function CandidatesPage() {
                       reverted twice on Resume Inbox earlier the same day.
                       Plain scroll instead — no overlap risk, matches that
                       established fix. */}
-                  <th style={{padding:'10px 14px',background:'#f8fafc',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',textAlign:'center'}}>Actions</th>
+                  <th style={{padding:'8px 10px',background:'#f8fafc',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',textAlign:'center'}}>Actions</th>
                 </tr>
               </thead>
               <tbody data-testid="candidate-list">
@@ -1168,11 +1168,11 @@ export default function CandidatesPage() {
                     <tr key={d.id} style={{borderBottom:'1px solid #f1f5f9',background:isSel?'#eff6ff':'white',transition:'background 0.1s'}}
                       onMouseEnter={e=>{if(!isSel)(e.currentTarget as HTMLElement).style.background='#f8faff';}}
                       onMouseLeave={e=>{if(!isSel)(e.currentTarget as HTMLElement).style.background='white';}}>
-                      <td style={{padding:'10px 14px',width:'36px'}}>
+                      <td style={{padding:'8px 10px',width:'36px'}}>
                         <input type="checkbox" checked={isSel} onChange={()=>toggleSel(d.id)} style={{accentColor:'#1e40af',cursor:'pointer',width:'15px',height:'15px'}}/>
                       </td>
                       {/* Name — click opens drawer */}
-                      <td style={{padding:'10px 14px',cursor:'pointer'}} onClick={()=>setDrawer(d)}>
+                      <td style={{padding:'8px 10px',cursor:'pointer'}} onClick={()=>setDrawer(d)}>
                         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
                           <div style={{width:'34px',height:'34px',borderRadius:'50%',background:gc(d.full_name),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:'700',color:'white',flexShrink:0}}>{gi(d.full_name)}</div>
                           <div>
@@ -1187,41 +1187,41 @@ export default function CandidatesPage() {
                           </div>
                         </div>
                       </td>
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         {d.phone
                           ? <div style={{display:'flex',alignItems:'center',gap:'4px',fontSize:'12px',color:'#475569'}}><Phone size={11}/>{d.phone}</div>
                           : <span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
                       </td>
                       {/* Exp */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         {exp
                           ? <span style={{fontSize:'11px',fontWeight:'600',padding:'2px 8px',borderRadius:'10px',background:'#dbeafe',color:'#1e40af'}}>{exp}</span>
                           : <span style={{fontSize:'11px',fontWeight:'500',padding:'2px 8px',borderRadius:'10px',background:'#f8fafc',color:'#94a3b8'}}>—</span>}
                         {d.notice_period_days > 0 && <div style={{fontSize:'10px',color:'#64748b',marginTop:'2px'}}>{d.notice_period_days}d notice</div>}
                       </td>
                       {/* CTC */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         {d.expected_ctc
                           ? <div style={{fontSize:'12px',color:'#059669',fontWeight:'600'}}>{fc(d.expected_ctc)}</div>
                           : <span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
                         {d.current_ctc && <div style={{fontSize:'10px',color:'#94a3b8'}}>Curr:{fc(d.current_ctc)}</div>}
                       </td>
                       {/* Company */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         {d.current_employer
                           ? <div style={{display:'flex',alignItems:'center',gap:'4px',fontSize:'12px',color:'#475569'}}><Briefcase size={11}/>{d.current_employer}</div>
                           : <span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
                         {d.location&&<div style={{fontSize:'10px',color:'#94a3b8',marginTop:'1px',display:'flex',alignItems:'center',gap:'3px'}}><MapPin size={9}/>{d.location}</div>}
                       </td>
                       {/* Skills */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         <div style={{display:'flex',flexWrap:'wrap',gap:'3px'}}>
                           {(d.skills||[]).slice(0,2).map((s:string)=><span key={s} style={{fontSize:'10px',fontWeight:'500',padding:'2px 6px',borderRadius:'4px',background:'#eff6ff',color:'#2563eb',border:'1px solid #bfdbfe'}}>{s}</span>)}
                           {(d.skills||[]).length>2&&<span style={{fontSize:'10px',padding:'2px 5px',borderRadius:'4px',background:'#f8fafc',color:'#94a3b8'}}>+{d.skills.length-2}</span>}
                         </div>
                       </td>
                       {/* Pipeline status */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         {sc ? (
                           <div>
                             <span style={{fontSize:'10px',fontWeight:'700',padding:'2px 7px',borderRadius:'8px',background:sc.bg,color:sc.color}}>{sc.label}</span>
@@ -1237,17 +1237,17 @@ export default function CandidatesPage() {
                         )}
                       </td>
                       {/* Last activity */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         {activity
                           ? <div style={{display:'flex',alignItems:'center',gap:'4px',fontSize:'11px',color:'#64748b'}}><Clock size={10}/>{activity}</div>
                           : <span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
                       </td>
                       {/* Source */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         <span style={{fontSize:'11px',padding:'2px 8px',borderRadius:'10px',background:'#f1f5f9',color:'#475569',fontWeight:'500'}}>{d.source||'direct'}</span>
                       </td>
                       {/* Owner (2026-08-11: 30-day individual recruiter ownership) */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         {d.owner && d.owner.status==='active' && new Date(d.owner.expires_at) > new Date() ? (
                           <div>
                             <div style={{fontSize:'11px',fontWeight:'600',color:'#0f172a'}}>{d.owner.recruiter_name}</div>
@@ -1265,7 +1265,7 @@ export default function CandidatesPage() {
                         )}
                       </td>
                       {/* Actions */}
-                      <td style={{padding:'10px 14px'}}>
+                      <td style={{padding:'8px 10px'}}>
                         <div style={{display:'flex',gap:'4px',justifyContent:'center'}}>
                           <button onClick={()=>setDrawer(d)} title="Quick view" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #bfdbfe',background:'#eff6ff',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',padding:0}}><Eye size={12} style={{color:'#2563eb'}}/></button>
                           <button onClick={()=>openEdit(d)} title="Edit" style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',padding:0}}><Edit size={12} style={{color:'#64748b'}}/></button>

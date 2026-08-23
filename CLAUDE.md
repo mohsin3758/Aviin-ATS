@@ -11056,3 +11056,42 @@ same-tab navigation and the Full Resume page's auto-refresh/history-loop
 fixes. Full regression sweep (S1/S2/S8/S13/S16/S20/S30/S38/S48/S53, 79
 tests) passed clean: 77 passed, 2 pre-existing skips, 0 failed. Zero-
 token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).
+
+## Candidates table: real overflow at narrow real-laptop widths, reduced
+## via padding trim (matching the Resume Inbox precedent), 2026-08-23
+User reported the Owner column and other trailing columns hiding/
+overlapping. Investigated with real screenshots rather than code
+review alone (an SSH connection dropped twice mid-test — a real network
+hiccup, not app-related; re-ran the check on VPS reachability before
+each retry). At 1600px with sidebar expanded, Owner rendered cleanly
+(142px of real overflow, needing scroll only for Actions). At 1366px —
+a real, common laptop width, the same class this project already
+documented needing extra care for Resume Inbox — overflow was 376px,
+genuinely pushing Source/Owner off-screen.
+
+Fixed the same way already proven for Resume Inbox earlier the same
+day: trimmed cell padding (`10px 14px` → `8px 10px`) across every real
+`<th>`/`<td>` in the table, including the separate `SortTh` component
+used for sortable headers (Name/Exp/Exp CTC/Activity) — missed on a
+first pass since it's a different component with its own inline
+padding, would have caused sortable headers to misalign against the
+now-narrower plain ones if left untouched. Reduced real overflow at
+1366px from 376px to 280px (verified via direct `scrollWidth`/
+`clientWidth` measurement, not estimated).
+
+**Honest scope note, matching the same conclusion already reached for
+Resume Inbox**: this table has 12 real columns of genuinely useful
+information (checkbox, Name, Phone, Exp, Exp CTC, Company, Skills,
+Pipeline, Activity, Source, Owner, Actions) — at a genuinely narrow
+1366px laptop width, some horizontal scroll remains necessary even
+after this trim, and further eliminating it would mean cutting real
+columns or content, not a display bug to chase away. The table's
+horizontal scroll (`overflowX:'auto'`, confirmed still present, not the
+sticky-column approach already tried and reverted twice elsewhere in
+this project for causing worse overlap bugs) remains fully functional —
+nothing is permanently hidden, it's reachable by scrolling right.
+
+Verified for real: direct geometry measurement before/after the fix at
+1366px, plus a real regression pass on S1/S53 (13 tests, all touching
+this same page) — clean, no regressions. Zero-token audit: `CONFIRMED
+CLEAN` (391 files, 0 external API refs).
