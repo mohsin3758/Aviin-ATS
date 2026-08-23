@@ -10724,3 +10724,71 @@ Requisitions page's own "Find AI Matches" feature) and `/candidates/{id}
 into the requisition form, with no free-text extraction/vocabulary-
 filtering step in between — so neither has any way to silently drop a
 typed requirement the way the free-text-JD-paste path did.
+
+## AI Matching fix follow-up, same day: a real gap the first pass missed —
+## plain one-skill-per-line JDs (no bullet markers) still fell through
+User reported "is this deployed? its showing same result not improved"
+with a screenshot: pasting a JD showed "Detected requirements: SAP FICO"
+only, and Rishith/Venkatesh.C still at 95%. Confirmed the fix WAS
+deployed (`ec124a7`, matched what was pushed) — the real issue was a
+genuine gap the first pass hadn't covered: `_extract_requirement_
+phrases()` only recognized bullet/numbered list lines and comma-lists
+after an explicit marker. The user's actual pasted JD had each
+requirement on its own line with NO bullet character at all ("SAP FICO"
+/ "Credit Management" / ... one per line, no "-"/"*"/number prefix) — a
+very common, arguably simpler JD-paste shape that neither of the first
+pass's two extraction tiers recognized, so it silently fell all the way
+back to the same taxonomy-only vocabulary the whole fix exists to stop
+relying on alone. Confirmed directly: `_extract_requirement_phrases()`
+against that exact plain-line input returned `[]` even after the fix
+was live.
+
+**Fixed**: added a 3rd, last-resort extraction tier — fires only when
+tiers 1+2 found nothing, and only when the JD text itself looks like a
+bare list (≥60% of its non-empty lines are short — 1-6 words — and
+don't end in sentence punctuation). A real prose JD still falls through
+to the taxonomy extractor exactly as before; a bare list of short lines
+(with or without bullets) is now always recognized. Verified against 4
+real shapes before deploying: plain lines (now correctly extracts all
+4), bullets (unchanged, still correct), pure prose (still correctly
+empty, no over-triggering), and a realistic mixed JD (title sentence +
+short list + a long requirement sentence) — correctly extracts only the
+3 genuine short list items, skipping both sentence-shaped lines.
+
+**A deploy-process lesson, not a code bug**: the first verification
+attempt after this edit used `docker exec ... python3 -c "..."` against
+the running container immediately after `scp`, and it incorrectly
+showed the OLD (unfixed) behavior — traced to the container not having
+been rebuilt yet (a plain file copy onto a running container's
+filesystem doesn't take effect the way a fresh `docker compose up -d
+--build` does for this project's image-based deploy, unlike some of
+this session's earlier edits that happened to already be mid-rebuild
+for another reason). A real rebuild resolved it; re-verified all 4
+cases cleanly afterward.
+
+**Also investigated, not a bug**: the same screenshot showed
+"Venkatesh.C" twice in the ranked list, both at a genuine 95%. Checked
+directly rather than assumed — this tenant genuinely has 3 separate
+"Venkatesh.C" candidate records with identical structured skills (a
+real, pre-existing duplicate-candidate data issue, unrelated to this
+fix — this project already has a dedicated Duplicate Candidate
+Detection feature for exactly this class of problem, not touched here).
+Confirmed the 95% itself is honest, not a residual bug: the exact
+contiguous phrases "claim management" and "disaster management" (not
+just the individual words, checked specifically to rule out a
+coincidental-word false positive) both genuinely appear in 2 of those 3
+records' real resume text — a candidate whose resume truly uses those
+exact terms deserves a high score; the original bug was about
+*silently dropping* stated requirements, not about correctly rewarding
+a genuine match.
+
+Verified for real end-to-end after the fix: re-ran the exact plain-line
+reproduction via the API (Rishith correctly back to 62% with 2 of 4
+matched, not 95%) and via a real headless-browser pass on the live page
+(all 4 requirements shown as "Detected requirements," Rishith's row
+showing the correct ✓/✕ chips). New permanent test added to "S53" (now
+6 tests) covering this exact plain-line-no-bullets shape. Full
+regression sweep (S1/S2/S8/S13/S16/S20/S30/S38/S48/S53, 74 tests)
+passed clean — 72 passed, 2 pre-existing skips, 0 failed (the earlier
+run's one flaky, unrelated S38 test passed clean this time too). Zero-
+token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).

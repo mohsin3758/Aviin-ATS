@@ -249,6 +249,20 @@ _REQ_MARKER_RE = re.compile(
 _SKILL_BREAKDOWN_STOPWORDS = {'and', 'the', 'for', 'with', 'of', 'in', 'a', 'an', 'to', 'or'}
 
 
+_SENTENCE_END_RE = re.compile(r'[.!?]\s*$')
+
+
+def _looks_like_bare_list_line(line: str) -> bool:
+    """A short, punctuation-free line reads as one list item typed on its
+    own line with no bullet character at all (a real, common JD-paste
+    shape - "SAP FICO" / "Credit Management" / "Claim Management", each
+    on its own line, no "-"/"*"/number prefix) rather than a sentence of
+    prose. Deliberately conservative: 1-6 words, no sentence-ending
+    punctuation."""
+    words = line.split()
+    return 1 <= len(words) <= 6 and not _SENTENCE_END_RE.search(line)
+
+
 def _extract_requirement_phrases(jd_text: str) -> list[str]:
     """Real bug fix (2026-08-23): rank_candidates() used to determine
     "required skills" SOLELY via extract_skills_from_text() - a fixed,
@@ -263,11 +277,26 @@ def _extract_requirement_phrases(jd_text: str) -> list[str]:
     genuinely lacking 3 of the 4 stated requirements.
 
     Fixes this by pulling the recruiter's OWN typed requirement phrases
-    verbatim - bullet/numbered list items, or a comma/semicolon list
-    right after an explicit "skills/requirements/experience in:" marker
-    - so nothing they actually asked for is ever silently discarded.
-    Falls back to nothing when the JD has no recognizable list
-    structure (plain prose) - the caller unions this with the taxonomy
+    verbatim, trying 3 real JD shapes in order:
+    1. Bullet/numbered list items ("- SAP FICO", "1. SAP FICO").
+    2. A comma/semicolon list right after an explicit "skills/
+       requirements/experience in:" marker.
+    3. REAL GAP FOUND LIVE, same day: neither of the above fires for the
+       simplest, arguably most common shape of all - each requirement on
+       its own line with NO bullet character whatsoever ("SAP FICO" /
+       "Credit Management" / ... one per line). Reproduced directly:
+       this exact input returned zero verbatim phrases from tiers 1+2,
+       silently falling all the way back to the same taxonomy-only
+       vocabulary this whole fix exists to stop relying on alone - the
+       fix looked deployed-but-inert to the user because the specific
+       JD they pasted happened to hit exactly this gap. Fires only as a
+       last resort (tiers 1+2 found nothing) and only when the JD text
+       itself looks like a bare list (>=60% of its non-empty lines are
+       short, punctuation-free lines) - never on ordinary prose, so a
+       real paragraph-style JD still falls through to the taxonomy
+       extractor exactly as before.
+    Falls back to nothing when the JD has no recognizable list structure
+    at all (plain prose) - the caller unions this with the taxonomy
     extractor, which still covers that case as it always has."""
     phrases: list[str] = []
     seen_lower: set[str] = set()
@@ -287,6 +316,14 @@ def _extract_requirement_phrases(jd_text: str) -> list[str]:
     for m in _REQ_MARKER_RE.finditer(jd_text):
         for part in re.split(r'[,;]|\s+and\s+', m.group(1)):
             _add(part)
+
+    if not phrases:
+        lines = [l.strip() for l in jd_text.split('\n') if l.strip()]
+        if len(lines) >= 2:
+            list_like = [l for l in lines if _looks_like_bare_list_line(l)]
+            if len(list_like) / len(lines) >= 0.6:
+                for l in list_like:
+                    _add(l)
 
     return phrases
 

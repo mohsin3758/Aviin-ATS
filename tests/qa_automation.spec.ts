@@ -6664,6 +6664,30 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     expect(body.required_skills).toEqual(expect.arrayContaining(['Python', 'AWS', 'Docker']));
   });
 
+  test('a plain one-requirement-per-line JD with NO bullet markers at all is still fully detected', async ({ request }) => {
+    // Real gap found live the same day, AFTER the initial fix shipped: a
+    // user reported "still not improved" from a screenshot showing only
+    // "Detected requirements: SAP FICO" — the exact same silent-drop
+    // symptom the original fix targeted, just for a JD shape (each
+    // requirement on its own line, no "-"/"*"/number prefix at all) that
+    // neither the bullet-line pass nor the comma-after-marker pass
+    // recognized as a list. Confirmed the fix WAS deployed but genuinely
+    // inert for this specific real input shape before widening the
+    // extractor's 3rd, last-resort tier.
+    const res = await request.post(`${API}/candidates/rank`, {
+      headers: auth(),
+      data: { jd_text: 'SAP FICO\nCredit Management\nClaim Management\nDisaster Management', limit: 200 },
+    });
+    const body = await res.json();
+    expect(body.required_skills.length).toBe(4);
+    expect(body.required_skills).toEqual(
+      expect.arrayContaining(['SAP FICO', 'Credit Management', 'Claim Management', 'Disaster Management']),
+    );
+    const mine = body.ranked.find((r: any) => r.id === candId);
+    expect(mine.matched_skills.sort()).toEqual(['Credit Management', 'SAP FICO'].sort());
+    expect(mine.missing_skills.sort()).toEqual(['Claim Management', 'Disaster Management'].sort());
+  });
+
   test('real headless UI: View Profile opens an inline preview (zero navigation), Back to list restores the ranked results', async ({ page }) => {
     await page.goto('/candidates');
     await page.getByRole('button', { name: 'JD Match' }).click();
