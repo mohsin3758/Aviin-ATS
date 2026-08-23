@@ -7,7 +7,7 @@ import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
   FileText, Users, GitMerge, Eye, Clock, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Layers,
-  Bookmark, Sparkles,
+  Bookmark, Sparkles, ArrowLeft,
 } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -598,6 +598,86 @@ function SortTh({label,col,sort,onSort,style:s}:{label:string;col:string;sort:{b
   );
 }
 
+// Inline candidate preview inside the JD Match modal — fetched on demand
+// only when a recruiter actually clicks "View Profile" for one candidate,
+// not eagerly for every ranked match. Deliberately does NOT navigate to
+// /candidates/{id} at all: that was the original implementation (a plain
+// <a target="_blank"> around the whole row) and the direct cause of the
+// reported "Back button returns to the plain Candidates list, not the AI
+// Matching Results" bug — a brand-new tab has no history entry for the
+// results page to go back TO. Same fix already proven on the
+// Requisitions page's own AiMatchModal (2026-08-21) — staying inside
+// this same modal means there is nothing to "go back" from.
+function JdCandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack }: {
+  candidateId: string; isSelected: boolean; onToggle: () => void; onBack: () => void;
+}) {
+  const { data: c, loading } = useFetch<any>(`/candidates/${candidateId}`);
+  if (loading || !c) {
+    return <div style={{ minHeight: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: 12 }}>Loading profile…</div>;
+  }
+  const skills: string[] = Array.isArray(c.skills) ? c.skills : [];
+  return (
+    <div style={{ maxHeight: 460, overflowY: 'auto', padding: '2px 2px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', fontSize: 12, fontWeight: 600, padding: 0 }}>
+          <ArrowLeft size={13} /> Back to list
+        </button>
+        <a href={`/candidates/${candidateId}`} target="_blank" rel="noreferrer"
+          style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#2563eb', textDecoration: 'none' }}>
+          Open Full Profile <ExternalLink size={11} />
+        </a>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+        <div style={{ width: 48, height: 48, borderRadius: '50%', background: gc(c.full_name || ''), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+          {gi(c.full_name || '')}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1e293b' }}>{c.full_name}</div>
+          <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+            {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ') || '—'}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6, fontSize: 11, color: '#64748b' }}>
+            {c.total_exp_mo > 0 && <span>{gx(c.total_exp_mo)} experience</span>}
+            {c.location && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><MapPin size={11} /> {c.location}</span>}
+            {c.email && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Mail size={11} /> {c.email}</span>}
+            {c.phone && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Phone size={11} /> {c.phone}</span>}
+          </div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #bfdbfe', background: isSelected ? '#eff6ff' : '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#1e40af' }}>
+          <input type="checkbox" checked={isSelected} onChange={onToggle} />
+          {isSelected ? 'Selected for pipeline' : 'Select for pipeline'}
+        </label>
+        {c.latest_resume_file_id && (
+          <button onClick={() => downloadResume(c.latest_resume_file_id, c.latest_resume_file_name)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+            <Download size={12} /> Download Resume
+          </button>
+        )}
+      </div>
+      {skills.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Skills</div>
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+            {skills.map((sk: string) => (
+              <span key={sk} style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 5, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' }}>{sk}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      {c.resume_text && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Resume Extract</div>
+          <div style={{ fontSize: 11.5, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-wrap', maxHeight: 220, overflowY: 'auto', background: '#f8fafc', border: '1px solid #f1f5f9', borderRadius: 8, padding: 10 }}>
+            {c.resume_text.slice(0, 3000)}{c.resume_text.length > 3000 ? '…' : ''}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────────
 export default function CandidatesPage() {
   // form/modal
@@ -669,6 +749,18 @@ export default function CandidatesPage() {
   // table's `selected` so the two selection mechanisms never cross-pollute.
   const [jdSelected,setJdSelected] = useState<Set<string>>(new Set());
   const [jdBulkAssignOpen,setJdBulkAssignOpen] = useState(false);
+  // REAL BUG FIX (2026-08-23): "View Profile" used to be a plain
+  // <a target="_blank"> wrapping the whole row - the ranked list stayed
+  // intact in the original tab by design, but the new tab's own "Back"
+  // button had nowhere real to return to and fell back to the plain
+  // Candidates list, reported live as "redirects to the general
+  // Candidate Page instead of returning to the AI Matching Results
+  // page." Same root fix already proven on the Requisitions page's own
+  // AI Match modal (2026-08-21): view the candidate INLINE inside this
+  // same modal instead of navigating anywhere - nothing to "come back"
+  // from, since nothing ever left this page. An "Open Full Profile" link
+  // still opens the real page in a new tab for anyone who wants it.
+  const [jdPreviewId,setJdPreviewId] = useState<string|null>(null);
 
   // status toast
   const [statusMsg,setStatusMsg] = useState('');
@@ -1181,11 +1273,11 @@ export default function CandidatesPage() {
       </Modal>
 
       {/* ── JD Match modal ───────────────────────────────────────────────── */}
-      <Modal open={showJD} onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());}} title="JD Match — AI Ranking" subtitle="Paste a job description to rank your candidates by fit" size="lg"
+      <Modal open={showJD} onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());setJdPreviewId(null);}} title="JD Match — AI Ranking" subtitle="Paste a job description to rank your candidates by fit" size="lg"
         footer={!rankResult
-          ? <FormActions onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());}} onSubmit={runJDRank} loading={ranking} submitLabel="Rank Candidates"/>
+          ? <FormActions onClose={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());setJdPreviewId(null);}} onSubmit={runJDRank} loading={ranking} submitLabel="Rank Candidates"/>
           : <div style={{display:'flex',justifyContent:'flex-end',gap:'10px'}}>
-              <button onClick={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());}} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Close</button>
+              <button onClick={()=>{setShowJD(false);setRankResult(null);setJdSelected(new Set());setJdPreviewId(null);}} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Close</button>
               <button onClick={()=>setJdBulkAssignOpen(true)} disabled={jdSelected.size===0}
                 style={{display:'flex',alignItems:'center',gap:'6px',padding:'9px 18px',borderRadius:'8px',border:'none',background:jdSelected.size===0?'#94a3b8':'#1e40af',color:'white',cursor:jdSelected.size===0?'not-allowed':'pointer',fontSize:'13px',fontWeight:'700'}}>
                 <Users size={13}/>Add {jdSelected.size>0?jdSelected.size:''} to Pipeline
@@ -1193,39 +1285,63 @@ export default function CandidatesPage() {
             </div>}>
         {!rankResult ? (
           <textarea style={{...INP,height:'220px',resize:'vertical'}} placeholder="Paste the full job description here..." value={jdText} onChange={e=>setJdText(e.target.value)}/>
+        ) : jdPreviewId ? (
+          <JdCandidatePreviewPanel candidateId={jdPreviewId} isSelected={jdSelected.has(jdPreviewId)}
+            onToggle={()=>setJdSelected(prev=>{const n=new Set(prev); n.has(jdPreviewId)?n.delete(jdPreviewId):n.add(jdPreviewId); return n;})}
+            onBack={()=>setJdPreviewId(null)}/>
         ) : (
           <div>
-            <div style={{padding:'10px 14px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',marginBottom:'16px'}}>✅ Ranked {(rankResult as any).ranked?.length||0} candidates by fit — click a name to open their profile, or select candidates to add them straight to a requisition's pipeline.</div>
+            <div style={{padding:'10px 14px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',marginBottom:'8px'}}>✅ Ranked {(rankResult as any).ranked?.length||0} candidates by fit — click "View Profile" to preview before adding, or select candidates to add them straight to a requisition's pipeline.</div>
+            {Array.isArray((rankResult as any).required_skills)&&(rankResult as any).required_skills.length>0&&(
+              <div style={{fontSize:'11px',color:'#64748b',marginBottom:'16px'}}>
+                Detected requirements: {(rankResult as any).required_skills.map((s:string,i:number)=>(
+                  <span key={s}>{i>0&&', '}<b style={{color:'#374151'}}>{s}</b></span>
+                ))}
+              </div>
+            )}
             <div data-testid="jd-rank-results" style={{maxHeight:'400px',overflowY:'auto'}}>
               {((rankResult as any).ranked||[]).length===0&&<div style={{padding:'32px',textAlign:'center',color:'#64748b',fontSize:'13px'}}>No candidates matched the job description skills.</div>}
-              {((rankResult as any).ranked||[]).map((c:any,i:number)=>(
-                <div key={c.id} style={{padding:'12px 14px',borderBottom:'1px solid #f1f5f9',display:'flex',alignItems:'center',gap:'12px'}}>
-                  <input type="checkbox" checked={jdSelected.has(c.id)} onChange={e=>{
-                    setJdSelected(prev=>{const n=new Set(prev); e.target.checked?n.add(c.id):n.delete(c.id); return n;});
-                  }} style={{width:'15px',height:'15px',cursor:'pointer',flexShrink:0}}/>
-                  <span style={{fontSize:'18px',fontWeight:'800',color:'#94a3b8',width:'28px',textAlign:'center',flexShrink:0}}>{i+1}</span>
-                  <a href={'/candidates/'+c.id} target="_blank" rel="noopener noreferrer" title="Open candidate profile (new tab)"
-                    style={{display:'flex',alignItems:'center',gap:'12px',flex:1,minWidth:0,textDecoration:'none',color:'inherit'}}>
+              {((rankResult as any).ranked||[]).map((c:any,i:number)=>{
+                const isSelected = jdSelected.has(c.id);
+                return (
+                  // REAL FIX (2026-08-23): row is now click-to-select (matching
+                  // the Requisitions page's already-proven AiMatchModal row
+                  // pattern), not a <label>/<a> wrapping everything — so a
+                  // "View Profile" trigger can sit inside without also
+                  // toggling the checkbox or navigating away.
+                  <div key={c.id} onClick={()=>{setJdSelected(prev=>{const n=new Set(prev); n.has(c.id)?n.delete(c.id):n.add(c.id); return n;});}}
+                    style={{padding:'12px 14px',borderBottom:'1px solid #f1f5f9',borderRadius:'8px',display:'flex',alignItems:'center',gap:'12px',cursor:'pointer',background:isSelected?'#eff6ff':'transparent'}}>
+                    <input type="checkbox" checked={isSelected} onClick={e=>e.stopPropagation()} onChange={e=>{
+                      setJdSelected(prev=>{const n=new Set(prev); e.target.checked?n.add(c.id):n.delete(c.id); return n;});
+                    }} style={{width:'15px',height:'15px',cursor:'pointer',flexShrink:0}}/>
+                    <span style={{fontSize:'18px',fontWeight:'800',color:'#94a3b8',width:'28px',textAlign:'center',flexShrink:0}}>{i+1}</span>
                     <div style={{width:'36px',height:'36px',borderRadius:'50%',background:gc(c.full_name||''),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:'700',color:'white',flexShrink:0}}>{gi(c.full_name||'')}</div>
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:'13px',fontWeight:'700',color:'#1e40af'}}>{c.full_name}</div>
+                      <div style={{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap'}}>
+                        <span style={{fontSize:'13px',fontWeight:'700',color:'#1e293b'}}>{c.full_name}</span>
+                        <button onClick={e=>{e.stopPropagation();setJdPreviewId(c.id);}} title="Preview full profile & resume before adding — stays on this list"
+                          style={{display:'flex',alignItems:'center',gap:'3px',fontSize:'9px',fontWeight:'700',color:'#2563eb',cursor:'pointer',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'999px',padding:'1px 7px'}}>
+                          <Eye size={9}/> View Profile
+                        </button>
+                      </div>
                       <div style={{fontSize:'11px',color:'#64748b'}}>{c.current_designation||'—'} · {c.current_employer||'—'} · {c.total_exp_mo>0?gx(c.total_exp_mo):'—'}</div>
-                      {(c.matched_skills?.length>0||c.missing_skills?.length>0)&&<div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'4px'}}>
-                        {c.matched_skills?.slice(0,4).map((s:string)=><span key={'m-'+s} style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#d1fae5',color:'#065f46',fontWeight:'600'}}>{s}</span>)}
-                        {c.missing_skills?.slice(0,4).map((s:string)=><span key={'x-'+s} title="Missing from this candidate's profile" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#fee2e2',color:'#991b1b',fontWeight:'600'}}>✕ {s}</span>)}
+                      {(c.matched_skills?.length>0||c.related_skills?.length>0||c.missing_skills?.length>0)&&<div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'4px'}}>
+                        {c.matched_skills?.slice(0,4).map((s:string)=><span key={'m-'+s} title="Exact match — found in the candidate's profile or resume" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#d1fae5',color:'#065f46',fontWeight:'600'}}>✓ {s}</span>)}
+                        {c.related_skills?.slice(0,4).map((s:string)=><span key={'r-'+s} title="Related — some overlap found, not an exact match" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#fef3c7',color:'#92400e',fontWeight:'600'}}>~ {s}</span>)}
+                        {c.missing_skills?.slice(0,4).map((s:string)=><span key={'x-'+s} title="No evidence found in this candidate's profile or resume" style={{fontSize:'9px',padding:'1px 5px',borderRadius:'3px',background:'#fee2e2',color:'#991b1b',fontWeight:'600'}}>✕ {s}</span>)}
                       </div>}
                     </div>
-                  </a>
-                  <button onClick={()=>{setJdSelected(new Set([c.id]));setJdBulkAssignOpen(true);}} title="Add to pipeline"
-                    style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>
-                    <Users size={13} style={{color:'#64748b'}}/>
-                  </button>
-                  <div style={{textAlign:'right',flexShrink:0,width:'48px'}}>
-                    <div style={{fontSize:'20px',fontWeight:'800',color:c.rank_score>=70?'#16a34a':c.rank_score>=40?'#d97706':'#94a3b8'}}>{Math.round(c.rank_score||0)}%</div>
-                    <div style={{fontSize:'9px',color:'#94a3b8'}}>match</div>
+                    <button onClick={e=>{e.stopPropagation();setJdSelected(new Set([c.id]));setJdBulkAssignOpen(true);}} title="Add to pipeline"
+                      style={{width:'28px',height:'28px',borderRadius:'6px',border:'1px solid #e2e8f0',background:'white',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>
+                      <Users size={13} style={{color:'#64748b'}}/>
+                    </button>
+                    <div style={{textAlign:'right',flexShrink:0,width:'48px'}} title={`${c.matched_skills?.length||0} of ${(rankResult as any).required_skills?.length||0} required skills matched`}>
+                      <div style={{fontSize:'20px',fontWeight:'800',color:c.rank_score>=70?'#16a34a':c.rank_score>=40?'#d97706':'#94a3b8'}}>{Math.round(c.rank_score||0)}%</div>
+                      <div style={{fontSize:'9px',color:'#94a3b8'}}>match</div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

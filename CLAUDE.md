@@ -10583,3 +10583,144 @@ audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).
 identical `already_signed`-dead-code bug in Offer Letter e-signing
 (`offers.py`/`sign_offer_by_token`) — same fix, different feature, out
 of scope for "check the NDA Documents page."
+
+## AI Matching accuracy investigation: root-caused a real ~95%-on-2-of-4
+## false score, plus the "View Profile" navigation bug fixed for the
+## Candidates page's own JD Match modal, 2026-08-23
+User asked for a deep, root-cause investigation (not assumptions) of two
+reported problems: candidates scoring ~95% AI Match against a JD listing
+4 required skills when their resume genuinely supported only 2, and
+"View Profile" inside AI Matching results losing the search/results
+context on Back navigation (or opening in a new window). Investigated
+and fixed both for real — traced the exact code path, reproduced the
+bug against a real production candidate before touching anything, fixed
+it, then re-verified with real API calls, direct unit tests, and a real
+headless-browser pass.
+
+**Issue 1 — real, severe, previously-undiscovered bug, confirmed via
+production data.** `POST /candidates/rank` (the Candidates page's "JD
+Match — AI Ranking" feature — a recruiter pastes a full JD, the system
+ranks every active candidate against it) determined `required_skills`
+SOLELY via `extract_skills_from_text()` — a fixed, curated ~100-term
+tech-skill vocabulary (`TECH_SKILLS` in `improved_parser.py`) built for
+*resume* parsing, never intended to interpret an arbitrary recruiter-
+typed requirement list. Reproduced live against the real "Rishith"
+candidate (SAP FICO consultant, structured skills `[SAP ABAP, SAP FICO,
+SAP HANA, LSMW, JUnit]`): pasting "SAP FICO, Credit Management, Claim
+Management, Disaster Management" as required skills, the extractor
+recognized only `['SAP FICO']` — the other 3 (real SAP FICO domain
+terms, not generic tech skills) were silently DROPPED from
+`required_skills` entirely, not shown as missing, just never checked at
+all. Since Rishith genuinely has "SAP FICO," he scored 100% skill match
+on a silently-reduced 1-skill requirement set, producing a real
+`rank_score: 95` — matching the reported symptom almost exactly.
+
+**Fix, `backend/routers/candidates.py`**: new `_extract_requirement_
+phrases()` pulls the recruiter's own typed requirements verbatim —
+bullet/numbered list lines, or a comma/semicolon list right after an
+explicit "skills/requirements/experience in:" marker — unioned with the
+existing taxonomy extractor (which still handles pure-prose JDs with no
+list structure, unchanged, verified via a regression test). Nothing a
+recruiter actually types is silently discarded anymore. The score and
+the displayed matched/missing chips now derive from the exact SAME
+signal (`compute_skill_similarity`, already resume-text-aware) — a
+second, independent inconsistency found in the same investigation: the
+old code computed the numeric score from a structured-skills-ONLY
+intersection while the chips shown to the user used a richer (structured
++ resume_text) signal, so the number and the chips could silently
+disagree on the same candidate.
+
+**Real transparency added**, matching the user's explicit ask for an
+auditable score: response now includes `skill_breakdown` (per-requirement
+matched/related/missing status), a new `related_skills` tier (word-
+overlap evidence found but not an exact/substring match — informational
+only, never inflates the score, to avoid reintroducing the exact
+over-matching problem this fix exists to correct), and labeled component
+percentages (`skill_match_pct`, `experience_match_pct`,
+`designation_match_pct`, `location_match_pct`, `notice_match_pct` — each
+honestly `null`/not shown when the JD itself states no real signal for
+that dimension, e.g. no location or notice-period expectation mentioned,
+rather than fabricating a number).
+
+**A real bug caught in my own fix before shipping it, not by the user**:
+the first version of the "related skill" detector used a plain 50%
+word-overlap ratio — for a 2-word phrase like "Claim Management," this
+let the single shared word "Management" alone (present almost anywhere)
+satisfy the 50% threshold even though the actually-distinctive word
+("Claim") never appears anywhere in the resume, wrongly tagging both
+"Claim Management" and "Disaster Management" as "related" instead of
+correctly "missing." Confirmed live before fixing: Rishith's resume
+contains "management" (unrelated context) but never "claim" or
+"disaster." Tightened to require an ABSOLUTE FLOOR of ≥2 real word-hits
+(not just a ratio) — a 2-word phrase now needs BOTH words present, closing
+the gap while still allowing genuine 2-of-4-word overlap on a longer
+phrase to count. Verified directly against 5 real/synthetic cases
+(including the exact failing case) before and after the fix.
+
+**A second real bug caught in the extractor itself, also before
+shipping**: the "requirements marker" regex used `\s*` (matches
+newlines) right after the colon — for a JD listing requirements on the
+FOLLOWING lines ("Requirements:\n1. SAP FICO\n2. ..."), this let the
+marker capture "1. SAP FICO" as one garbage phrase with its list-number
+prefix retained, duplicating what the (correct) bullet-line pass already
+extracted separately. Fixed by requiring the marker's captured content
+stay on the same line as the colon (`[ \t]*` instead of `\s*`) — verified
+against comma-list, numbered-list, bullet-list, and pure-prose JD shapes
+before deploying.
+
+**Issue 2/3 — real navigation bug, confirmed and fixed with the same
+pattern already proven elsewhere in this codebase.** The Candidates
+page's JD Match modal's candidate rows were wrapped in a plain
+`<a target="_blank">` — a deliberate design (open in a new tab so the
+original ranked-results tab stays intact), but the brand-new tab's own
+"Back" button had no real history entry to return to and fell back to
+the plain Candidates list — exactly the reported "redirects to the
+general Candidate Page instead of returning to the AI Matching Results
+page." The Requisitions page's own, separate AI Match modal hit and
+fixed this identical complaint on 2026-08-21 with a genuine inline
+preview (view the candidate INSIDE the same modal, zero navigation) —
+ported that same proven `CandidatePreviewPanel` pattern here as
+`JdCandidatePreviewPanel`: clicking "View Profile" now opens an inline
+panel (name, designation, contact, skills, resume extract, a real
+"Select for pipeline" checkbox, a real Download Resume button) with
+zero navigation and a "Back to list" that restores the exact same ranked
+results untouched — verified via `expect(page.url()).toBe(urlBefore)`,
+proving not even the URL changes, let alone a new tab. An "Open Full
+Profile ↗" link still opens the real Candidate 360 page in a new tab for
+anyone who wants the complete view — the same intentional escape hatch
+the Requisitions page's version already offers.
+
+Verified for real end-to-end, not code review: reproduced the exact
+95%-on-2-of-4 bug against the real "Rishith" candidate before touching
+any code; re-ran the identical reproduction after each of the 3 fix
+iterations (root cause, related-skill threshold, marker-regex line
+bug) until the response matched the user's own worked example exactly
+(`skill_match_pct: 50`, matched `[SAP FICO, Credit Management]`,
+missing `[Claim Management, Disaster Management]`); directly unit-
+tested `_related_skill_hit()` against 5 real/synthetic cases and
+`_extract_requirement_phrases()` against 4 real JD-shape variants inside
+the backend container; a real headless-browser pass confirmed the fixed
+score/chips render correctly on the live page, that "View Profile"
+causes genuinely zero navigation, and that "Back to list" restores the
+full ranked results with the detected-requirements line still showing
+all 4 real skills. Updated the pre-existing "S20" regression test (built
+for the old plain-link UX, now genuinely obsolete) to assert the new
+inline-preview behavior instead, and added a new permanent "S53 JD Match
+Scoring Accuracy + Inline Profile Preview" suite (5 tests) using a fully
+self-contained throwaway candidate (not the real "Rishith" record) so
+the suite stays deterministic regardless of future changes to real
+production data. Full regression sweep (S1/S2/S8/S13/S16/S20/S30/S38/
+S48/S53, 83 tests) passed clean — one pre-existing, unrelated S38 test
+(a different endpoint, an async-timing race already documented
+elsewhere in this project) flaked once and passed on Playwright's own
+retry, not a regression from today's changes. Zero-token audit:
+`CONFIRMED CLEAN` (391 files, 0 external API refs).
+
+**Confirmed NOT vulnerable to the same bug class, checked directly rather
+than assumed**: `GET /requisitions/{id}/match-candidates` (the
+Requisitions page's own "Find AI Matches" feature) and `/candidates/{id}
+/match-open-jobs` both score against a requisition's structured
+`skills_required` column — a plain tag list a recruiter enters directly
+into the requisition form, with no free-text extraction/vocabulary-
+filtering step in between — so neither has any way to silently drop a
+typed requirement the way the free-text-JD-paste path did.

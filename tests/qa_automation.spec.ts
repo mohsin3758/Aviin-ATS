@@ -2118,6 +2118,16 @@ test.describe.serial('S19 RBAC/Ownership/JobBoard/Onboarding Fixes', () => {
 // the DOM right behind the modal overlay with its own, separate
 // `a[href^="/candidates/"]` links, and an unscoped locator matches those
 // first (caught by this exact test failing that way before the fix).
+//
+// UPDATED 2026-08-23: "View Profile" no longer opens a real navigation
+// at all (was a plain `<a target="_blank">` around the whole row) —
+// reported live: after opening a candidate that way, the profile page's
+// own "Back" button had nowhere real to return to and dropped the user
+// on the plain Candidates list instead of the AI Matching Results. Now
+// opens a genuine inline preview inside this same modal (same pattern
+// already proven on the Requisitions page's own AI Match modal) — there
+// is nothing to navigate to or come back from, so the old
+// `a[href^="/candidates/"]` + new-tab assertion below no longer applies.
 test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipeline works', async ({ page, context, request }) => {
   const errors: string[] = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -2155,14 +2165,16 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
     test.skip(true, 'no ranked candidates in this environment to test against');
   }
 
-  const firstLink = results.locator('a[href^="/candidates/"]').first();
-  const href = await firstLink.getAttribute('href');
+  const urlBeforePreview = page.url();
+  await results.getByRole('button', { name: 'View Profile' }).first().click();
+  await expect(page.getByText('Back to list')).toBeVisible({ timeout: 10000 });
+  const fullProfileLink = page.getByRole('link', { name: /Open Full Profile/i });
+  await expect(fullProfileLink).toBeVisible();
+  const href = await fullProfileLink.getAttribute('href');
   expect(href).toMatch(/^\/candidates\/[a-f0-9-]+$/);
-
-  const [profilePage] = await Promise.all([context.waitForEvent('page'), firstLink.click()]);
-  await profilePage.waitForLoadState();
-  expect(profilePage.url()).toContain(href!);
-  await profilePage.close();
+  expect(page.url()).toBe(urlBeforePreview); // confirms zero navigation occurred
+  await page.getByText('Back to list').click();
+  await expect(results).toBeVisible();
 
   await rows.first().check();
   const addBtn = page.getByRole('button', { name: /Add 1 to Pipeline/i });
@@ -6554,5 +6566,130 @@ test.describe.serial('S52 Per-Stage Email Send Mode (Automatic vs Manual)', () =
   test.afterAll(async ({ request }) => {
     if (appId) await request.delete(`${API}/applications/${appId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+  });
+});
+
+// S53 JD Match scoring accuracy (2026-08-23): a real user reported
+// candidates showing a ~95% AI Match Score against JDs listing 4 required
+// skills when the candidate's actual resume only supported 2 of them.
+// Root-caused to POST /candidates/rank silently DROPPING any requirement
+// phrase extract_skills_from_text() (a fixed ~100-term tech-skill
+// vocabulary built for resume parsing) didn't recognize — "Credit
+// Management"/"Claim Management"/"Disaster Management" (real SAP FICO
+// domain terms) all vanished from `required_skills` entirely, leaving
+// only "SAP FICO" to score against; a candidate with just that one real
+// skill scored 100% skill match on a silently-reduced requirement set.
+// Fixed by extracting the recruiter's own typed requirement phrases
+// verbatim (bullet/numbered lines, or a comma list after an explicit
+// "skills/requirements:" marker) rather than relying solely on the
+// resume vocabulary, and by making the score and the matched/missing
+// chips derive from the exact same signal (they used to disagree with
+// each other on the same candidate). Uses a fully self-contained
+// throwaway candidate (not the real production candidate this bug was
+// first found and fixed against) so this suite stays deterministic
+// regardless of any future change to real production data.
+test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', () => {
+  let token = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+
+  test('setup: a throwaway candidate with exactly 2 of 4 real skills', async ({ request }) => {
+    token = await getApiToken(request);
+    const res = await request.post(`${API}/candidates`, {
+      headers: auth(),
+      data: {
+        full_name: `QA S53 ScoreAccuracy ${Date.now()}`,
+        skills: ['SAP FICO'],
+        resume_text:
+          'Experienced SAP FICO consultant with hands-on Credit management ' +
+          'configuration and dunning letters. No exposure to claims processing ' +
+          'or business continuity planning of any kind.',
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    const c = await res.json();
+    candId = c.id;
+  });
+
+  test('POST /candidates/rank: all 4 typed requirements are detected, not silently dropped', async ({ request }) => {
+    const res = await request.post(`${API}/candidates/rank`, {
+      headers: auth(),
+      data: {
+        jd_text:
+          'We are looking for a candidate with strong experience in:\n' +
+          '- SAP FICO\n- Credit Management\n- Claim Management\n- Disaster Management',
+        limit: 200,
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.required_skills).toEqual(
+      expect.arrayContaining(['SAP FICO', 'Credit Management', 'Claim Management', 'Disaster Management']),
+    );
+    expect(body.required_skills.length).toBe(4); // exactly 4, no dropped and no duplicated
+
+    const mine = body.ranked.find((r: any) => r.id === candId);
+    expect(mine).toBeTruthy();
+    expect(mine.matched_skills.sort()).toEqual(['Credit Management', 'SAP FICO'].sort());
+    expect(mine.missing_skills.sort()).toEqual(['Claim Management', 'Disaster Management'].sort());
+    expect(mine.skill_match_pct).toBe(50); // 2 of 4 - was silently inflated to 100 pre-fix
+    expect(mine.rank_score).toBeLessThan(80); // was a fake ~95-100 pre-fix
+  });
+
+  test('a generic connector word alone ("Management") does not trigger a false "related" tag', async ({ request }) => {
+    // Regression test for a second real bug caught during the fix itself,
+    // before it ever shipped: the first version of the "related skill"
+    // detector used a plain 50% word-overlap RATIO, which let the single
+    // shared word "Management" alone satisfy a 2-word phrase like "Claim
+    // Management" even though "Claim" itself never appears anywhere.
+    const res = await request.post(`${API}/candidates/rank`, {
+      headers: auth(),
+      data: {
+        jd_text: 'Requirements: SAP FICO, Credit Management, Claim Management, Disaster Management',
+        limit: 200,
+      },
+    });
+    const body = await res.json();
+    const mine = body.ranked.find((r: any) => r.id === candId);
+    expect(mine.related_skills || []).toEqual([]);
+    expect(mine.missing_skills.sort()).toEqual(['Claim Management', 'Disaster Management'].sort());
+  });
+
+  test('a pure-prose JD with no list structure still falls back to taxonomy skill extraction (no regression)', async ({ request }) => {
+    const res = await request.post(`${API}/candidates/rank`, {
+      headers: auth(),
+      data: { jd_text: 'We need a strong Python and AWS engineer with Docker experience.', limit: 50 },
+    });
+    const body = await res.json();
+    expect(body.required_skills).toEqual(expect.arrayContaining(['Python', 'AWS', 'Docker']));
+  });
+
+  test('real headless UI: View Profile opens an inline preview (zero navigation), Back to list restores the ranked results', async ({ page }) => {
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: 'JD Match' }).click();
+    await page.getByPlaceholder('Paste the full job description here...').fill(
+      'We are looking for a candidate with strong experience in:\n- SAP FICO\n- Credit Management\n- Claim Management\n- Disaster Management',
+    );
+    await page.getByRole('button', { name: 'Rank Candidates' }).click();
+    const results = page.getByTestId('jd-rank-results');
+    await expect(results).toBeVisible({ timeout: 15000 });
+
+    const detectedLine = page.locator('div', { hasText: 'Detected requirements:' }).first();
+    await expect(detectedLine).toBeVisible();
+    await expect(detectedLine.locator('b', { hasText: 'Claim Management' })).toBeVisible();
+
+    const urlBefore = page.url();
+    await results.getByRole('button', { name: 'View Profile' }).first().click();
+    await expect(page.getByText('Back to list')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Open Full Profile')).toBeVisible();
+    expect(page.url()).toBe(urlBefore); // no navigation occurred at all
+
+    await page.getByText('Back to list').click();
+    await expect(results).toBeVisible();
+    await expect(detectedLine).toBeVisible();
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
   });
 });

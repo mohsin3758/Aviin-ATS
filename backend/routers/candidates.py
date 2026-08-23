@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List
 from typing import Optional
 import json
+import re
 import db, events
 from deps import Actor, get_actor, require_role
 from schemas import CandidateCreate, CandidateUpdate
@@ -232,6 +233,89 @@ class RankRequest(_BM):
     min_exp_months: Optional[int] = None
 
 
+_BULLET_LINE_RE = re.compile(r'^[\-\*•‣◦⁃∙]\s+|^\d+[\.\)]\s+')
+_REQ_MARKER_RE = re.compile(
+    r'(?:skills?|requirements?|experience\s+in|must\s+have|expertise\s+in|proficien(?:t|cy)\s+in)'
+    # [ \t]* (not \s*) deliberately stops at a newline right after the
+    # colon - a real bug caught before shipping: "Requirements:\n1. SAP
+    # FICO\n2. ..." (list on the FOLLOWING lines, common JD format) let
+    # \s* swallow the newline and capture "1. SAP FICO" as a single
+    # garbage phrase with its list-number prefix retained, duplicating
+    # what the bullet-line pass below already extracts correctly. When
+    # the marker's content is on a later line, only the bullet-line pass
+    # should ever fire for it.
+    r'[ \t]*[:\-][ \t]*([^\n]{3,200})', re.IGNORECASE,
+)
+_SKILL_BREAKDOWN_STOPWORDS = {'and', 'the', 'for', 'with', 'of', 'in', 'a', 'an', 'to', 'or'}
+
+
+def _extract_requirement_phrases(jd_text: str) -> list[str]:
+    """Real bug fix (2026-08-23): rank_candidates() used to determine
+    "required skills" SOLELY via extract_skills_from_text() - a fixed,
+    curated ~100-term tech-skill vocabulary built for resume parsing.
+    Any requirement a recruiter typed that isn't in that vocabulary
+    (e.g. "Credit Management"/"Claim Management"/"Disaster Management" -
+    real SAP FICO module terms, not generic tech skills) was silently
+    DROPPED from `required_skills` entirely - not shown as missing, just
+    never checked at all. Reproduced live: pasting those 4 terms only
+    ever detected "SAP FICO", so a candidate with just that one real
+    skill scored 100% skill match and a 95% overall score, despite
+    genuinely lacking 3 of the 4 stated requirements.
+
+    Fixes this by pulling the recruiter's OWN typed requirement phrases
+    verbatim - bullet/numbered list items, or a comma/semicolon list
+    right after an explicit "skills/requirements/experience in:" marker
+    - so nothing they actually asked for is ever silently discarded.
+    Falls back to nothing when the JD has no recognizable list
+    structure (plain prose) - the caller unions this with the taxonomy
+    extractor, which still covers that case as it always has."""
+    phrases: list[str] = []
+    seen_lower: set[str] = set()
+
+    def _add(raw: str):
+        p = raw.strip(' \t-*•‣◦⁃∙').strip()
+        p = re.sub(r'\s+', ' ', p)
+        if 2 <= len(p) <= 60 and p.lower() not in seen_lower:
+            seen_lower.add(p.lower())
+            phrases.append(p)
+
+    for line in jd_text.split('\n'):
+        stripped = line.strip()
+        if _BULLET_LINE_RE.match(stripped):
+            _add(_BULLET_LINE_RE.sub('', stripped, count=1))
+
+    for m in _REQ_MARKER_RE.finditer(jd_text):
+        for part in re.split(r'[,;]|\s+and\s+', m.group(1)):
+            _add(part)
+
+    return phrases
+
+
+def _related_skill_hit(phrase: str, text_lower: str) -> bool:
+    """Conservative "related but not exact" signal for the missing-skills
+    breakdown, informational only - never contributes to the score
+    itself, to avoid reintroducing the exact over-matching problem this
+    whole fix exists to correct.
+
+    Requires an ABSOLUTE FLOOR of at least 2 distinct significant words
+    from the phrase to each appear as their own whole-word match in the
+    resume text - not just a 50% ratio. A plain ratio floor let a single
+    generic connector word ("Management") alone satisfy 50% of a 2-word
+    phrase like "Claim Management" even when the actual distinctive term
+    ("Claim") is completely absent - verified live: Rishith's resume
+    contains "Management" (as part of unrelated content) but never
+    "Claim" or "Disaster" anywhere, and the ratio-only version wrongly
+    tagged both as "related". Requiring hits>=2 means a 2-word phrase
+    needs BOTH words present, closing that gap while still allowing a
+    genuine 2-of-4-word overlap on a longer phrase to count."""
+    words = [w for w in re.findall(r"[a-zA-Z][a-zA-Z0-9+#.]*", phrase.lower())
+             if w not in _SKILL_BREAKDOWN_STOPWORDS and len(w) > 2]
+    if len(words) < 2:
+        return False
+    hits = sum(1 for w in words if re.search(r'(?<![a-z0-9])' + re.escape(w) + r'(?![a-z0-9])', text_lower))
+    return hits >= 2 and (hits / len(words)) >= 0.5
+
+
 @router.post("/rank")
 async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
     """
@@ -239,13 +323,19 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
     Uses regex skill extraction + experience + location scoring (free, instant).
     Score breakdown: skills 65pts + experience 25pts + designation 5pts + location 5pts.
     """
-    import re
     from services.improved_parser import extract_skills_from_text, extract_experience_v2
     from routers.ner import compute_skill_similarity
 
     jd = body.jd_text or ''
-    req_skills    = extract_skills_from_text(jd)
-    req_lower     = {s.lower() for s in req_skills}
+    taxonomy_skills  = extract_skills_from_text(jd)
+    verbatim_phrases = _extract_requirement_phrases(jd)
+    req_skills = list(taxonomy_skills)
+    req_lower_set = {s.lower() for s in req_skills}
+    for p in verbatim_phrases:
+        if p.lower() not in req_lower_set:
+            req_skills.append(p)
+            req_lower_set.add(p.lower())
+
     min_exp_years = extract_experience_v2(jd) or 0
     min_exp_mo    = body.min_exp_months if body.min_exp_months is not None else int(min_exp_years * 12)
 
@@ -253,6 +343,15 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
     lm = re.search(r'(?:location|based in|office)\s*[:\-]\s*([^\n,]{2,30})', jd, re.I)
     if lm:
         loc_hint = lm.group(1).strip().lower()[:15]
+
+    # Honest notice-period signal: only computed when the JD itself states
+    # an explicit expectation - never fabricated when it doesn't.
+    notice_req_days: Optional[int] = None
+    nm = re.search(r'notice\s*period\s*(?:of|is|[:\-])?\s*(\d{1,3})\s*(day|week)', jd, re.I)
+    if nm:
+        notice_req_days = int(nm.group(1)) * (7 if nm.group(2).lower().startswith('week') else 1)
+    elif re.search(r'immediate\s+joiners?', jd, re.I):
+        notice_req_days = 0
 
     role_words = {w.lower() for w in re.findall(r'[A-Za-z]+', jd[:300]) if len(w) > 3}
 
@@ -266,9 +365,36 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
     scored = []
     for r in rows:
         c = dict(r)
-        cand_skills_lower = {s.lower() for s in (c.get('skills') or [])}
-        matched   = req_lower & cand_skills_lower
-        skill_pct = len(matched) / max(len(req_lower), 1)
+        resume_text = c.get('resume_text') or ''
+        # REAL GAP FIX (2026-08-20): matched/missing used to be checked
+        # ONLY against the candidate's structured `skills` array - a
+        # required skill genuinely described in the resume's own text
+        # but never captured by the (imperfect) resume-parsing pass
+        # showed as flatly missing. Now also does a case-insensitive
+        # substring check against resume_text, via the same shared
+        # helper every other missing_skills computation in this codebase
+        # uses, so a "missing skill" chip means the same thing everywhere.
+        #
+        # REAL GAP FIX (2026-08-23): this is now also the SAME signal
+        # that drives the numeric score - previously skill_score was
+        # computed from a separate, structured-skills-only intersection
+        # while the displayed matched_skills/missing_skills chips used
+        # this richer (structured + resume_text) signal, so the number
+        # and the chips could disagree with each other on the same
+        # candidate. One signal, everywhere.
+        _, matched_names, unmatched_names = compute_skill_similarity(
+            candidate_skills=c.get('skills'), required_skills=req_skills, resume_text=resume_text,
+        )
+        text_lower = resume_text.lower()
+        related_names = [s for s in unmatched_names if _related_skill_hit(s, text_lower)]
+        missing_names = [s for s in unmatched_names if s not in related_names]
+
+        # Overall score only ever counts REAL, exact/substring evidence -
+        # "related" is informational transparency only, never inflates
+        # the number. This is the direct fix for the reported bug: a
+        # candidate matching 2 of 4 stated requirements now scores 50%
+        # skill match, not 100%.
+        skill_pct   = len(matched_names) / max(len(req_skills), 1)
         skill_score = round(skill_pct * 65)
 
         cand_exp = c.get('total_exp_mo') or 0
@@ -283,32 +409,45 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
 
         loc_score = 5 if loc_hint and loc_hint in (c.get('location') or '').lower() else 0
 
+        notice_match_pct: Optional[int] = None
+        if notice_req_days is not None:
+            cand_notice = c.get('notice_period_days')
+            if cand_notice is None:
+                notice_match_pct = None
+            elif cand_notice <= notice_req_days:
+                notice_match_pct = 100
+            else:
+                over_by = cand_notice - notice_req_days
+                notice_match_pct = max(0, round(100 - over_by / 30 * 100))
+
         total = skill_score + exp_score + desig_score + loc_score
-        # REAL GAP FIX (2026-08-20): matched/missing used to be checked
-        # ONLY against the candidate's structured `skills` array - a
-        # required skill genuinely described in the resume's own text
-        # but never captured by the (imperfect) resume-parsing pass
-        # showed as flatly missing. Now also does a case-insensitive
-        # substring check against resume_text, via the same shared
-        # helper every other missing_skills computation in this codebase
-        # uses, so a "missing skill" chip means the same thing everywhere.
-        _, matched_names, missing_names = compute_skill_similarity(
-            candidate_skills=c.get('skills'), required_skills=req_skills, resume_text=c.get('resume_text'),
+
+        skill_breakdown = (
+            [{'skill': s, 'status': 'matched'} for s in matched_names] +
+            [{'skill': s, 'status': 'related'} for s in related_names] +
+            [{'skill': s, 'status': 'missing'} for s in missing_names]
         )
 
         c.pop('resume_text', None)  # not needed in the response; can be very large
         scored.append({
             **c,
-            'rank_score':      total,
-            'matched_skills':  matched_names,
-            'missing_skills':  missing_names,
-            'skill_match_pct': round(skill_pct * 100),
+            'rank_score':          total,
+            'matched_skills':      matched_names,
+            'related_skills':      related_names,
+            'missing_skills':      missing_names,
+            'skill_breakdown':     skill_breakdown,
+            'skill_match_pct':     round(skill_pct * 100),
+            'experience_match_pct': round((exp_score / 25) * 100) if min_exp_mo > 0 or cand_exp else None,
+            'designation_match_pct': round((desig_score / 5) * 100) if role_words else None,
+            'location_match_pct':  (round((loc_score / 5) * 100) if loc_hint else None),
+            'notice_match_pct':    notice_match_pct,
         })
 
     scored.sort(key=lambda x: x['rank_score'], reverse=True)
     return {
-        'required_skills':         list(req_skills),
+        'required_skills':         req_skills,
         'min_exp_months_detected': min_exp_mo,
+        'notice_period_required_days': notice_req_days,
         'total_candidates_scored': len(scored),
         'ranked':                  scored[:body.limit],
     }
