@@ -921,7 +921,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               { key: 'scorecards', icon: <Star size={12} />, label: 'Scorecards' },
               { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
             ].map(t => (
-              <button key={t.key} onClick={() => setDrawerTab(t.key)}
+              <button key={t.key} data-tab={t.key} onClick={() => setDrawerTab(t.key)}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', borderBottom: `2px solid ${drawerTab === t.key ? '#2563EB' : 'transparent'}`, color: drawerTab === t.key ? '#2563EB' : '#64748B' }}>
                 {t.icon}{t.label}
                 {!!t.count && (

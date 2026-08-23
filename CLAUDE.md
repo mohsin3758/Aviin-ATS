@@ -10476,3 +10476,110 @@ including S37, which exercises this exact refactored backend function
 via its own KAE-submission trigger) plus S31/S33/S51 (17 tests, today's
 earlier Users & Roles work) — all clean. Zero-token audit: `CONFIRMED
 CLEAN` (390 files, 0 external API refs).
+
+## NDA Documents deep-check: real "already signed" bug found and fixed,
+## plus a real near-miss caught during verification, 2026-08-23
+User asked to check every real NDA Documents feature (Draft/Awaiting
+Signature/E-Signed/Manually Signed, document templates, both signing
+methods) end-to-end and show the steps for both signing flows. Read
+`nda.py` + both frontend surfaces (`/nda-documents`, the pipeline
+drawer's NDA tab, the public `/sign-nda/{token}` page) first, then
+verified every path with real API calls and a real headless-browser
+pass — not code review.
+
+**Real bug found: revisiting a signing link after already signing shows
+"Invalid or Expired Link" instead of the intended "Already Signed"
+message.** `sign_nda_by_token()` (`sql/12_nda_esign.sql`) nulls
+`nda_documents.signing_token` on a successful sign — but
+`get_nda_by_signing_token()` (called by `GET /nda-sign/public`, which
+the signing page re-hits on every load) looks the row up BY that same
+token. Once nulled, the lookup finds nothing, so `nda.py`'s own
+already-correct `if row["status"] == "e_signed": return {"already_
+signed": True, ...}` branch was dead code — never reachable. Reproduced
+live before fixing: a real signed NDA's link showed "Invalid or Expired
+Link" on revisit, not the friendly signed-confirmation page the
+frontend already fully supports. Fixed with `sql/74_fix_nda_already_
+signed_dead_code.sql` — stops nulling `signing_token` on sign (the
+UPDATE's own `AND status='sent'` guard already makes the SIGN action
+itself correctly single-use; a replay with the same token matches zero
+rows once status is no longer `'sent'`, so nulling the token added no
+real security benefit, it just broke the read-only "view what I signed"
+path). Verified the security guard still holds after the fix: a replay
+sign attempt with the same (now-persisted) token still cleanly 400s
+("already used"). **The identical bug exists in the analogous Offer
+Letter e-sign flow** (`sign_offer_by_token()`, same `signing_token =
+NULL` pattern, same dead `already_signed` branch in `offers.py`) — found
+while checking for the same root cause elsewhere, flagged to the user
+rather than fixed, since Offer Letters is a separate feature from what
+was actually asked about here.
+
+**A real near-miss caught during verification, not after**: testing the
+document-template-attach flow by uploading a test NDA template silently
+overwrote the tenant's real, already-uploaded NDA template (the exact
+"Independent IT Contractor Service Agreement_AviinTech Business
+Solutions.docx" visible in the user's own screenshot) — `document_
+templates`'s upsert is `ON CONFLICT (tenant_id, doc_type) DO UPDATE`, a
+correct, intentional "replace any time" design for a real recruiter, but
+a real hazard for a same-slot test upload. Caught immediately by
+checking disk before assuming data loss: the original `.docx` was still
+present (a new `.pdf` was written alongside it under a different
+filename, only the DB row's pointer had moved) — restored the DB row's
+`file_path`/`file_name`/`mime_type` to point back at the original file,
+verified via a real download matching the original 55,929-byte size
+exactly. Learned from this and used the Contract Template slot (empty
+before testing, confirmed via the same screenshot) for the rest of the
+template-attach verification instead, removed it afterward to restore
+the empty state.
+
+**Verified for real, end-to-end, every path**:
+- **E-Signed / type-name**: create draft (auto-generated on first GET)
+  → send (`sign_method: type_name`) → public `GET /nda-sign/public`
+  shows the real letter text → public `POST /nda-sign/sign` → status
+  flips to `e_signed`, `signatory_name` recorded, application stage
+  auto-advances `→ screened`, KAE/manager notification fires.
+- **E-Signed / OTP**: send (`sign_method: otp`) → public GET shows
+  `otp_required: true` → sign attempt with no OTP cleanly 400s → real
+  OTP requested and generated → sign with wrong OTP cleanly 400s → sign
+  with the correct OTP succeeds, `sign_method: otp` recorded, same
+  stage auto-advance.
+- **Manually Signed**: upload a scanned signed copy via
+  `POST .../nda/manual-sign` → status flips to `manually_signed`,
+  `signatory_name`/`manual_file_path` recorded, same stage auto-advance
+  → the uploaded file downloads back byte-identical via
+  `GET /nda/{id}/manual-file`.
+- **Document templates**: upload/attach/download all confirmed working
+  — a `contract_template`-attached send correctly shows `has_attached_
+  file: true` on the public page and serves the real uploaded bytes via
+  `GET /nda-sign/attached-file`.
+- **List filters** (`/nda-documents`' Draft/Awaiting Signature/E-Signed/
+  Manually Signed tabs): each real status filter returned exactly the
+  matching rows, confirmed by cross-checking candidate names against
+  which flow created them.
+- **Real headless-browser pass**: the actual `/nda-documents` page
+  renders e-signed and manually-signed rows correctly under their tabs;
+  the pipeline drawer's NDA tab (both real e-signed and manually-signed
+  candidates) renders the correct status badge, signatory, and — for
+  manual signs — a working "View Uploaded Signed Copy" button; the
+  public sign page now genuinely shows "NDA Signed!" on a revisit to an
+  already-used link instead of the pre-fix "Invalid or Expired Link".
+  Caught and fixed one real test-locator bug along the way (not an app
+  bug): the drawer's tab buttons had no `data-testid`/`data-tab` hook at
+  all, so a text-based `getByRole('button',{name:'NDA'})` locator
+  ambiguously matched a second "NDA" element on the page — added
+  `data-tab={t.key}` to the drawer tab buttons (small, additive, zero
+  behavior change, matching the same convention already used on
+  `candidates/[id]/page.tsx`'s own tabs) rather than fight a fragile
+  text selector.
+
+All 5 throwaway candidates (and their applications/NDA records) created
+during verification were soft-deleted via the real `DELETE /candidates/
+{id}` API afterward, confirmed zero residue via a real search. Full
+regression sweep (S1/S2/S8/S13/S16/S30, 48 tests touching applications/
+pipeline/candidates) passed clean: 46 passed, 2 pre-existing skips
+(Ollama check, an environment-gated role test), 0 failed. Zero-token
+audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).
+
+**Not fixed in this pass, flagged for a future explicit decision**: the
+identical `already_signed`-dead-code bug in Offer Letter e-signing
+(`offers.py`/`sign_offer_by_token`) — same fix, different feature, out
+of scope for "check the NDA Documents page."
