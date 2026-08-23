@@ -250,6 +250,10 @@ _SKILL_BREAKDOWN_STOPWORDS = {'and', 'the', 'for', 'with', 'of', 'in', 'a', 'an'
 
 
 _SENTENCE_END_RE = re.compile(r'[.!?]\s*$')
+_SENTENCE_LEADING_STOPWORDS = {
+    'we', 'need', 'the', 'a', 'an', 'is', 'are', 'with', 'for', 'looking',
+    'seeking', 'you', 'this', 'our', 'i', 'to', 'of', 'in', 'and', 'or',
+}
 
 
 def _looks_like_bare_list_line(line: str) -> bool:
@@ -325,6 +329,26 @@ def _extract_requirement_phrases(jd_text: str) -> list[str]:
                 for l in list_like:
                     _add(l)
 
+    # REAL GAP FOUND LIVE, same day, second follow-up: an even simpler
+    # shape than either tier above - a single line with NO bullet, NO
+    # "skills/requirements:" marker, and no line breaks at all, just a
+    # bare comma list ("fico, credit, claim, disaster"). Fires only as
+    # the final fallback (nothing else found anything) and requires
+    # EVERY comma-separated part to look like a short term, not a
+    # sentence fragment - deliberately strict (any one part failing
+    # skips the whole tier, not just that part) since a genuine
+    # requirement list and a genuine prose sentence with commas but no
+    # trailing period ("We need Python, AWS and Docker experience") can
+    # otherwise look superficially similar.
+    if not phrases and not re.search(r'[.!?]', jd_text):
+        parts = [p.strip() for p in re.split(r'[,;]', jd_text) if p.strip()]
+        if len(parts) >= 2 and all(
+            len(p.split()) <= 4 and p.split()[0].lower() not in _SENTENCE_LEADING_STOPWORDS
+            for p in parts
+        ):
+            for p in parts:
+                _add(p)
+
     return phrases
 
 
@@ -360,7 +384,7 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
     Uses regex skill extraction + experience + location scoring (free, instant).
     Score breakdown: skills 65pts + experience 25pts + designation 5pts + location 5pts.
     """
-    from services.improved_parser import extract_skills_from_text, extract_experience_v2
+    from services.improved_parser import extract_skills_from_text, extract_experience_v2, _SKILL_LOOKUP
     from routers.ner import compute_skill_similarity
 
     jd = body.jd_text or ''
@@ -369,6 +393,16 @@ async def rank_candidates(body: RankRequest, actor: Actor = Depends(get_actor)):
     req_skills = list(taxonomy_skills)
     req_lower_set = {s.lower() for s in req_skills}
     for p in verbatim_phrases:
+        # Real bug caught before shipping: reproduced live with "fico,
+        # credit, claim, disaster" - taxonomy_skills already resolves
+        # "fico" to its canonical "SAP FICO" via _SKILL_LOOKUP, but a
+        # plain lowercase-string union still added the recruiter's own
+        # bare "fico" as a SECOND, separate requirement right next to
+        # "SAP FICO" - same skill, listed twice. Skip a verbatim phrase
+        # when it's a known alias of a canonical name already included.
+        canonical = _SKILL_LOOKUP.get(p.lower())
+        if canonical and canonical.lower() in req_lower_set:
+            continue
         if p.lower() not in req_lower_set:
             req_skills.append(p)
             req_lower_set.add(p.lower())

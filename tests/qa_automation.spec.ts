@@ -6688,6 +6688,83 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     expect(mine.missing_skills.sort()).toEqual(['Claim Management', 'Disaster Management'].sort());
   });
 
+  test('a bare comma list with no marker word at all ("fico, credit, claim, disaster") is fully detected, with no duplicate against the taxonomy-resolved canonical name', async ({ request }) => {
+    // Second real gap found live the same day, immediately after the
+    // plain-line fix above shipped: reported again as "same issue" from
+    // a screenshot with an even simpler input — one line, no bullets, no
+    // "Requirements:"/"Skills:" marker at all, just a bare comma list of
+    // short abbreviated terms. Neither the plain-line tier (requires
+    // >=2 LINES) nor the marker-comma tier (requires an explicit marker
+    // word) recognized this. Also exposed a second, real bug in the fix
+    // itself: extract_skills_from_text() already resolves "fico" to its
+    // canonical "SAP FICO" via the taxonomy, but the naive lowercase-
+    // string union still added the recruiter's own bare "fico" as a
+    // SECOND, separate requirement right next to "SAP FICO" - fixed by
+    // deduping through the taxonomy's own alias map, not just exact
+    // string equality.
+    const res = await request.post(`${API}/candidates/rank`, {
+      headers: auth(),
+      data: { jd_text: 'fico, credit, claim, disaster', limit: 200 },
+    });
+    const body = await res.json();
+    expect(body.required_skills.length).toBe(4); // not 3 (dropped) and not 5 (duplicated)
+    expect(body.required_skills).toEqual(
+      expect.arrayContaining(['SAP FICO', 'credit', 'claim', 'disaster']),
+    );
+    const mine = body.ranked.find((r: any) => r.id === candId);
+    expect(mine.matched_skills.sort()).toEqual(['SAP FICO', 'credit'].sort());
+    expect(mine.missing_skills.sort()).toEqual(['claim', 'disaster'].sort());
+  });
+
+  test('a real prose sentence with commas but no trailing period does not get mistaken for a bare list', async ({ request }) => {
+    // Regression guard for the bare-comma-list tier above: a genuine
+    // sentence fragment ("We need Python, AWS and Docker experience")
+    // superficially resembles a comma list too - must still fall
+    // through to the taxonomy extractor, not get split into nonsense
+    // phrases like "We need Python".
+    const res = await request.post(`${API}/candidates/rank`, {
+      headers: auth(),
+      data: { jd_text: 'We need Python, AWS and Docker experience', limit: 50 },
+    });
+    const body = await res.json();
+    expect(body.required_skills).toEqual(expect.arrayContaining(['Python', 'AWS', 'Docker']));
+    expect(body.required_skills.some((s: string) => s.toLowerCase().includes('we need'))).toBe(false);
+  });
+
+  test('word-boundary matching: a short bare skill term does not false-match inside an unrelated longer word', async ({ request }) => {
+    // Regression guard for the compute_skill_similarity word-boundary
+    // fix - once bare single-word terms started being extracted
+    // verbatim, a naive substring check would have wrongly matched
+    // "credit" inside "creditworthiness" or "claim" inside "disclaimer".
+    const throwawayRes = await request.post(`${API}/candidates`, {
+      headers: auth(),
+      data: {
+        full_name: `QA S53 WordBoundary ${Date.now()}`,
+        skills: [],
+        resume_text: 'Strong creditworthiness assessment background, added a disclaimer to every report.',
+      },
+    });
+    const throwaway = await throwawayRes.json();
+    try {
+      // A real, low-scoring (0% match) throwaway candidate is not
+      // guaranteed to land in a small top-N slice on a tenant with
+      // hundreds of real candidates - request a generous limit so this
+      // specific candidate is reliably present regardless of how many
+      // real candidates already exist, rather than relying on ranking
+      // position.
+      const res = await request.post(`${API}/candidates/rank`, {
+        headers: auth(),
+        data: { jd_text: 'credit, claim', limit: 5000 },
+      });
+      const body = await res.json();
+      const mine = body.ranked.find((r: any) => r.id === throwaway.id);
+      expect(mine.matched_skills).toEqual([]);
+      expect(mine.missing_skills.sort()).toEqual(['claim', 'credit'].sort());
+    } finally {
+      await request.delete(`${API}/candidates/${throwaway.id}`, { headers: auth() }).catch(() => {});
+    }
+  });
+
   test('real headless UI: View Profile opens an inline preview (zero navigation), Back to list restores the ranked results', async ({ page }) => {
     await page.goto('/candidates');
     await page.getByRole('button', { name: 'JD Match' }).click();
@@ -6698,7 +6775,7 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     const results = page.getByTestId('jd-rank-results');
     await expect(results).toBeVisible({ timeout: 15000 });
 
-    const detectedLine = page.locator('div', { hasText: 'Detected requirements:' }).first();
+    const detectedLine = page.getByTestId('jd-detected-requirements');
     await expect(detectedLine).toBeVisible();
     await expect(detectedLine.locator('b', { hasText: 'Claim Management' })).toBeVisible();
 

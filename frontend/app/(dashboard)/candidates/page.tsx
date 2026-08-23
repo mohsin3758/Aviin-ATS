@@ -1293,7 +1293,7 @@ export default function CandidatesPage() {
           <div>
             <div style={{padding:'10px 14px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',marginBottom:'8px'}}>✅ Ranked {(rankResult as any).ranked?.length||0} candidates by fit — click "View Profile" to preview before adding, or select candidates to add them straight to a requisition's pipeline.</div>
             {Array.isArray((rankResult as any).required_skills)&&(rankResult as any).required_skills.length>0&&(
-              <div style={{fontSize:'11px',color:'#64748b',marginBottom:'16px'}}>
+              <div data-testid="jd-detected-requirements" style={{fontSize:'11px',color:'#64748b',marginBottom:'16px'}}>
                 Detected requirements: {(rankResult as any).required_skills.map((s:string,i:number)=>(
                   <span key={s}>{i>0&&', '}<b style={{color:'#374151'}}>{s}</b></span>
                 ))}

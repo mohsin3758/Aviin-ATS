@@ -196,12 +196,30 @@ def compute_skill_similarity(
     missing - a skill found only in resume_text (not the structured list)
     still counts as matched, since it's real, checkable evidence, just
     not one this app's own parser happened to capture structurally.
+    Third real gap fix (2026-08-23): the resume_text check above used
+    plain Python `in` (a raw substring test), not a word-boundary check -
+    harmless for a long, distinctive multi-word phrase, but a real false-
+    positive risk once short, bare single-word requirements started being
+    extracted verbatim from a recruiter's own typed query (e.g. "credit"
+    as a required term would count "creditworthiness" as a match; "claim"
+    would match inside "disclaimer"). Switched to the same word-boundary
+    regex pattern already used elsewhere in this codebase for exactly
+    this reason (TECH_SKILLS keyword extraction, _related_skill_hit) -
+    strictly more correct than the substring check it replaces, never
+    loosens an existing match.
+
     Returns (skill_similarity_0_to_1, matched_skills, missing_skills)."""
     cand_lower = {s.lower() for s in (candidate_skills or []) if s}
     text_lower = (resume_text or "").lower()
+
+    def _in_text(term: str) -> bool:
+        if not text_lower:
+            return False
+        return bool(re.search(r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])', text_lower))
+
     req_list = [s for s in (required_skills or []) if s]
-    matched = [s for s in req_list if s.lower() in cand_lower or (text_lower and s.lower() in text_lower)]
-    missing = [s for s in req_list if s.lower() not in cand_lower and not (text_lower and s.lower() in text_lower)]
+    matched = [s for s in req_list if s.lower() in cand_lower or _in_text(s.lower())]
+    missing = [s for s in req_list if s.lower() not in cand_lower and not _in_text(s.lower())]
     keyword_ratio = (len(matched) / len(req_list)) if req_list else None
 
     if keyword_ratio is not None and cosine_sim_value is not None:

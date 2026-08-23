@@ -10792,3 +10792,94 @@ regression sweep (S1/S2/S8/S13/S16/S20/S30/S38/S48/S53, 74 tests)
 passed clean — 72 passed, 2 pre-existing skips, 0 failed (the earlier
 run's one flaky, unrelated S38 test passed clean this time too). Zero-
 token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).
+
+## AI Matching fix, third round same day: a bare comma-separated JD with
+## no marker word at all — the simplest possible input shape, and the
+## one the user actually tried — plus a duplicate-requirement bug found
+## in the same investigation
+User reported "same issue, still showing 95%" with a new screenshot:
+input this time was a single line with no marker word and no line
+breaks — "fico, credit, claim, disaster" — even simpler than either
+shape the first two rounds fixed. Confirmed via direct testing:
+`_extract_requirement_phrases()` returned `[]` for this exact string —
+none of the 3 existing tiers (bullet lines, marker-then-comma-list,
+bare multi-line list) recognize a single-line, no-marker, no-bullet
+comma list, so it fell all the way back to `extract_skills_from_text()`
+(taxonomy), which only resolves "fico" → "SAP FICO" and drops "credit"/
+"claim"/"disaster" entirely — reproducing the exact reported symptom.
+
+**Fixed**: added a 4th, most-permissive tier — fires only when every
+earlier tier found nothing, and only when the ENTIRE jd_text contains
+no sentence-ending punctuation anywhere AND every comma/semicolon-
+separated part is short (≤4 words) AND no part starts with a common
+sentence-leading word ("we", "need", "the", "is", "with", etc.).
+Deliberately strict — a single part failing any check skips the whole
+tier, not just that part — to avoid mistaking a genuine sentence with
+commas but no trailing period ("We need Python, AWS and Docker
+experience") for a bare list; verified this exact case still correctly
+falls through to the taxonomy extractor and doesn't produce nonsense
+phrases like "We need Python."
+
+**A second, real bug found in the same investigation, before it shipped
+to the user**: once "fico" could be extracted verbatim, the union logic
+that merges taxonomy-detected skills with verbatim phrases used a plain
+lowercase-string comparison — but `extract_skills_from_text()` had
+*already* resolved "fico" to its canonical "SAP FICO" independently, so
+the union added BOTH "SAP FICO" and "fico" as two separate, duplicate
+requirements in the same list (confirmed live: `required_skills:
+['SAP FICO', 'fico', 'credit', 'claim', 'disaster']` — 5 items for 4
+real requirements). Fixed by deduping through the taxonomy's own real
+alias-to-canonical map (`improved_parser._SKILL_LOOKUP`) before adding a
+verbatim phrase, not just exact string equality — a verbatim phrase that
+resolves to a canonical name already present is skipped, keeping the
+tidier, consistently-cased taxonomy form. Re-verified: `required_skills:
+['SAP FICO', 'credit', 'claim', 'disaster']` — exactly 4, correct.
+
+**Also hardened the shared matching function while extracting bare
+single words became a real, live path for the first time**: `compute_
+skill_similarity()` (`ner.py`) checked resume-text evidence with a plain
+Python substring test, not word-boundary-safe — harmless for a long,
+distinctive multi-word phrase, but a real false-positive risk once a
+recruiter's own bare, short, generic term ("credit", "claim") could be
+checked directly: "credit" would wrongly match inside "creditworthiness",
+"claim" inside "disclaimer". Switched to the same word-boundary regex
+pattern already established elsewhere in this codebase for exactly this
+reason. A strict correctness improvement — never loosens an existing
+match, only removes false ones — applying to every caller of this shared
+function (resume scoring, requisition matching, JD ranking), not just
+this feature. Verified directly: "credit" no longer matches inside
+"creditworthiness," still correctly matches a genuine standalone
+"credit" mention; same for "claim" vs. "disclaimer."
+
+Verified for real end-to-end: reproduced the exact reported input via
+the API before fixing (`required_skills: ['SAP FICO']` — only 1 of 4),
+confirmed the fix (`['SAP FICO', 'credit', 'claim', 'disaster']` — all 4,
+no duplicate), confirmed Rishith correctly back to 62% (was showing 95%
+in the reported screenshot). Direct unit tests on the widened extractor
+against 6 real JD shapes (bare comma list, bullets, plain lines, marker-
+comma, pure prose, and a real sentence-with-commas-but-no-period edge
+case) and on the word-boundary fix against 3 real false-positive/true-
+positive pairs. A real headless-browser pass confirmed the fix on the
+live page with the user's own exact text, including a "no duplicate
+'fico' entry" check. Added a real `data-testid="jd-detected-requirements"`
+hook to the frontend (the div had none before, causing test locator
+ambiguity when a broader `hasText` match accidentally spanned the whole
+ranked-results list) and hardened the earlier round's test to use it
+too, matching this project's established "give the test a real hook"
+convention. 3 new permanent tests added to "S53" (now 9 tests total) —
+the bare-comma-list case, the prose-with-commas-no-period regression
+guard, and the word-boundary false-positive guard. Full regression
+sweep (S1/S2/S8/S13/S16/S20/S30/S38/S48/S53, 77 tests) passed clean: 75
+passed, 2 pre-existing skips, 0 failed — genuinely clean this run, no
+flaky tests. Zero-token audit: `CONFIRMED CLEAN` (391 files, 0 external
+API refs).
+
+**Honest scope note, not silently glossed over**: bare single-word
+requirements like "credit"/"claim"/"disaster" are inherently ambiguous —
+word-boundary matching prevents partial-word false positives (the worst
+class), but can't distinguish a resume's genuine "Credit Management"
+experience from an unrelated legitimate use of the same word (e.g.
+"Credit Card processing" for a different context). This is a real,
+acknowledged limitation of accepting arbitrarily abbreviated recruiter
+input rather than a bug — the fix's job is to stop *silently dropping*
+what's typed, not to perfectly disambiguate every possible short word.
