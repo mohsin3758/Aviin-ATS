@@ -2168,10 +2168,13 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
   const urlBeforePreview = page.url();
   await results.getByRole('button', { name: 'View Profile' }).first().click();
   await expect(page.getByText('Back to list')).toBeVisible({ timeout: 10000 });
-  const fullProfileLink = page.getByRole('link', { name: /Open Full Profile/i });
-  await expect(fullProfileLink).toBeVisible();
-  const href = await fullProfileLink.getAttribute('href');
-  expect(href).toMatch(/^\/candidates\/[a-f0-9-]+$/);
+  // "Open Full Profile" is a button (router.push), not an <a href> - it
+  // used to be a plain link, changed the same day to same-tab navigation
+  // after a real report that repeated new-tab opens across a review
+  // session were confusing (see S53's dedicated coverage for the actual
+  // navigation-target check). Here just confirm viewing the inline
+  // preview itself caused zero navigation, same as always.
+  await expect(page.getByRole('button', { name: /Open Full Profile/i })).toBeVisible();
   expect(page.url()).toBe(urlBeforePreview); // confirms zero navigation occurred
   await page.getByText('Back to list').click();
   await expect(results).toBeVisible();
@@ -6790,27 +6793,30 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     await expect(detectedLine).toBeVisible();
   });
 
-  test('real headless UI: resume extract highlights matched skill terms, and Open Full Profile carries a real Back to AI Match Results link', async ({ page, context }) => {
-    // Two more real bugs reported live from the same JD Match feature,
-    // same day: (1) the browser's own Ctrl+F searches the WHOLE page
-    // (every candidate row, not just the open resume), so verifying a
-    // term genuinely appears in ONE candidate's resume was impractical -
-    // fixed by highlighting matched/related skill terms directly inside
-    // the Resume Extract, reusing the exact <mark>-wrapping pattern
-    // already proven on the dedicated full-resume-view page. (2) "Open
-    // Full Profile" opens a new tab by design (keeps the ranked results
-    // intact), but that new tab had no way back to those results at
-    // all - fixed with a real localStorage-backed "Back to AI Match
-    // Results" link that re-runs the identical search.
+  test('real headless UI: resume extract highlights matched skill terms, Open Full Profile navigates in the SAME tab (no new window), and Back to AI Match Results still works', async ({ page, context }) => {
+    // Three real bugs reported live from the same JD Match feature, same
+    // day: (1) the browser's own Ctrl+F searches the WHOLE page (every
+    // candidate row, not just the open resume) - fixed by highlighting
+    // matched/related skill terms directly inside the Resume Extract,
+    // reusing the exact <mark>-wrapping pattern already proven on the
+    // dedicated full-resume-view page. (2) "Open Full Profile" originally
+    // opened a new tab by design (keeps the ranked results intact) - a
+    // real localStorage-backed "Back to AI Match Results" link was added
+    // first, but the user then reported the repeated new-tab behavior
+    // itself as confusing across a real multi-candidate review session
+    // (screenshot showed 8 stacked tabs) - switched to same-tab
+    // navigation instead, relying entirely on the Back link to return.
     //
-    // Real bug caught before shipping, not by the user: the first
-    // attempt used sessionStorage on the (wrong) assumption a
-    // target="_blank" tab clones it - the anchor's own rel="noreferrer"
-    // implicitly forces noopener too, which severs the browsing-context
-    // relationship sessionStorage cloning actually depends on. Confirmed
-    // live the new tab got a fresh, empty sessionStorage. Switched to
-    // localStorage (origin-scoped, not opener-scoped) - the same
-    // mechanism this codebase already uses for the auth token.
+    // Real bug caught before shipping, not by the user: the FIRST
+    // attempt at the Back link used sessionStorage on the (wrong)
+    // assumption a target="_blank" tab clones it - the anchor's own
+    // rel="noreferrer" implicitly forces noopener too, which severs the
+    // browsing-context relationship sessionStorage cloning actually
+    // depends on. Confirmed live the new tab got a fresh, empty
+    // sessionStorage. Switched to localStorage (origin-scoped, not
+    // opener-scoped) - the same mechanism this codebase already uses for
+    // the auth token - which is also why it still works correctly now
+    // that navigation happens in the same tab rather than a new one.
     await page.goto('/candidates');
     await page.getByRole('button', { name: 'JD Match' }).click();
     await page.getByPlaceholder('Paste the full job description here...').fill(
@@ -6829,18 +6835,46 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     await expect(marks.first()).toBeVisible({ timeout: 5000 });
     expect(await marks.count()).toBeGreaterThan(0);
 
-    const [profilePage] = await Promise.all([
-      context.waitForEvent('page'),
-      page.getByRole('link', { name: /Open Full Profile/i }).click(),
-    ]);
-    await profilePage.waitForLoadState();
-    await expect(profilePage.getByRole('button', { name: 'Back to AI Match Results' })).toBeVisible({ timeout: 10000 });
+    let newPageOpened = false;
+    context.on('page', () => { newPageOpened = true; });
+    await page.getByRole('button', { name: /Open Full Profile/i }).click();
+    await page.waitForURL(/\/candidates\/[a-f0-9-]+$/, { timeout: 10000 });
+    expect(newPageOpened).toBe(false); // the real regression check for "opening a new window every time"
 
-    await profilePage.getByRole('button', { name: 'Back to AI Match Results' }).click();
-    await expect(profilePage.getByTestId('jd-rank-results')).toBeVisible({ timeout: 15000 });
-    await expect(profilePage.getByTestId('jd-detected-requirements').locator('b', { hasText: 'Claim Management' })).toBeVisible();
-    expect(profilePage.url()).not.toContain('reopenJdMatch');
-    await profilePage.close();
+    await expect(page.getByRole('button', { name: 'Back to AI Match Results' })).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'Back to AI Match Results' }).click();
+    await expect(page.getByTestId('jd-rank-results')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId('jd-detected-requirements').locator('b', { hasText: 'Claim Management' })).toBeVisible();
+    expect(page.url()).not.toContain('reopenJdMatch');
+  });
+
+  test('real headless UI: Full Resume page — Match Against Open Jobs auto-refreshes, and Back navigation reaches the real Candidates list (not a loop)', async ({ page }) => {
+    // Two more real bugs reported live, same day: the Full Resume page's
+    // "Match Against Open Jobs" told the user to manually reload the
+    // browser instead of refreshing itself; and "Back to {name}'s
+    // Profile" unconditionally PUSHED a fresh profile history entry on
+    // every visit, so the profile page's own goBack() (router.back()
+    // once history.length > 1) kept unwinding back into the resume page
+    // instead of ever reaching the real /candidates list - reported live
+    // as clicking Back repeatedly cycling between the two pages forever.
+    await page.goto('/candidates');
+    await page.locator('a[href^="/candidates/"]').first().click();
+    await page.waitForURL(/\/candidates\/[a-f0-9-]+$/);
+    const profileUrl = page.url();
+
+    await page.getByRole('button', { name: 'View Full Resume' }).click();
+    await page.waitForURL(/\/candidates\/[a-f0-9-]+\/resume$/);
+
+    await page.getByRole('button', { name: /Match Against Open Jobs/i }).click();
+    await expect(page.getByText(/Matched \d+ open requisition|No open requisitions/)).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/reload to see/i)).not.toBeVisible();
+
+    await page.getByRole('button', { name: /Back to .+'s Profile/ }).click();
+    await page.waitForURL(/\/candidates\/[a-f0-9-]+$/, { timeout: 10000 });
+    expect(page.url()).toBe(profileUrl);
+
+    await page.getByRole('button', { name: 'Back to Candidates' }).click();
+    await page.waitForURL(/\/candidates$/, { timeout: 10000 }); // the real regression check - must reach the list, not loop back to resume
   });
 
   test.afterAll(async ({ request }) => {

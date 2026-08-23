@@ -10978,3 +10978,81 @@ tab with no way back" shape (confirmed by reading its code), but the
 user's reports were specifically against the Candidates page's JD Match
 feature; flagged here as a real, matching gap for a future explicit
 decision rather than silently carried over unasked.
+
+## AI Match, final round same day: Full Resume page's manual-reload bug,
+## a real navigation-loop bug found via history-stack tracing, and moved
+## "Open Full Profile" to same-tab navigation after the new-tab pattern
+## itself became the complaint, 2026-08-23
+User reported 3 more real issues, all confirmed live via screenshots
+including one showing 8 stacked duplicate tabs from one review session.
+
+**Bug 1 — "Match Against Open Jobs" on the Full Resume page
+(`candidates/[id]/resume/page.tsx`) told the user to manually reload
+the browser instead of refreshing itself.** The endpoint genuinely
+writes real `candidate_scores` rows server-side, but this page's
+`matchOpenJobs()` never called `refetch()` afterward — a separate,
+independent implementation from the Candidate 360 profile page's own
+`matchOpenJobs()` (built 2026-08-20), which already does this correctly;
+this page's copy just never got the same treatment. Fixed by calling
+`refetch()` (and resetting `scoreIdx` to 0) on a successful match,
+matching the profile page's convention; the "Comparing Against" panel
+now appears automatically.
+
+**Bug 2 — a real navigation-loop bug, root-caused by tracing the actual
+browser history stack, not guessed.** "Back to {name}'s Profile" on the
+same page unconditionally called `router.push(/candidates/{id})`
+regardless of how the page was reached — every visit PUSHED a fresh
+profile history entry rather than reusing the real one already there.
+Combined with the Candidate 360 profile page's own `goBack()` (built
+2026-08-21: `router.back()` whenever `window.history.length > 1`), this
+meant the growing, artificially-pushed history made `goBack()` always
+choose "go back one step" — which unwound straight into the resume page
+again, not the real `/candidates` list. Reported live as clicking Back
+repeatedly cycling between the profile and resume pages, never reaching
+the base Candidates list. Fixed by giving the resume page's "Back to
+Profile" the exact same smart-back logic already established on the
+profile page itself (`router.back()` when there's somewhere real to go
+back to, `router.push` only as a fallback for a genuinely history-less
+direct visit) — now both pages cooperate on the same real history stack
+instead of fighting it.
+
+**Bug 3 — the JD Match modal's "Open Full Profile" opening a new tab
+became the complaint itself, not solved by giving the new tab a way
+back.** Earlier the same day, "Open Full Profile" was fixed to open in
+a new tab (preserving the ranked results) with a working localStorage-
+backed "Back to AI Match Results" link on the destination page. Reported
+live, with direct evidence (a screenshot of 8 accumulated duplicate
+tabs from one real review session): opening a fresh tab on every single
+click across a multi-candidate review reads as "opening a new window
+every time," regardless of whether a way back exists. Switched to
+same-tab navigation (`router.push`) instead of removing the return
+mechanism — the "Back to AI Match Results" link is exactly what makes
+this safe now: the ranked results are preserved by a real, working way
+back, not by leaving them behind in a separate tab. `localStorage`
+(chosen earlier the same day specifically because it doesn't depend on
+opener/browsing-context lineage, unlike `sessionStorage`) continues to
+work correctly for this purpose regardless of same-tab vs. new-tab
+navigation.
+
+**Every fix verified for real end-to-end, not code review**: a
+headless-browser test confirmed clicking "Open Full Profile" causes the
+URL to change to the candidate's own profile with genuinely zero new
+`page` events firing on the browser context (the concrete regression
+check for "opening a new window every time"), and that "Back to AI
+Match Results" still correctly reopens and re-runs the exact same
+search from there. A second test confirmed a real "Match Against Open
+Jobs" click on the Full Resume page shows the score panel without any
+reload and with the old "reload to see" wording genuinely gone; and
+that "Back to Profile" → "Back to Candidates" reaches the real
+`/candidates` list URL — the precise regression this whole
+investigation was about, not just "a click happened."
+
+Updated the pre-existing "S20" test (built earlier the same day for the
+prior new-tab shape), which broke immediately once "Open Full Profile"
+became a button instead of a link (`getByRole('link', ...)` no longer
+matched) — genuinely caught by the regression sweep, not missed.
+Extended "S53" (now 12 tests) with dedicated coverage for both the
+same-tab navigation and the Full Resume page's auto-refresh/history-loop
+fixes. Full regression sweep (S1/S2/S8/S13/S16/S20/S30/S38/S48/S53, 79
+tests) passed clean: 77 passed, 2 pre-existing skips, 0 failed. Zero-
+token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).

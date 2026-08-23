@@ -56,7 +56,7 @@ function highlightMatched(text: string, matched: string[]): React.ReactNode {
 export default function CandidateResumeFullPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const { data: candidate, loading } = useFetch<any>(id ? `/candidates/${id}` : null);
+  const { data: candidate, loading, refetch } = useFetch<any>(id ? `/candidates/${id}` : null);
   const [scoreIdx, setScoreIdx] = useState(0);
   const [matching, setMatching] = useState(false);
   const [matchNote, setMatchNote] = useState('');
@@ -64,19 +64,43 @@ export default function CandidateResumeFullPage() {
   const scores: any[] = Array.isArray(candidate?.ai_scores) ? candidate.ai_scores : [];
   const active = scores[scoreIdx] || null;
 
+  // REAL BUG FIX (2026-08-23): reported live — after a real match, the
+  // panel told the user to manually reload the browser to see the
+  // updated scores, instead of just refreshing itself. The endpoint
+  // writes real candidate_scores rows server-side; this page simply
+  // never re-fetched. The candidate profile page's own equivalent
+  // matchOpenJobs() already calls refetch() correctly — this page's
+  // separate implementation just never got the same treatment.
   async function matchOpenJobs() {
     if (!id) return;
     setMatching(true);
     setMatchNote('');
     try {
       const r = await apiFetch(`/candidates/${id}/match-open-jobs`, { method: 'POST' });
-      setMatchNote(r.matched > 0 ? `Matched ${r.matched} open requisition${r.matched > 1 ? 's' : ''} — reload to see updated scores.` : 'No open requisitions to match against right now.');
+      setMatchNote(r.matched > 0 ? `Matched ${r.matched} open requisition${r.matched > 1 ? 's' : ''}.` : 'No open requisitions to match against right now.');
+      if (r.matched > 0) { setScoreIdx(0); refetch(); }
     } catch (e: any) {
       alert(e?.message || 'Job matching failed');
     } finally {
       setMatching(false);
     }
   }
+
+  // REAL BUG FIX (2026-08-23): "Back to {name}'s Profile" always
+  // unconditionally PUSHED a fresh /candidates/{id} history entry,
+  // regardless of how this page was actually reached — reported live:
+  // clicking Back repeatedly cycled between this page and a fresh
+  // profile push, never reaching the real Candidates list. Each push
+  // grew window.history.length, so the profile page's own goBack()
+  // (router.back() whenever history.length > 1) kept unwinding back
+  // into THIS page instead of ever reaching /candidates. Same smart-back
+  // pattern already used on the profile page itself: reuse real browser
+  // history when there's somewhere real to go back to, only push as a
+  // fallback for a genuinely history-less direct-URL visit.
+  const backToProfile = () => {
+    if (typeof window !== 'undefined' && window.history.length > 1) router.back();
+    else router.push(`/candidates/${id}`);
+  };
 
   const highlighted = useMemo(
     () => highlightMatched(candidate?.resume_text || '', active?.matched_skills || []),
@@ -92,7 +116,7 @@ export default function CandidateResumeFullPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1100px' }}>
-      <button onClick={() => router.push(`/candidates/${id}`)}
+      <button onClick={backToProfile}
         style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', fontSize: '13px', padding: 0, width: 'fit-content' }}>
         <ArrowLeft size={15} /> Back to {candidate.full_name}'s Profile
       </button>

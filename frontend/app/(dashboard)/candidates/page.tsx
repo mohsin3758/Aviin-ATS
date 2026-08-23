@@ -1,5 +1,6 @@
 'use client';
 import { useState, useRef, useMemo, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions, SectionDivider } from '@/components/ui/Modal';
 import { API, authHeaders, getTokenPayload } from '@/lib/auth';
@@ -642,31 +643,32 @@ function JdCandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack, ma
   candidateId: string; isSelected: boolean; onToggle: () => void; onBack: () => void;
   matchedSkills: string[]; relatedSkills: string[]; jdText: string;
 }) {
+  const router = useRouter();
   const { data: c, loading } = useFetch<any>(`/candidates/${candidateId}`);
   if (loading || !c) {
     return <div style={{ minHeight: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: 12 }}>Loading profile…</div>;
   }
   const skills: string[] = Array.isArray(c.skills) ? c.skills : [];
-  // REAL BUG FIX (2026-08-23): "Open Full Profile" opens the real
-  // Candidate 360 page in a new tab by design (keeps this modal's
-  // ranked results intact) - but reported live: there was no way back
-  // to these specific results from that page at all.
-  //
-  // First attempt used sessionStorage on the assumption a new tab
-  // opened via <a target="_blank"> clones it - but this anchor also
-  // carries rel="noreferrer", which implicitly forces noopener too,
-  // severing the browsing-context relationship that sessionStorage
-  // cloning actually depends on per spec. Confirmed live: the new tab
-  // received a completely fresh, empty sessionStorage, not a clone -
-  // the "Back to AI Match Results" link never appeared. Switched to
-  // localStorage instead, which is scoped purely by origin, not by
-  // opener/browsing-session lineage - readable from any tab of this
-  // app regardless of how it was opened, matching how this codebase
-  // already stores the auth token.
-  function saveReturnContext() {
+  // REAL BUG FIX (2026-08-23): "Open Full Profile" originally opened the
+  // real Candidate 360 page in a NEW TAB by design (keeps this modal's
+  // ranked results intact without needing any return mechanism at all).
+  // Reported live, twice: (1) there was no way back to these specific
+  // results from that new tab (fixed earlier the same day with a
+  // localStorage-backed "Back to AI Match Results" link), and (2) even
+  // with that fix, opening a fresh tab on every single click across a
+  // real multi-candidate review session left many duplicate tabs open
+  // and reads as "opening a new window every time" - confirmed live via
+  // a screenshot showing 8 stacked tabs from one session. Switched to
+  // same-tab navigation (router.push) instead of removing the return
+  // mechanism - the "Back to AI Match Results" link built earlier the
+  // same day is what makes this now safe: the ranked results are no
+  // longer preserved by leaving them in a separate tab, they're
+  // preserved by a real, working way back.
+  function goToFullProfile() {
     try {
       localStorage.setItem('aiMatchReturnCtx', JSON.stringify({ jdText, ts: Date.now() }));
     } catch {}
+    router.push(`/candidates/${candidateId}`);
   }
   return (
     <div style={{ maxHeight: 460, overflowY: 'auto', padding: '2px 2px' }}>
@@ -674,10 +676,10 @@ function JdCandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack, ma
         <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', fontSize: 12, fontWeight: 600, padding: 0 }}>
           <ArrowLeft size={13} /> Back to list
         </button>
-        <a href={`/candidates/${candidateId}`} target="_blank" rel="noreferrer" onClick={saveReturnContext}
-          style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#2563eb', textDecoration: 'none' }}>
+        <button onClick={goToFullProfile}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#2563eb', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
           Open Full Profile <ExternalLink size={11} />
-        </a>
+        </button>
       </div>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
         <div style={{ width: 48, height: 48, borderRadius: '50%', background: gc(c.full_name || ''), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
