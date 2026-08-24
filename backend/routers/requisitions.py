@@ -13,6 +13,7 @@ from schemas import RequisitionCreate, RequisitionUpdate
 from routers.job_sharing import auto_distribute_on_open
 from routers.assignments import _workload_label
 from permissions import require_permission, get_job_visibility_scope
+from services import assignment_notify
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 
@@ -596,6 +597,15 @@ async def assign_requisition(requisition_id: str, actor: Actor = Depends(get_act
             message = str(exc)
             status_code = 404 if "not found" in message.lower() else 409
             raise HTTPException(status_code=status_code, detail=message)
+
+        # Real gap closed (2026-08-24 research pass) — same as the manual
+        # assign path in assignments.py: notify the recruiter + a real
+        # kickoff task, not just a silent DB row.
+        await assignment_notify.notify_and_task_on_assign(
+            conn, actor.tenant_id, requisition_id=requisition_id,
+            recruiter_id=str(row["recruiter_id"]),
+            assigned_by_user_id=actor.user_id if actor.role is not None else None,
+        )
 
     result = dict(row)
     result["explanation"] = json.loads(result["explanation"])

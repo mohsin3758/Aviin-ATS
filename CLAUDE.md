@@ -11857,3 +11857,176 @@ pass confirmed the URL `/requisitions/{id}`, then clicking "Summary" and
 seeing "Assigned Recruiter" for real, against the exact production job
 in question. Zero-token audit: `CONFIRMED CLEAN` (392 files, 0 external
 API refs).
+
+## Assignment Dashboard built end-to-end, from the 2-round research pass,
+## with a real production bug found and fixed via genuine testing,
+## 2026-08-24
+Direct follow-up to the same-day internal-gap + external-industry-
+comparison research (Bullhorn/CEIPAL/JobDiva/Vincere/Crelate + real
+staffing-ops benchmarks). User explicitly asked to build the full,
+consolidated list from both research rounds (excluding co-recruiter
+support, which was flagged as needing its own separate decision), with a
+genuine end-to-end test using real API calls and real data before calling
+anything done — and got exactly that, including a real bug the API-level
+testing alone would have missed.
+
+**Schema** — deliberately minimal (`sql/78_assignment_dashboard.sql`):
+one new column, `recruiter_leave.conflict_notified_at` (dedup marker for
+the leave-conflict scheduler job). Everything else — AI-vs-Manual,
+client responsiveness, desk/team grouping — is computed from tables that
+already exist: `assignment_event.metadata->>'reason'`, `client_feedback`
+(a real, live table with zero committed migration — schema pulled via
+`psql \d` before writing any query against it, not reconstructed from
+memory) vs `submittals.submitted_at`, and `users.department` (already
+real data, already used in 5 other places in this app).
+
+**Backend** — new `backend/routers/assignment_dashboard.py`:
+- `GET /assignment-dashboard/list` — the base dashboard: every
+  assignment joined to its real requisition/client/recruiter/desk, the
+  latest `assignment_event` (AI vs Manual + who assigned it), a real
+  `submittals`-based submission count, computed SLA status (using the
+  same priority x client-tier formula `find_sla_breaches()` already
+  uses, inlined since that function only returns already-breaching rows
+  and this needed every row's status), and a live `recruiter_on_leave`
+  flag. Filterable by client/desk/recruiter/priority/method/date range;
+  `mine=true` (or an automatically-forced self-scope for any role
+  outside admin/manager/kae) powers the recruiter-facing "My
+  Assignments" half of the same endpoint.
+- `GET /assignment-dashboard/summary?group_by=recruiter|client|desk` —
+  the 3 real aggregation dimensions from the research: recruiter (with
+  both the existing ratio-based Low/Medium/High workload_label AND a new
+  absolute-count `capacity_tier` — healthy <=20 / stretch <=30 /
+  overloaded >30, the real industry benchmark numbers from the external
+  research, not invented), client (with the new `avg_client_response_hours`
+  metric — the "hiring-manager responsiveness" gap the external research
+  specifically surfaced), and desk (`users.department`, the real
+  "desk" concept staffing agencies actually use, confirmed via research
+  rather than assumed). Recruiters with zero current assignments are
+  included, not silently dropped — an idle desk slot is a real signal.
+  SLA-at-risk (predictive) reuses `sla_predictions.forecast()` directly
+  (a plain Python function call, not a second model) rather than
+  duplicating the ML/fallback-median logic.
+- `GET /assignment-dashboard/history/{requisition_id}` — the full
+  chronological timeline for a requisition, walking every `assignments`
+  row it's ever had (reassignment creates a NEW row) plus every real
+  `assignment_event` tied to them. The audit trail has been complete
+  since P1/P3; this is the first frontend consumer of it, ever.
+- `POST /assignment-dashboard/bulk-reassign` — loops the existing,
+  already-correct `do_reassign()` function per assignment id (one
+  failure never aborts the batch), admin/manager-gated, same HITL bar as
+  the single-assignment reassign endpoint.
+- `GET /assignment-dashboard/export.csv` — reuses the shared `to_csv()`
+  helper from `p28_p32.py` rather than a new implementation.
+- New `backend/services/assignment_notify.py` — the biggest confirmed
+  UX gap from the research ("people not knowing they've been assigned is
+  a real operational problem"): both `create_assignment()`
+  (assignments.py, manual) and `assign_with_explanation()`'s caller
+  (requisitions.py, auto-assign) now write a real in-app notification to
+  the newly-assigned recruiter AND a real kickoff `recruiter_tasks` row
+  ("Get started: <title>", due in 2 days) — closing the loop the
+  research named explicitly (notified, and given a next action).
+  Reassignment gets a lighter-weight notification only (no kickoff task
+  — the outgoing recruiter is being taken off it, a task would be
+  meaningless).
+- Leave-aware handling, industry-named not invented: new
+  `flag_leave_conflicting_assignments()` scheduler job (daily 04:15 IST)
+  finds active assignments whose recruiter has a real, currently-active
+  `recruiter_leave` row, and sends ONE real notification to the
+  recruiter's manager (`reporting_to`, or a tenant-wide 'manager'
+  broadcast if unset) per leave record — deliberately does NOT
+  auto-reassign, since who covers (if anyone) is a real decision a
+  manager should make, not something a scheduler job should do
+  unilaterally. `conflict_notified_at` prevents re-notifying daily for
+  the whole span of a multi-day leave.
+- New `assignment_dashboard` feature key added to `permissions.py`'s
+  taxonomy (Core Features group), same soft-launch `require_permission()`
+  pattern as the other 22 already-enforced features.
+
+**Frontend** — new `/assignments` page (sidebar entry added next to
+Recruiter Ops), role-branching in one page rather than two: admin/
+manager/kae see the full "Assignment Dashboard" (stat cards, the 3-mode
+View-by summary table, a filterable detail list with bulk-select +
+Bulk Reassign + CSV export, and a per-row History timeline modal); every
+other role sees "My Assignments" — the same detail list, self-scoped,
+with the manager-only controls (View-by toggle, client/desk filters,
+bulk-select) genuinely absent from the DOM, not just hidden by CSS.
+
+**A real production bug found and fixed only because this was tested
+against real, already-messy production data, not a clean fixture**:
+verifying the AI-vs-Manual detection against a real, already-existing
+production assignment (khan mer / Associate Managing Consultant - SAP
+FICO) showed it displaying as "Manual" despite the user having used
+Auto-Reassign on it earlier the same day (per the previous entry's own
+screenshot). Traced directly, not guessed: that assignment had **zero**
+`assignment_event` rows at all. Root cause, confirmed by pulling
+`do_reassign()`'s real, complete definition via `pg_get_functiondef()`
+(schema-drifted — no committed `CREATE FUNCTION` anywhere in
+`sql/*.sql`, confirmed by grep before touching it): the function writes
+an event for the OLD assignment row (`event_type='reassigned'`) but
+**never wrote one for the NEW assignment row it creates** — meaning
+every reassigned-into assignment in this system's history has been
+invisible to any event-based query, not just this new dashboard.
+`sql/79_do_reassign_new_assignment_event.sql` adds one more INSERT,
+tied to the new assignment id, with a reason (`auto_assigned_re` /
+`manually_assigned_re`) distinguishing an auto-picked reassignment from
+an explicitly-specified one — same convention as the existing initial-
+assign reasons, `_re` suffixed so history can still tell the two apart.
+
+**A second real bug caught directly by running the new scheduler job
+against real data, not by reading the code**: the first version of
+`flag_leave_conflicting_assignments()` crashed with `invalid input for
+query argument $5: UUID(...) (expected str, got UUID)` — `notifications.
+resource_id` is `text`, and `c["recruiter_id"]` from an asyncpg `Record`
+comes back as a native `uuid.UUID` object, not a string (every other
+notification-writing call site in this new work already had a plain
+Python string in scope, from a request param, so this was the one spot
+that needed an explicit `str()` cast). Fixed and re-verified.
+
+Verified for real end-to-end, not code review, at every layer: 7 direct
+backend checks (manual assign -> notification+task confirmed via direct
+SQL, correct "Manual" method; Auto-Reassign -> correct "AI" method after
+the fix, confirmed the exact bug existed first via a live production
+row before fixing it; bulk-reassign with a deliberately-mixed valid/
+invalid batch -> 1 succeeded/1 clean-errored, not a crash; CSV export ->
+real UTF-8-BOM'd data; a real throwaway plain-recruiter login correctly
+force-scoped to zero rows even when explicitly requesting another
+recruiter's id, and correctly 403'd on bulk-reassign while reads stayed
+open per the soft-launch permission model; all 3 summary group-by modes
+returned real, correctly-aggregated numbers, including idle recruiters
+at 0 and an honest `null` for client-response-hours where no
+`client_feedback` exists yet). The leave-conflict job was run twice
+directly inside the container against a real leave record for a real
+recruiter with a real active assignment — first run produced exactly
+one real notification to his real manager and set the dedup marker;
+second run correctly produced zero additional notifications. A real
+headless-browser pass (admin) confirmed the dashboard renders real stat
+cards, all 3 View-by modes with real data, a real 5-event history
+timeline reflecting the exact sequence of test actions taken (manual
+assign -> auto-reassign -> bulk-reassign), and a working bulk-select bar
+— all via genuine screenshots, not just passing locators (two locator-
+ambiguity mistakes in the test script itself were caught and fixed
+along the way — both times because the real page had MORE correctly-
+rendered content than the test anticipated, e.g. "SLA Breached"
+correctly appearing as both a stat-card label and a table column
+header). A second real headless-browser pass, logged in as a genuine
+throwaway recruiter, confirmed "My Assignments" renders with the
+manager-only controls genuinely absent, not just visually hidden.
+
+A broader regression sweep (S1/S2/S8/S13/S16/S20/S30/S37/S49 — 63 tests,
+chosen specifically because they cover `assign-with-explanation`, the
+Auto-Assign role gate, and other endpoints directly touched by this
+work) ran 61 passed / 2 skipped / 0 failed — no regressions from the
+`assignments.py`/`requisitions.py`/`do_reassign()` changes. Zero-token
+audit: `CONFIRMED CLEAN` (397 files, 0 external API refs). All throwaway
+test data (2 requisitions, 3 assignment rows tied to them, 1 real leave
+record, 1 recruiter test user, 1 stray manager notification from the
+leave test) cleaned up afterward via real APIs where they existed and
+direct SQL only where they didn't (no delete endpoint for `notifications`
+by design, matching established precedent elsewhere in this project).
+
+**Explicitly excluded from this build, stated rather than silently
+dropped**: co-recruiter/secondary-assignee support — the one item from
+the research that needs relaxing `assignments_one_active_per_requisition`
+(added 2026-08-10 to fix a real self-amplifying data-corruption bug),
+flagged as needing its own separate decision, not folded into this
+dashboard build.

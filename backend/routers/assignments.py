@@ -15,6 +15,7 @@ import db
 import events
 from deps import Actor, get_actor, require_role
 from schemas import AssignmentCreate, ReassignRequest
+from services import assignment_notify
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
@@ -128,6 +129,13 @@ async def create_assignment(
             actor_user_id=actor.user_id, metadata=explanation,
         )
 
+        # Real gap closed (2026-08-24 research pass): a recruiter previously
+        # only found out they'd been assigned by noticing it themselves.
+        await assignment_notify.notify_and_task_on_assign(
+            conn, actor.tenant_id, requisition_id=body.requisition_id,
+            recruiter_id=body.recruiter_id, assigned_by_user_id=actor.user_id,
+        )
+
     result = dict(row)
     result["recruiter_name"] = recruiter_name
     result["explanation"] = explanation
@@ -172,6 +180,11 @@ async def reassign(
                 "new_assignment_id": str(result["new_assignment_id"]),
                 "auto_picked": body.new_recruiter_id is None,
             },
+        )
+
+        await assignment_notify.notify_on_reassign(
+            conn, actor.tenant_id, requisition_id=str(old["requisition_id"]),
+            new_recruiter_id=str(result["new_recruiter_id"]), reason=body.reason,
         )
 
     return {

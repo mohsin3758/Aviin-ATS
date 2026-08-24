@@ -1240,6 +1240,72 @@ async def process_ownership_expiry():
         logger.error(f"process_ownership_expiry error: {e}")
 
 
+async def flag_leave_conflicting_assignments():
+    """Daily 04:15 IST (2026-08-24, Assignment Dashboard research pass):
+    recruiter_leave already correctly excludes someone from NEW auto-
+    assign scoring while on leave — but going on leave has always had
+    zero effect on assignments they ALREADY hold. A recruiter with 5
+    active assignments who goes on leave tomorrow previously left those
+    5 requisitions silently unattended, with nothing flagging it. Real,
+    industry-named pattern: staffing "desk" coverage requires knowing
+    when a desk goes uncovered, not silently ignoring it.
+
+    Deliberately does NOT auto-reassign — that's a real decision a
+    manager should make (who covers, if anyone), not something this job
+    should do unilaterally. It flags: one real in-app notification to
+    the recruiter's manager (reporting_to) — or a tenant-wide 'manager'
+    role broadcast if reporting_to is unset — per real, currently-in-
+    conflict leave record, using conflict_notified_at as a one-time-only
+    dedup marker so a 10-day leave with 3 active assignments doesn't
+    re-notify daily for its whole duration."""
+    logger.info("scheduler: checking for recruiter leave vs active-assignment conflicts")
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    conflicts = await conn.fetch(
+                        """SELECT rl.id AS leave_id, rl.recruiter_id, rl.start_date, rl.end_date, rl.leave_type,
+                                  u.full_name AS recruiter_name, u.reporting_to,
+                                  COUNT(a.id) AS active_assignment_count
+                           FROM recruiter_leave rl
+                           JOIN users u ON u.id = rl.recruiter_id
+                           JOIN assignments a ON a.recruiter_id = rl.recruiter_id AND a.status = 'active'
+                           JOIN requisitions r ON r.id = a.requisition_id AND r.is_active IS NOT FALSE
+                           WHERE rl.tenant_id = $1 AND rl.conflict_notified_at IS NULL
+                             AND now()::date BETWEEN rl.start_date AND rl.end_date
+                           GROUP BY rl.id, rl.recruiter_id, rl.start_date, rl.end_date, rl.leave_type,
+                                    u.full_name, u.reporting_to""",
+                        tid,
+                    )
+                    for c in conflicts:
+                        title = f"{c['recruiter_name']} is on leave with {c['active_assignment_count']} active assignment(s)"
+                        body = (f"{c['leave_type']} leave {c['start_date']}–{c['end_date']}. "
+                                f"{c['active_assignment_count']} requisition(s) currently assigned to them have no coverage plan.")
+                        if c["reporting_to"]:
+                            await conn.execute(
+                                """INSERT INTO notifications (tenant_id, user_id, recipient_user_id, title, body, type, resource, resource_id, channel)
+                                   VALUES ($1,$2,$2,$3,$4,'warning','recruiter_leave',$5,'inapp')""",
+                                tid, c["reporting_to"], title, body, str(c["recruiter_id"]),
+                            )
+                        else:
+                            await conn.execute(
+                                """INSERT INTO notifications (tenant_id, recipient_role, title, body, type, resource, resource_id, channel)
+                                   VALUES ($1,'manager',$2,$3,'warning','recruiter_leave',$4,'inapp')""",
+                                tid, title, body, str(c["recruiter_id"]),
+                            )
+                        await conn.execute(
+                            "UPDATE recruiter_leave SET conflict_notified_at = now() WHERE id = $1", c["leave_id"],
+                        )
+                    if conflicts:
+                        logger.info(f"Leave-conflict flagging: {len(conflicts)} conflict(s) notified for tenant {tid}")
+            except Exception as e:
+                logger.error(f"Leave-conflict flagging failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"flag_leave_conflicting_assignments error: {e}")
+
+
 _PRODUCTIVITY_COUNT_COLUMNS = {
     "sourced": "candidates_sourced",
     "screened": "candidates_screened",
@@ -1704,6 +1770,8 @@ def start_scheduler():
                       id="duplicate_scan", replace_existing=True)
     # Daily at 04:00 IST — expire lapsed candidate-ownership locks
     # (2026-08-11 individual recruiter ownership).
+    scheduler.add_job(flag_leave_conflicting_assignments, "cron", hour=4, minute=15,
+                       id="leave_conflict_flagging", replace_existing=True)
     scheduler.add_job(process_ownership_expiry, "cron", hour=4, minute=0,
                       id="ownership_expiry", replace_existing=True)
     # Workforce Intelligence (2026-08-11): hourly/daily/weekly recruiter

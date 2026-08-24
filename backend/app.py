@@ -72,6 +72,7 @@ from routers import shift_scheduling
 from routers import kae_submission
 from routers import resume_generator
 from routers import call_letters
+from routers import assignment_dashboard
 
 # GAP features (1-10) — job-distribution and bgv-api were retired (see
 # gap_features.py module docstring): both duplicated real functionality
@@ -321,6 +322,7 @@ app.include_router(sla_predictions.router)
 app.include_router(kae_submission.router)
 app.include_router(resume_generator.router)
 app.include_router(call_letters.router)
+app.include_router(assignment_dashboard.router)
 
 
 @app.get("/health")

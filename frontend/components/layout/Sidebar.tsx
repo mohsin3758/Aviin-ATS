@@ -30,6 +30,7 @@ const NAV_GROUPS = [
     { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity', roles:['admin','super_admin','lead_recruiter'] },
     { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates' },
     { icon:Users2,          href:'/recruiter-ops', label:'Recruiter Ops' },
+    { icon:ClipboardList,   href:'/assignments',   label:'Assignment Dashboard' },
     { icon:Laptop,          href:'/device-monitoring', label:'Device Monitoring' },
     { icon:MapPin,          href:'/field-attendance', label:'Field Attendance', roles:['admin','super_admin','manager','lead_recruiter'] },
     { icon:CalendarClock,   href:'/shift-scheduling', label:'Shift Scheduling' },
