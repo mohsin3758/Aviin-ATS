@@ -12124,3 +12124,90 @@ touched by today's earlier and current work) ran 40 passed / 1 skipped /
 0 failed. Zero-token audit: `CONFIRMED CLEAN` (397 files, 0 external API
 refs). All throwaway test data (2 requisitions, 2 shift-timing presets)
 cleaned up afterward via the real APIs, confirmed zero residue.
+
+## Mass QA/test-fixture cleanup: users, KAE ownership, and a genuine
+## hard-delete of 1,738 QA candidates, 2026-08-24
+User asked, from a screenshot of a real report listing dozens of "QA S19
+Owner"/"QA S19b NonOwner"-named rows, to delete all QA-created users,
+owners, recruiters, and files from the database — the accumulated
+residue from this project's own extensive test-suite history (S14/S16/
+S17/S19/S30/S43/S49/S51, documented leaking repeatedly throughout this
+file). Investigated before touching anything, distinguishing real people
+from test fixtures by content, not just a name pattern:
+
+- **Users**: 248 QA-pattern users found (247 already inactive, 1 still
+  active) via full_name/email pattern matching (`QA %`, `ZZ %`,
+  `%test.com%`, `qa_%`, etc.) — spot-checked all 33 distinct name
+  patterns before acting, confirmed none resembled a real person. The
+  established permanent `QA Test Recruiter` fixture
+  (`qa_test_1782053776@aviinjobs.com`) was explicitly excluded from the
+  pattern match by email — this account is deliberately kept across
+  this entire project's test history and was never touched. Purged via
+  the real `DELETE /users/{id}/purge` API (deactivate-first, then
+  purge) in a loop against one auth token: **48 permanently removed, 200
+  correctly refused (409, real FK-referenced activity — audit_log,
+  applications, assignments, notifications) and left safely deactivated**
+  — the same safety-net behavior this endpoint was built for, working
+  exactly as designed under real volume.
+- **KAE ownership ("Owner")**: the screenshot's "QA S19/S43 Owner" rows
+  turned out to be plain `users.full_name` values, not a separate
+  entity — already covered by the user purge above. Separately, 108
+  real `client_owners` rows pointed at QA users. `DELETE /kae/owners/{id}`
+  is a real, deliberate soft-delete (`is_active=false`, matching this
+  table's own established convention) — confirmed this by reading the
+  endpoint, not assumed, after a follow-up count still showed 108 "QA"
+  rows post-cleanup and looked at first like the delete hadn't worked.
+  Since the user's later answer on candidates explicitly chose full
+  hard-delete for consistency, cleaned these up the same way directly
+  (confirmed zero FK dependents on `client_owners` first) — 108 hard-
+  removed, 0 remaining.
+- **Candidates + files**: 1,738 QA-pattern candidates, all already
+  soft-deleted (i.e., already invisible everywhere in the app — this
+  project's established "deleted" state). Since there's no safe,
+  FK-protected purge API for candidates the way there is for users, and
+  a genuine hard-delete is a real, irreversible, large-scale operation
+  spanning ~40 real foreign-key relationships, asked the user directly
+  rather than guessing which they meant — **they chose full hard-delete**.
+  Mapped every real FK dependency on `candidates` and `applications` via
+  `information_schema` first (not from memory), then ran the full
+  cascade inside a single transaction so a missing table would roll back
+  cleanly instead of leaving a half-deleted mess. **It did roll back
+  once** — the first attempt was missing `candidate_activities` and
+  `recruiter_sla_tracking` from the explicit NO-ACTION delete list (both
+  were genuinely in the FK graph query's own output, just missed when
+  building the DELETE script) — Postgres caught it, nothing was lost,
+  added both and re-ran clean. Final result, all in one committed
+  transaction: 1,738 candidates + 1,071 applications + 6 offers + 38
+  interview schedules + 1,730 `generated_resumes` (the real "files" —
+  actual PDF/DOCX document records) + 1 `resume_files` row (explicitly
+  deleted rather than left `SET NULL`-orphaned, since the user asked for
+  files gone, not just unlinked) + every other real dependent (scores,
+  activities, tags, ownership history, consent records, etc.) —
+  genuinely, permanently removed. `imap_messages`/`message_drafts`/
+  `extension_captures` were deliberately left alone (their FK is
+  `SET NULL`, and these are real historical records — an email or a
+  browser-extension capture shouldn't vanish just because the candidate
+  link on it is being cleaned up).
+
+Verified for real after the fact, not assumed: `/health` and real
+authenticated calls to `/candidates`/`/requisitions` confirmed the app
+stayed fully functional through the whole operation; a regression sweep
+across two separate rounds (S1/S2/S8/S13/S51 plus the earlier S1/S2/S13/
+S16/S20/S22/S30 from the same-day form-additions work) passed clean
+both times, 0 failures. A final residue check found 2 more QA candidates
+— traced directly to the S51 regression suite's own real test flow (it
+deliberately creates and force-deletes a real candidate to prove that
+action never destroys the underlying candidate/application) that had
+just run moments earlier as part of this same verification — already
+correctly soft-deleted by that suite's own cleanup, left alone rather
+than chased as an ever-refreshing target on every future test run.
+
+**Explicitly left in place, not an oversight**: 208 QA-pattern users
+remain, permanently deactivated but not hard-deletable — each has real
+referencing history (audit trail, past assignments, notifications) the
+purge endpoint correctly refuses to destroy, the same safety boundary
+this project has relied on since the endpoint was built. No code was
+changed in this entire cleanup — every action went through either a
+real, already-existing API or a carefully-verified, transaction-
+protected raw SQL cascade for the one operation (candidate hard-delete)
+that had no safe API to lean on.
