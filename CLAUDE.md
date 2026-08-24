@@ -12401,3 +12401,71 @@ that window — this session's own well-documented per-IP login rate-limit
 characteristic from heavy back-to-back testing, not a regression) — both
 re-ran clean in isolation after the cooldown window (15/15). Zero-token
 audit: `CONFIRMED CLEAN` (398 files, 0 external API refs).
+
+## Resume Inbox: manual client/role selection, current-stage highlight on
+## Move to Pipeline, and a real raw-link 404 fixed, 2026-08-24
+User reported 3 real issues from 4 live screenshots of the Resume Inbox
+drawer (the exact real "Bishnu Prasad" SAP FICO candidate): (1) the
+auto-matched job was the only option — no manual way to pick a client and
+its own role instead; (2) the "Move to Pipeline" stage pills gave no
+signal for which stage a candidate already occupies before clicking; (3) a
+red-circled Download link that opened a raw storage-path URL and returned
+`{"detail":"Not Found"}`.
+
+**Bug 3, confirmed first** — `resume-inbox/page.tsx`'s compact "RESUME
+FILE" box (distinct from the working "Download Resume File" button lower
+in the same drawer) was still `<a href={API_URL + item.file_path}>` —
+nothing in the backend serves that raw storage path directly. Same "raw
+`file_path` link, not the auth-gated `/resume-intake/{id}/download`
+endpoint" bug class already found and fixed twice elsewhere in this
+project (2026-08-09) — this was the one remaining raw link, on this same
+page, that the earlier fixes never touched. Replaced with the existing,
+already-correct `downloadResumeFile()` blob-fetch helper (same one the
+big button and the table row already use). Verified live against the
+real candidate from the screenshots: a genuine browser Download event
+fired with the correct filename, not a 404.
+
+**Bug 1 — new "Manual selection" client -> role picker.** Reused
+`GET /clients` and `GET /requisitions?client_id=X&status=open` (both
+already real, existing endpoints — no backend change needed) for a
+cascading dropdown inside the Move to Pipeline card: pick a client, then
+a role belonging to that client. A new `effectiveReqId` (manual pick if
+set, else the existing auto-match) now drives everything already in that
+card — the pill row's enabled state, `handleMoveToStage`'s
+`requisition_id`, and the "View Pipeline" link — so manual selection
+transparently overrides the auto-match rather than requiring a parallel
+code path. Replaces the old dead-end "Use the job filter to associate
+this resume with a JD first" message (the page-level job filter only
+ever filtered the LIST, it never targeted one specific resume) with a
+direct "+ Select client/role" prompt when nothing auto-matched.
+
+**Bug 2 — current-stage highlight.** `item.pipeline_stage` (already
+fetched, already used for the small summary badge above) was never used
+inside the pill row itself — every pill looked identical regardless of
+where the candidate actually stood. The matching pill now gets a 2px
+ring border, a deeper background tint, and a small "●" dot marker
+(plus a title tooltip), so a recruiter can see "Interested" is the real
+current stage before clicking anything else.
+
+Verified for real end-to-end, not code review — against the exact real
+production candidate from the user's own screenshots: a genuine
+headless-browser pass confirmed the Interested pill renders with a real
+2px border + dot (matching the real `pipeline_stage:'interested'` on
+this candidate), the manual toggle correctly reads "Manual selection"
+(a match already exists) and reveals a real client dropdown populated
+with the tenant's actual 4 real clients, and the RESUME FILE download
+button fired a genuine Download event with the correct filename — no
+raw JSON 404. New permanent "S56 Resume Inbox" suite (4 tests) added to
+`qa_automation.spec.ts`, following the same "find a real queue item, no
+direct creation endpoint exists for resume_files" convention already
+established by S32. One real test-authoring mistake caught and fixed
+before it shipped, not an app bug: an early attempt to assert "every
+OTHER pill stays plain" used Playwright's `hasNot` filter expecting it
+to exclude the current-stage pill from the results — `hasNot` only
+checks for a matching DESCENDANT, not a self-match, so it silently
+excluded nothing; fixed by reading every pill's own computed style
+directly via `evaluateAll()` instead of relying on a locator filter that
+never worked as assumed. Broader regression sweep across every existing
+Resume Inbox suite (S32/S39/S40/S41/S44/S45/S46/S56, 24 tests) passed
+clean. Zero-token audit: `CONFIRMED CLEAN` (398 files, 0 external API
+refs).

@@ -215,12 +215,26 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
     ? PIPELINE_STAGES_LIVE.find((s: any) => s.key === item.pipeline_stage)
     : null;
 
+  // Real gap fix (2026-08-24): the auto-matched job was the ONLY option —
+  // no way to pick a different client/role, or to set one when nothing
+  // auto-matched, short of leaving this drawer and using the page-level
+  // job filter (which just filters the list, doesn't target this resume).
+  // Manual selection is client -> role, cascading, and simply overrides
+  // whatever the auto-match produced once a role is picked.
+  const [manualPick, setManualPick] = useState(false);
+  const [manualClientId, setManualClientId] = useState('');
+  const [manualReqId, setManualReqId] = useState('');
+  const { data: manualClients } = useFetch<any[]>(manualPick ? '/clients' : null);
+  const { data: manualClientReqs } = useFetch<any[]>(manualPick && manualClientId ? `/requisitions?client_id=${manualClientId}&status=open` : null);
+  const effectiveReqId = manualReqId || reqId;
+  const effectiveReqTitle = (manualReqId && manualClientReqs?.find((r: any) => r.id === manualReqId)?.title) || reqTitle;
+
   async function handleMoveToStage(stage: string) {
     if (!item.candidate_id) return;
-    if (!reqId) { setPipelineStatus('error'); setPipelineMsg('No matched job found for this resume'); return; }
+    if (!effectiveReqId) { setPipelineStatus('error'); setPipelineMsg('Select a client + role first'); return; }
     setPipelineStatus('loading'); setPipelineStage(stage);
     try {
-      await apiFetch('/applications', { method: 'POST', body: JSON.stringify({ candidate_id: item.candidate_id, requisition_id: reqId, stage }) });
+      await apiFetch('/applications', { method: 'POST', body: JSON.stringify({ candidate_id: item.candidate_id, requisition_id: effectiveReqId, stage }) });
       setPipelineStatus('success');
       setPipelineMsg('Moved to ' + (PIPELINE_STAGES_LIVE.find((s: any) => s.key === stage)?.label || stage));
     } catch(e: any) {
@@ -334,52 +348,95 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
 
         {(pd.expected_ctc || pd.notice_period) && <div style={{ background: '#fafafa', borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12 }}>{pd.expected_ctc && <div><b>Expected CTC:</b> {pd.expected_ctc}</div>}{pd.notice_period && <div style={{ marginTop: 4 }}><b>Notice Period:</b> {pd.notice_period}</div>}</div>}
 
-        {item.file_name && <div style={{ marginBottom: 16, padding: 12, background: '#f0fdf4', borderRadius: 10, border: '1px solid #bbf7d0' }}><div style={{ fontSize: 11, fontWeight: 700, color: '#059669', marginBottom: 6 }}>RESUME FILE</div><div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}><FileText size={13} color="#059669" /><span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.file_name}</span><span style={{ color: '#94a3b8', flexShrink: 0 }}>{fsize(item.file_size)}</span></div>{item.file_path && <a href={`${API_URL}${item.file_path}`} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#059669', fontSize: 12, fontWeight: 700, textDecoration: 'none', flexShrink: 0 }}><Download size={12} /> Download</a>}</div></div>}
+        {item.file_name && <div style={{ marginBottom: 16, padding: 12, background: '#f0fdf4', borderRadius: 10, border: '1px solid #bbf7d0' }}><div style={{ fontSize: 11, fontWeight: 700, color: '#059669', marginBottom: 6 }}>RESUME FILE</div><div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}><FileText size={13} color="#059669" /><span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.file_name}</span><span style={{ color: '#94a3b8', flexShrink: 0 }}>{fsize(item.file_size)}</span></div>
+          {/* Real bug fix (2026-08-24): this was a raw <a href={API_URL+file_path}>
+              pointing straight at a storage path nothing serves directly —
+              the same "raw file_path link, not the auth-gated download
+              endpoint" bug class already found and fixed twice elsewhere in
+              this project (2026-08-09). The big "Download Resume File"
+              button below already used the correct downloadResumeFile()
+              blob-fetch pattern — this was the one remaining raw link. */}
+          <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#059669', fontSize: 12, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}><Download size={12} /> Download</button></div></div>}
 
         {item.email_subject && <div style={{ marginBottom: 16 }}><div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>ORIGINAL EMAIL</div><div style={{ fontSize: 13, color: '#374151', fontStyle: 'italic' }}>{item.email_subject}</div><div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>From: {item.source_email} · {fdt(item.email_received_at || item.created_at)}</div></div>}
 
         {/* Move to Pipeline */}
         {item.candidate_id && (
           <div style={{ marginBottom: 16, padding: 14, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, gap: 8 }}>
               <div style={{ fontSize: 11, fontWeight: 800, color: '#374151', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
                 🔄 Move to Pipeline
               </div>
-              {reqTitle && <span style={{ fontSize: 10, color: '#6366f1', fontWeight: 600, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{reqTitle}</span>}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                {effectiveReqTitle && !manualPick && <span style={{ fontSize: 10, color: '#6366f1', fontWeight: 600, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{effectiveReqTitle}</span>}
+                {/* Real gap fix (2026-08-24): the auto-matched job used to be
+                    the ONLY option — no way to pick a different client/role,
+                    or set one when nothing auto-matched. */}
+                <button data-testid="resume-inbox-manual-toggle" onClick={() => { if (manualPick) { setManualPick(false); setManualClientId(''); setManualReqId(''); } else setManualPick(true); }}
+                  style={{ fontSize: 10, fontWeight: 700, color: manualPick ? '#dc2626' : '#7c3aed', background: manualPick ? '#fef2f2' : '#f5f3ff', border: `1px solid ${manualPick ? '#fecaca' : '#ddd6fe'}`, borderRadius: 6, padding: '3px 8px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                  {manualPick ? '✕ Cancel' : (reqId ? 'Manual selection' : '+ Select client/role')}
+                </button>
+              </div>
             </div>
-            {!reqId && (
-              <div style={{ fontSize: 11, color: '#94a3b8', fontStyle: 'italic' }}>No matched job. Use the job filter to associate this resume with a JD first.</div>
+
+            {manualPick && (
+              <div data-testid="resume-inbox-manual-picker" style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10, padding: 10, background: '#fff', border: '1px solid #ddd6fe', borderRadius: 8 }}>
+                <select data-testid="resume-inbox-manual-client" value={manualClientId} onChange={e => { setManualClientId(e.target.value); setManualReqId(''); }} style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }}>
+                  <option value="">Select client...</option>
+                  {(manualClients || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <select data-testid="resume-inbox-manual-role" value={manualReqId} onChange={e => setManualReqId(e.target.value)} disabled={!manualClientId} style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12, opacity: manualClientId ? 1 : 0.6 }}>
+                  <option value="">{manualClientId ? (manualClientReqs ? (manualClientReqs.length ? 'Select role...' : 'No open roles for this client') : 'Loading roles...') : 'Select a client first'}</option>
+                  {(manualClientReqs || []).map((r: any) => <option key={r.id} value={r.id}>{r.title}</option>)}
+                </select>
+              </div>
             )}
-            {reqId && pipelineStatus === 'success' && (
+
+            {!effectiveReqId && (
+              <div style={{ fontSize: 11, color: '#94a3b8', fontStyle: 'italic' }}>No matched job — use "{reqId ? 'Manual selection' : '+ Select client/role'}" above to associate this resume with a role.</div>
+            )}
+            {effectiveReqId && pipelineStatus === 'success' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, fontSize: 12, fontWeight: 700, color: '#15803d' }}>
                 ✓ {pipelineMsg}
-                <a href={'/pipeline?job=' + reqId} target="_blank" rel="noreferrer" style={{ marginLeft: 'auto', fontSize: 11, color: '#059669', textDecoration: 'none', fontWeight: 600 }}>View Pipeline →</a>
+                <a href={'/pipeline?job=' + effectiveReqId} target="_blank" rel="noreferrer" style={{ marginLeft: 'auto', fontSize: 11, color: '#059669', textDecoration: 'none', fontWeight: 600 }}>View Pipeline →</a>
               </div>
             )}
-            {reqId && pipelineStatus === 'exists' && (
+            {effectiveReqId && pipelineStatus === 'exists' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, fontSize: 12, fontWeight: 700, color: '#92400e' }}>
                 ⚠ {pipelineMsg}
-                <a href={'/pipeline?job=' + reqId} target="_blank" rel="noreferrer" style={{ marginLeft: 'auto', fontSize: 11, color: '#b45309', textDecoration: 'none', fontWeight: 600 }}>View Pipeline →</a>
+                <a href={'/pipeline?job=' + effectiveReqId} target="_blank" rel="noreferrer" style={{ marginLeft: 'auto', fontSize: 11, color: '#b45309', textDecoration: 'none', fontWeight: 600 }}>View Pipeline →</a>
               </div>
             )}
-            {reqId && pipelineStatus === 'error' && (
+            {effectiveReqId && pipelineStatus === 'error' && (
               <div style={{ padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, fontSize: 12, color: '#dc2626' }}>{pipelineMsg}</div>
             )}
-            {reqId && pipelineStatus !== 'success' && (
+            {effectiveReqId && pipelineStatus !== 'success' && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {PIPELINE_STAGES_LIVE.map((s: any) => (
-                  <button key={s.key} onClick={() => handleMoveToStage(s.key)}
-                    disabled={pipelineStatus === 'loading'}
-                    style={{ fontSize: 11, fontWeight: 700, padding: '5px 11px', borderRadius: 20,
-                      cursor: pipelineStatus === 'loading' ? 'wait' : 'pointer',
-                      border: '1px solid ' + s.color + '50',
-                      background: (pipelineStatus === 'loading' && pipelineStage === s.key) ? s.color : s.color + '15',
-                      color: (pipelineStatus === 'loading' && pipelineStage === s.key) ? '#fff' : s.color,
-                      opacity: (pipelineStatus === 'loading' && pipelineStage !== s.key) ? 0.5 : 1,
-                      transition: 'all 0.15s' }}>
-                    {(pipelineStatus === 'loading' && pipelineStage === s.key) ? '...' : s.label}
-                  </button>
-                ))}
+                {/* Real gap fix (2026-08-24): none of these pills ever showed
+                    which stage the candidate is ALREADY at when a real
+                    application exists — recruiter had no way to tell before
+                    clicking. item.pipeline_stage (already fetched, already
+                    used for the summary badge above) now bolds/rings/dots
+                    the matching pill instead of leaving every pill identical. */}
+                {PIPELINE_STAGES_LIVE.map((s: any) => {
+                  const isCurrent = item.pipeline_stage === s.key;
+                  return (
+                    <button key={s.key} data-testid={`resume-inbox-stage-${s.key}`} onClick={() => handleMoveToStage(s.key)}
+                      disabled={pipelineStatus === 'loading'}
+                      title={isCurrent ? 'Candidate is currently at this stage' : undefined}
+                      style={{ fontSize: 11, fontWeight: 700, padding: '5px 11px', borderRadius: 20,
+                        cursor: pipelineStatus === 'loading' ? 'wait' : 'pointer',
+                        display: 'inline-flex', alignItems: 'center', gap: 4,
+                        border: isCurrent ? `2px solid ${s.color}` : '1px solid ' + s.color + '50',
+                        background: (pipelineStatus === 'loading' && pipelineStage === s.key) ? s.color : (isCurrent ? s.color + '33' : s.color + '15'),
+                        color: (pipelineStatus === 'loading' && pipelineStage === s.key) ? '#fff' : s.color,
+                        opacity: (pipelineStatus === 'loading' && pipelineStage !== s.key) ? 0.5 : 1,
+                        transition: 'all 0.15s' }}>
+                      {isCurrent && <span style={{ fontSize: 9 }}>●</span>}
+                      {(pipelineStatus === 'loading' && pipelineStage === s.key) ? '...' : s.label}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>

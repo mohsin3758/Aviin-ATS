@@ -7216,3 +7216,91 @@ test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
   });
 });
+
+test.describe.serial('S56 Resume Inbox: manual client/role selection, current-stage highlight, real download fix', () => {
+  let anyItemId: string | null = null;
+  let itemWithCandidateId: string | null = null;
+  let itemWithStage: string | null = null;
+
+  test('setup: find real queue items to test against (no direct creation API for resume_files exists)', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const r = await request.get(`${API}/resume-intake/queue?status=all&limit=200`, { headers: auth });
+    expect(r.ok()).toBeTruthy();
+    const items = (await r.json()).items || [];
+    if (!items.length) return test.skip();
+    anyItemId = items.find((i: any) => i.file_name)?.id || items[0].id;
+    itemWithCandidateId = items.find((i: any) => i.candidate_id)?.id || null;
+    itemWithStage = items.find((i: any) => i.candidate_id && i.pipeline_stage)?.id || null;
+  });
+
+  test('BUG FIX: the compact "RESUME FILE" box download is a real button (auth-gated blob fetch), not the raw <a href={file_path}> that 404\'d', async ({ page }) => {
+    if (!anyItemId) return test.skip();
+    // Real bug (2026-08-24): this was `<a href={API_URL+item.file_path}>` —
+    // nothing in the backend serves that raw storage path directly (the
+    // exact same bug class already fixed twice elsewhere in this project,
+    // 2026-08-09), so clicking it opened a raw {"detail":"Not Found"} 404
+    // in a new tab. The big "Download Resume File" button below it already
+    // used the correct downloadResumeFile() blob-fetch pattern — this was
+    // the one remaining raw link on this page.
+    await page.goto(`/resume-inbox?item=${anyItemId}`);
+    const drawer = page.getByTestId('resume-inbox-drawer');
+    await expect(drawer).toBeVisible({ timeout: 15000 });
+    const dl = page.getByRole('button', { name: 'Download', exact: true });
+    await expect(dl).toBeVisible();
+    // Real, not a link — confirms it goes through downloadResumeFile()'s
+    // blob-fetch, not a raw navigable href to a nonexistent static route.
+    expect(await dl.evaluate(el => el.tagName)).toBe('BUTTON');
+    const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
+    await dl.click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename().length).toBeGreaterThan(0);
+  });
+
+  test('BUG FIX: a real, working manual client -> role picker exists on Move to Pipeline (previously the auto-match was the only option)', async ({ page }) => {
+    if (!itemWithCandidateId) return test.skip();
+    await page.goto(`/resume-inbox?item=${itemWithCandidateId}`);
+    const drawer = page.getByTestId('resume-inbox-drawer');
+    await expect(drawer).toBeVisible({ timeout: 15000 });
+    const toggle = page.getByTestId('resume-inbox-manual-toggle');
+    await expect(toggle).toBeVisible();
+    await toggle.click();
+    const picker = page.getByTestId('resume-inbox-manual-picker');
+    await expect(picker).toBeVisible();
+    const clientSelect = page.getByTestId('resume-inbox-manual-client');
+    const clientOptions = await clientSelect.locator('option').allTextContents();
+    // Real, live clients — not a hardcoded/placeholder list.
+    expect(clientOptions.length).toBeGreaterThan(1);
+    // Role select is disabled until a client is picked.
+    await expect(page.getByTestId('resume-inbox-manual-role')).toBeDisabled();
+    await clientSelect.selectOption({ index: 1 });
+    await expect(page.getByTestId('resume-inbox-manual-role')).toBeEnabled({ timeout: 10000 });
+    // Cancel reverts cleanly, no leftover picker.
+    await toggle.click();
+    await expect(picker).not.toBeVisible();
+  });
+
+  test('BUG FIX: the pill matching the candidate\'s real current pipeline stage is visually distinct (bold ring + dot), not identical to every other pill', async ({ page }) => {
+    if (!itemWithStage) return test.skip();
+    await page.goto(`/resume-inbox?item=${itemWithStage}`);
+    const drawer = page.getByTestId('resume-inbox-drawer');
+    await expect(drawer).toBeVisible({ timeout: 15000 });
+    const stagePill = page.locator('[data-testid^="resume-inbox-stage-"][title="Candidate is currently at this stage"]');
+    await expect(stagePill.first()).toBeVisible({ timeout: 10000 });
+    const style = await stagePill.first().evaluate(el => getComputedStyle(el).borderWidth);
+    expect(style).toBe('2px');
+    // Every OTHER pill must stay the plain 1px style — this is a real
+    // highlight on the one matching stage, not every pill styled the same.
+    // (Read every pill's own border-width directly rather than trying to
+    // "exclude the current one" via a Playwright locator filter — an
+    // earlier attempt at that used `hasNot` expecting it to exclude an
+    // element that matches the filter itself, but `hasNot` only checks
+    // for a matching DESCENDANT, so it never actually excluded anything.)
+    const widths = await page.locator('[data-testid^="resume-inbox-stage-"]').evaluateAll(
+      els => els.map(el => ({ current: el.hasAttribute('title'), width: getComputedStyle(el).borderWidth }))
+    );
+    const others = widths.filter(w => !w.current);
+    expect(others.length).toBeGreaterThan(0);
+    expect(others.some(w => w.width === '2px')).toBe(false);
+  });
+});
