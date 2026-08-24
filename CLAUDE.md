@@ -12310,3 +12310,94 @@ sweep across every suite touching the 11 modified files (S1/S8/S13/S16/
 S23/S24/S25/S28/S30/S43/S49, 72 tests) ran clean: 71 passed, 1 skipped,
 0 failed. Zero-token audit: `CONFIRMED CLEAN` (398 files, 0 external API
 refs).
+
+## QA Test Recruiter fixture permanently deleted + 2 real force-purge bugs
+## found and fixed along the way, 2026-08-24
+User reported, from a live Assignment Dashboard screenshot, that the
+permanent `QA Test Recruiter` fixture (`qa_test_1782053776@aviinjobs.com`,
+kept deliberately since early in this project as the standard non-admin
+test login, referenced dozens of times throughout this file's history)
+was still visibly listed there and asked to delete it "in the all
+format" — genuine, permanent removal, not another soft-deactivate.
+
+Real, heavily-used accounts don't purge cleanly on the first try, and
+this one didn't — force-purging it (`DELETE /users/{id}/purge?force=true`,
+built 2026-08-22) surfaced 2 real, previously-unexercised bugs in the
+force-purge logic itself, neither ever triggered before because no user
+with this much real accumulated history (47 real assignments, 550 real
+notifications) had ever been force-purged.
+
+**Bug 1 — `notifications`' own CHECK constraint** (`recipient_user_id IS
+NOT NULL OR recipient_role IS NOT NULL`) violated on the second of two
+sequential `SET column=NULL` updates. Many real notifications (this
+project's own established dual-write convention) set BOTH `user_id` AND
+`recipient_user_id` to the same user with `recipient_role` NULL — nulling
+one column, then the other, left a row with both NULL and no
+`recipient_role`, violating the constraint on the second pass. Fixed by
+moving both columns from the SET-NULL list to the DELETE-ROWS list — a
+notification's whole purpose is notifying someone specific; once that
+person is permanently gone, deleting it (not silently corrupting it) is
+correct.
+
+**Bug 2 — a genuine transitive FK**: `assignment_event.assignment_id`
+references `assignments.id` with no `ON DELETE` clause. Force-deleting
+this user's `assignments` rows (`recruiter_id`-scoped) failed outright
+once real `assignment_event` rows still referenced those specific
+assignments — confirmed via a real crash in the backend logs
+(`ForeignKeyViolationError` on `assignment_event_assignment_id_fkey`),
+not guessed. Ran a systematic `pg_constraint` sweep of every table
+already in `_FORCE_NULLIFY`/`_FORCE_DELETE_ROWS` for the same transitive-
+dependency shape rather than patching just the one crash and stopping —
+found one more real candidate (`shift_swap_requests.shift_id` ->
+`staff_shifts.id`) but confirmed it's already `ON DELETE CASCADE`, so no
+fix was actually needed there (added a defensive, harmless pre-step
+delete anyway, matching the one genuinely-needed fix's shape). Also
+found `user_email_accounts` -> `imap_messages`/`imap_sync_state` (both
+NOT NULL) — deliberately did **not** add a blind delete/pre-step here:
+unlike an assignment_event row (pure audit trail *about* the assignment
+being purged), `imap_messages` are real, independently valuable
+candidate-correspondence history — force-purging an unrelated internal
+user account should never silently destroy real email history as a side
+effect. Instead, wrapped the whole `_FORCE_DELETE_ROWS` loop + final
+`DELETE FROM users` in one `try/except ForeignKeyViolationError`, so
+this case (and any other still-undiscovered transitive dependency) now
+fails safe as a clean, specific 409 instead of a raw 500 — matching the
+established "refuse cleanly rather than silently destroy real records"
+philosophy already used for the financial/compliance-record guard.
+Real pre-step deletes added for the one case that does need them:
+`DELETE FROM assignment_event WHERE assignment_id IN (SELECT id FROM
+assignments WHERE recruiter_id=$1)` before the parent `assignments`
+delete runs.
+
+Both fixes verified for real, not code review: reproduced bug 2 exactly
+on a safe throwaway user (a real assignment + a real assignment_event
+row built directly in SQL, matching the crash's real shape) — confirmed
+the pre-fix 500, then the post-fix clean 200, then confirmed via direct
+SQL that the user, its assignment, AND the assignment_event row were all
+genuinely gone (not just a silent no-op). Only then retried the real
+`QA Test Recruiter` fixture — succeeded cleanly (200), confirmed gone via
+direct SQL (`count=0`), confirmed app health stayed clean throughout.
+
+**2 pre-existing tests updated, not left broken**: this fixture's
+credentials were hardcoded logins in 2 tests (S30's Auto-Assign role-gate
+test, which had a graceful-skip fallback that would have silently
+skipped forever once the fixture was gone; S34's enforcement-gate test,
+which had no fallback at all and would have hard-failed with `Bearer
+undefined`). Both rewritten to create and clean up their own throwaway
+recruiter-role account instead of depending on a long-lived shared one —
+closes the coverage gap for good, not just for today. S34's own feature-
+count assertion was also separately stale (74, now genuinely 75 — the
+Assignment Dashboard feature key added earlier the same session grew the
+real taxonomy again, the identical "update the number when it legitimately
+grows" pattern already documented for the 73->74 growth). New permanent
+regression test added to S51 covering both force-purge bugs together (a
+real notifications dual-write row + a real assignment_event-linked
+assignment, one force-purge call, confirmed clean).
+
+Verified end-to-end: S30/S34/S51 all pass clean (28/28); a broader sweep
+(S1/S8/S13/S16/S30/S43/S49/S51) showed 2 suites (S43, S49) hit real 429s
+during the run (confirmed via direct backend-log grep, 8 real 429s in
+that window — this session's own well-documented per-IP login rate-limit
+characteristic from heavy back-to-back testing, not a regression) — both
+re-ran clean in isolation after the cooldown window (15/15). Zero-token
+audit: `CONFIRMED CLEAN` (398 files, 0 external API refs).

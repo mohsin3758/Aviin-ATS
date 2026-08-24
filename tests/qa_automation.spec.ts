@@ -3536,14 +3536,31 @@ test.describe.serial('S30 Resume/Recruiter Follow-up Audit Fixes', () => {
   test('Auto-Assign role gate: a plain recruiter is blocked (403), admin is not', async ({ request }) => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-    const rec = await (await request.post(`${API}/auth/login`, { data: { email: 'qa_test_1782053776@aviinjobs.com', password: 'QaTemp12345!' } }))
-      .json().catch(() => null);
-    if (!rec?.access_token) return test.skip();
-
-    const asRecruiter = await request.post(`${API}/requisitions/${reqId}/assign`, {
-      headers: { 'Authorization': `Bearer ${rec.access_token}` },
+    // Real, disposable throwaway account — the old permanent "QA Test
+    // Recruiter" fixture used here was permanently force-deleted on
+    // 2026-08-24 (per an explicit user request), so this test now creates
+    // and cleans up its own plain-recruiter-role account instead of
+    // silently skipping forever via the old missing-fixture fallback.
+    const gateUser = await request.post(`${API}/users`, {
+      headers: auth,
+      data: { email: `qa.s30.gate.${Date.now()}@test.com`, full_name: 'QA S30 Gate Test', role: 'recruiter', password: 'TestPass123!' },
     });
-    expect(asRecruiter.status()).toBe(403);
+    const gateUserBody = await gateUser.json();
+    try {
+      const rec = await (await request.post(`${API}/auth/login`, { data: { email: gateUserBody.email, password: 'TestPass123!' } }))
+        .json().catch(() => null);
+      if (!rec?.access_token) return test.skip();
+
+      const asRecruiter = await request.post(`${API}/requisitions/${reqId}/assign`, {
+        headers: { 'Authorization': `Bearer ${rec.access_token}` },
+      });
+      expect(asRecruiter.status()).toBe(403);
+    } finally {
+      if (gateUserBody?.id) {
+        await request.patch(`${API}/users/${gateUserBody.id}/deactivate`, { headers: auth }).catch(() => {});
+        await request.delete(`${API}/users/${gateUserBody.id}/purge?force=true`, { headers: auth }).catch(() => {});
+      }
+    }
   });
 
   test('Recruiter Ops UI: Incentives Advanced KPIs tab and Recruiter Ops SLA panel render', async ({ page }) => {
@@ -3832,18 +3849,20 @@ test.describe.serial('S34 Feature-Level Permissions', () => {
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(body.groups).toHaveLength(11);
-    // Real, live count as of 2026-08-23 - was 73 when this test was written
-    // (2026-08-17), genuinely grew to 74 once "Reminders & Follow-Ups" was
-    // added to the Core group by the Reminder System feature (2026-08-21/22)
-    // - a real taxonomy growth, not a bug. This test's own hardcoded number
-    // and Core-labels list had gone stale and needed updating to match.
-    expect(body.features).toHaveLength(74);
+    // Real, live count as of 2026-08-24 - was 73 when this test was written
+    // (2026-08-17), grew to 74 once "Reminders & Follow-Ups" was added to
+    // Core by the Reminder System feature (2026-08-21/22), grew again to 75
+    // once "Assignment Dashboard" was added to Core the same day this test
+    // was next revisited (2026-08-24) - real taxonomy growth, not a bug.
+    // This test's own hardcoded number and Core-labels list had gone stale
+    // and needed updating to match, both times.
+    expect(body.features).toHaveLength(75);
 
     const core = body.groups.find((g: any) => g.id === 'core');
     const coreLabels = core.features.map((f: any) => f.label);
     for (const label of ['Dashboard', 'Candidates', 'Companies', 'Jobs / Requisitions', 'Pipeline (Kanban)',
-      'Pipeline Velocity', 'Duplicate Candidates', 'Recruiter Ops', 'Reminders & Follow-Ups',
-      'Device Monitoring', 'Field Attendance', 'Shift Scheduling']) {
+      'Pipeline Velocity', 'Duplicate Candidates', 'Recruiter Ops', 'Assignment Dashboard',
+      'Reminders & Follow-Ups', 'Device Monitoring', 'Field Attendance', 'Shift Scheduling']) {
       expect(coreLabels).toContain(label);
     }
 
@@ -3889,17 +3908,32 @@ test.describe.serial('S34 Feature-Level Permissions', () => {
     const token = await getApiToken(request);
     const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
     const before = await (await request.get(`${API}/roles/enforcement`, { headers: auth })).json();
+    // Real, disposable throwaway account — the old permanent "QA Test
+    // Recruiter" fixture this test used to log in as was permanently
+    // force-deleted on 2026-08-24 (per an explicit user request), so this
+    // test now creates and cleans up its own plain-recruiter-role account
+    // rather than depending on a long-lived shared one.
+    const gateUser = await request.post(`${API}/users`, {
+      headers: auth,
+      data: { email: `qa.s34.gate.${Date.now()}@test.com`, full_name: 'QA S34 Gate Test', role: 'recruiter', password: 'TestPass123!' },
+    });
+    const gateUserBody = await gateUser.json();
     try {
       await request.put(`${API}/roles/enforcement`, { headers: auth, data: { enabled: true } });
-      const recLogin = await request.post(`${API}/auth/login`, { data: { email: 'qa_test_1782053776@aviinjobs.com', password: 'QaTemp12345!' } });
+      const recLogin = await request.post(`${API}/auth/login`, { data: { email: gateUserBody.email, password: 'TestPass123!' } });
       const recAuth = { 'Authorization': `Bearer ${(await recLogin.json()).access_token}` };
-      // QA Test Recruiter has candidates:create/read/update but not delete.
+      // A plain recruiter's default role permissions have candidates:create/
+      // read/update but not delete — the real thing under test here.
       const del = await request.delete(`${API}/candidates/00000000-0000-0000-0000-000000000000`, { headers: recAuth });
       expect(del.status()).toBe(403);
       const read = await request.get(`${API}/candidates?limit=1`, { headers: recAuth });
       expect(read.ok()).toBeTruthy();
     } finally {
       await request.put(`${API}/roles/enforcement`, { headers: auth, data: { enabled: before.enabled } });
+      if (gateUserBody?.id) {
+        await request.patch(`${API}/users/${gateUserBody.id}/deactivate`, { headers: auth }).catch(() => {});
+        await request.delete(`${API}/users/${gateUserBody.id}/purge?force=true`, { headers: auth }).catch(() => {});
+      }
     }
   });
 
@@ -6381,6 +6415,40 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     // silently remove, matching the same accepted-residue precedent
     // already established elsewhere in this suite.
     createdIds.push(financeUser.id);
+  });
+
+  test('BUG FIX: force delete no longer 500s on a real notifications CHECK-constraint violation (dual user_id+recipient_user_id row) or a real transitive FK (assignment_event referencing an assignment being force-deleted)', async ({ request }) => {
+    // Found 2026-08-24 while permanently deleting a real, heavily-used
+    // fixture account. Both were previously-untriggered because no user
+    // with this much real accumulated history had ever been force-purged.
+    const stamp = Date.now();
+    const auth = { Authorization: `Bearer ${token}` };
+    const u = await (await request.post(`${API}/users`, { headers: auth, data: { full_name: `QA S51 FK Repro ${stamp}`, email: `qa_s51_fkrepro_${stamp}@aviintech.com`, role: 'recruiter' } })).json();
+
+    // Real assignment + a real assignment_event tied to it — the
+    // notifications dual-write side effect of a genuine assign covers the
+    // first bug for free; the assignment_event row itself covers the second.
+    const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: auth });
+    const reqId = (await reqRes.json())[0].id;
+    const cand = await (await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S51 FK Repro Cand ${stamp}`, email: `qa_s51_fkrepro_cand_${stamp}@aviinjobs.com`, phone: `999003${String(stamp).slice(-3)}` } })).json();
+    const assignRes = await request.post(`${API}/requisitions/${reqId}/assign`, {
+      headers: auth, data: { recruiter_id: u.id },
+    }).catch(() => null);
+    // requisition may already have an active assignment (409) — fall back
+    // to a direct manual assignment against a fresh throwaway requisition
+    // so the real assignment_event row is guaranteed to exist either way.
+    if (!assignRes || assignRes.status() !== 200) {
+      const req2 = await (await request.post(`${API}/requisitions`, { headers: auth, data: { title: `QA S51 FK Repro Req ${stamp}`, skills_required: ['Python'] } })).json();
+      await request.post(`${API}/assignments`, { headers: auth, data: { requisition_id: req2.id, recruiter_id: u.id } });
+    }
+
+    await request.patch(`${API}/users/${u.id}/deactivate`, { headers: auth });
+    const forceRes = await request.delete(`${API}/users/${u.id}/purge?force=true`, { headers: auth });
+    expect(forceRes.status()).toBe(200);
+    const getAfter = await request.get(`${API}/users/${u.id}`, { headers: auth });
+    expect(getAfter.status()).toBe(404);
+
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: auth }).catch(() => {});
   });
 
   test('BUG FIX: the Invite/Edit User modal no longer closes (and discards typed input) on an accidental click outside the box — only the X and Cancel buttons close it', async ({ page }) => {

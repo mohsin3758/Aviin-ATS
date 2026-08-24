@@ -370,7 +370,6 @@ _FORCE_NULLIFY = [
     ("recruiter_kpi_scores", "approved_by"), ("job_portal_issues", "reported_by"),
     ("job_portal_issues", "resolved_by"), ("job_shares", "posted_by"),
     ("monitored_devices", "live_view_requested_by"), ("nda_documents", "uploaded_by"),
-    ("notifications", "recipient_user_id"), ("notifications", "user_id"),
     ("offers", "approved_by"), ("payroll_export_webhooks", "created_by"),
     ("payroll_runs", "approved_by"), ("permission_check_log", "user_id"),
     ("recruiter_client_blocks", "blocked_by"), ("recruiter_leave", "created_by"),
@@ -392,6 +391,15 @@ _FORCE_DELETE_ROWS = [
     ("device_enrollment_tokens", "user_id"), ("device_intensity_metrics", "user_id"),
     ("device_monitoring_consent", "user_id"), ("device_screenshots", "user_id"),
     ("monitored_devices", "user_id"), ("push_subscriptions", "user_id"),
+    # notifications moved here from the SET-NULL list (real bug, 2026-08-24):
+    # its CHECK constraint requires recipient_user_id OR recipient_role to
+    # stay non-null, but many real notifications (this project's own
+    # established dual-write pattern) set BOTH user_id AND recipient_user_id
+    # to the same user with recipient_role NULL - nulling one column via a
+    # separate UPDATE, then the other, violated the constraint on the
+    # second pass. A notification's whole purpose is notifying someone; if
+    # that person is gone, deleting it (not orphaning it) is correct.
+    ("notifications", "user_id"), ("notifications", "recipient_user_id"),
     ("recruiter_activity_events", "recruiter_id"), ("recruiter_client_blocks", "recruiter_id"),
     ("recruiter_leave", "recruiter_id"), ("recruiter_performance_scores", "recruiter_id"),
     ("recruiter_productivity_daily", "recruiter_id"), ("recruiter_productivity_hourly", "recruiter_id"),
@@ -455,21 +463,41 @@ async def purge_user(user_id: str, force: bool = False, actor: Actor = Depends(r
         async with conn.transaction():
             for table, col in _FORCE_NULLIFY:
                 await conn.execute(f"UPDATE {table} SET {col}=NULL WHERE {col}=$1", user_id)
-            for table, col in _FORCE_DELETE_ROWS:
-                await conn.execute(f"DELETE FROM {table} WHERE {col}=$1", user_id)
+            # Real bug (2026-08-24): a genuine, TRANSITIVE FK — a row this
+            # user owns (an assignment, a shift) is itself referenced by a
+            # third table (assignment_event.assignment_id,
+            # shift_swap_requests.shift_id) with no ON DELETE clause.
+            # Deleting the owned row while that reference still exists
+            # raises a raw ForeignKeyViolationError, caught only generically
+            # below — but for these two, the referencing row's whole reason
+            # to exist IS the row being purged (an event *about* this
+            # assignment, a swap request *about* this shift), so the right
+            # move is to clean them up first, not just fail gracefully.
+            await conn.execute(
+                "DELETE FROM assignment_event WHERE assignment_id IN "
+                "(SELECT id FROM assignments WHERE recruiter_id=$1)", user_id)
+            await conn.execute(
+                "DELETE FROM shift_swap_requests WHERE shift_id IN "
+                "(SELECT id FROM staff_shifts WHERE user_id=$1)", user_id)
             try:
+                for table, col in _FORCE_DELETE_ROWS:
+                    await conn.execute(f"DELETE FROM {table} WHERE {col}=$1", user_id)
                 await conn.execute("DELETE FROM users WHERE id=$1 AND tenant_id=$2", user_id, actor.tenant_id)
             except asyncpg.exceptions.ForeignKeyViolationError as e:
+                # Any OTHER, still-undiscovered transitive dependency (e.g. a
+                # connected mailbox's real, NOT NULL imap_messages/
+                # imap_sync_state history — genuine business/candidate
+                # correspondence, not disposable audit trail, deliberately
+                # never silently destroyed) fails safe here as a clean 409
+                # instead of the raw 500 this loop used to raise.
                 blocking_table = getattr(e, "detail", None) or str(e)
                 raise HTTPException(
                     409,
-                    "This user still has financial or compliance-sensitive records on file "
-                    "(incentive payouts, retention bank, loyalty milestones, KAE/recruiter KPI "
-                    "scores, or an approval-chain step) that force delete deliberately never "
-                    f"removes. Detail: {blocking_table}",
+                    "This user still has financial or compliance-sensitive records on file, "
+                    "or a connected mailbox with real email history, that force delete "
+                    f"deliberately never removes. Detail: {blocking_table}",
                 )
     return {"ok": True, "purged": user_id, "force": True}
-    return {"ok": True, "purged": user_id}
 
 
 @router.get("/stats/summary")
