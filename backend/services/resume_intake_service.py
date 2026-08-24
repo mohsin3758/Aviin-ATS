@@ -677,9 +677,10 @@ async def create_application(conn, tenant_id: str, candidate_id: str, requisitio
         # never appear on the actual Kanban board, only ever visible via
         # "already in pipeline" banners elsewhere. Same fallback as the
         # other two creation paths (bulk-assign, POST /applications).
-        default_stage = await conn.fetchval(
-            "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add AND is_visible",
-            tenant_id) or 'sourced'
+        # 2026-08-25: extracted to a real shared helper — see
+        # routers.pipeline_stages.resolve_default_add_stage's own docstring.
+        from routers.pipeline_stages import resolve_default_add_stage
+        default_stage = await resolve_default_add_stage(conn, tenant_id)
         # ON CONFLICT target must restate the partial unique index's
         # predicate (applications_tenant_req_cand_active_key,
         # 2026-08-20's "Remove from Pipeline" migration) — a removed

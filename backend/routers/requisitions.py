@@ -11,6 +11,7 @@ import events
 from deps import Actor, get_actor
 from schemas import RequisitionCreate, RequisitionUpdate
 from routers.job_sharing import auto_distribute_on_open
+from services.candidate_rediscovery import scan_requisition_for_rediscovery
 from routers.assignments import _workload_label
 from permissions import require_permission, get_job_visibility_scope
 from services import assignment_notify
@@ -233,6 +234,13 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(req
             await auto_distribute_on_open(actor.tenant_id, str(row["id"]), actor.user_id)
         except Exception:
             pass
+        # Candidate rediscovery (2026-08-25): same "just went open" moment,
+        # same best-effort shape — scan the tenant's existing candidate
+        # database for strong-fitting dormant/rejected candidates.
+        try:
+            await scan_requisition_for_rediscovery(actor.tenant_id, str(row["id"]))
+        except Exception:
+            pass
 
     return result
 
@@ -289,6 +297,10 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
     if updates.get("status") == "open" and result.get("approval_status") == "approved":
         try:
             await auto_distribute_on_open(actor.tenant_id, requisition_id, actor.user_id)
+        except Exception:
+            pass
+        try:
+            await scan_requisition_for_rediscovery(actor.tenant_id, requisition_id)
         except Exception:
             pass
 
@@ -712,6 +724,10 @@ async def _act_on_step(requisition_id: str, step_id: str, body: ApprovalAction, 
     if fully_approved:
         try:
             await auto_distribute_on_open(actor.tenant_id, requisition_id, actor.user_id)
+        except Exception:
+            pass
+        try:
+            await scan_requisition_for_rediscovery(actor.tenant_id, requisition_id)
         except Exception:
             pass
 

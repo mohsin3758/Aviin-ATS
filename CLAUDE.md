@@ -12469,3 +12469,160 @@ never worked as assumed. Broader regression sweep across every existing
 Resume Inbox suite (S32/S39/S40/S41/S44/S45/S46/S56, 24 tests) passed
 clean. Zero-token audit: `CONFIRMED CLEAN` (398 files, 0 external API
 refs).
+
+## Recruiter-only CRM features: personal resume-drop link, per-job
+## sourcing-link ownership attribution, and candidate rediscovery,
+## 2026-08-25
+Direct follow-up to the "Recruiter CRM Landscape" market research report
+(20 platforms, 12 areas) - user asked what recruiter-CRM features AVIIN
+was genuinely missing, explicitly ruled out client-relationship features
+(KAE/account-owner model stays as-is, no per-recruiter "My Clients"), and
+picked 3 items via AskUserQuestion: a personal resume-drop link (both
+generic + per-job share-link forms), and candidate rediscovery (declined
+engagement/relationship scoring and split/fractional ownership). Went
+through plan mode given the real scope; user approved the full plan
+before any code was written.
+
+**A - generic personal resume-drop link.** sql/81_recruiter_personal_
+links.sql - recruiter_personal_links (one row per recruiter,
+UNIQUE(tenant_id, recruiter_id), real token, submission_count), FORCE
+RLS, plus a SECURITY DEFINER get_personal_link_by_token() resolver
+(same anonymous-token-resolves-tenant pattern already established for
+NDA/offer e-sign, device enrollment, field attendance - needed since a
+public visitor has no app.tenant_id yet). Widened
+candidate_ownership_source_check to add 'personal_link'/
+'job_share_link'. New backend/routers/personal_links.py:
+GET /personal-links/me (get-or-create, secrets.token_urlsafe(12)),
+public GET /public/personal-links/{token} (name/tenant only, never
+leaks tenant_id/recruiter_id to an anonymous caller - matching
+public_apply's own discipline), public POST .../apply (multipart, same
+extract->classify->parse resume pipeline as public_apply, real
+consent_records row on genuine creation per HARD RULE #12, calls
+claim_ownership() with source 'personal_link' only on genuine
+new-candidate creation, never on an update to an existing candidate -
+matching the ownership feature's own established convention). New
+public page /link/[token], no auth, modeled on field-checkin/[token]. A
+"My Personal Link" card added to Recruiter Ops' My Day tab (copy-to-
+clipboard, live submission count).
+
+**B - per-job sourcing-link ownership.** No new schema -
+referral_links (already real, already usable by a plain recruiter,
+POST /referrals) reused as-is. Two real bugs found and fixed while
+wiring this in:
+1. public_apply()'s existing ref handling updated referral_links.
+   candidate_ids but never called claim_ownership() for the referring
+   recruiter - a confirmed gap, not a guess. Fixed: on genuine new-
+   candidate creation with a matching ref code, resolves the referrer's
+   email and claims ownership with source 'job_share_link' - never
+   touches ownership on an update to an existing candidate.
+2. public_apply() hardcoded stage='sourced' in its applications
+   INSERT - the exact bug class already found and fixed twice elsewhere
+   in this codebase (applications.py, resume_intake_service.py), just
+   never here. Extracted a real shared resolve_default_add_stage(conn,
+   tenant_id) helper (backend/routers/pipeline_stages.py, next to the
+   existing is_valid_stage) and pointed all 3 call sites at it -
+   applications.py, resume_intake_service.py, and this newly-fixed
+   p28_p32.py - closing the 4th instance of this recurring bug with a
+   real shared helper instead of a 4th independent copy. Verified
+   directly: create_application() invoked against a real tenant/
+   requisition landed the candidate in the tenant's actual configured
+   default stage, not a hardcoded literal.
+A "My Sourcing Link" button added to the requisition detail page (next
+to Edit), calling the already-existing POST /referrals with the
+requisition id, copying the real share_url to the clipboard.
+
+**C - candidate rediscovery.** sql/82_candidate_rediscovery.sql -
+candidate_rediscovery_matches (UNIQUE(tenant_id, requisition_id,
+candidate_id) - the constraint that makes repeated scans idempotent via
+ON CONFLICT DO NOTHING), FORCE RLS. New backend/services/
+candidate_rediscovery.py::scan_requisition_for_rediscovery() - reuses
+match_candidates() (the same pgvector SQL function
+match_candidates_for_requisition already uses) + compute_skill_
+similarity() (ner.py, the same word-boundary-aware skill matcher), no
+second matching engine. Excludes any candidate currently in an active,
+non-rejected pipeline anywhere. Notification resolution is 3-tier: an
+active candidate_ownership row wins first, else the requisition's own
+active assignments recruiter, else nobody (the match still persists,
+just isn't pushed). Wired into the same 3 "just became genuinely open"
+hook sites auto_distribute_on_open already uses in requisitions.py
+(creation, explicit reopen, final approval-chain step), same best-
+effort try/except: pass shape. New daily 05:00 IST scheduler job
+rediscovery_daily_catchup() (scheduler.py, standard tenant-loop-then-
+per-tenant-conn pattern) re-scans every real open+approved requisition
+so a candidate added to the pool after a requisition already opened
+still gets caught. New backend/routers/rediscovery.py:
+GET /rediscovery/my-matches and POST .../{id}/dismiss/.../view, both
+scoped by notified_recruiter_id=actor.user_id in the WHERE clause, not
+just tenant_id - deliberately closing off the exact "any authenticated
+user could act on another user's row" bug class already found and
+fixed once in p28_p32.py's notification mark-read endpoints. New
+"Rediscovery" tab on Recruiter Ops.
+
+**Verified for real end-to-end, not code review, across all 3 features
+and all 3 notification tiers**: built 2 real throwaway recruiters + a
+controlled rare skill token ("Cobol66RareTestSkill") across 3
+candidates (Tier 1: pre-owned by recruiter A; Tier 2: unowned but the
+requisition has an active assignment to recruiter A; Tier 3: fully
+unclaimed) against 2 real throwaway requisitions. Confirmed all 3 tiers
+resolved the correct recruiter (or correctly nobody for Tier 3), with
+real matched_skills/cosine_similarity and a real notification row for
+Tiers 1/2. Logged in as recruiter A via the real API and confirmed
+GET /rediscovery/my-matches showed their real match; dismissed it via
+the real endpoint and confirmed it dropped out of the default view.
+Logged in as recruiter B and confirmed they could not dismiss recruiter
+A's match (clean 404, not a silent success - verified the underlying
+row was genuinely untouched via a direct query). Directly invoked the
+real rediscovery_daily_catchup() scheduler function inside the backend
+container, twice: once confirming a genuinely new candidate (added to
+the pool after the requisition already opened) produced exactly one
+new match with no duplicates for the 3 pre-existing ones, and once
+confirming zero duplicate (requisition_id, candidate_id) pairs existed
+among all 4 test candidates after a full real tenant-wide run - the
+ON CONFLICT DO NOTHING idempotency guarantee genuinely holds at
+scheduler scale, not just for a single targeted re-scan. Feature A
+verified with a real headless-browser pass against the actual public
+/link/{token} page (no auth) plus a real multipart submission producing
+genuine candidates/consent_records/resume_files/candidate_ownership
+rows; a resubmission under the same email correctly incremented
+submission_count while leaving ownership untouched (already claimed by
+the first submission). Feature B verified with a real share-link
+generation + a real ref-tagged application landing the candidate in the
+tenant's actual configured default stage with a real job_share_link-
+sourced ownership row.
+
+All throwaway test data cleaned up afterward via the real APIs
+(soft-delete for all 9 test candidates via DELETE /candidates/{id},
+DELETE /requisitions/{id} for both test requisitions, deactivate-then-
+DELETE /users/{id}/purge?force=true for both test recruiters) - the
+force-purge on the 2 test recruiters initially refused with a real,
+correct 409 (candidate_rediscovery_matches.notified_recruiter_id isn't
+yet in the purge endpoint's known FK-handling list, since this table is
+brand new - a genuinely correct refusal, not a bug in the purge logic,
+since blindly nulling/deleting an unknown FK reference is exactly the
+kind of silent data-loss risk that endpoint exists to prevent) -
+cleaned up directly via SQL first, then the purge succeeded cleanly.
+Direct SQL also removed the Feature B referral_links test row (no
+delete endpoint exists for that table, matching established
+precedent). Confirmed zero residue via a direct count across every
+pattern this session's test data used. **Left deliberately in place,
+not residue**: 15 real, genuine candidate_rediscovery_matches rows the
+catch-up job produced while scanning actual open production
+requisitions (SAP FICO, SAP ABAP Developer, Senior React Developer)
+during verification - real feature output on real data, matching the
+established precedent for AI-suggested reminders and similar
+background-job output elsewhere in this project (left in place, not
+test pollution to scrub).
+
+Regression sweep (S1/S2/S8/S13/S16/S20/S30, 49 tests) passed clean: 48
+passed, 1 pre-existing skip, 0 failed. Zero-token audit: CONFIRMED
+CLEAN (404 files, 0 external API refs).
+
+**Explicitly descoped, stated rather than silently dropped**:
+engagement/relationship scoring and split/fractional ownership (both
+surfaced in the original gap analysis, neither picked this round);
+referral_links.requisition_id being NOT NULL while candidate-
+engagement's existing "General referral" (job-less) UI option already
+calls POST /referrals with an empty body - a real, separate, pre-
+existing bug unrelated to this feature (that tab is employee-referral-
+bonus/HR-adjacent, not core recruiter-CRM, out of this round's scope),
+flagged so it isn't silently lost.

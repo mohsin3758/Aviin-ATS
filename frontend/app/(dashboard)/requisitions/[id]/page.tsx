@@ -8,7 +8,7 @@ import {
   Plus, X, ChevronDown, Mail, Phone, Download, ExternalLink,
   Star, MessageSquare, FileText, Activity, Search, SlidersHorizontal,
   RotateCcw, CheckCircle, AlertTriangle, Send, UserCog, Repeat, Sparkles,
-  Trash2,
+  Trash2, Share2,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -211,6 +211,21 @@ export default function RequisitionPipelinePage() {
     }
   }, [rawBoard, selected, showToast, refreshStats, refreshBoard]);
 
+  // Recruiter-CRM feature (2026-08-25): a per-job share link with real
+  // sourcing attribution — reuses the existing referral_links endpoint
+  // (already recruiter-accessible, no role gate), surfaced here where a
+  // recruiter is actually looking rather than only on the employee-
+  // referral-bonus tab on Candidate Engagement.
+  const getMySourcingLink = useCallback(async () => {
+    try {
+      const result = await apiFetch('/referrals', { method: 'POST', body: JSON.stringify({ requisition_id: reqId }) });
+      await navigator.clipboard.writeText(result.share_url);
+      showToast('Sourcing link copied — share it to get credit for candidates you source');
+    } catch (e: any) {
+      showToast(String(e?.message || 'Could not create sourcing link'), false);
+    }
+  }, [reqId, showToast]);
+
   // ── Drag & drop ─────────────────────────────────────────────────────────────
   function onDragStart(e: React.DragEvent, appId: string, fromStage: string) {
     dragRef.current = { id: appId, fromStage };
@@ -304,6 +319,11 @@ export default function RequisitionPipelinePage() {
                   <div style={{ fontSize: 9, fontWeight: 600, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 3 }}>{k.label}</div>
                 </div>
               ))}
+              <button onClick={getMySourcingLink}
+                title="Get a personal link for this job — whoever applies through it is credited to you as the sourcing recruiter"
+                style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 8, padding: '0 12px', color: '#CBD5E1', fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}>
+                <Share2 size={12} /> My Sourcing Link
+              </button>
               <button onClick={() => router.push(`/requisitions?edit=${reqId}`)}
                 style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 8, padding: '0 12px', color: '#CBD5E1', fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}>
                 <Edit size={12} /> Edit

@@ -527,6 +527,7 @@ async def public_apply(
         cand = await conn.fetchrow(
             "SELECT id FROM candidates WHERE email=$1 AND tenant_id=$2::uuid",
             email, tenant_id)
+        is_new_candidate = cand is None
         if not cand:
             skills = parsed.get("skills") or []
             resume_text = parsed.get("_resume_text")
@@ -571,16 +572,39 @@ async def public_apply(
                 round(float(parsed.get("_confidence", 0.7) or 0.7), 3) if parsed else 0.0,
                 'auto_accepted' if parsed else 'rejected')
 
+        # 2026-08-25 bug fix: this hardcoded 'sourced' unconditionally, the
+        # exact same bug already fixed on 2 other creation paths
+        # (applications.py, resume_intake_service.py) — for any tenant
+        # where 'sourced' is hidden/not the configured default, a public
+        # applicant silently landed in an invisible stage. Now resolved via
+        # the same real shared helper both those fixes now also use.
+        from routers.pipeline_stages import resolve_default_add_stage
+        initial_stage = await resolve_default_add_stage(conn, tenant_id)
         await conn.execute("""
             INSERT INTO applications (tenant_id, candidate_id, requisition_id, stage)
-            VALUES ($1::uuid, $2, $3::uuid, 'sourced')
+            VALUES ($1::uuid, $2, $3::uuid, $4)
             ON CONFLICT DO NOTHING
-        """, tenant_id, cand['id'], job_id)
+        """, tenant_id, cand['id'], job_id, initial_stage)
         if ref:
-            await conn.execute("""
+            ref_row = await conn.fetchrow("""
                 UPDATE referral_links SET candidate_ids = array_append(candidate_ids, $1::uuid)
                 WHERE tenant_id=$2::uuid AND unique_code=$3 AND NOT ($1::uuid = ANY(candidate_ids))
+                RETURNING referrer_user_id
             """, cand['id'], tenant_id, ref)
+            # 2026-08-25 gap fix (recruiter-CRM research): a recruiter who
+            # shares this job's link to source a candidate never got real
+            # ownership credit for it — only click/candidate_ids tracking.
+            # Wired into the existing 30-day FCFS ownership service, same
+            # "claim only on genuine creation, never on an update" rule
+            # every other intake path already follows.
+            if ref_row and is_new_candidate:
+                referrer_email = await conn.fetchval(
+                    "SELECT email FROM users WHERE id=$1", ref_row['referrer_user_id'])
+                if referrer_email:
+                    from services.candidate_ownership import claim_ownership
+                    await claim_ownership(
+                        conn, tenant_id, cand['id'], str(ref_row['referrer_user_id']),
+                        referrer_email, 'job_share_link')
         # Low-severity finding (2026-08-11 audit): returning the real
         # internal candidate_id here, and always with the same shape
         # whether the email matched an existing candidate or created a

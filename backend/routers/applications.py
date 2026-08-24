@@ -9,7 +9,7 @@ import events, asyncio
 from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
 from permissions import require_permission
-from routers.pipeline_stages import is_valid_stage
+from routers.pipeline_stages import is_valid_stage, resolve_default_add_stage
 from routers.p30_p35 import fire_webhook
 from services import candidate_ownership as ownership
 from services import activity_events
@@ -200,9 +200,11 @@ async def create_application(body: ApplicationCreate, background_tasks: Backgrou
         # was built to prevent, just missed on this second creation path.
         initial_stage = body.stage
         if not initial_stage:
-            initial_stage = await conn.fetchval(
-                "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add AND is_visible",
-                actor.tenant_id) or 'sourced'
+            # 2026-08-25: this inline query was the original of what's now a
+            # real shared helper (routers.pipeline_stages.resolve_default_add_stage)
+            # — extracted once a 3rd independent hardcoded copy of the same
+            # bug turned up in p28_p32.py's public_apply().
+            initial_stage = await resolve_default_add_stage(conn, actor.tenant_id)
         elif not await is_valid_stage(conn, actor.tenant_id, initial_stage):
             raise HTTPException(400, f"Unknown stage '{initial_stage}' — add it under Settings > Pipeline Stages first")
         # Default assigned_recruiter_id to the creating user when not given —

@@ -95,6 +95,19 @@ async def is_valid_stage(conn, tenant_id: str, stage_key: str) -> bool:
     return (not has_any_config) and stage_key in DEFAULT_KEYS
 
 
+async def resolve_default_add_stage(conn, tenant_id: str) -> str:
+    """The tenant's real, configured "which stage does a new candidate land
+    in" default (Settings > Pipeline Stages' star toggle) — 'sourced' if
+    nothing is explicitly marked. This exact query was independently
+    duplicated 3 times (applications.py's POST /applications,
+    resume_intake_service.py's create_application, and p28_p32.py's
+    public_apply, found hardcoding a literal 'sourced' on 2026-08-25) before
+    being extracted here as the one real shared implementation."""
+    return await conn.fetchval(
+        "SELECT stage_key FROM pipeline_stage_config WHERE tenant_id=$1 AND is_default_add AND is_visible",
+        tenant_id) or 'sourced'
+
+
 def _out(rows) -> list[dict]:
     """Attach `deletable` so the frontend never has to duplicate the
     protected-key rule — same source of truth as the DELETE endpoint."""

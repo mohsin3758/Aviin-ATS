@@ -1694,6 +1694,38 @@ async def compute_recruiter_risk_scores(period_start: date | None = None):
         logger.error(f"compute_recruiter_risk_scores error: {e}")
 
 
+async def rediscovery_daily_catchup():
+    """Candidate rediscovery (2026-08-25) — daily catch-up for requisitions
+    that were already open before the real-time hook fired, or for
+    candidates added to the database after a requisition already opened.
+    Standard tenant-loop pattern: list tenants via system_conn(), then a
+    real per-tenant tenant_conn() for the work, try/except around each
+    tenant AND each requisition so one bad row never kills the rest."""
+    from services.candidate_rediscovery import scan_requisition_for_rediscovery
+    logger.info("scheduler: candidate rediscovery daily catch-up")
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id FROM tenants")
+    except Exception as e:
+        logger.error(f"rediscovery_daily_catchup: could not list tenants: {e}")
+        return
+
+    for t in tenants:
+        tid = str(t["id"])
+        try:
+            async with db.tenant_conn(tid) as conn:
+                reqs = await conn.fetch(
+                    "SELECT id FROM requisitions WHERE tenant_id=$1 AND status='open' AND approval_status='approved' AND is_active IS NOT FALSE",
+                    tid)
+            for r in reqs:
+                try:
+                    await scan_requisition_for_rediscovery(tid, str(r["id"]))
+                except Exception as e:
+                    logger.error(f"rediscovery scan failed for req {r['id']} (tenant {tid}): {e}")
+        except Exception as e:
+            logger.error(f"rediscovery_daily_catchup failed for tenant {tid}: {e}")
+
+
 def start_scheduler():
     """Register and start all jobs.
 
@@ -1790,6 +1822,13 @@ def start_scheduler():
     # completed prior week (a trend metric, not a daily snapshot).
     scheduler.add_job(compute_recruiter_risk_scores, "cron", day_of_week="mon", hour=3, minute=30,
                       id="recruiter_risk_scores", replace_existing=True)
+    # Daily 05:00 IST — candidate rediscovery catch-up (2026-08-25): the
+    # real-time hook fires on the 3 "just went open" requisition moments;
+    # this re-checks still-open requisitions for candidates added to the
+    # database afterward. ON CONFLICT DO NOTHING in the scan itself makes
+    # re-running this safe — only genuinely new matches produce a row/notification.
+    scheduler.add_job(rediscovery_daily_catchup, "cron", hour=5, minute=0,
+                      id="rediscovery_daily_catchup", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

@@ -2,10 +2,11 @@
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
-import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff, Sun, AlertCircle, Video, Activity, Trophy, HeartPulse } from 'lucide-react';
+import { Circle, ListChecks, Target, Flame, Plus, X, Clock, Sparkles, CalendarOff, Sun, AlertCircle, Video, Activity, Trophy, HeartPulse, Search, Link as LinkIcon, Copy, Check } from 'lucide-react';
 
 const TABS = [
   { key: 'myday', label: 'My Day', icon: Sun },
+  { key: 'rediscovery', label: 'Rediscovery', icon: Search },
   { key: 'activity', label: 'Activity', icon: Activity },
   { key: 'autoassign', label: 'Auto-Assign', icon: Sparkles },
   { key: 'leaderboard', label: 'Team Leaderboard', icon: Trophy },
@@ -419,6 +420,35 @@ function timeOnly(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function MyPersonalLinkCard() {
+  // Recruiter-CRM feature (2026-08-25): a permanent, shareable resume-drop
+  // link per recruiter (get-or-create on first fetch), not tied to any job.
+  const { data: link } = useFetch<any>('/personal-links/me');
+  const [copied, setCopied] = useState(false);
+  if (!link?.share_url) return null;
+  return (
+    <div style={{ ...card, background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <LinkIcon size={15} color="#1D4ED8" />
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#1E3A8A' }}>My Personal Resume Link</div>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#64748B' }}>{link.submission_count} submission{link.submission_count === 1 ? '' : 's'}</span>
+      </div>
+      <p style={{ fontSize: 11, color: '#475569', margin: '0 0 8px' }}>
+        Share this on LinkedIn/WhatsApp — anyone who submits their resume through it is automatically yours to own for 30 days.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input readOnly value={link.share_url} style={{ flex: 1, fontSize: 12, padding: '6px 10px', border: '1px solid #BFDBFE', borderRadius: 6, background: '#fff', color: '#1E3A8A' }} />
+        <button
+          onClick={() => { navigator.clipboard.writeText(link.share_url); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 10px', background: copied ? '#16A34A' : '#1D4ED8', color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function MyDayTab() {
   const { data, loading } = useFetch<any>('/recruiter/my-day');
   const tasks = data?.tasks_due || [];
@@ -428,6 +458,7 @@ function MyDayTab() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <MyPersonalLinkCard />
       {nothingToDo && (
         <div style={{ ...card, textAlign: 'center', padding: 32, color: '#16A34A', fontSize: 13, fontWeight: 700 }}>
           ✓ Nothing needs your attention right now — no tasks due, no interviews today, no stale candidates.
@@ -614,6 +645,46 @@ function PresenceTab() {
           </div>
         ))}
         {!activity?.activity?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No recent activity.</div>}
+      </div>
+    </div>
+  );
+}
+
+function RediscoveryTab() {
+  // Recruiter-CRM feature (2026-08-25): candidates already in the database
+  // who now fit a newly-opened role, surfaced by services/candidate_rediscovery.py
+  const { data: matches, refetch } = useFetch<any[]>('/rediscovery/my-matches');
+
+  const dismiss = async (id: string) => { await apiFetch(`/rediscovery/${id}/dismiss`, { method: 'POST' }); refetch(); };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ fontSize: 12, color: '#64748B' }}>
+        Candidates already in your database who fit a role you're assigned to or own — surfaced automatically when a job opens, so nothing dormant gets missed.
+      </p>
+      <div style={card}>
+        {(matches || []).map((m: any) => (
+          <div key={m.id} style={{ padding: '10px 0', borderBottom: '1px solid #F1F5F9' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <a href={`/candidates/${m.candidate_id}`} target="_blank" rel="noreferrer" style={{ fontSize: 13, fontWeight: 700, color: '#1E40AF', textDecoration: 'none' }}>
+                {m.candidate_name}
+              </a>
+              <span style={{ fontSize: 11, color: '#94A3B8' }}>for {m.requisition_title}</span>
+              <button onClick={() => dismiss(m.id)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }}>
+                <X size={14} />
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 6 }}>
+              {(m.matched_skills || []).map((s: string) => (
+                <span key={s} style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 5, background: '#DCFCE7', color: '#15803D' }}>✓ {s}</span>
+              ))}
+              {(m.missing_skills || []).map((s: string) => (
+                <span key={s} style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 5, background: '#FEF2F2', color: '#B91C1C' }}>✕ {s}</span>
+              ))}
+            </div>
+          </div>
+        ))}
+        {!matches?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No rediscovered candidates right now — check back once new roles open.</div>}
       </div>
     </div>
   );
@@ -968,6 +1039,7 @@ export default function RecruiterOpsPage() {
         ))}
       </div>
       {tab === 'myday' && <MyDayTab />}
+      {tab === 'rediscovery' && <RediscoveryTab />}
       {tab === 'activity' && <ActivityTab />}
       {tab === 'autoassign' && <AutoAssignTab />}
       {tab === 'leaderboard' && <LeaderboardTab />}
