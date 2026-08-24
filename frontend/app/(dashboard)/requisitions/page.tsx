@@ -3,7 +3,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
-import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X, ArrowLeft, Download, Mail, Phone, ExternalLink } from 'lucide-react';
+import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X, ArrowLeft, Download, Mail, Phone, ExternalLink, Star } from 'lucide-react';
 
 // Same auth-gated blob-fetch pattern already used by the Candidate 360
 // page's own Download Resume button — duplicated here (not imported
@@ -53,8 +53,10 @@ const EMPTY_FORM = {
   submission_limit_per_recruiter: '' as any,
   experience_min: 0, experience_max: 10, notice_period_max: 60,
   education_required: '',
-  budget_min: '' as any, budget_max: '' as any, bill_rate: '' as any,
+  budget_min: '' as any, budget_max: '' as any,
+  bill_rate_min: '' as any, bill_rate_max: '' as any,
   skills_required: [] as string[],
+  mandatory_skills: [] as string[],
   description: '',
 };
 
@@ -109,6 +111,83 @@ function MultiSelectChips({
     </div>
   );
 }
+
+// Manual/custom Shift Timing entry (2026-08-24) — the tenant-configured
+// preset chips above are the fast path, but a recruiter posting a job
+// with a genuinely new region/timing shouldn't have to leave this form
+// and go to Settings > Ops Settings first. Creates a REAL, reusable
+// preset via the same endpoint that page manages (not a disconnected
+// free-text field) so it's immediately available for future jobs too,
+// then auto-selects it on this one.
+function ShiftTimingCustomAdd({ onCreated }: { onCreated: (newTiming: any) => void }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ label: '', region: '', start_time: '09:00', end_time: '18:00', timezone_label: 'IST' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    if (!form.label.trim() || !form.region.trim()) { setError('Label and Region are required'); return; }
+    setSaving(true); setError('');
+    try {
+      const created = await apiFetch('/shift-timings', { method: 'POST', body: JSON.stringify(form) });
+      onCreated(created);
+      setOpen(false);
+      setForm({ label: '', region: '', start_time: '09:00', end_time: '18:00', timezone_label: 'IST' });
+    } catch (e: any) {
+      setError(e.message || 'Could not save this shift timing');
+    } finally { setSaving(false); }
+  };
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} style={{
+        padding: '6px 12px', borderRadius: '20px', fontSize: '12.5px', fontWeight: 600,
+        cursor: 'pointer', border: '1px dashed #cbd5e1', background: 'white', color: '#2563eb',
+      }}>+ Add Custom Timing</button>
+    );
+  }
+
+  const miniInput: React.CSSProperties = {
+    border: '1px solid #e2e8f0', borderRadius: '6px', padding: '6px 8px', fontSize: '12px', boxSizing: 'border-box',
+  };
+
+  return (
+    <div style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px', background: '#f8fafc', marginTop: '6px' }}>
+      {error && <div style={{ fontSize: '11px', color: '#dc2626', marginBottom: '8px' }}>{error}</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: '8px', marginBottom: '8px' }}>
+        <input placeholder="Label (e.g. Germany Shift)" value={form.label}
+          onChange={e => setForm(f => ({ ...f, label: e.target.value }))} style={{ ...miniInput, width: '100%' }} />
+        <input placeholder="Region (e.g. Germany)" value={form.region}
+          onChange={e => setForm(f => ({ ...f, region: e.target.value }))} style={{ ...miniInput, width: '100%' }} />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '10px' }}>
+        <div>
+          <label style={{ fontSize: '10px', color: '#94a3b8', display: 'block', marginBottom: '2px' }}>Start</label>
+          <input type="time" value={form.start_time} onChange={e => setForm(f => ({ ...f, start_time: e.target.value }))} style={{ ...miniInput, width: '100%' }} />
+        </div>
+        <div>
+          <label style={{ fontSize: '10px', color: '#94a3b8', display: 'block', marginBottom: '2px' }}>End</label>
+          <input type="time" value={form.end_time} onChange={e => setForm(f => ({ ...f, end_time: e.target.value }))} style={{ ...miniInput, width: '100%' }} />
+        </div>
+        <div>
+          <label style={{ fontSize: '10px', color: '#94a3b8', display: 'block', marginBottom: '2px' }}>Timezone</label>
+          <input placeholder="IST" value={form.timezone_label} onChange={e => setForm(f => ({ ...f, timezone_label: e.target.value }))} style={{ ...miniInput, width: '100%' }} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <button type="button" onClick={submit} disabled={saving} style={{
+          padding: '6px 14px', background: '#2563eb', color: 'white', border: 'none',
+          borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: saving ? 'default' : 'pointer',
+        }}>{saving ? 'Saving…' : 'Save & Select'}</button>
+        <button type="button" onClick={() => { setOpen(false); setError(''); }} style={{
+          padding: '6px 14px', background: 'white', color: '#64748b', border: '1px solid #e2e8f0',
+          borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+        }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 const STATUS_BADGE: Record<string, string> = {
   open: 'badge-green', on_hold: 'badge-amber', filled: 'badge-blue', closed: 'badge-gray',
 };
@@ -1167,7 +1246,7 @@ function RequisitionsPageInner() {
   // time-range + region presets an admin manages on Ops Settings, not a
   // hardcoded list, matching the same pattern already used for Rejection
   // Reasons / SLA Tiers / Tracking-Sheet Templates elsewhere in this app.
-  const { data: shiftTimings } = useFetch<any[]>('/shift-timings');
+  const { data: shiftTimings, refetch: refetchShiftTimings } = useFetch<any[]>('/shift-timings');
   const reqs: any[] = Array.isArray(rawReqs) ? rawReqs : (rawReqs?.items || []);
 
   const clientOptions = Array.from(new Set(reqs.map(r => r.client_name).filter(Boolean))).sort();
@@ -1227,8 +1306,10 @@ function RequisitionsPageInner() {
       education_required: req.education_required || '',
       budget_min: req.budget_min ?? '',
       budget_max: req.budget_max ?? '',
-      bill_rate: req.bill_rate ?? '',
+      bill_rate_min: req.bill_rate_min ?? req.bill_rate ?? '',
+      bill_rate_max: req.bill_rate_max ?? '',
       skills_required: req.skills_required || [],
+      mandatory_skills: req.mandatory_skills || [],
       description: req.description || '',
     });
     setEditId(req.id); setError(''); setShowModal(true);
@@ -1290,7 +1371,22 @@ function RequisitionsPageInner() {
     setSkillInput('');
   };
   const removeSkill = (s: string) =>
-    setForm(prev => ({ ...prev, skills_required: prev.skills_required.filter(x => x !== s) }));
+    setForm(prev => ({
+      ...prev,
+      skills_required: prev.skills_required.filter(x => x !== s),
+      mandatory_skills: prev.mandatory_skills.filter(x => x !== s),
+    }));
+
+  // Mandatory Skills (2026-08-24) — a real subset of skills_required, not
+  // a parallel list a recruiter has to keep in sync by hand: toggling a
+  // skill's own chip flips its membership here directly.
+  const toggleMandatory = (s: string) =>
+    setForm(prev => ({
+      ...prev,
+      mandatory_skills: prev.mandatory_skills.includes(s)
+        ? prev.mandatory_skills.filter(x => x !== s)
+        : [...prev.mandatory_skills, s],
+    }));
 
   const handleSave = async () => {
     if (!form.title.trim()) { setError('Job title is required'); return; }
@@ -1298,7 +1394,7 @@ function RequisitionsPageInner() {
     try {
       const payload: any = { ...form };
       // Convert empty strings to null for numeric/date fields
-      ['sla_hours', 'budget_min', 'budget_max', 'bill_rate', 'submission_limit_per_recruiter'].forEach(k => {
+      ['sla_hours', 'budget_min', 'budget_max', 'bill_rate_min', 'bill_rate_max', 'submission_limit_per_recruiter'].forEach(k => {
         if (payload[k] === '' || payload[k] === null) payload[k] = undefined;
         else payload[k] = Number(payload[k]);
       });
@@ -1590,9 +1686,9 @@ function RequisitionsPageInner() {
               value={form.positions_count} onChange={fNum('positions_count')} />
           </FormField>
         </FormRow>
-        {(shiftTimings?.length ?? 0) > 0 && (
-          <FormRow cols={1}>
-            <FormField label="Shift Timing (by region)" hint="Tenant-configured presets — manage in Settings > Ops Settings">
+        <FormRow cols={1}>
+          <FormField label="Shift Timing (by region)" hint="Select one or more presets, or add a one-off timing below">
+            {(shiftTimings?.length ?? 0) > 0 && (
               <MultiSelectChips
                 options={(shiftTimings || []).filter((s: any) => s.is_active).map((s: any) => ({
                   value: s.id,
@@ -1601,9 +1697,15 @@ function RequisitionsPageInner() {
                 selected={form.shift_timing_ids}
                 onToggle={toggleArrayField('shift_timing_ids')}
               />
-            </FormField>
-          </FormRow>
-        )}
+            )}
+            <div style={{ marginTop: (shiftTimings?.length ?? 0) > 0 ? '8px' : 0 }}>
+              <ShiftTimingCustomAdd onCreated={(newTiming) => {
+                refetchShiftTimings();
+                setForm(prev => ({ ...prev, shift_timing_ids: [...prev.shift_timing_ids, newTiming.id] }));
+              }} />
+            </div>
+          </FormField>
+        </FormRow>
 
         {/* ── Section 3: Location & Timeline ─────────────────────────────── */}
         <SectionDivider label="Location & Timeline" />
@@ -1657,7 +1759,7 @@ function RequisitionsPageInner() {
 
         {/* ── Section 5: Budget / Billing ─────────────────────────────────── */}
         <SectionDivider label="Budget / Billing" />
-        <FormRow cols={3}>
+        <FormRow cols={2}>
           <FormField label="Min Budget (Annual Rs.)">
             <input type="number" style={inputStyle} min={0} placeholder="e.g. 800000"
               value={form.budget_min} onChange={fNum('budget_min')} />
@@ -1666,27 +1768,42 @@ function RequisitionsPageInner() {
             <input type="number" style={inputStyle} min={0} placeholder="e.g. 1500000"
               value={form.budget_max} onChange={fNum('budget_max')} />
           </FormField>
-          <FormField label="Bill Rate (Rs./month) — contract roles">
-            <input type="number" style={inputStyle} min={0} placeholder="e.g. 120000"
-              value={form.bill_rate} onChange={fNum('bill_rate')} />
+        </FormRow>
+        <FormRow cols={2}>
+          <FormField label="Min Billing Rate (Rs./month) — contract roles">
+            <input type="number" style={inputStyle} min={0} placeholder="e.g. 100000"
+              value={form.bill_rate_min} onChange={fNum('bill_rate_min')} />
+          </FormField>
+          <FormField label="Max Billing Rate (Rs./month) — contract roles">
+            <input type="number" style={inputStyle} min={0} placeholder="e.g. 140000"
+              value={form.bill_rate_max} onChange={fNum('bill_rate_max')} />
           </FormField>
         </FormRow>
 
         {/* ── Section 6: Required Skills ──────────────────────────────────── */}
         <SectionDivider label="Required Skills" />
-        <FormField label="">
+        <FormField label="" hint="Click the star on a skill to mark it Mandatory (vs. nice-to-have)">
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px', minHeight: '28px' }}>
-            {form.skills_required.map(s => (
-              <span key={s} style={{
-                display: 'inline-flex', alignItems: 'center', gap: '5px',
-                padding: '3px 10px', background: '#eff6ff', color: '#2563eb',
-                borderRadius: '6px', fontSize: '12px', fontWeight: '500',
-                border: '1px solid #bfdbfe',
-              }}>
-                {s}
-                <span onClick={() => removeSkill(s)} style={{ cursor: 'pointer', color: '#93c5fd', fontWeight: '700', fontSize: '14px', lineHeight: 1 }}>×</span>
-              </span>
-            ))}
+            {form.skills_required.map(s => {
+              const isMandatory = form.mandatory_skills.includes(s);
+              return (
+                <span key={s} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '5px',
+                  padding: '3px 8px 3px 10px',
+                  background: isMandatory ? '#fef2f2' : '#eff6ff',
+                  color: isMandatory ? '#b91c1c' : '#2563eb',
+                  borderRadius: '6px', fontSize: '12px', fontWeight: '500',
+                  border: `1px solid ${isMandatory ? '#fecaca' : '#bfdbfe'}`,
+                }}>
+                  {s}
+                  <span onClick={() => toggleMandatory(s)} title={isMandatory ? 'Mandatory — click to make optional' : 'Mark as Mandatory'}
+                    style={{ cursor: 'pointer', display: 'inline-flex', color: isMandatory ? '#dc2626' : '#93c5fd' }}>
+                    <Star size={12} fill={isMandatory ? '#dc2626' : 'none'} />
+                  </span>
+                  <span onClick={() => removeSkill(s)} style={{ cursor: 'pointer', color: isMandatory ? '#fca5a5' : '#93c5fd', fontWeight: '700', fontSize: '14px', lineHeight: 1 }}>×</span>
+                </span>
+              );
+            })}
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <input style={{ ...inputStyle, flex: 1 }}

@@ -20,10 +20,11 @@ router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 # jd_embedding (vector(384)) deliberately excluded - large and has no
 # asyncpg codec registered for the `vector` type.
 FIELDS = """id, tenant_id, client_id, title, description, skills_required,
+            mandatory_skills,
             location, employment_type, status, positions_count, sla_hours,
             created_by, created_at, updated_at,
             experience_min, experience_max,
-            budget_min, budget_max, bill_rate,
+            budget_min, budget_max, bill_rate, bill_rate_min, bill_rate_max,
             work_mode, priority, deadline, expected_start_date,
             education_required, shift_type, notice_period_max,
             industry, client_name, approval_status,
@@ -153,31 +154,45 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(req
     employment_type_scalar = employment_types[0] if employment_types else body.employment_type
     work_modes = body.work_modes or ([body.work_mode] if body.work_mode else [])
     work_mode_scalar = work_modes[0] if work_modes else body.work_mode
+    # Real min/max range (2026-08-24) -- bill_rate (legacy scalar) kept in
+    # sync as bill_rate_min, same convention as employment_type/work_mode.
+    bill_rate_scalar = body.bill_rate_min if body.bill_rate_min is not None else body.bill_rate
+
+    insert_cols = [
+        "tenant_id", "client_id", "title", "description", "skills_required", "mandatory_skills",
+        "location", "employment_type", "positions_count", "sla_hours", "created_by",
+        "experience_min", "experience_max",
+        "budget_min", "budget_max", "bill_rate", "bill_rate_min", "bill_rate_max",
+        "work_mode", "priority", "deadline", "expected_start_date",
+        "education_required", "shift_type", "notice_period_max",
+        "industry", "client_name", "submission_limit_per_recruiter",
+        "employment_types", "work_modes", "shift_timing_ids",
+    ]
+    insert_vals = [
+        actor.tenant_id, body.client_id, body.title, body.description,
+        body.skills_required, body.mandatory_skills, body.location, employment_type_scalar,
+        body.positions_count, body.sla_hours, actor.user_id,
+        body.experience_min, body.experience_max,
+        body.budget_min, body.budget_max, bill_rate_scalar, body.bill_rate_min, body.bill_rate_max,
+        work_mode_scalar, body.priority, body.deadline, body.expected_start_date,
+        body.education_required, body.shift_type, body.notice_period_max,
+        body.industry, body.client_name, body.submission_limit_per_recruiter,
+        employment_types, work_modes, _parse_shift_timing_ids(body.shift_timing_ids),
+    ]
+    # Generated placeholder list, not hand-counted -- a mismatch here
+    # (real bug, caught before deploy while adding bill_rate_min/max and
+    # mandatory_skills: the hand-written $1..$30 list silently fell one
+    # short of the real 31-column/31-value list) is now structurally
+    # impossible regardless of how many columns this INSERT grows to.
+    placeholders = ", ".join(f"${i+1}" for i in range(len(insert_vals)))
+    assert len(insert_cols) == len(insert_vals)
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
-            f"""INSERT INTO requisitions
-                  (tenant_id, client_id, title, description, skills_required,
-                   location, employment_type, positions_count, sla_hours, created_by,
-                   experience_min, experience_max,
-                   budget_min, budget_max, bill_rate,
-                   work_mode, priority, deadline, expected_start_date,
-                   education_required, shift_type, notice_period_max,
-                   industry, client_name, submission_limit_per_recruiter,
-                   employment_types, work_modes, shift_timing_ids)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                        $20, $21, $22, $23, $24, $25, $26, $27, $28)
+            f"""INSERT INTO requisitions ({', '.join(insert_cols)})
+                VALUES ({placeholders})
                 RETURNING {FIELDS}""",
-            actor.tenant_id, body.client_id, body.title, body.description,
-            body.skills_required, body.location, employment_type_scalar,
-            body.positions_count, body.sla_hours, actor.user_id,
-            body.experience_min, body.experience_max,
-            body.budget_min, body.budget_max, body.bill_rate,
-            work_mode_scalar, body.priority, body.deadline, body.expected_start_date,
-            body.education_required, body.shift_type, body.notice_period_max,
-            body.industry, body.client_name, body.submission_limit_per_recruiter,
-            employment_types, work_modes, _parse_shift_timing_ids(body.shift_timing_ids),
+            *insert_vals,
         )
 
         result = dict(row)
@@ -246,6 +261,8 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
         updates["work_mode"] = updates["work_modes"][0]
     if "shift_timing_ids" in updates:
         updates["shift_timing_ids"] = _parse_shift_timing_ids(updates["shift_timing_ids"])
+    if "bill_rate_min" in updates and "bill_rate" not in updates:
+        updates["bill_rate"] = updates["bill_rate_min"]
 
     params: list = []
     set_clauses = []

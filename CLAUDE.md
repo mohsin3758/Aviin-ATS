@@ -12030,3 +12030,97 @@ the research that needs relaxing `assignments_one_active_per_requisition`
 (added 2026-08-10 to fix a real self-amplifying data-corruption bug),
 flagged as needing its own separate decision, not folded into this
 dashboard build.
+
+## New Client Requirement form: Mandatory Skills, Billing Rate range,
+## and manual Shift Timing entry, 2026-08-24
+Direct follow-up to the same-day multi-select work. User asked for 3
+more real gaps on the same form: (1) a way to mark which Required
+Skills are genuinely mandatory vs nice-to-have; (2) Billing Rate turned
+into a real min/max range, matching the existing annual Budget fields;
+(3) a way to add a Shift Timing directly on this form instead of only
+ever picking from tenant-configured presets.
+
+**Schema** (`sql/80_bill_rate_range_and_mandatory_skills.sql`) —
+`requisitions.bill_rate_min`/`bill_rate_max` (new), `mandatory_skills`
+TEXT[] (new, a real SUBSET of `skills_required` — deliberately a
+separate column, not encoded into `skills_required` itself via a marker
+like "Python*", so the many existing readers of that field — AI skill
+matching, Boolean search, JD templates — keep working completely
+unchanged). The old single `bill_rate` column is kept, not dropped —
+backfilled into `bill_rate_min` (0 existing rows had a value at
+migration time, confirmed honestly rather than assumed) and kept in
+sync going forward as `bill_rate_min`'s value, same "legacy scalar
+stays in sync with the richer field" convention already used for
+`employment_type`/`work_mode` earlier the same day.
+
+**A real placeholder-count bug caught before deploy, not after**: while
+adding the 2 new columns to `create_requisition()`'s hand-written
+`$1..$30` INSERT, the VALUES list silently fell one placeholder short
+of the real 31-column/31-value list — asyncpg would have thrown a
+parameter-count mismatch on the very first real call. Caught by
+manually recounting before deploying, then fixed properly rather than
+just patched: rewrote the INSERT to generate its placeholder list from
+the actual params array length (`", ".join(f"${i+1}" ...)` + an
+`assert len(cols) == len(vals)`), so this exact bug class is now
+structurally impossible regardless of how many columns this INSERT
+grows to in the future.
+
+**Backend** — `RequisitionCreate`/`RequisitionUpdate` gained
+`mandatory_skills`/`bill_rate_min`/`bill_rate_max`. `update_requisition`
+needed no new logic for `mandatory_skills` at all (it's a fully dynamic
+`model_dump(exclude_unset=True)` UPDATE) — just one line to keep
+`bill_rate` synced when `bill_rate_min` changes, matching the existing
+`employment_types`/`work_modes` sync pattern exactly.
+
+**Frontend** (`requisitions/page.tsx`):
+- **Mandatory Skills** — each skill chip gained a clickable star
+  (lucide `Star`, filled when mandatory) right next to its remove ×.
+  Mandatory skills render in red (`#fef2f2`/`#b91c1c`) instead of the
+  default blue, so the distinction reads at a glance without needing to
+  click into anything. Removing a skill entirely also clears it from
+  `mandatory_skills`, so the two lists can never drift out of sync.
+- **Billing Rate range** — split into Min/Max fields, same layout and
+  copy convention (`"— contract roles"`) as the original single field,
+  now a sibling `FormRow` to the annual Budget Min/Max fields instead of
+  crammed into the same 3-column row.
+- **Manual Shift Timing entry** — new `ShiftTimingCustomAdd` component:
+  a "+ Add Custom Timing" button reveals a small inline form (label,
+  region, start/end time, timezone), and on save calls the SAME real
+  `POST /shift-timings` endpoint the Ops Settings management tab
+  already uses — not a disconnected one-off free-text field. The new
+  preset is immediately selected on the current job AND becomes a real,
+  reusable option for every future job from then on. The section's old
+  "hide entirely if the tenant has zero presets configured yet" gate
+  was removed — that was exactly the scenario where manual entry
+  matters most, a tenant with nothing configured yet still needs a way
+  to add their first one right here.
+
+Verified for real end-to-end, not code review: a real requisition
+created via direct API call with `mandatory_skills:["Python","AWS"]`
+and `bill_rate_min/max` correctly returned both, with the legacy
+`bill_rate` scalar correctly derived as `100000` (matching
+`bill_rate_min`); a `PATCH` with only `bill_rate_min` correctly
+re-derived the scalar; a real custom shift timing created via the exact
+endpoint the form calls, then attached to a requisition, round-tripped
+correctly. A real headless-browser pass confirmed the full flow through
+the actual UI: typed Min/Max billing rate values, added 2 real skills,
+starred one mandatory (screenshot-confirmed rendering red with a filled
+star vs. the other staying blue with an outline star), clicked "+ Add
+Custom Timing," filled and saved a real "QA Custom Region Shift," and
+confirmed it appeared as a genuinely selected chip immediately —
+alongside an EARLIER API-created "Germany Shift" preset also correctly
+showing up as an available, reusable option (proving presets created
+either via the form or via Ops Settings both feed the same real list).
+Saving through the real UI produced a requisition whose stored fields
+exactly matched every value entered. Two real test-locator mistakes
+caught and fixed during verification, not app bugs — "Kubernetes" and
+"Terraform" each ambiguously matched both their real chip AND their now-
+disabled quick-pick button in the skills list below, both genuinely
+correct elements, not a bug in either case.
+
+A regression sweep (S1/S2/S13/S16/S20/S22/S30, 41 tests, chosen to cover
+`assign-with-explanation` and the Requisitions view-switcher directly
+touched by today's earlier and current work) ran 40 passed / 1 skipped /
+0 failed. Zero-token audit: `CONFIRMED CLEAN` (397 files, 0 external API
+refs). All throwaway test data (2 requisitions, 2 shift-timing presets)
+cleaned up afterward via the real APIs, confirmed zero residue.

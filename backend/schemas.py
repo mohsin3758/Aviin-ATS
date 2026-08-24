@@ -68,6 +68,12 @@ class RequisitionCreate(BaseModel):
     title: str
     description: Optional[str] = None
     skills_required: list[str] = Field(default_factory=list)
+    # Real subset of skills_required (2026-08-24) -- which of the required
+    # skills are genuinely mandatory, not just nice-to-have. Deliberately a
+    # separate column, not encoded into skills_required itself, so every
+    # existing reader of that field (AI matching, Boolean search, JD
+    # templates) keeps working unchanged.
+    mandatory_skills: list[str] = Field(default_factory=list)
     location: Optional[str] = None
     employment_type: EmploymentType = "contract"
     # Real multi-select (2026-08-24): a requisition can now genuinely need
@@ -86,6 +92,11 @@ class RequisitionCreate(BaseModel):
     budget_min: Optional[float] = None
     budget_max: Optional[float] = None
     bill_rate: Optional[float] = None
+    # Real min/max range (2026-08-24), matching the existing budget_min/max
+    # pattern -- bill_rate (scalar) kept in sync as bill_rate_min so any
+    # existing reader of the single value still works.
+    bill_rate_min: Optional[float] = None
+    bill_rate_max: Optional[float] = None
     work_mode: Optional[str] = "onsite"
     work_modes: list[WorkMode] = Field(default_factory=list)
     priority: Optional[str] = "medium"
@@ -104,6 +115,7 @@ class RequisitionUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     skills_required: Optional[list[str]] = None
+    mandatory_skills: Optional[list[str]] = None
     location: Optional[str] = None
     employment_type: Optional[EmploymentType] = None
     employment_types: Optional[list[EmploymentType]] = None
@@ -116,6 +128,8 @@ class RequisitionUpdate(BaseModel):
     budget_min: Optional[float] = None
     budget_max: Optional[float] = None
     bill_rate: Optional[float] = None
+    bill_rate_min: Optional[float] = None
+    bill_rate_max: Optional[float] = None
     work_mode: Optional[str] = None
     work_modes: Optional[list[WorkMode]] = None
     priority: Optional[str] = None
