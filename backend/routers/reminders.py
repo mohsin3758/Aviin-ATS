@@ -115,13 +115,19 @@ async def reminder_reports(days: int = 30, actor: Actor = Depends(get_actor),
                FROM recruiter_tasks
                WHERE tenant_id=$1 AND created_at >= now() - ($2::text || ' days')::interval""",
             actor.tenant_id, str(days))
+        # REAL BUG FIX (2026-08-24): no u.is_active filter at all -- every
+        # deactivated/QA-test recruiter who ever had a task stayed in this
+        # report forever, indistinguishable from real active recruiters.
+        # Same "missing is_active on a joined users table" class documented
+        # repeatedly elsewhere in this project (Team Leaderboard, Incentives
+        # scorecard list, KPI export, owner_json subquery, etc.).
         by_recruiter = await conn.fetch(
             """SELECT u.full_name, u.id AS recruiter_id,
                       count(*) AS total,
                       count(*) FILTER (WHERE t.status='completed') AS completed,
                       count(*) FILTER (WHERE t.status IN ('pending','in_progress') AND t.due_at < now()) AS overdue
                FROM recruiter_tasks t
-               JOIN users u ON u.id = t.recruiter_id
+               JOIN users u ON u.id = t.recruiter_id AND u.is_active IS NOT FALSE
                WHERE t.tenant_id=$1 AND t.created_at >= now() - ($2::text || ' days')::interval
                GROUP BY u.id, u.full_name ORDER BY total DESC""",
             actor.tenant_id, str(days))

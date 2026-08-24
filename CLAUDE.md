@@ -12211,3 +12211,32 @@ changed in this entire cleanup — every action went through either a
 real, already-existing API or a carefully-verified, transaction-
 protected raw SQL cascade for the one operation (candidate hard-delete)
 that had no safe API to lean on.
+
+## Follow-up same day: the mass user cleanup above didn't fix one specific
+## report — a real missing is_active filter found and fixed, 2026-08-24
+User reported the same "QA S19 Owner" spam still visible after the mass
+cleanup, from the "Reminders & Follow-Ups" Reports tab specifically
+(confirmed by asking which page, rather than guessing among several
+candidates). Real root cause, distinct from the cleanup above: `GET
+/reminders/reports`'s `by_recruiter` breakdown (`reminders.py`) joined
+`recruiter_tasks` to `users` with **no `is_active` filter at all** — so
+every recruiter who had ever been assigned a task stayed in this one
+report forever, correctly deactivated or not. The mass cleanup earlier
+today deactivated/purged the underlying `users` rows correctly; this
+report just never checked that column. Same "missing is_active on a
+joined users table" bug class already found and fixed repeatedly
+elsewhere in this project (Team Leaderboard, Incentives scorecard list,
+KPI CSV export, the Candidates page's owner badge) — this is simply an
+instance nobody had looked at until now.
+
+Fixed with `AND u.is_active IS NOT FALSE` on the join. Verified for
+real, not assumed: the exact same report endpoint went from returning
+dozens of QA-pattern rows (matching the screenshot) to exactly 4 real
+active accounts (Admin User, the deliberately-kept permanent `QA Test
+Recruiter` fixture — legitimately still active, correctly still shown,
+not a residual bug — khan mer, Shahana Tahreen); a real headless-browser
+pass on the actual Reports tab confirmed zero "QA S19"/"QA S49"/"QA
+User" text anywhere on the rendered page, and a pulled screenshot
+visually confirmed the same clean 4-row table. S49 regression suite
+(8/8, the suite covering this exact endpoint) re-run clean. Zero-token
+audit: `CONFIRMED CLEAN` (398 files, 0 external API refs).
