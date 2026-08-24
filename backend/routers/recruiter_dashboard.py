@@ -401,8 +401,11 @@ async def list_risk_scores(period_start: str | None = None, risk_level: str | No
             period_start = latest
         else:
             period_start = date.fromisoformat(period_start)
+        # REAL BUG FIX (2026-08-24): no u.is_active filter -- a manager
+        # reviewing "who's at risk" should never see deactivated/QA-test
+        # recruiters mixed in with real risk scores.
         q = """SELECT rs.*, u.full_name AS recruiter_name FROM recruiter_risk_scores rs
-               JOIN users u ON u.id = rs.recruiter_id
+               JOIN users u ON u.id = rs.recruiter_id AND u.is_active IS NOT FALSE
                WHERE rs.tenant_id=$1 AND rs.period_start=$2"""
         params = [actor.tenant_id, period_start]
         if risk_level:

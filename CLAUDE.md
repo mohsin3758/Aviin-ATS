@@ -12240,3 +12240,73 @@ User" text anywhere on the rendered page, and a pulled screenshot
 visually confirmed the same clean 4-row table. S49 regression suite
 (8/8, the suite covering this exact endpoint) re-run clean. Zero-token
 audit: `CONFIRMED CLEAN` (398 files, 0 external API refs).
+
+## Systematic sweep: every "missing is_active on a joined users table"
+## bug found across the whole backend, 2026-08-24
+Direct follow-up, same day, to the Reminders Reports fix — user asked
+for a deep, comprehensive check across every report/list/file surface
+for the same class of leak, not just the one already found. Grepped
+every `JOIN users` in the backend (55 occurrences across 24 files),
+read the full query context around each one (a single-line grep for
+`is_active` produces false positives when the filter sits on a later
+line of the same query — several of the 55 already had it and weren't
+real gaps), and judged each on the same standard this project has used
+consistently: a **live, browsable operational list or roster** gets the
+filter; a **genuine historical/audit/financial record** (who did this,
+who was owed this money) does not, since hiding it there would be
+actively wrong, not just imprecise.
+
+**11 real gaps found and fixed** (`AND u.is_active IS NOT FALSE` added
+to the join): Device Monitoring's Team Overview device roster
+(`device_monitoring.py`, the self-scoped "My Devices" branch
+deliberately left unfiltered — a user must always see their own
+devices); the weekly KPI PDF/webhook summary (`final_features.py`);
+Recruiter-Client Blocks (`ops_gaps.py`); the Interview Scheduler's
+interviewer name (`p23_p27.py` — a second, previously-missed gap on the
+exact same query a 2026-08-17 fix already touched for the *candidate*
+side, never the interviewer side); Risk & Wellbeing scores
+(`recruiter_dashboard.py`); the Leave tab (`recruiter_ops.py`); BU
+Eligibility (`account_pl.py`); Advanced KPIs (`incentives.py`); KAE
+email resolution for real submission emails (`kae_submission.py` —
+this one is a genuine functional-correctness bug, not just display: a
+deactivated KAE with a still-active `client_owners` row would actually
+receive a real external email); the Shift Scheduling calendar and swap
+requests (`shift_scheduling.py`, both sides of the swap join); and the
+**Assignment Dashboard's own `/list` and `/summary` endpoints**, built
+earlier this same day — the exact bug class this whole sweep exists to
+catch, present in code written hours earlier and not caught until a
+systematic pass looked for it deliberately.
+
+**Two real judgment calls made explicitly, not mechanically applying
+the same fix everywhere**: `incentives.py`'s `/bank` (retention bank)
+and `/loyalty` (loyalty milestones) endpoints were deliberately left
+**unfiltered** — these are real financial/compensation records, and a
+departed real employee's pending payout must stay visible to whoever
+processes it; filtering by `is_active` would hide legitimate money
+owed, not just QA noise, matching this project's own established
+"historical/financial record" precedent (audit_log, placements-export).
+Several other candidates (`candidate_ownership_history`, `candidate_
+activities`, `communications`' message threads, `job_sharing`'s
+posted-by, `resume_generator`'s generated-by, `requisitions`' approval-
+chain approver, `kae_submission`'s submission history, `p23_p27.py`'s
+CV-bulk-upload history and dead `audit_logs`-table reader, `p28_p32.py`'s
+real `audit_log`/placements-export readers) were reviewed and
+deliberately left alone for the same reason — they're genuine "who did
+this" historical records, not live rosters.
+
+Also checked "files" specifically, per the user's explicit ask: real
+counts for `generated_resumes` tied to QA *users* (not just the already-
+cleaned QA candidates), `monitored_devices`, `device_screenshots`, and
+`staff_shifts` all came back zero — no further file residue beyond
+what the earlier candidate hard-delete already removed.
+
+Verified for real, not code review: real API calls against every fixed
+endpoint confirmed clean or correctly-reduced results (Recruiter-Client
+Blocks and Leave both genuinely 0 rows; Advanced KPIs 1 real row;
+Assignment Dashboard's own list correctly still shows the legitimately-
+active `QA Test Recruiter` fixture alongside real people, nothing else)
+against live production data, not a synthetic check. A broad regression
+sweep across every suite touching the 11 modified files (S1/S8/S13/S16/
+S23/S24/S25/S28/S30/S43/S49, 72 tests) ran clean: 71 passed, 1 skipped,
+0 failed. Zero-token audit: `CONFIRMED CLEAN` (398 files, 0 external API
+refs).

@@ -54,10 +54,13 @@ async def kpi_pdf(month: int, year: int, actor: Actor = Depends(get_actor)):
         raise HTTPException(503, "reportlab not installed")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # REAL BUG FIX (2026-08-24): no u.is_active filter -- a real,
+        # generated KPI PDF/report could include deactivated/QA-test
+        # recruiters. Same class documented repeatedly elsewhere.
         rows = await conn.fetch("""
             SELECT k.*, u.full_name, u.email
             FROM recruiter_kpi_scores k
-            JOIN users u ON u.id=k.user_id
+            JOIN users u ON u.id=k.user_id AND u.is_active IS NOT FALSE
             WHERE k.tenant_id=$1 AND k.period_month=$2 AND k.period_year=$3
             ORDER BY k.total_score DESC
         """, actor.tenant_id, month, year)

@@ -144,7 +144,7 @@ async def list_assignments(
             FROM assignments asg
             JOIN requisitions r ON r.id = asg.requisition_id
             LEFT JOIN clients cl ON cl.id = r.client_id
-            JOIN users u ON u.id = asg.recruiter_id
+            JOIN users u ON u.id = asg.recruiter_id AND u.is_active IS NOT FALSE
             LEFT JOIN latest_event le ON le.assignment_id = asg.id
             LEFT JOIN users assigner ON assigner.id = le.actor_user_id
             LEFT JOIN sub_counts sc ON sc.recruiter_id = asg.recruiter_id AND sc.requisition_id = asg.requisition_id
@@ -203,7 +203,7 @@ async def summary(
             FROM assignments asg
             JOIN requisitions r ON r.id = asg.requisition_id
             LEFT JOIN clients cl ON cl.id = r.client_id
-            JOIN users u ON u.id = asg.recruiter_id
+            JOIN users u ON u.id = asg.recruiter_id AND u.is_active IS NOT FALSE
             LEFT JOIN LATERAL (
               SELECT metadata FROM assignment_event
               WHERE assignment_id = asg.id AND tenant_id = $1

@@ -240,7 +240,7 @@ async def list_interviews(candidate_id: Optional[str]=None,
                    r.title AS role_title
             FROM interview_schedules i
             JOIN candidates c ON c.id=i.candidate_id
-            LEFT JOIN users u ON u.id=i.interviewer_id
+            LEFT JOIN users u ON u.id=i.interviewer_id AND u.is_active IS NOT FALSE
             LEFT JOIN requisitions r ON r.id=i.requisition_id
             WHERE i.tenant_id=$1 AND c.is_active IS NOT FALSE
               AND ($2::text IS NULL OR i.candidate_id::text=$2)

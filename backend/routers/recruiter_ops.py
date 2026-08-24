@@ -404,7 +404,7 @@ async def list_leave(recruiter_id: Optional[str] = None, upcoming_only: bool = F
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             f"""SELECT l.*, u.full_name AS recruiter_name FROM recruiter_leave l
-                JOIN users u ON u.id = l.recruiter_id
+                JOIN users u ON u.id = l.recruiter_id AND u.is_active IS NOT FALSE
                 WHERE {' AND '.join(conditions)} ORDER BY l.start_date DESC""",
             *params,
         )

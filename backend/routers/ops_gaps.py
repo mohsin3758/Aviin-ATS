@@ -426,7 +426,7 @@ async def list_blocks(actor: Actor = Depends(get_actor)):
         rows = await conn.fetch(
             """SELECT b.*, u.full_name AS recruiter_name, c.name AS client_name
                FROM recruiter_client_blocks b
-               JOIN users u ON u.id = b.recruiter_id
+               JOIN users u ON u.id = b.recruiter_id AND u.is_active IS NOT FALSE
                LEFT JOIN clients c ON c.id = b.client_id
                WHERE b.tenant_id=$1 ORDER BY b.created_at DESC""",
             actor.tenant_id,

@@ -309,7 +309,7 @@ async def list_advanced_kpis(
         rows = await conn.fetch("""
             SELECT k.*, u.full_name
             FROM recruiter_advanced_kpis k
-            JOIN users u ON u.id = k.user_id
+            JOIN users u ON u.id = k.user_id AND u.is_active IS NOT FALSE
             WHERE ($1::int IS NULL OR k.period_month = $1)
               AND ($2::int IS NULL OR k.period_year  = $2)
             ORDER BY k.period_year DESC, k.period_month DESC, u.full_name

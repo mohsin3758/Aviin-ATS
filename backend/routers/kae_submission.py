@@ -204,11 +204,15 @@ async def _resolve_kaes(conn, tenant_id: str, client_id: Optional[str]):
     most-recent first; callers that need "the" primary KAE use [0]."""
     if not client_id:
         return []
+    # REAL BUG FIX (2026-08-24): no u.is_active filter -- a deactivated
+    # (departed staff, or QA-test) KAE with a still-active client_owners
+    # row would genuinely receive a real submission email. Functional
+    # correctness, not just a display issue.
     return await conn.fetch(
         """SELECT u.id, u.full_name, u.email
            FROM client_owners co JOIN users u ON u.id = co.user_id
            WHERE co.tenant_id=$1 AND co.client_id=$2 AND co.owner_type='kae' AND co.is_active
-             AND u.email IS NOT NULL AND u.email != ''
+             AND u.is_active IS NOT FALSE AND u.email IS NOT NULL AND u.email != ''
            ORDER BY co.assigned_at DESC""",
         tenant_id, client_id,
     )

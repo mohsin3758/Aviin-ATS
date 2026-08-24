@@ -248,7 +248,7 @@ async def list_bu(actor: Actor=Depends(require_permission("bu_tracker", "read"))
         rows = await conn.fetch("""
             SELECT be.*, u.full_name AS bu_head_name
             FROM bu_eligibility be
-            LEFT JOIN users u ON u.id=be.bu_head_user_id
+            LEFT JOIN users u ON u.id=be.bu_head_user_id AND u.is_active IS NOT FALSE
             ORDER BY be.is_eligible DESC, be.min_monthly_revenue DESC
         """)
     return [dict(r) for r in rows]

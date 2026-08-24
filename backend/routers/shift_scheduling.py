@@ -72,8 +72,10 @@ async def list_shifts(
     actor: Actor = Depends(get_actor),
 ):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # REAL BUG FIX (2026-08-24): no u.is_active filter -- a real,
+        # live shift calendar should never show deactivated/QA-test staff.
         q = """SELECT s.*, u.full_name AS user_name, t.name AS template_name, t.color AS template_color
-               FROM staff_shifts s JOIN users u ON u.id=s.user_id
+               FROM staff_shifts s JOIN users u ON u.id=s.user_id AND u.is_active IS NOT FALSE
                LEFT JOIN shift_templates t ON t.id=s.template_id
                WHERE s.tenant_id=$1"""
         params = [actor.tenant_id]
@@ -155,12 +157,15 @@ class SwapRequestIn(BaseModel):
 @router.get("/swap-requests")
 async def list_swap_requests(status: Optional[str] = None, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # REAL BUG FIX (2026-08-24): no is_active filter on either side --
+        # a real, actionable swap-request list should never show deactivated/
+        # QA-test staff among the requests needing a real decision.
         q = """SELECT r.*, s.shift_date, s.start_time, s.end_time, u1.full_name AS requested_by_name,
                       u2.full_name AS target_user_name
                FROM shift_swap_requests r
                JOIN staff_shifts s ON s.id=r.shift_id
-               JOIN users u1 ON u1.id=r.requested_by
-               LEFT JOIN users u2 ON u2.id=r.target_user_id
+               JOIN users u1 ON u1.id=r.requested_by AND u1.is_active IS NOT FALSE
+               LEFT JOIN users u2 ON u2.id=r.target_user_id AND u2.is_active IS NOT FALSE
                WHERE r.tenant_id=$1"""
         params = [actor.tenant_id]
         if status:

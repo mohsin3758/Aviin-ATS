@@ -583,9 +583,15 @@ async def list_devices(user_id: Optional[str] = None, actor: Actor = Depends(get
                 actor.tenant_id, scoped,
             )
         else:
+            # REAL BUG FIX (2026-08-24): Team Overview's device roster had no
+            # u.is_active filter -- same "missing is_active on a joined
+            # users table" class documented repeatedly elsewhere in this
+            # project. The self-scoped branch above deliberately keeps
+            # no filter -- a user viewing their own devices should never
+            # be hidden from their own self-service page.
             rows = await conn.fetch(
                 """SELECT d.*, u.full_name FROM monitored_devices d
-                   JOIN users u ON u.id = d.user_id
+                   JOIN users u ON u.id = d.user_id AND u.is_active IS NOT FALSE
                    WHERE d.tenant_id=$1 ORDER BY d.enrolled_at DESC""",
                 actor.tenant_id,
             )
