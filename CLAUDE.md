@@ -11808,3 +11808,52 @@ Compact views' Work Mode column (only the Card view shows Work Mode
 inline today; multi-select still works correctly everywhere, this is
 just a display-surface gap that predates this feature and wasn't part
 of the request).
+
+## Same-day follow-up: no direct link to the requisition detail page
+## existed anywhere, plus the pending manual-assign visual check closed
+User reported (with screenshots) not being able to find the Assigned
+Recruiter card at all — they were on the Kanban pipeline board and the
+Edit Client Requirement modal, neither of which has it. Investigated
+before answering and found a real, previously-unnoticed navigation gap:
+the Jobs & Requisitions list's "View"/"View Pipeline" action (all 4 view
+modes) has only ever linked to `/pipeline?job={id}` — there was **no
+direct link anywhere in the app** to `/requisitions/{id}` (the detail
+page the Assigned Recruiter card, approval chain, and submission usage
+all live on) except the Kanban board's own small "Full Page ↗" link, one
+extra, easy-to-miss hop.
+
+Added a real second link/icon — "Details" (Card/List/Table views) or a
+compact icon-only variant (Compact view, matching that view's own
+established dense-by-design convention from 2026-08-11) — next to the
+existing "View Pipeline" action in all 4 view modes, using the already-
+imported `ExternalLink` icon to visually distinguish it from the
+Eye-icon pipeline link.
+
+**A second, real thing found while verifying this, not a bug — the
+detail page defaults to its "Candidates" tab, not "Summary."** The
+Assigned Recruiter card lives on the Summary tab specifically, one more
+click past landing on the page — explains why a first-time visitor
+wouldn't see it immediately even after finding the right page. Not
+changed (the Candidates tab default is a reasonable, deliberate choice
+for a page most often opened to review applicants) — just documented so
+this doesn't get mistaken for another gap.
+
+**Closed the one item flagged as pending in the entry above.** Verified
+the manual-assign picker via a real headless-browser pass against the
+exact real production job from the user's own screenshots (Associate
+Managing Consultant - SAP FICO) — Details link -> Summary tab -> the
+real Assigned Recruiter card renders correctly, already showing a real
+assignment ("khan mer, Recruiter · assigned today") with the new
+workload-aware "Auto-Reassign (AI)" and "Reassign" buttons. (The
+immediately-prior attempt at this same check reported "no Assign/
+Reassign button visible" — traced to the test script's own regex locator
+being whitespace-sensitive against this button's actual JSX output, not
+a real absence; confirmed via the screenshot that both buttons render
+correctly. A real test-authoring mistake, not an app bug, same class
+documented repeatedly elsewhere in this project.)
+
+Verified for real end-to-end, not code review: a real headless-browser
+pass confirmed the URL `/requisitions/{id}`, then clicking "Summary" and
+seeing "Assigned Recruiter" for real, against the exact production job
+in question. Zero-token audit: `CONFIRMED CLEAN` (392 files, 0 external
+API refs).

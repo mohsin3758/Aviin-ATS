@@ -834,6 +834,20 @@ function JobCard({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req: an
         }}>
           <Eye size={12} /> View Pipeline
         </a>
+        {/* REAL GAP FIX (2026-08-24): the list previously had zero direct
+            link to the requisition detail page (/requisitions/{id}) —
+            the Assigned Recruiter card, approval chain, and submission
+            usage only lived there, reachable only via the Kanban board's
+            own "Full Page" link, one extra hop and easy to miss. */}
+        <a href={`/requisitions/${req.id}`} title="Full requisition details — Assigned Recruiter, approval chain, submission usage" style={{
+          display: 'flex', alignItems: 'center', gap: '5px',
+          fontSize: '12px', fontWeight: '600', color: '#374151',
+          textDecoration: 'none', background: '#f8fafc',
+          padding: '5px 12px', borderRadius: '6px',
+          border: '1px solid #e2e8f0',
+        }}>
+          <ExternalLink size={12} /> Details
+        </a>
         <ShareButton reqId={req.id} />
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '4px' }}>
           <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{
@@ -897,6 +911,11 @@ function JobCardCompact({ req, onEdit, onDelete, counts }: { req: any; onEdit: (
       <div style={{ marginTop: 'auto', display: 'flex', gap: '4px', paddingTop: '6px', borderTop: '1px solid #f1f5f9' }}>
         <a href={`/pipeline?job=${req.id}`} title="View Pipeline" style={{ flex: 1, textAlign: 'center', fontSize: '10.5px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '4px 0', borderRadius: '5px', border: '1px solid #bfdbfe' }}>
           View
+        </a>
+        {/* Icon-only, matching this view's own deliberately-dense design
+            (2026-08-11) — a full "Details" button would overcrowd it. */}
+        <a href={`/requisitions/${req.id}`} title="Full requisition details — Assigned Recruiter, approval chain" style={{ width: '24px', height: '24px', borderRadius: '5px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <ExternalLink size={11} style={{ color: '#64748b' }} />
         </a>
         <ShareButton reqId={req.id} size="icon" />
         <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{ width: '24px', height: '24px', borderRadius: '5px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
@@ -962,6 +981,9 @@ function JobListRow({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req:
       <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px', flexShrink: 0 }}>
         <a href={`/pipeline?job=${req.id}`} title="View Pipeline" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#2563eb', textDecoration: 'none', background: '#eff6ff', padding: '5px 10px', borderRadius: '6px', border: '1px solid #bfdbfe' }}>
           <Eye size={11} /> Pipeline
+        </a>
+        <a href={`/requisitions/${req.id}`} title="Full requisition details — Assigned Recruiter, approval chain" style={{ width: '28px', height: '28px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <ExternalLink size={12} style={{ color: '#374151' }} />
         </a>
         <ShareButton reqId={req.id} size="icon" />
         <button onClick={e => { e.stopPropagation(); onEdit(req); }} style={{ width: '28px', height: '28px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
@@ -1032,6 +1054,9 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts, onCandidatesAdded }
                   <div style={{ display: 'flex', gap: '6px' }}>
                     <a href={`/pipeline?job=${req.id}`} title="View Pipeline" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', borderRadius: '6px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
                       <Eye size={12} style={{ color: '#2563eb' }} />
+                    </a>
+                    <a href={`/requisitions/${req.id}`} title="Full requisition details — Assigned Recruiter, approval chain" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', borderRadius: '6px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                      <ExternalLink size={12} style={{ color: '#374151' }} />
                     </a>
                     <ShareButton reqId={req.id} size="icon" />
                     <button onClick={() => onEdit(req)} style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
