@@ -1021,12 +1021,45 @@ function ActivityTab({ candidateId }: any) {
 
 // ── Summary Tab ───────────────────────────────────────────────────────────────
 // ── Assigned Recruiter card (HARD RULE #10: reassignment is HITL-gated) ───────
+// Real availability/priority/workload tooltip text (2026-08-24) — one
+// shared builder so the manual picker's per-recruiter cards and the
+// Auto-Assign/Auto-Reassign result banner all describe a recruiter using
+// the exact same real, already-scored factors (reusing match_recruiters(),
+// not a second signal), just rendered in two different places.
+function recruiterDetailText(m: any): string {
+  if (!m) return '';
+  const parts = [
+    `Workload: ${m.workload_label} (${m.available_capacity ?? '?'}/${m.capacity_weekly ?? '?'} slots free, ${m.active_assignments ?? m.active_assignments_before ?? 0} active assignment(s))`,
+    `Priority fit (match score): ${Math.round((m.match_score ?? 0) * 100) / 100}%`,
+    `Availability: ${m.on_leave ? 'On leave' : 'Available'}`,
+    `Skill overlap: ${m.skill_match_count ?? 0} skill(s)`,
+    `Performance score: ${m.performance_score ?? 'N/A'}`,
+    `Prior client relationship: ${m.has_prior_client_relationship ? 'Yes' : 'No'}`,
+    `Tenure: ${m.tenure_months ?? 0} month(s)`,
+    m.location_match != null ? `Location match: ${m.location_match ? 'Yes' : 'No'}` : null,
+  ].filter(Boolean);
+  return parts.join(' · ');
+}
+
+const WORKLOAD_BADGE: Record<string, { color: string; bg: string }> = {
+  Low: { color: '#16A34A', bg: '#F0FDF4' },
+  Medium: { color: '#CA8A04', bg: '#FEFCE8' },
+  High: { color: '#DC2626', bg: '#FEF2F2' },
+};
+
 function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   const { data: assignments, refetch } = useFetch<any[]>(`/assignments?requisition_id=${reqId}`);
   // Recommendation 5 (recruiter-assignment gap analysis): picker only ever
   // needs to offer real recruiters, not every active user (admins/KAEs
   // included) — was previously fetching the unfiltered user list.
   const { data: users } = useFetch<any[]>(`/users?is_active=true&role=recruiter`);
+  // Real availability/priority/workload breakdown per recruiter (2026-08-24)
+  // — reuses match_recruiters(), the same scoring engine Auto-Assign already
+  // uses, so the manual picker shows identical real signal, not a bare
+  // name-only dropdown. limit=50 so every real recruiter in a small/medium
+  // tenant shows up, not just a top-5 shortlist.
+  const { data: matchRecruiters } = useFetch<any[]>(`/requisitions/${reqId}/match-recruiters?limit=50`);
+  const matchMap = Object.fromEntries((matchRecruiters || []).map((m: any) => [m.recruiter_id, m]));
   const [showForm, setShowForm] = useState(false);
   const [newRecruiterId, setNewRecruiterId] = useState('');
   const [reason, setReason] = useState('');
@@ -1037,10 +1070,16 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   const [autoErr, setAutoErr] = useState('');
 
   const role = getTokenPayload()?.role || '';
-  const canReassign = ['admin', 'super_admin', 'manager'].includes(role);
+  // Manual assignment (create a brand-new one) is reachable by KAE,
+  // Manager, or Admin per request — reassigning an ALREADY-active
+  // assignment stays a HARD RULE #10 HITL-gated, admin/manager-only
+  // action (unchanged backend gate on POST /assignments/{id}/reassign).
+  const canAssignInitial = ['admin', 'super_admin', 'manager', 'kae'].includes(role);
+  const canReassignOnly = ['admin', 'super_admin', 'manager'].includes(role);
   const userMap = Object.fromEntries((users || []).map((u: any) => [u.id, u]));
   const active = (assignments || []).find((a: any) => a.status === 'active');
   const recruiter = active ? userMap[active.recruiter_id] : null;
+  const canReassign = recruiter ? canReassignOnly : canAssignInitial;
 
   async function submit() {
     if (!newRecruiterId) { setErr('Select a recruiter'); return; }
@@ -1120,20 +1159,51 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
         <div style={{ marginTop: 10, fontSize: 11, color: '#4338CA', background: '#EEF2FF', border: '1px solid #C7D2FE', borderRadius: 8, padding: '8px 10px', lineHeight: 1.6 }}>
           <strong>{autoResult.recruiter_name}</strong> auto-assigned (match score {Math.round((autoResult.match_score || 0) * 100) / 100}%).
           {autoResult.explanation?.skill_match_count != null && (
-            <> {autoResult.explanation.skill_match_count} skill match(es), {autoResult.explanation.available_capacity} slot(s) free.</>
+            <> {autoResult.explanation.skill_match_count} skill match(es), {autoResult.explanation.available_capacity} slot(s) free
+            {autoResult.explanation.workload_label ? `, ${autoResult.explanation.workload_label} workload` : ''}.</>
           )}
         </div>
       )}
       {showForm && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9' }}>
-          <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>NEW RECRUITER</label>
-          <select value={newRecruiterId} onChange={e => setNewRecruiterId(e.target.value)}
-            style={{ width: '100%', padding: '8px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, marginBottom: 8 }}>
-            <option value="">-- Select --</option>
-            {(users || []).filter((u: any) => u.id !== active?.recruiter_id).map((u: any) => (
-              <option key={u.id} value={u.id}>{u.full_name} ({u.role_name || u.role})</option>
-            ))}
-          </select>
+          <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>
+            NEW RECRUITER — hover a name for full availability / priority / workload detail
+          </label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8, maxHeight: 260, overflowY: 'auto' }}>
+            {(users || []).filter((u: any) => u.id !== active?.recruiter_id).map((u: any) => {
+              const m = matchMap[u.id];
+              const wl = WORKLOAD_BADGE[m?.workload_label] || WORKLOAD_BADGE.Medium;
+              const isSelected = newRecruiterId === u.id;
+              return (
+                <div key={u.id} data-testid={`recruiter-option-${u.id}`}
+                  onClick={() => setNewRecruiterId(u.id)}
+                  title={m ? recruiterDetailText(m) : 'No availability data yet for this recruiter on this requisition'}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                    border: `1px solid ${isSelected ? '#93C5FD' : '#E2E8F0'}`,
+                    background: isSelected ? '#EFF6FF' : '#fff',
+                  }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{u.full_name} <span style={{ fontWeight: 400, color: '#94A3B8' }}>({u.role_name || u.role})</span></div>
+                    {m && (
+                      <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 2 }}>
+                        {m.available_capacity}/{m.capacity_weekly} slots free · match {Math.round((m.match_score || 0) * 100) / 100}%
+                        {m.on_leave ? ' · on leave' : ''}
+                      </div>
+                    )}
+                  </div>
+                  {m && (
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 6, color: wl.color, background: wl.bg, flexShrink: 0 }}>
+                      {m.workload_label} load
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            {!(users || []).filter((u: any) => u.id !== active?.recruiter_id).length && (
+              <div style={{ fontSize: 12, color: '#94A3B8' }}>No other active recruiters available.</div>
+            )}
+          </div>
           {active && (
             <>
               <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>REASON</label>

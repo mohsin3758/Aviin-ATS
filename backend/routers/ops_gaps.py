@@ -155,6 +155,78 @@ async def update_sla_tiers(body: SlaTiersIn, actor: Actor = Depends(require_role
     return dict(row)
 
 
+# ═══════════════════════════════════════════════════════ Shift Timings ═══
+# Tenant-configurable named shift presets (region + a real time range) for
+# the Requisition form's multi-select "Shift Timing" field - the same
+# "real settings-page list, not a hardcoded dropdown" convention as
+# scoring-weights/sla-tiers above, matching the explicit request that
+# adding a new region/timing shouldn't need a code change.
+class ShiftTimingIn(BaseModel):
+    label: str
+    region: str
+    start_time: str  # "HH:MM", parsed below
+    end_time: str
+    timezone_label: Optional[str] = None
+    is_active: bool = True
+
+
+def _parse_time(s: str):
+    from datetime import time as _time
+    try:
+        h, m = s.split(":")
+        return _time(int(h), int(m))
+    except (ValueError, AttributeError):
+        raise HTTPException(400, f"Invalid time '{s}' - expected HH:MM")
+
+
+shift_timings_router = APIRouter(prefix="/shift-timings", tags=["shift-timings"])
+
+
+@shift_timings_router.get("")
+async def list_shift_timings(include_inactive: bool = False, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        where = "" if include_inactive else "AND is_active"
+        rows = await conn.fetch(
+            f"SELECT * FROM shift_timings WHERE tenant_id=$1 {where} ORDER BY region, start_time",
+            actor.tenant_id)
+    return [dict(r) for r in rows]
+
+
+@shift_timings_router.post("", status_code=201)
+async def create_shift_timing(body: ShiftTimingIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO shift_timings (tenant_id, label, region, start_time, end_time, timezone_label, is_active, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
+            actor.tenant_id, body.label, body.region, _parse_time(body.start_time),
+            _parse_time(body.end_time), body.timezone_label, body.is_active, actor.user_id,
+        )
+    return dict(row)
+
+
+@shift_timings_router.put("/{shift_id}")
+async def update_shift_timing(shift_id: str, body: ShiftTimingIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """UPDATE shift_timings SET label=$1, region=$2, start_time=$3, end_time=$4,
+                 timezone_label=$5, is_active=$6, updated_at=now()
+               WHERE id=$7 AND tenant_id=$8 RETURNING *""",
+            body.label, body.region, _parse_time(body.start_time), _parse_time(body.end_time),
+            body.timezone_label, body.is_active, shift_id, actor.tenant_id,
+        )
+    if not row:
+        raise HTTPException(404, "Shift timing not found")
+    return dict(row)
+
+
+@shift_timings_router.delete("/{shift_id}")
+async def delete_shift_timing(shift_id: str, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM shift_timings WHERE id=$1 AND tenant_id=$2", shift_id, actor.tenant_id)
+    return {"ok": True, "deleted": result != "DELETE 0"}
+
+
 # ═══════════════════════════════════════════════════════════ Submittals ═══
 class SubmittalIn(BaseModel):
     application_id: str

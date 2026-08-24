@@ -10,7 +10,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-EmploymentType = Literal["contract", "fulltime", "c2h", "fte", "part_time"]
+EmploymentType = Literal["contract", "fulltime", "c2h", "fte", "part_time", "fl_contract"]
+WorkMode = Literal["remote", "onsite", "hybrid"]
 RequisitionStatus = Literal["open", "on_hold", "filled", "closed"]
 ApplicationStage = Literal[
     "sourced", "contacted", "interested", "nda",
@@ -69,6 +70,13 @@ class RequisitionCreate(BaseModel):
     skills_required: list[str] = Field(default_factory=list)
     location: Optional[str] = None
     employment_type: EmploymentType = "contract"
+    # Real multi-select (2026-08-24): a requisition can now genuinely need
+    # more than one employment type (e.g. Contract + FL Contract) at once.
+    # employment_type (scalar) is still accepted/kept in sync as
+    # employment_types[0] - the many existing display call sites
+    # (dashboard cards, Companies page, public career pages, GlobalSearch)
+    # read it as a single string and were not rewritten today.
+    employment_types: list[EmploymentType] = Field(default_factory=list)
     positions_count: int = 1
     sla_hours: Optional[int] = None
     submission_limit_per_recruiter: Optional[int] = None
@@ -79,11 +87,13 @@ class RequisitionCreate(BaseModel):
     budget_max: Optional[float] = None
     bill_rate: Optional[float] = None
     work_mode: Optional[str] = "onsite"
+    work_modes: list[WorkMode] = Field(default_factory=list)
     priority: Optional[str] = "medium"
     deadline: Optional[date] = None
     expected_start_date: Optional[date] = None
     education_required: Optional[str] = None
     shift_type: Optional[str] = "day"
+    shift_timing_ids: list[str] = Field(default_factory=list)
     notice_period_max: Optional[int] = 60
     industry: Optional[str] = None
     client_name: Optional[str] = None
@@ -96,6 +106,7 @@ class RequisitionUpdate(BaseModel):
     skills_required: Optional[list[str]] = None
     location: Optional[str] = None
     employment_type: Optional[EmploymentType] = None
+    employment_types: Optional[list[EmploymentType]] = None
     status: Optional[RequisitionStatus] = None
     positions_count: Optional[int] = None
     sla_hours: Optional[int] = None
@@ -106,11 +117,13 @@ class RequisitionUpdate(BaseModel):
     budget_max: Optional[float] = None
     bill_rate: Optional[float] = None
     work_mode: Optional[str] = None
+    work_modes: Optional[list[WorkMode]] = None
     priority: Optional[str] = None
     deadline: Optional[date] = None
     expected_start_date: Optional[date] = None
     education_required: Optional[str] = None
     shift_type: Optional[str] = None
+    shift_timing_ids: Optional[list[str]] = None
     notice_period_max: Optional[int] = None
     industry: Optional[str] = None
     client_name: Optional[str] = None

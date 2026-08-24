@@ -1,4 +1,5 @@
 import json
+import uuid
 from typing import Optional
 
 import asyncpg
@@ -10,6 +11,7 @@ import events
 from deps import Actor, get_actor
 from schemas import RequisitionCreate, RequisitionUpdate
 from routers.job_sharing import auto_distribute_on_open
+from routers.assignments import _workload_label
 from permissions import require_permission, get_job_visibility_scope
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
@@ -24,7 +26,8 @@ FIELDS = """id, tenant_id, client_id, title, description, skills_required,
             work_mode, priority, deadline, expected_start_date,
             education_required, shift_type, notice_period_max,
             industry, client_name, approval_status,
-            submission_limit_per_recruiter, is_active"""
+            submission_limit_per_recruiter, is_active,
+            employment_types, work_modes, shift_timing_ids"""
 
 # Gap-audit item 09: hierarchy/approval-chain routing. requisitions.approval_
 # status existed since an early migration but defaulted to 'approved' with
@@ -63,6 +66,19 @@ async def _notify_approver(conn, tenant_id: str, approver_id: str, requisition_i
 PIPELINE_STAGES = ["sourced", "contacted", "interested", "nda", "screened", "submitted", "l1_interview", "l2_interview", "offer", "offer_accepted", "placed", "rejected", "hold"]
 
 
+def _parse_shift_timing_ids(raw: list[str] | None) -> list:
+    """asyncpg needs real uuid.UUID objects for a UUID[] column parameter,
+    not plain strings (the same class of gap documented repeatedly
+    elsewhere in this project) - converts explicitly and 400s cleanly on
+    a malformed id instead of a raw 500."""
+    if not raw:
+        return []
+    try:
+        return [uuid.UUID(s) for s in raw]
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(400, "shift_timing_ids must be a list of valid UUIDs")
+
+
 @router.get("")
 async def list_requisitions(
     status: str | None = None,
@@ -89,7 +105,10 @@ async def list_requisitions(
         conditions.append(f"priority = ${len(params)}")
     if work_mode:
         params.append(work_mode)
-        conditions.append(f"work_mode = ${len(params)}")
+        # Matches either the legacy scalar or the new multi-select array,
+        # so a requisition tagged with several work modes still surfaces
+        # under a single-value filter.
+        conditions.append(f"(work_mode = ${len(params)} OR ${len(params)} = ANY(work_modes))")
     if search:
         params.append(f"%{search}%")
         conditions.append(
@@ -124,6 +143,16 @@ async def list_requisitions(
 
 @router.post("")
 async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(require_permission("requisitions", "create"))):
+    # Real multi-select (2026-08-24): employment_types/work_modes are the
+    # new source of truth when given; the legacy scalar employment_type/
+    # work_mode columns (still read by several existing display sites -
+    # dashboard, Companies page, public career pages, GlobalSearch) are
+    # kept in sync as "the first selected value" rather than left stale.
+    employment_types = body.employment_types or ([body.employment_type] if body.employment_type else [])
+    employment_type_scalar = employment_types[0] if employment_types else body.employment_type
+    work_modes = body.work_modes or ([body.work_mode] if body.work_mode else [])
+    work_mode_scalar = work_modes[0] if work_modes else body.work_mode
+
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             f"""INSERT INTO requisitions
@@ -133,19 +162,21 @@ async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(req
                    budget_min, budget_max, bill_rate,
                    work_mode, priority, deadline, expected_start_date,
                    education_required, shift_type, notice_period_max,
-                   industry, client_name, submission_limit_per_recruiter)
+                   industry, client_name, submission_limit_per_recruiter,
+                   employment_types, work_modes, shift_timing_ids)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                        $20, $21, $22, $23, $24, $25)
+                        $20, $21, $22, $23, $24, $25, $26, $27, $28)
                 RETURNING {FIELDS}""",
             actor.tenant_id, body.client_id, body.title, body.description,
-            body.skills_required, body.location, body.employment_type,
+            body.skills_required, body.location, employment_type_scalar,
             body.positions_count, body.sla_hours, actor.user_id,
             body.experience_min, body.experience_max,
             body.budget_min, body.budget_max, body.bill_rate,
-            body.work_mode, body.priority, body.deadline, body.expected_start_date,
+            work_mode_scalar, body.priority, body.deadline, body.expected_start_date,
             body.education_required, body.shift_type, body.notice_period_max,
             body.industry, body.client_name, body.submission_limit_per_recruiter,
+            employment_types, work_modes, _parse_shift_timing_ids(body.shift_timing_ids),
         )
 
         result = dict(row)
@@ -204,6 +235,16 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Keep the legacy scalar columns in sync with the new arrays when the
+    # array is updated but the caller didn't also explicitly set the
+    # scalar - same "first selected value" convention as create_requisition.
+    if "employment_types" in updates and "employment_type" not in updates and updates["employment_types"]:
+        updates["employment_type"] = updates["employment_types"][0]
+    if "work_modes" in updates and "work_mode" not in updates and updates["work_modes"]:
+        updates["work_mode"] = updates["work_modes"][0]
+    if "shift_timing_ids" in updates:
+        updates["shift_timing_ids"] = _parse_shift_timing_ids(updates["shift_timing_ids"])
 
     params: list = []
     set_clauses = []
@@ -507,10 +548,17 @@ async def match_recruiters_for_requisition(
     requisition_id: str, limit: int = 5, actor: Actor = Depends(get_actor)
 ):
     """T1: historical skill-overlap + spare capacity (see match_recruiters() in
-    sql/04_phase3_ai_engine.sql)."""
+    sql/04_phase3_ai_engine.sql). Wired into the manual-assign picker
+    (2026-08-24) so it shows the same real availability/workload/priority
+    breakdown as Auto-Assign, not a bare name-only dropdown."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT * FROM match_recruiters($1, $2)", requisition_id, limit)
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["workload_label"] = _workload_label(d["available_capacity"], d["capacity_weekly"])
+        out.append(d)
+    return out
 
 
 @router.post("/{requisition_id}/assign")
@@ -534,9 +582,13 @@ async def assign_requisition(requisition_id: str, actor: Actor = Depends(get_act
     wrong here since this endpoint isn't HITL-gated at all. Switched to the
     same inline exemption pattern already established in intelligence.py's
     account-manager gate: role=None is trusted-internal, not "not admin/
-    manager", so it's exempt rather than blocked."""
-    if actor.role is not None and actor.role not in ("admin", "manager"):
-        raise HTTPException(status_code=403, detail="Requires role in ('admin', 'manager')")
+    manager", so it's exempt rather than blocked.
+
+    2026-08-24: widened to also allow role='kae', matching the same
+    widening on manual assign (POST /assignments) — a KAE managing their
+    client's requisition can use either path, not just the manual one."""
+    if actor.role is not None and actor.role not in ("admin", "manager", "kae"):
+        raise HTTPException(status_code=403, detail="Requires role in ('admin', 'manager', 'kae')")
     async with db.tenant_conn(actor.tenant_id) as conn:
         try:
             row = await conn.fetchrow("SELECT * FROM assign_with_explanation($1)", requisition_id)

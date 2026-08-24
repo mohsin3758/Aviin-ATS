@@ -40,6 +40,14 @@ const SKILLS_LIST = [
 const EMPTY_FORM = {
   title: '', client_name: '', industry: '', priority: 'medium',
   employment_type: 'contract', work_mode: 'onsite', shift_type: 'day',
+  // Real multi-select fields (2026-08-24) — arrays are now the source of
+  // truth; employment_type/work_mode above stay in sync as arrays[0] so
+  // the many existing single-value display call sites keep working
+  // unmodified. shift_timing_ids is new/additive alongside shift_type
+  // (a general day/night/rotational category), not a replacement for it.
+  employment_types: ['contract'] as string[],
+  work_modes: ['onsite'] as string[],
+  shift_timing_ids: [] as string[],
   positions_count: 1,
   location: '', expected_start_date: '', deadline: '', sla_hours: '' as any,
   submission_limit_per_recruiter: '' as any,
@@ -52,8 +60,55 @@ const EMPTY_FORM = {
 
 const TYPE_BADGE: Record<string, string> = {
   contract: 'badge-blue', fulltime: 'badge-green', c2h: 'badge-purple',
-  fte: 'badge-teal', part_time: 'badge-gray',
+  fte: 'badge-teal', part_time: 'badge-gray', fl_contract: 'badge-amber',
 };
+const TYPE_LABEL: Record<string, string> = {
+  contract: 'Contract', fulltime: 'Full-time', c2h: 'Contract to Hire',
+  fte: 'FTE', part_time: 'Part-time', fl_contract: 'FL Contract',
+};
+const WORK_MODE_LABEL: Record<string, string> = {
+  onsite: 'Onsite', remote: 'Remote', hybrid: 'Hybrid',
+};
+
+// Real multi-select checkbox-chip control (2026-08-24) — reused for
+// Employment Type, Work Mode, and Shift Timing presets, matching this
+// file's existing chip-tag visual convention (skills_required) rather
+// than a native <select multiple>, which has poor UX for a handful of
+// short options.
+function MultiSelectChips({
+  options, selected, onToggle, colorFor,
+}: {
+  options: { value: string; label: string }[];
+  selected: string[];
+  onToggle: (value: string) => void;
+  colorFor?: (value: string) => { color: string; bg: string; border: string };
+}) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+      {options.map(opt => {
+        const active = selected.includes(opt.value);
+        const c = colorFor ? colorFor(opt.value) : { color: '#1e40af', bg: '#eff6ff', border: '#bfdbfe' };
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            data-testid={`chip-${opt.value}`}
+            onClick={() => onToggle(opt.value)}
+            style={{
+              padding: '6px 12px', borderRadius: '20px', fontSize: '12.5px', fontWeight: 600,
+              cursor: 'pointer', transition: 'all .12s',
+              border: `1px solid ${active ? c.border : '#e2e8f0'}`,
+              background: active ? c.bg : 'white',
+              color: active ? c.color : '#64748b',
+            }}
+          >
+            {active ? '✓ ' : ''}{opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 const STATUS_BADGE: Record<string, string> = {
   open: 'badge-green', on_hold: 'badge-amber', filled: 'badge-blue', closed: 'badge-gray',
 };
@@ -68,6 +123,19 @@ const WORK_MODE_CONFIG: Record<string, { color: string; bg: string }> = {
   remote: { color: '#7c3aed', bg: '#f5f3ff' },
   hybrid: { color: '#0891b2', bg: '#ecfeff' },
 };
+
+// Shared badge for the (possibly multi-select) employment type — shows
+// the primary type plus a real "+N" for any additional types actually
+// selected, rather than silently only ever showing the scalar.
+function EmploymentTypeBadge({ req, style }: { req: any; style?: React.CSSProperties }) {
+  const extra = (req.employment_types?.length || 0) - 1;
+  return (
+    <span className={`badge ${TYPE_BADGE[req.employment_type] || 'badge-gray'}`} style={{ fontSize: '10px', ...style }}
+      title={req.employment_types?.length > 1 ? req.employment_types.map((t: string) => TYPE_LABEL[t] || t).join(', ') : undefined}>
+      {TYPE_LABEL[req.employment_type] || req.employment_type}{extra > 0 ? ` +${extra}` : ''}
+    </span>
+  );
+}
 
 function daysRemaining(deadline: string | null, clientNow?: number): number | null {
   if (!deadline || !clientNow) return null;
@@ -568,9 +636,7 @@ function JobCard({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req: an
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
             <h3 style={{ fontSize: '14px', fontWeight: '700', color: '#0f172a', marginRight: '2px' }}>{req.title}</h3>
-            <span className={`badge ${TYPE_BADGE[req.employment_type] || 'badge-gray'}`} style={{ fontSize: '10px' }}>
-              {req.employment_type}
-            </span>
+            <EmploymentTypeBadge req={req} />
             <span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '10px' }}>
               {req.status}
             </span>
@@ -617,8 +683,9 @@ function JobCard({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req: an
           <span style={{
             fontSize: '11px', fontWeight: '500', padding: '2px 8px', borderRadius: '6px',
             background: wm.bg, color: wm.color, border: `1px solid ${wm.color}30`,
-          }}>
-            {req.work_mode.charAt(0).toUpperCase() + req.work_mode.slice(1)}
+          }} title={req.work_modes?.length > 1 ? req.work_modes.map((m: string) => WORK_MODE_LABEL[m] || m).join(', ') : undefined}>
+            {WORK_MODE_LABEL[req.work_mode] || req.work_mode}
+            {(req.work_modes?.length || 0) > 1 ? ` +${req.work_modes.length - 1}` : ''}
           </span>
         )}
         {req.budget_min && req.budget_max && (
@@ -869,7 +936,7 @@ function JobListRow({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req:
         </div>
         {req.client_name && <div style={{ fontSize: '11px', color: '#64748b' }}>{req.client_name}{req.industry ? ` · ${req.industry}` : ''}</div>}
       </div>
-      <span className={`badge ${TYPE_BADGE[req.employment_type] || 'badge-gray'}`} style={{ fontSize: '10px', flexShrink: 0 }}>{req.employment_type}</span>
+      <EmploymentTypeBadge req={req} style={{ flexShrink: 0 }} />
       <span className={`badge ${STATUS_BADGE[req.status] || 'badge-gray'}`} style={{ fontSize: '10px', flexShrink: 0 }}>{req.status}</span>
       {req.location && (
         <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: '#64748b', flexShrink: 0 }}>
@@ -932,7 +999,7 @@ function JobTableView({ reqs, onEdit, onDelete, stageCounts, onCandidatesAdded }
                 onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}>
                 <td style={{ padding: '10px 14px', fontSize: '12.5px', fontWeight: 600, color: '#0f172a', maxWidth: '220px' }}>{req.title}</td>
                 <td style={{ padding: '10px 14px', fontSize: '12px', color: '#475569' }}>{req.client_name || '—'}</td>
-                <td style={{ padding: '10px 14px' }}><span className={`badge ${TYPE_BADGE[req.employment_type] || 'badge-gray'}`} style={{ fontSize: '10px' }}>{req.employment_type}</span></td>
+                <td style={{ padding: '10px 14px' }}><EmploymentTypeBadge req={req} /></td>
                 <td style={{ padding: '10px 14px' }}>
                   <span style={{ fontSize: '11px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: pri.bg, color: pri.color, border: `1px solid ${pri.border}` }}>
                     {pri.emoji} {req.priority}
@@ -1071,6 +1138,11 @@ function RequisitionsPageInner() {
 
   const { data: rawReqs, loading, refetch } = useFetch<any>('/requisitions');
   const { data: stageCounts, refetch: refetchCounts } = useFetch<any>('/pipeline/req-stage-counts');
+  // Tenant-configurable Shift Timing presets (2026-08-24) — real named
+  // time-range + region presets an admin manages on Ops Settings, not a
+  // hardcoded list, matching the same pattern already used for Rejection
+  // Reasons / SLA Tiers / Tracking-Sheet Templates elsewhere in this app.
+  const { data: shiftTimings } = useFetch<any[]>('/shift-timings');
   const reqs: any[] = Array.isArray(rawReqs) ? rawReqs : (rawReqs?.items || []);
 
   const clientOptions = Array.from(new Set(reqs.map(r => r.client_name).filter(Boolean))).sort();
@@ -1112,6 +1184,12 @@ function RequisitionsPageInner() {
       employment_type: req.employment_type || 'contract',
       work_mode: req.work_mode || 'onsite',
       shift_type: req.shift_type || 'day',
+      // Real records predating 2026-08-24 have no arrays at all - fall
+      // back to the legacy scalar so editing an old requisition doesn't
+      // silently wipe its existing single value.
+      employment_types: (req.employment_types?.length ? req.employment_types : [req.employment_type || 'contract']),
+      work_modes: (req.work_modes?.length ? req.work_modes : [req.work_mode || 'onsite']),
+      shift_timing_ids: req.shift_timing_ids || [],
       positions_count: req.positions_count || 1,
       location: req.location || '',
       expected_start_date: req.expected_start_date ? req.expected_start_date.substring(0, 10) : '',
@@ -1148,6 +1226,21 @@ function RequisitionsPageInner() {
 
   const fNum = (key: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm(prev => ({ ...prev, [key]: e.target.value === '' ? '' : Number(e.target.value) }));
+
+  // Multi-select toggle for employment_types/work_modes/shift_timing_ids —
+  // keeps the legacy scalar (employment_type/work_mode) in sync as
+  // arrays[0] client-side too, so a save-then-immediate-view (before the
+  // list refetches) still shows the right primary badge.
+  const toggleArrayField = (arrKey: 'employment_types' | 'work_modes' | 'shift_timing_ids', scalarKey?: 'employment_type' | 'work_mode') =>
+    (value: string) => setForm(prev => {
+      const cur = prev[arrKey] as string[];
+      const next = cur.includes(value) ? cur.filter(v => v !== value) : [...cur, value];
+      // At least one selection required for employment_type/work_mode
+      // (the scalar column is NOT NULL) - a click that would empty the
+      // array is a no-op instead of silently breaking the derived scalar.
+      if (next.length === 0 && scalarKey) return prev;
+      return { ...prev, [arrKey]: next, ...(scalarKey ? { [scalarKey]: next[0] } : {}) };
+    });
 
   // REAL BUG FOUND 2026-08-20: pasting or typing a JD's own multi-skill
   // line ("Important skills - Disaster management, Credit management and
@@ -1426,23 +1519,39 @@ function RequisitionsPageInner() {
 
         {/* ── Section 2: Work & Contract ─────────────────────────────────── */}
         <SectionDivider label="Work & Contract" />
+        <FormRow cols={2}>
+          <FormField label="Employment Type" required hint="Select one or more">
+            <MultiSelectChips
+              options={[
+                { value: 'contract', label: 'Contract' },
+                { value: 'fl_contract', label: 'FL Contract' },
+                { value: 'fulltime', label: 'Full-time' },
+                { value: 'c2h', label: 'Contract to Hire' },
+                { value: 'fte', label: 'FTE' },
+                { value: 'part_time', label: 'Part-time' },
+              ]}
+              selected={form.employment_types}
+              onToggle={toggleArrayField('employment_types', 'employment_type')}
+            />
+          </FormField>
+          <FormField label="Work Mode" hint="Select one or more">
+            <MultiSelectChips
+              options={[
+                { value: 'remote', label: 'Remote' },
+                { value: 'onsite', label: 'Onsite' },
+                { value: 'hybrid', label: 'Hybrid' },
+              ]}
+              selected={form.work_modes}
+              onToggle={toggleArrayField('work_modes', 'work_mode')}
+              colorFor={(v) => ({
+                color: WORK_MODE_CONFIG[v]?.color || '#1e40af',
+                bg: WORK_MODE_CONFIG[v]?.bg || '#eff6ff',
+                border: WORK_MODE_CONFIG[v]?.color || '#bfdbfe',
+              })}
+            />
+          </FormField>
+        </FormRow>
         <FormRow cols={4}>
-          <FormField label="Employment Type" required>
-            <select style={inputStyle} value={form.employment_type} onChange={f('employment_type')}>
-              <option value="contract">Contract</option>
-              <option value="fulltime">Full-time</option>
-              <option value="c2h">Contract to Hire</option>
-              <option value="fte">FTE</option>
-              <option value="part_time">Part-time</option>
-            </select>
-          </FormField>
-          <FormField label="Work Mode">
-            <select style={inputStyle} value={form.work_mode} onChange={f('work_mode')}>
-              <option value="onsite">Onsite</option>
-              <option value="remote">Remote</option>
-              <option value="hybrid">Hybrid</option>
-            </select>
-          </FormField>
           <FormField label="Shift Type">
             <select style={inputStyle} value={form.shift_type} onChange={f('shift_type')}>
               <option value="day">Day</option>
@@ -1456,6 +1565,20 @@ function RequisitionsPageInner() {
               value={form.positions_count} onChange={fNum('positions_count')} />
           </FormField>
         </FormRow>
+        {(shiftTimings?.length ?? 0) > 0 && (
+          <FormRow cols={1}>
+            <FormField label="Shift Timing (by region)" hint="Tenant-configured presets — manage in Settings > Ops Settings">
+              <MultiSelectChips
+                options={(shiftTimings || []).filter((s: any) => s.is_active).map((s: any) => ({
+                  value: s.id,
+                  label: `${s.label} (${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)} ${s.timezone_label || ''}, ${s.region})`,
+                }))}
+                selected={form.shift_timing_ids}
+                onToggle={toggleArrayField('shift_timing_ids')}
+              />
+            </FormField>
+          </FormRow>
+        )}
 
         {/* ── Section 3: Location & Timeline ─────────────────────────────── */}
         <SectionDivider label="Location & Timeline" />

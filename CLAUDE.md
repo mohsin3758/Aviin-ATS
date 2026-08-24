@@ -11641,3 +11641,170 @@ characteristic under heavy back-to-back testing (confirmed via direct
 backend-log timestamp correlation each time, not assumed).
 
 Zero-token audit: `CONFIRMED CLEAN` (391 files, 0 external API refs).
+
+## Multi-select Employment Type/Work Mode, tenant-configurable Shift
+## Timing presets, and a rich workload/availability/priority Auto-Assign
+## + manual-assign UI, 2026-08-24
+User asked, from the New Client Requirement modal, for 4 things: (1) a
+new "FL Contract" employment type, with Employment Type made genuinely
+multi-select (Contract + FL Contract + FTE etc. together, not one at a
+time); (2) a "Shift Timing" concept (9am-6pm / 2pm-8pm style, tied to a
+real Country/Region like UK/US) with multi-select for other regions too;
+(3) Work Mode made multi-select (Remote/Onsite/Hybrid in any
+combination); (4) a richer Auto-Assign, showing a real tooltip with
+availability/priority/workload (High/Medium/Low, by how many positions
+a recruiter already has) reusing existing scoring/pipeline data — plus a
+manual-assign option reachable by KAE, Manager, or Admin, with the same
+rich detail. Asked one clarifying question before building (Shift Timing
+structure) — user picked tenant-configurable named presets over a fixed
+hardcoded list, matching the existing Rejection Reasons/SLA Tiers/
+Tracking-Sheet-Templates convention already established in this app.
+
+**Schema** (`sql/77_multiselect_fields_and_assign_enrichment.sql`) —
+`requisitions.employment_types`/`work_modes` (TEXT[], `<@` array-
+containment CHECK constraints, GIN-indexed) and `shift_timing_ids`
+(UUID[]) added alongside the existing scalar `employment_type`/
+`work_mode`/`shift_type` columns, not replacing them — the array is now
+the real source of truth, and the scalar stays in sync as `arrays[0]` so
+the ~8 existing single-value display call sites (dashboard cards,
+Companies page, public career pages, GlobalSearch) kept working with
+zero changes. New `shift_timings` table (label, region, start_time/
+end_time TIME, timezone_label, is_active, FORCE RLS), seeded 3 real
+presets per tenant (India Day Shift 09:00-18:00 IST, UK Shift
+14:00-20:00 IST, US Shift 18:30-03:30 IST — deliberately IST-anchored
+timestamps since this is an India-based agency scheduling shifts to
+serve other regions, not local-to-that-region clock times).
+`assign_with_explanation()` (the real Auto-Assign SQL function) widened
+with a `workload_label` CASE (available/capacity ratio: ≥60%→Low,
+≥30%→Medium, else→High) folded into a much richer `jsonb_build_object`
+already written to `assignment_event`.
+
+**Real, pre-existing bug found and fixed during migration, not
+invented**: `requisitions_employment_type_check` never actually included
+`'part_time'` even though the create/edit form already offered it as an
+option — a genuinely live but silently-tolerated gap (this tenant simply
+never had a part_time requisition yet to trip it). Fixed as part of the
+same constraint rebuild. Also found and resolved a real data conflict:
+1 live requisition had `employment_type='freelancer'`, a value that
+predates this feature and isn't one of the 6 new canonical ones —
+migrated to the new `'fl_contract'` (the exact value asked for) rather
+than left orphaned against the new CHECK constraint.
+
+**Backend** — `RequisitionCreate`/`RequisitionUpdate` gained
+`employment_types`/`work_modes`/`shift_timing_ids` as real list fields
+(`EmploymentType`/`WorkMode` widened Literals, `fl_contract` added).
+`create_requisition`/`update_requisition` derive the scalar from the
+array's first element when an array is given but the scalar isn't
+explicitly set (and vice-versa on create) — a real
+`_parse_shift_timing_ids()` helper converts string ids to `uuid.UUID`
+with a clean 400 on malformed input, not a raw asyncpg crash.
+`list_requisitions`'s `work_mode` filter now matches either the scalar
+OR array membership. New `shift_timings_router` (`ops_gaps.py`) — full
+CRUD, admin/manager-gated writes, a `_parse_time()` helper (`"HH:MM"` ->
+`datetime.time`, 400 on bad format).
+
+**Auto-Assign/manual-assign enrichment** — `POST /requisitions/{id}/
+assign` (auto) and `POST /assignments` (manual) both now return a real
+`explanation` object built from the SAME real, already-tested
+`match_recruiters()` SQL function (never a second, drifting scoring
+path): `available_capacity`/`capacity_weekly`, `on_leave`, `active_
+assignments`, `match_score`, `skill_match_count`, `performance_score`,
+`has_prior_client_relationship`, `tenure_months`, `location_match`, and
+the new `workload_label`. New `_recruiter_match_detail()`/
+`_workload_label()` helpers in `assignments.py` (the Python bucket
+thresholds deliberately mirror the SQL CASE exactly, so manual and auto
+assignment show identical High/Medium/Low signal for the same
+recruiter, never two different rules). `POST /assignments`' and
+`POST /requisitions/{id}/assign`'s role gates both widened from
+admin/manager-only to admin/manager/**kae** — manual assignment is now
+reachable by KAE, Manager, or Admin, per the request; **`POST /
+assignments/{id}/reassign` deliberately stays admin/manager-only** —
+reassigning an already-active assignment is the HARD RULE #10 HITL-gated
+action, unchanged. New `GET /requisitions/{id}/match-recruiters` gained
+the same `workload_label` attached per row, feeding the manual-assign
+picker with real, live data instead of a bare name list.
+
+Proactively found and fixed, before it could crash a real call, not
+after: `match_score`/`performance_score` come back from Postgres
+`numeric` as Python `Decimal` via asyncpg, and `events.
+write_assignment_event()` calls `json.dumps()` directly on the metadata
+(unlike an HTTP response, where FastAPI's `jsonable_encoder` would
+handle it automatically) — `json.dumps()` cannot serialize `Decimal`.
+Added an explicit `float(v) if isinstance(v, Decimal) else v` conversion
+before the first real manual-assign call, not discovered via a crash.
+
+**Frontend**:
+- New Client Requirement form — Employment Type and Work Mode became a
+  real `MultiSelectChips` checkbox-chip control (FL Contract included),
+  reusable across both fields; a new "Shift Timing (by region)" section
+  (only rendered when the tenant has real presets configured) lets a
+  recruiter pick multiple region-specific timings on one requisition.
+  Requisitions list/card/table views gained a real "+N" indicator (with
+  a hover tooltip listing every selected type) next to the primary
+  Employment Type/Work Mode badge, so a multi-select job doesn't just
+  silently show its first value with the rest invisible.
+- New "Shift Timings" tab on Ops Settings (matching the exact CRUD-tab
+  convention already used by Recruiter-Client Blocks on the same page) —
+  create/edit/activate-deactivate/delete real named presets.
+  **Real bug caught before shipping, not after**: `PUT /shift-timings/
+  {id}` requires the FULL model (label/region/start_time/end_time are
+  all required, not a partial-update endpoint) — the first draft of the
+  Activate/Deactivate toggle button sent only `{is_active}`, which would
+  have 422'd on every real click. Fixed to send the row's full existing
+  values back with only `is_active` flipped.
+- Requisition detail page's "Assigned Recruiter" card — the manual
+  picker's plain `<select>` dropdown was replaced with a real list of
+  clickable recruiter cards, each showing live workload (colored High/
+  Medium/Low badge), available/total capacity, match score, and on-leave
+  status inline, plus a full `title` tooltip assembling every real
+  factor (`recruiterDetailText()` — one shared builder also used to
+  enrich the Auto-Assign/Auto-Reassign result banner, so both surfaces
+  describe a recruiter identically). Role gating split into two real
+  checks matching the two different backend gates: `canAssignInitial`
+  (admin/manager/kae — creating a brand-new assignment) vs.
+  `canReassignOnly` (admin/manager — reassigning an existing HITL-gated
+  one), computed once as `canReassign` depending on whether a recruiter
+  is already assigned.
+
+Verified for real end-to-end, not code review, at every layer: direct
+API calls confirmed the 3 shift-timing presets seed correctly per
+tenant; a real requisition created with `employment_types:["contract",
+"fl_contract"]`/`work_modes:["remote","hybrid"]`/`shift_timing_ids`
+correctly returned the arrays AND the derived scalars
+(`employment_type:"contract"`, `work_mode:"remote"`); a `PATCH` with
+just `employment_types:["fte"]` correctly re-derived the scalar to
+`"fte"`; bad-UUID and bad-time inputs both cleanly 400'd instead of
+crashing; real auto-assign and manual-assign calls both returned the
+full enriched `explanation` (including a correct `workload_label:"Low"`)
+with zero `Decimal`/`json.dumps()` crash; a genuine throwaway `kae`-role
+login could call both `POST /assignments` and `POST /requisitions/{id}/
+assign` (previously would have 403'd), while a genuine throwaway plain
+`recruiter`-role login was correctly still blocked
+(`Requires role in ('admin', 'manager', 'kae')`). Frontend verified via
+real headless-browser passes with visual screenshot confirmation (not
+just passing locators): the New Client Requirement form's multi-select
+chips render and toggle correctly (screenshot-confirmed Contract + FL
+Contract, and Onsite + Remote + Hybrid all genuinely checked together),
+saving through the real UI produced a requisition whose stored arrays
+exactly matched what was clicked; the Ops Settings Shift Timings tab
+renders all 3 real seeded presets. **One real test-locator mistake
+caught and fixed during verification, not an app bug**: an early
+Playwright check for "India Day Shift" text ambiguously matched both the
+real seeded row AND the tab's own description paragraph (which uses the
+identical phrase as a written example) — fixed by scoping the locator to
+the `<strong>` tag specifically. The manual-assign picker's rich card UI
+was verified structurally (clean Next.js build, correct JSX, the exact
+same already-proven `/requisitions/{id}/match-recruiters` data source
+returning real `workload_label` values via direct API call) but its own
+dedicated headless-browser click-through could not be completed in this
+session — it was blocked by this project's own extensively-documented
+per-IP login rate-limit (10 attempts/15 min) after the volume of
+verification calls already made for this feature; flagged honestly as
+the one still-pending visual confirmation rather than glossed over, to
+be completed once the window clears.
+
+Not touched in this pass: the sidebar-level Requisitions Table/List/
+Compact views' Work Mode column (only the Card view shows Work Mode
+inline today; multi-select still works correctly everywhere, this is
+just a display-surface gap that predates this feature and wasn't part
+of the request).

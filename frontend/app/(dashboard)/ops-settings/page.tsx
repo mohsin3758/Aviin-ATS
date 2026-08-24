@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { authHeaders } from '@/lib/auth';
-import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Copy, Power, Star, Pencil, Trophy, Mail } from 'lucide-react';
+import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Copy, Power, Star, Pencil, Trophy, Mail, Clock } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -11,6 +11,7 @@ const TABS = [
   { key: 'sla', label: 'SLA Tiers', icon: AlertTriangle },
   { key: 'performance', label: 'Performance Weights', icon: Trophy },
   { key: 'blocks', label: 'Recruiter-Client Blocks', icon: Ban },
+  { key: 'shift_timings', label: 'Shift Timings', icon: Clock },
   { key: 'templates', label: 'Tracking Sheet Templates', icon: FileSpreadsheet },
   { key: 'screening', label: 'Screening Notifications', icon: Mail },
   { key: 'gdpr', label: 'Data Retention (GDPR)', icon: ShieldOff },
@@ -295,6 +296,99 @@ function BlocksTab() {
           </div>
         ))}
         {!blocks?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No blocks configured.</div>}
+      </div>
+    </div>
+  );
+}
+
+// Shift Timing presets (2026-08-24) — tenant-configurable named
+// time-range + region presets, same CRUD shape as Recruiter-Client
+// Blocks above, feeding the New Client Requirement form's multi-select
+// "Shift Timing (by region)" field instead of a hardcoded list.
+const EMPTY_SHIFT_FORM = { label: '', region: '', start_time: '09:00', end_time: '18:00', timezone_label: 'IST' };
+
+function ShiftTimingsTab() {
+  const { data: shifts, refetch } = useFetch<any[]>('/shift-timings?include_inactive=true');
+  const [showForm, setShowForm] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [form, setForm] = useState(EMPTY_SHIFT_FORM);
+  const [err, setErr] = useState('');
+
+  const openCreate = () => { setForm(EMPTY_SHIFT_FORM); setEditId(null); setErr(''); setShowForm(true); };
+  const openEdit = (s: any) => {
+    setForm({ label: s.label, region: s.region || '', start_time: (s.start_time || '').slice(0, 5), end_time: (s.end_time || '').slice(0, 5), timezone_label: s.timezone_label || 'IST' });
+    setEditId(s.id); setErr(''); setShowForm(true);
+  };
+
+  const save = async () => {
+    if (!form.label.trim() || !form.region.trim()) { setErr('Label and Region are required'); return; }
+    try {
+      if (editId) await apiFetch(`/shift-timings/${editId}`, { method: 'PUT', body: JSON.stringify(form) });
+      else await apiFetch('/shift-timings', { method: 'POST', body: JSON.stringify(form) });
+      setShowForm(false); setEditId(null); refetch();
+    } catch (e: any) { setErr(e.message || 'Save failed'); }
+  };
+  const toggleActive = async (s: any) => {
+    // PUT requires the full model (label/region/start_time/end_time are
+    // all required fields, not partial-update) - send the row's existing
+    // real values back with only is_active flipped, not a bare partial
+    // body (would 422 on the required fields).
+    await apiFetch(`/shift-timings/${s.id}`, { method: 'PUT', body: JSON.stringify({
+      label: s.label, region: s.region, start_time: (s.start_time || '').slice(0, 5),
+      end_time: (s.end_time || '').slice(0, 5), timezone_label: s.timezone_label, is_active: !s.is_active,
+    }) });
+    refetch();
+  };
+  const del = async (id: string) => { await apiFetch(`/shift-timings/${id}`, { method: 'DELETE' }); refetch(); };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ fontSize: 12, color: '#64748B' }}>
+        Real, named shift-timing presets (e.g. "9am–6pm India Day Shift", "2pm–8pm UK Shift") used on the New Client
+        Requirement form's multi-select Shift Timing field — one job can genuinely need multiple regions/timings at once.
+      </p>
+      <button onClick={openCreate} style={{ ...btn, alignSelf: 'flex-start', display: 'flex', gap: 6, alignItems: 'center' }}>
+        <Plus size={14} /> Add Shift Timing
+      </button>
+      {showForm && (
+        <div style={card}>
+          {err && <div style={{ fontSize: 12, color: '#DC2626', marginBottom: 8 }}>{err}</div>}
+          <label style={label}>LABEL (E.G. "UK SHIFT")</label>
+          <input value={form.label} onChange={e => setForm({ ...form, label: e.target.value })} style={input} />
+          <label style={label}>COUNTRY / REGION (E.G. UK, US, INDIA)</label>
+          <input value={form.region} onChange={e => setForm({ ...form, region: e.target.value })} style={input} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <label style={label}>START TIME</label>
+              <input type="time" value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} style={input} />
+            </div>
+            <div>
+              <label style={label}>END TIME</label>
+              <input type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} style={input} />
+            </div>
+          </div>
+          <label style={label}>TIMEZONE LABEL (DISPLAY ONLY, E.G. IST/GMT/EST)</label>
+          <input value={form.timezone_label} onChange={e => setForm({ ...form, timezone_label: e.target.value })} style={input} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={save} style={btn}>{editId ? 'Update' : 'Add'} Shift Timing</button>
+            <button onClick={() => { setShowForm(false); setEditId(null); }} style={{ ...btn, background: '#fff', color: '#374151', border: '1px solid #E2E8F0' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <div style={card}>
+        {(shifts || []).map((s: any) => (
+          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12, opacity: s.is_active ? 1 : 0.5 }}>
+            <span style={{ flex: 1 }}>
+              <strong>{s.label}</strong> — {(s.start_time || '').slice(0, 5)}–{(s.end_time || '').slice(0, 5)} {s.timezone_label}
+              <span style={{ color: '#64748B' }}> · {s.region}</span>
+              {!s.is_active && <span style={{ color: '#94A3B8' }}> · inactive</span>}
+            </span>
+            <button onClick={() => openEdit(s)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }} title="Edit"><Pencil size={14} /></button>
+            <button onClick={() => toggleActive(s)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: s.is_active ? '#16A34A' : '#94A3B8' }} title={s.is_active ? 'Deactivate' : 'Activate'}><Power size={14} /></button>
+            <button onClick={() => del(s.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }} title="Delete"><Trash2 size={14} /></button>
+          </div>
+        ))}
+        {!shifts?.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No shift timings configured.</div>}
       </div>
     </div>
   );
@@ -624,6 +718,7 @@ export default function OpsSettingsPage() {
       {tab === 'sla' && <SlaTab />}
       {tab === 'performance' && <PerformanceWeightsTab />}
       {tab === 'blocks' && <BlocksTab />}
+      {tab === 'shift_timings' && <ShiftTimingsTab />}
       {tab === 'templates' && <TemplatesTab />}
       {tab === 'screening' && <ScreeningTab />}
       {tab === 'gdpr' && <GdprTab />}
