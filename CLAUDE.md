@@ -12626,3 +12626,80 @@ calls POST /referrals with an empty body - a real, separate, pre-
 existing bug unrelated to this feature (that tab is employee-referral-
 bonus/HR-adjacent, not core recruiter-CRM, out of this round's scope),
 flagged so it isn't silently lost.
+
+## Referral Links: the "General referral" job-less option fixed, plus a
+## much deeper redirect bug found in the same investigation, 2026-08-25
+Direct follow-up to the recruiter-CRM feature build's own explicitly-
+flagged, deliberately-descoped finding: referral_links.requisition_id
+was NOT NULL, but candidate-engagement/page.tsx's ReferralsTab already
+calls POST /referrals with an empty body for its "General referral"
+(job-less) option - would 500 on click, confirmed by reading the exact
+frontend call site (`body: JSON.stringify({})`) and the live DB schema
+side by side.
+
+**Fix 1 - the reported bug.** gap_features.py's ReferralIn.
+requisition_id was already Optional[str]=None, and referral_redirect()
+already had a working fallback destination (/careers?ref=code, no job)
+for a null requisition_id - the whole app-layer code path was already
+built to support a job-less link, confirmed by reading the code before
+touching anything. The DB column was the only thing blocking it.
+sql/83_referral_links_nullable_requisition.sql - ALTER COLUMN
+requisition_id DROP NOT NULL, plus a real CREATE TABLE IF NOT EXISTS
+backfill for referral_links (schema-drifted, no committed migration
+ever existed for this table, byte-for-byte captured via pg_dump
+--schema-only, same recurring pattern documented dozens of times
+elsewhere in this project) with the column already nullable so a fresh
+environment gets the fixed schema from day one.
+
+**Fix 2 - a much more serious, previously-undiscovered bug found while
+verifying fix 1, not by reading the code.** Reproduced the exact
+frontend request (empty-body POST) and it correctly returned 200 -
+but clicking the actual redirect link (GET /r/{code}, what a candidate
+receiving the link genuinely clicks) 404'd, both through the public
+domain and hitting the backend directly. Root-caused, not guessed:
+referral_links is owned by postgres, not app_user (confirmed via
+pg_tables), and db.system_conn() always connects as app_user
+(confirmed in db.py) - since app_user is NOT the table owner, RLS is
+fully enforced against it regardless of FORCE (FORCE only changes
+behavior for the owner; a non-owner always gets RLS applied when RLS
+is merely enabled). system_conn() sets app.tenant_id='', so the
+isolation policy (tenant_id::text = '') matched zero rows for every
+query. **This means GET /r/{code} has returned a 404 for every single
+referral link ever generated, not just job-less ones, since this
+feature was built** - a real, live, previously-unverified break in the
+one mechanism that actually makes a referral link usable.
+
+Two leftover, unused SECURITY DEFINER functions already existed for
+exactly this purpose (get_referral_by_code/increment_referral_clicks,
+flagged dead in an earlier audit on 2026-07-27, reconfirmed zero real
+callers anywhere in the backend via grep before touching them) - an
+older, imperfect shape (get_referral_by_code INNER JOINs requisitions,
+so it would still return nothing for a job-less link even after fix 1
+landed). Dropped both, replaced with one correct, atomic function
+(redeem_referral_click(p_code) - UPDATE...RETURNING tenant_id,
+requisition_id in one statement, owned by postgres, REVOKE ALL FROM
+PUBLIC + GRANT EXECUTE TO app_user) matching this project's established
+anonymous-token SECURITY DEFINER pattern (NDA/offer e-sign, personal_
+links, field attendance). referral_redirect() (gap_features.py) now
+calls it via system_conn() instead of the old direct UPDATE.
+
+Verified for real end-to-end, not code review: reproduced the exact
+original 500 via a direct curl matching the frontend's own request
+shape before touching any code; after fix 1 alone, confirmed
+POST /referrals with an empty body returns 200 with requisition_id:null,
+but GET /r/{code} still 404'd (both via the public domain and directly
+against the backend, ruling out an nginx routing issue); after fix 2,
+confirmed a job-less link's redirect returns a real 307 to
+/careers?ref={code} and a job-tied link's redirect returns a real 307
+to /careers/{requisition_id}?ref={code}, both with click_count
+genuinely incrementing on repeat visits (checked via the real
+GET /referrals/ list endpoint, not assumed); confirmed a garbage code
+still cleanly 404s. New permanent "S57 Referral Links" suite (5 tests)
+added to qa_automation.spec.ts, including a real headless-browser click
+of the actual "Generate Referral Link" button on Candidate Engagement's
+Referrals tab with a real console-error check. Regression sweep
+(S1/S2/S8/S13/S16/S25/S30/S57, 56 tests) passed clean: 55 passed, 1
+pre-existing skip, 0 failed. Zero-token audit: CONFIRMED CLEAN (404
+files, 0 external API refs). Test throwaway referral rows left in place
+(no delete endpoint exists for this table, matching established
+precedent for tables like candidate_submissions/generated_resumes).

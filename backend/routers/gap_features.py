@@ -224,10 +224,7 @@ async def referral_create(body: ReferralIn, actor: Actor = Depends(get_actor)):
 async def referral_redirect(code: str):
     from fastapi.responses import RedirectResponse
     async with db.system_conn() as conn:
-        row = await conn.fetchrow(
-            "UPDATE referral_links SET click_count = click_count + 1 WHERE unique_code=$1 RETURNING requisition_id",
-            code,
-        )
+        row = await conn.fetchrow("SELECT * FROM redeem_referral_click($1)", code)
     if not row:
         raise HTTPException(404, "Referral link not found")
     dest = f"{APP_URL}/careers/{row['requisition_id']}?ref={code}" if row["requisition_id"] else f"{APP_URL}/careers?ref={code}"

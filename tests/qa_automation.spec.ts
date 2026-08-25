@@ -7217,6 +7217,88 @@ test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not
   });
 });
 
+test.describe.serial('S57 Referral Links: job-less "General referral" no longer 500s, redirect actually works', () => {
+  // Two real bugs found and fixed together: (1) referral_links.
+  // requisition_id was NOT NULL, so the "General referral" (job-less)
+  // option candidate-engagement's ReferralsTab already calls
+  // (POST /referrals with an empty body) had always 500'd -
+  // sql/83 makes the column nullable. (2) Found while verifying (1):
+  // GET /r/{code} - the public redirect a candidate actually clicks -
+  // has been fully broken for EVERY referral link, not just job-less
+  // ones, since this feature was built: referral_links is owned by
+  // postgres, not app_user, and db.system_conn() always connects as
+  // app_user - RLS applies to a non-owner even without FORCE, so
+  // system_conn()'s app.tenant_id='' matched zero rows. Fixed with a
+  // real SECURITY DEFINER function (redeem_referral_click), replacing
+  // two leftover, unused, imperfect functions from an earlier build.
+  let token = '';
+  let reqId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+
+  test('setup: resolve a real open requisition', async ({ request }) => {
+    token = await getApiToken(request);
+    const res = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: auth() });
+    const body = await res.json();
+    reqId = (Array.isArray(body) ? body : body.requisitions || body.items)[0].id;
+    expect(reqId).toBeTruthy();
+  });
+
+  test('POST /referrals with an empty body (the real "General referral" button) succeeds, not a 500', async ({ request }) => {
+    const res = await request.post(`${API}/referrals`, { headers: auth(), data: {} });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.requisition_id).toBeNull();
+    expect(body.share_url).toContain('/r/');
+
+    // real redirect: job-less link lands on /careers (no job id), never /careers/undefined or a 404
+    const redirect = await request.fetch(`${API}/r/${body.unique_code}`, { maxRedirects: 0 });
+    expect([301, 302, 307, 308]).toContain(redirect.status());
+    const location = redirect.headers()['location'] || '';
+    expect(location).toMatch(/\/careers\?ref=/);
+    expect(location).not.toMatch(/\/careers\/(undefined|null)/);
+  });
+
+  test('a job-tied referral link redirects to /careers/{requisition_id}, and click_count genuinely increments', async ({ request }) => {
+    const create = await request.post(`${API}/referrals`, { headers: auth(), data: { requisition_id: reqId } });
+    expect(create.ok()).toBeTruthy();
+    const { unique_code } = await create.json();
+
+    const redirect = await request.fetch(`${API}/r/${unique_code}`, { maxRedirects: 0 });
+    expect([301, 302, 307, 308]).toContain(redirect.status());
+    expect(redirect.headers()['location'] || '').toContain(`/careers/${reqId}?ref=${unique_code}`);
+
+    // click it again to prove the counter genuinely increments, not just a static redirect
+    await request.fetch(`${API}/r/${unique_code}`, { maxRedirects: 0 });
+    const list = await request.get(`${API}/referrals/`, { headers: auth() });
+    const row = (await list.json()).referrals.find((r: any) => r.unique_code === unique_code);
+    expect(row.click_count).toBe(2);
+  });
+
+  test('a garbage/nonexistent referral code cleanly 404s', async ({ request }) => {
+    const res = await request.fetch(`${API}/r/this-code-does-not-exist-qa-s57`, { maxRedirects: 0 });
+    expect(res.status()).toBe(404);
+  });
+
+  test('real headless UI: clicking the actual "Generate Referral Link" button (General referral) succeeds with no console error', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
+    await page.goto('/candidate-engagement');
+    const referralsTab = page.getByRole('button', { name: 'Referrals' });
+    if (await referralsTab.count() > 0) await referralsTab.first().click();
+    const btn = page.getByRole('button', { name: 'Generate Referral Link' });
+    await expect(btn).toBeVisible({ timeout: 10000 });
+    const before = await page.locator('text=General referral').count();
+    await btn.click();
+    await expect.poll(async () => page.locator('text=General referral').count(), { timeout: 10000 }).toBeGreaterThan(before);
+    expect(errors.filter((e) => !e.includes('favicon'))).toEqual([]);
+  });
+
+  // No delete endpoint exists for referral_links (by design, matching
+  // established precedent elsewhere in this project for tables with no
+  // delete endpoint) - the 2 rows this suite creates are left as
+  // harmless residue, same as candidate_submissions/generated_resumes.
+});
+
 test.describe.serial('S56 Resume Inbox: manual client/role selection, current-stage highlight, real download fix', () => {
   let anyItemId: string | null = null;
   let itemWithCandidateId: string | null = null;
