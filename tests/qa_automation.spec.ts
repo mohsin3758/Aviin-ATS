@@ -5757,6 +5757,37 @@ test.describe.serial('S60 New Client Requirement: Client / Company Name is a rea
     await page.locator('button:has-text("Cancel")').click();
   });
 
+  // Real follow-up gap, caught by re-checking the fix rather than
+  // stopping once the click-to-select path worked: typing a client's
+  // FULL, EXACT name and tabbing away without clicking the suggestion
+  // (a confident recruiter has no reason to expect a click is required)
+  // silently left client_id unlinked, reproducing the original bug for
+  // the case where the user is most sure they typed something real.
+  test('real headless UI: typing the exact real client name and tabbing away (no click) still auto-links via blur; a partial typed name does not', async ({ page }) => {
+    await page.goto('/requisitions');
+    await page.getByRole('button', { name: 'Add Requirement' }).first().click();
+    await expect(page.getByText('New Client Requirement')).toBeVisible({ timeout: 10000 });
+    const clientInput = page.locator('input[data-testid="client-name-input"]');
+    const titleInput = page.locator('input[placeholder="e.g. Senior Python Developer"]');
+
+    // Exact, case-insensitive match, no click -> auto-links on blur
+    await clientInput.fill(clientName.toLowerCase());
+    await titleInput.click();
+    await expect(page.locator('text=Linked to existing client record')).toBeVisible({ timeout: 5000 });
+    await page.locator('button:has-text("Cancel")').click();
+
+    // Partial match (not exact), no click -> stays unlinked
+    await page.getByRole('button', { name: 'Add Requirement' }).first().click();
+    await expect(page.getByText('New Client Requirement')).toBeVisible({ timeout: 10000 });
+    const clientInput2 = page.locator('input[data-testid="client-name-input"]');
+    const titleInput2 = page.locator('input[placeholder="e.g. Senior Python Developer"]');
+    await clientInput2.fill(clientName.slice(0, 12)); // real prefix, not the full name
+    await titleInput2.click();
+    await page.waitForTimeout(400);
+    await expect(page.locator('text=Linked to existing client record')).toHaveCount(0);
+    await page.locator('button:has-text("Cancel")').click();
+  });
+
   test.afterAll(async ({ request }) => {
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
     if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});

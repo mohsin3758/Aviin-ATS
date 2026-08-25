@@ -13355,3 +13355,39 @@ linked badge). Broader regression sweep (S1/S2/S8/S13/S22/S47/S48/S60,
 Zero-token audit: `CONFIRMED CLEAN` (407 files, 0 external API refs).
 All throwaway test data (2 requisitions, 1 client) cleaned up via real
 APIs, confirmed zero residue.
+
+## Follow-up same day: re-checking the Client combobox fix found a real edge case it missed — typing the exact name and tabbing away without clicking left it unlinked, 2026-08-25
+User asked to check the earlier fix for anything missed. Widened the
+check past the reported scenario (typing "invenio" and clicking a
+suggestion, already confirmed working) — swept the frontend for any
+other free-text `client_name` entry point that might share the same
+gap (found none: the requisition detail page only displays
+`client_name`, its own "Edit" button routes back through the already-
+fixed list-page form; confirmed no requisition bulk-import path exists
+at all, ruling out a second silent free-text client entry).
+
+Then tested the combobox's own edge cases directly rather than assuming
+the click-to-select path was the whole story: typing a client's FULL,
+EXACT real name and tabbing away to the next field WITHOUT clicking the
+dropdown suggestion — confirmed via a real headless-browser check —
+left `client_id` unlinked, silently reproducing the exact original bug
+for the one case a recruiter is most confident about (they typed the
+real name correctly, no reason to expect a click was still required).
+
+Fixed by adding a blur-time auto-link: if nothing was explicitly
+selected and the typed text case-insensitively matches exactly one real
+client, link it automatically on blur — deliberately only on an exact,
+unambiguous match, never a partial one, so a genuinely new client whose
+name happens to be a substring of an existing one is never wrongly
+auto-linked.
+
+Verified all 4 real cases via direct headless-browser checks before
+writing the permanent test: exact match, no click → now correctly
+auto-links; exact match differing only in case ("invenio" vs
+"Invenio") → still correctly auto-links; a partial typed prefix → does
+NOT auto-link; a genuinely new, non-matching name → does NOT auto-link.
+Extended the existing "S60" suite with a 6th test covering the exact-
+match-auto-links / partial-match-does-not-link pair. Broader regression
+sweep (S1/S2/S8/S13/S22/S47/S48/S60, 52 tests) passed clean: 51 passed,
+1 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (407
+files, 0 external API refs).

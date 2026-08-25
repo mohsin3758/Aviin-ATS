@@ -142,6 +142,25 @@ function ClientNameCombobox({
     padding: '9px 12px', fontSize: '13px', outline: 'none',
     color: '#1e293b', background: 'white', boxSizing: 'border-box',
   };
+  // Real follow-up gap fix, same day: typing a client's FULL, EXACT name
+  // and tabbing away without ever clicking the suggestion (a confident
+  // recruiter has no reason to expect a click is required) left client_id
+  // unlinked, silently reproducing the original bug for the one case
+  // where the user is most sure they typed something real. On blur, if
+  // nothing was explicitly selected and the typed text case-insensitively
+  // matches exactly one real client, auto-link it -- deliberately only on
+  // an exact, unambiguous match, never a partial one, so a genuinely new
+  // client name that happens to be a substring of an existing one is
+  // never wrongly auto-linked.
+  const handleBlur = () => {
+    setTimeout(() => {
+      setOpen(false);
+      if (!clientId && q) {
+        const exact = clients.filter((c: any) => c.name?.toLowerCase() === q);
+        if (exact.length === 1) onSelect({ id: exact[0].id, name: exact[0].name });
+      }
+    }, 150);
+  };
   return (
     <div style={{ position: 'relative' }}>
       <input
@@ -150,7 +169,7 @@ function ClientNameCombobox({
         value={value}
         onChange={e => { onChangeText(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onBlur={handleBlur}
         data-testid="client-name-input"
       />
       {clientId && (
