@@ -12825,3 +12825,35 @@ suite (8 tests) added to `qa_automation.spec.ts`. Full regression sweep
 (S1/S2/S8/S13/S16/S30/S57/S58, 61 tests) re-run clean after the
 `location` fix: 60 passed, 1 pre-existing skip, 0 failed. Zero-token
 audit: `CONFIRMED CLEAN` (405 files, 0 external API refs).
+
+## Add Candidate form: Experience field changed from months to Years,
+## 2026-08-25
+Direct follow-up to the Add Candidate form work above — user pointed at
+a screenshot of the "Experience (months)" field and asked to change it
+to "Years Experience". The underlying DB column (`candidates.
+total_exp_mo`) stores months and is used that way throughout the rest
+of the app (list sorting, pipeline scoring, matching) — changing the
+storage unit would be a much bigger, unnecessary migration. Scoped this
+to a pure UI-layer conversion instead: the input now shows/accepts
+years (decimal, `step=0.5` for half-year precision), converting to
+months only at the point of writing `form.total_exp_mo`
+(`Math.round(years*12)`) — the exact same shared state every other part
+of the form/save flow already reads.
+
+Checked for other manual-entry copies of this same field before
+touching anything — found only one other `total_exp_mo` write site
+(`bulk-cv` upload's `createSelected()`), which already computes months
+from a backend-parsed `exp_years` value with no manual input involved,
+so nothing else needed the same change.
+
+Verified for real, not code review: a real headless-browser pass typed
+"4.5" into the new Years Experience field, confirmed the hint line
+showed "= 4y 6m", saved a real candidate through the actual UI (with a
+real resume attached, satisfying the still-mandatory-resume rule from
+the same form), and confirmed via a direct follow-up API call that
+`total_exp_mo` was stored as exactly `54` — not truncated or rounded
+wrong. Extended the existing "S58" suite's real UI test with this exact
+check plus a new API round-trip test confirming the persisted value.
+Regression sweep (S1/S2/S8/S13/S16/S30/S57/S58, 62 tests) passed clean:
+61 passed, 1 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED
+CLEAN` (406 files, 0 external API refs).

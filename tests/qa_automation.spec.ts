@@ -7349,6 +7349,18 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
     const stamp = Date.now();
     await page.locator('input[placeholder="e.g. Rahul Sharma"]').fill('QA S58 UI Test ' + stamp);
     await page.locator('input[placeholder="e.g. Bengaluru, Karnataka"]').fill('Bengaluru');
+
+    // Years Experience field (2026-08-25 follow-up: was "Experience
+    // (months)" — recruiters were typing months into it despite the
+    // label/placeholder saying otherwise; now a real years input,
+    // converted to total_exp_mo internally) — 4.5 years must round to
+    // exactly 54 months, not truncate or drift.
+    await expect(page.getByText('Years Experience')).toBeVisible();
+    await expect(page.getByText('Experience (months)')).not.toBeVisible();
+    const expInput = page.locator('label:has-text("Years Experience")').locator('xpath=..').locator('input[type=number]');
+    await expInput.fill('4.5');
+    await expect(page.getByText('= 4y 6m')).toBeVisible();
+
     await page.getByRole('button', { name: 'Add Candidate' }).last().click();
     await expect(page.getByText(/resume file.*required/i)).toBeVisible({ timeout: 5000 });
 
@@ -7358,6 +7370,14 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
 
     await page.getByRole('button', { name: 'Add Candidate' }).last().click();
     await expect(page.getByText('Add New Candidate')).not.toBeVisible({ timeout: 15000 });
+  });
+
+  test('years-experience API round-trip: 4.5 years persisted from the UI create above stored as exactly 54 months', async ({ request }) => {
+    const search = await request.get(`${API}/candidates?search=QA S58 UI Test`, { headers: auth() });
+    const body = await search.json();
+    const items = body.items || body.data || body || [];
+    expect(items.length).toBeGreaterThan(0);
+    expect(items[0].total_exp_mo).toBe(54);
   });
 
   test.afterAll(async ({ request }) => {
