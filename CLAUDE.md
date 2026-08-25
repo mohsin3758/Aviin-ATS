@@ -13294,3 +13294,64 @@ including that "+ Add via Edit" genuinely opens the Edit modal. Broader
 regression sweep (S1/S2/S8/S13/S16/S30/S48/S56/S58/S59, 80 tests) passed
 clean: 79 passed, 1 pre-existing skip, 0 failed. Zero-token audit:
 `CONFIRMED CLEAN` (407 files, 0 external API refs).
+
+## New Client Requirement: "Client / Company Name" made a real searchable combobox against the clients table, plus a real client_id link that never existed before, 2026-08-25
+User reported, from 2 screenshots: typing "invenio" (a real, already-
+existing client) into the "Client / Company Name" field on the New
+Client Requirement form showed nothing — no suggestions, no way to pick
+from the database.
+
+**Root cause, found by reading the code, not assumed**: this field was
+a plain free-text `<input>` bound only to `client_name` — and, more
+seriously, the form had NEVER populated `requisitions.client_id` at
+all, even though the backend schema (`RequisitionCreate`/
+`RequisitionUpdate`) has carried a real `client_id` FK column since it
+was built. Every requisition created through this form was only ever
+linked to a client by a loose free-text string match, never a real
+foreign key — silently breaking every downstream feature that keys off
+`client_id` (KAE ownership, Account P&L, the Client Portal's real
+token-based link, Tracking Sheet Templates' per-client pinning).
+
+**Fixed**: new `ClientNameCombobox` component (`requisitions/page.tsx`)
+— fetches the real `GET /clients` list, filters live as you type
+(substring match), shows a dropdown of real matching clients with their
+industry, and a "No existing client matches... will be saved as a new
+client name" hint when nothing matches (so typing a genuinely new
+client still works, exactly as before). Selecting a suggestion sets
+BOTH `client_name` and `client_id` and shows a "✓ Linked to existing
+client record" confirmation; typing without selecting clears `client_id`
+so a stale id from an earlier selection can never silently carry over
+onto an unrelated typed name. `openEdit()` now seeds `client_id` from
+the real requisition record when editing.
+
+**A real correctness bug caught before shipping, not after**: the
+natural instinct was to fold `client_id` into the existing "empty
+string → `undefined`" cleanup pass alongside `client_name`/`industry` —
+but `PATCH /requisitions/{id}` uses `model_dump(exclude_unset=True)`,
+so an *omitted* key leaves the requisition's existing `client_id`
+completely untouched in the database. That would mean editing a
+previously-linked requisition and typing a different, non-matching
+client name would update the visible `client_name` while silently
+leaving the OLD `client_id` still pointing at the wrong client — a real,
+invisible data-integrity bug. Fixed by handling `client_id` separately:
+always send it explicitly, either the real id or `null` — never
+omitted — so clearing a stale link is a real, explicit action, not an
+accidental omission.
+
+Verified for real end-to-end, not code review: a real headless-browser
+pass typing "invenio" into the live form showed the actual dropdown
+entry "Invenio · IT Services" and selecting it correctly populated the
+field with the "Linked to existing client record" badge (screenshot-
+confirmed, matching the user's exact reported scenario), zero console
+errors; a direct API round-trip confirmed a real requisition created
+with `client_id` genuinely persists and returns it; a second API call
+confirmed a `PATCH` explicitly sending `client_id: null` genuinely
+clears a previously-set value, proving the "no silent stale id" fix
+holds. New permanent "S60" suite (5 tests: real client_id link on
+create, explicit clear on update, real UI select-and-link, and the
+no-match "will be saved as new client" hint with no false-positive
+linked badge). Broader regression sweep (S1/S2/S8/S13/S22/S47/S48/S60,
+51 tests) passed clean: 50 passed, 1 pre-existing skip, 0 failed.
+Zero-token audit: `CONFIRMED CLEAN` (407 files, 0 external API refs).
+All throwaway test data (2 requisitions, 1 client) cleaned up via real
+APIs, confirmed zero residue.

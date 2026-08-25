@@ -5674,6 +5674,95 @@ test.describe.serial('S47 New Requirement: deadline/expected_start_date save cor
   });
 });
 
+test.describe.serial('S60 New Client Requirement: Client / Company Name is a real searchable combobox linked to client_id', () => {
+  // Real gap fix (2026-08-25) — reported live: typing "invenio" (a real,
+  // existing client) into the Client / Company Name field showed no
+  // suggestions at all. Root cause: the field was a plain free-text input
+  // that never populated requisitions.client_id (only the free-text
+  // client_name column) — the form has never linked a requisition to a
+  // real clients row, which would silently break KAE ownership/account
+  // P&L/client-portal/submission-template features that key off
+  // client_id. Fixed with a real search-and-select combobox against
+  // GET /clients; typing without selecting still works for a genuinely
+  // new client name (client_id stays null), matching this codebase's
+  // "don't force what doesn't need forcing" convention elsewhere.
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  let token = '';
+  let clientId = '';
+  const stamp = Date.now();
+  const clientName = `QA S60 Combobox Client ${stamp}`;
+  let reqId = '';
+
+  test('setup: real auth token + a real throwaway client', async ({ request }) => {
+    token = await getApiToken(request);
+    const c = await request.post(`${API}/clients`, { headers: auth(), data: { name: clientName, industry: 'IT Services' } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+  });
+
+  test('POST /requisitions with client_id links a real client, not just the free-text name', async ({ request }) => {
+    const res = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `QA S60 API Test Role ${stamp}`, client_name: clientName, client_id: clientId, status: 'open' },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const body = await res.json();
+    expect(body.client_id).toBe(clientId);
+    expect(body.client_name).toBe(clientName);
+    reqId = body.id;
+  });
+
+  test('PATCH with a typed name that no longer matches any client explicitly clears client_id (not silently left stale)', async ({ request }) => {
+    const res = await request.patch(`${API}/requisitions/${reqId}`, {
+      headers: auth(), data: { client_name: `${clientName} - renamed no longer linked`, client_id: null },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const body = await res.json();
+    expect(body.client_id).toBeNull();
+  });
+
+  test('real headless UI: typing the real client name shows it in the dropdown; selecting it links client_id and shows the confirmation', async ({ page, request }) => {
+    await page.goto('/requisitions');
+    await page.getByRole('button', { name: 'Add Requirement' }).first().click();
+    await expect(page.getByText('New Client Requirement')).toBeVisible({ timeout: 10000 });
+
+    const clientInput = page.locator('input[data-testid="client-name-input"]');
+    await clientInput.fill(clientName.slice(0, 20)); // partial name, real substring search
+    const option = page.locator('button[data-testid^="client-option-"]', { hasText: clientName });
+    await expect(option).toBeVisible({ timeout: 5000 });
+    await option.click();
+    await expect(clientInput).toHaveValue(clientName);
+    await expect(page.locator('text=Linked to existing client record')).toBeVisible();
+
+    await page.locator('input[placeholder="e.g. Senior Python Developer"]').fill(`QA S60 UI Test Role ${stamp}`);
+    await page.locator('button:has-text("Save Requirement")').click();
+    await expect(page.getByText('New Client Requirement')).not.toBeVisible({ timeout: 15000 });
+
+    const search = await request.get(`${API}/requisitions?limit=500`, { headers: auth() });
+    const rows = await search.json();
+    const uiReq = (Array.isArray(rows) ? rows : rows.data || []).find((r: any) => r.title === `QA S60 UI Test Role ${stamp}`);
+    expect(uiReq).toBeTruthy();
+    expect(uiReq.client_id).toBe(clientId);
+    if (uiReq) await request.delete(`${API}/requisitions/${uiReq.id}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('real headless UI: typing a name with no match shows the "will be saved as new client" hint, no linked-record badge', async ({ page }) => {
+    await page.goto('/requisitions');
+    await page.getByRole('button', { name: 'Add Requirement' }).first().click();
+    await expect(page.getByText('New Client Requirement')).toBeVisible({ timeout: 10000 });
+
+    const clientInput = page.locator('input[data-testid="client-name-input"]');
+    await clientInput.fill(`Totally New Company ${stamp}`);
+    await expect(page.locator('text=/will be saved as a new client name/')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Linked to existing client record')).toHaveCount(0);
+    await page.locator('button:has-text("Cancel")').click();
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+  });
+});
+
 test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the full candidate database', () => {
   let token: string;
   let reqId: string;

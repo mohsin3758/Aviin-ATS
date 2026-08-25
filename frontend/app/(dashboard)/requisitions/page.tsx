@@ -3,7 +3,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
-import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X, ArrowLeft, Download, Mail, Phone, ExternalLink, Star } from 'lucide-react';
+import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X, ArrowLeft, Download, Mail, Phone, ExternalLink, Star, CheckCircle } from 'lucide-react';
 
 // Same auth-gated blob-fetch pattern already used by the Candidate 360
 // page's own Download Resume button — duplicated here (not imported
@@ -38,7 +38,7 @@ const SKILLS_LIST = [
 ];
 
 const EMPTY_FORM = {
-  title: '', client_name: '', industry: '', priority: 'medium',
+  title: '', client_name: '', client_id: '', industry: '', priority: 'medium',
   employment_type: 'contract', work_mode: 'onsite', shift_type: 'day',
   // Real multi-select fields (2026-08-24) — arrays are now the source of
   // truth; employment_type/work_mode above stay in sync as arrays[0] so
@@ -108,6 +108,77 @@ function MultiSelectChips({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// Client / Company Name — real searchable combobox against the actual
+// `clients` table (2026-08-25). Real gap found live: this field was a
+// plain free-text input, and the form never populated client_id at all
+// (only the free-text client_name column) — so a genuinely existing
+// client like "Invenio" never showed up while typing, and even picking
+// its exact name wouldn't have linked the requisition to the real
+// client record (breaking KAE ownership/account P&L/client-portal/
+// submission-template features that key off client_id). Typing still
+// works for a genuinely new client not yet in the system — selecting a
+// suggestion is what links client_id; typing without selecting keeps
+// client_id cleared so a stale id from a previous selection can never
+// silently carry over onto an unrelated typed name.
+function ClientNameCombobox({
+  value, clientId, onSelect, onChangeText,
+}: {
+  value: string;
+  clientId: string;
+  onSelect: (c: { id: string; name: string }) => void;
+  onChangeText: (text: string) => void;
+}) {
+  const { data: clientsRaw } = useFetch<any[]>('/clients');
+  const clients: any[] = clientsRaw || [];
+  const [open, setOpen] = useState(false);
+  const q = value.trim().toLowerCase();
+  const filtered = q ? clients.filter((c: any) => c.name?.toLowerCase().includes(q)) : clients;
+  const inputStyle: React.CSSProperties = {
+    width: '100%', border: '1px solid #e2e8f0', borderRadius: '8px',
+    padding: '9px 12px', fontSize: '13px', outline: 'none',
+    color: '#1e293b', background: 'white', boxSizing: 'border-box',
+  };
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        style={inputStyle}
+        placeholder="Type to search existing clients, e.g. Invenio..."
+        value={value}
+        onChange={e => { onChangeText(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        data-testid="client-name-input"
+      />
+      {clientId && (
+        <div style={{ fontSize: '11px', color: '#16a34a', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <CheckCircle size={11} /> Linked to existing client record
+        </div>
+      )}
+      {open && filtered.length > 0 && (
+        <div data-testid="client-name-dropdown" style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: '4px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.15)', zIndex: 50, maxHeight: '220px', overflowY: 'auto' }}>
+          {filtered.slice(0, 30).map((c: any) => (
+            <button
+              key={c.id}
+              type="button"
+              data-testid={`client-option-${c.id}`}
+              onMouseDown={e => { e.preventDefault(); onSelect({ id: c.id, name: c.name }); setOpen(false); }}
+              style={{ width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', borderBottom: '1px solid #f8fafc', background: c.id === clientId ? '#eff6ff' : '#fff', cursor: 'pointer', fontSize: '12.5px', color: '#1e293b', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+            >
+              <span>{c.name}{c.industry ? <span style={{ color: '#94a3b8' }}> · {c.industry}</span> : null}</span>
+              {c.id === clientId && <CheckCircle size={12} color="#2563eb" />}
+            </button>
+          ))}
+        </div>
+      )}
+      {open && q && filtered.length === 0 && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: '4px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.15)', zIndex: 50, padding: '10px 12px', fontSize: '12px', color: '#94a3b8' }}>
+          No existing client matches "{value.trim()}" — will be saved as a new client name (no linked record).
+        </div>
+      )}
     </div>
   );
 }
@@ -1283,6 +1354,7 @@ function RequisitionsPageInner() {
     setForm({
       title: req.title || '',
       client_name: req.client_name || '',
+      client_id: req.client_id || '',
       industry: req.industry || '',
       priority: req.priority || 'medium',
       employment_type: req.employment_type || 'contract',
@@ -1401,6 +1473,14 @@ function RequisitionsPageInner() {
       ['deadline', 'expected_start_date', 'education_required', 'industry', 'client_name'].forEach(k => {
         if (payload[k] === '') payload[k] = undefined;
       });
+      // client_id is deliberately NOT folded into the generic '' -> undefined
+      // pass above: PATCH uses model_dump(exclude_unset=True), so an omitted
+      // key leaves the requisition's existing client_id untouched. If a
+      // recruiter types a client name that no longer matches the
+      // previously-selected client (real gap fixed 2026-08-25 — the field
+      // never carried client_id at all before), the stale id must be
+      // explicitly cleared, not silently left pointing at the old client.
+      payload.client_id = form.client_id || null;
 
       if (editId) {
         await apiFetch(`/requisitions/${editId}`, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -1615,8 +1695,12 @@ function RequisitionsPageInner() {
               value={form.title} onChange={f('title')} />
           </FormField>
           <FormField label="Client / Company Name">
-            <input style={inputStyle} placeholder="e.g. Infosys, TCS, Startup Inc."
-              value={form.client_name} onChange={f('client_name')} />
+            <ClientNameCombobox
+              value={form.client_name}
+              clientId={form.client_id}
+              onChangeText={text => setForm(prev => ({ ...prev, client_name: text, client_id: '' }))}
+              onSelect={c => setForm(prev => ({ ...prev, client_name: c.name, client_id: c.id }))}
+            />
           </FormField>
         </FormRow>
         <FormRow cols={2}>
