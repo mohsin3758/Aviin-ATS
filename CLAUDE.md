@@ -13260,3 +13260,37 @@ real second-click behavior rather than a guessed assertion point.
 Broader regression sweep (S1/S2/S8/S13/S16/S30/S48/S56/S58/S59, 79 tests)
 passed clean: 78 passed, 1 pre-existing skip, 0 failed. Zero-token audit:
 `CONFIRMED CLEAN` (407 files, 0 external API refs).
+
+## Follow-up same day: Skill/Project Experience section was hidden-when-empty — indistinguishable from "not working" on every real pre-existing candidate, 2026-08-25
+User reported "NOT ABLE TO SEE AND VISIBLE NEW SKILLS TABLE DETAILS" with
+a live screenshot of a real candidate ("Usha N. N") whose drawer showed
+Skills chips and Move to Pipeline, but no Skill/Project Experience
+section anywhere. Confirmed via a direct API call before touching
+anything — `GET /candidates/{id}/skill-experience` genuinely returned
+`{"rows":[]}` for this real candidate. Not a bug in the fetch/render
+logic itself: the section was built (earlier the same day) to match the
+existing Skills-chips/Applications sections' own convention of hiding
+entirely when there's nothing to show — but since this is a brand-new
+field, EVERY pre-existing candidate in the database has zero rows,
+making the section invisible on every real candidate until someone
+starts filling it in via Edit. Indistinguishable from broken.
+
+Fixed by making the section always render, with an honest empty state
+("No skill / project experience recorded yet.") plus a direct
+"+ Add via Edit" link that opens the Edit Candidate modal right where a
+recruiter would actually add the first row — rather than a candidate
+with real data being the only way to confirm the feature exists at all.
+
+Verified for real, not code review: reproduced the exact reported
+candidate's empty response via direct API call first, then a genuine
+headless-browser pass against that SAME real candidate confirmed the
+section now renders with the empty-state text and a working "+ Add via
+Edit" button (screenshot-confirmed, not just a passing locator) — and,
+separately, the earlier real throwaway candidate with an actual saved
+row still renders the full table correctly, confirming the fix didn't
+regress the populated case. New permanent test added to the existing
+"S59" suite (now 4 tests) covering the empty-state case end-to-end,
+including that "+ Add via Edit" genuinely opens the Edit modal. Broader
+regression sweep (S1/S2/S8/S13/S16/S30/S48/S56/S58/S59, 80 tests) passed
+clean: 79 passed, 1 pre-existing skip, 0 failed. Zero-token audit:
+`CONFIRMED CLEAN` (407 files, 0 external API refs).

@@ -441,10 +441,24 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
           </div>
         )}
         {/* Skill / Project Experience table — read-only mirror of what's
-            captured on the Add/Edit Candidate form (2026-08-25). */}
-        {skillExpRows.length>0 && (
-          <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9'}}>
-            <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>SKILL / PROJECT EXPERIENCE ({skillExpRows.length})</div>
+            captured on the Add/Edit Candidate form (2026-08-25).
+            Real bug fix, same day: this used to be hidden entirely when
+            skillExpRows was empty (matching the Skills-chips/Applications
+            sections' own established convention above) — but since this
+            is a brand-new field, every pre-existing candidate genuinely
+            has zero rows, making the whole section indistinguishable
+            from "not working" (reported live against a real candidate,
+            confirmed via direct API: {"rows":[]}). Now always renders,
+            with an honest empty state + a direct path to fill it in,
+            instead of silently disappearing. */}
+        <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9'}}>
+          <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>SKILL / PROJECT EXPERIENCE {skillExpRows.length>0?`(${skillExpRows.length})`:''}</div>
+          {skillExpRows.length===0 ? (
+            <div style={{fontSize:'11px',color:'#94a3b8',fontStyle:'italic',display:'flex',alignItems:'center',justifyContent:'space-between',gap:'8px'}}>
+              <span>No skill / project experience recorded yet.</span>
+              <button onClick={()=>onEdit(candidate)} style={{fontSize:'11px',fontWeight:'700',color:'#1e40af',background:'none',border:'none',cursor:'pointer',padding:0,whiteSpace:'nowrap'}}>+ Add via Edit</button>
+            </div>
+          ) : (
             <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:'8px'}}>
               <table style={{width:'100%',borderCollapse:'collapse',fontSize:'11px',minWidth:'520px'}}>
                 <thead>
@@ -469,8 +483,8 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
                 </tbody>
               </table>
             </div>
-          </div>
-        )}
+          )}
+        </div>
         {/* Move to Pipeline — real action panel (job picker + clickable
             stage pills), matching Resume Inbox's own drawer (2026-08-25) —
             this drawer previously only ever showed the passive "In

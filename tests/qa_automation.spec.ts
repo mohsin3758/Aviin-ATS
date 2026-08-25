@@ -7707,6 +7707,33 @@ test.describe.serial('S59 Candidates drawer: Move to Pipeline action panel + Ski
     expect(Array.isArray(apps) ? apps.length : (apps.items || []).length).toBeGreaterThan(0);
   });
 
+  // Real bug fix, reported live against a genuine pre-existing production
+  // candidate (2026-08-25 follow-up): the section used to be hidden
+  // entirely when skillExpRows was empty (matching the Skills-chips/
+  // Applications sections' own convention) — but since this is a
+  // brand-new field, every pre-existing candidate genuinely has zero
+  // rows, making the section indistinguishable from "not working."
+  // Confirmed the reported candidate really had {"rows":[]} via a direct
+  // API call before concluding it was a display gap, not a data bug.
+  test('real headless UI: Skill/Project Experience section always renders, with an honest empty state (not hidden) when a candidate has zero rows', async ({ page, request }) => {
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S59 NoSkillExp ${stamp}`, location: 'Pune' },
+    });
+    const noExpId = (await cand.json()).id;
+
+    await page.goto(`/candidates?search=QA S59 NoSkillExp ${stamp}`);
+    const row = page.locator('table tbody tr', { hasText: `QA S59 NoSkillExp ${stamp}` }).first();
+    await row.locator('button[title="Quick view"]').click({ timeout: 15000 });
+
+    await expect(page.locator('text=No skill / project experience recorded yet.')).toBeVisible({ timeout: 10000 });
+    const addLink = page.locator('button:has-text("+ Add via Edit")');
+    await expect(addLink).toBeVisible();
+    await addLink.click();
+    await expect(page.getByText('Edit Candidate')).toBeVisible({ timeout: 10000 });
+
+    await request.delete(`${API}/candidates/${noExpId}`, { headers: auth() }).catch(() => {});
+  });
+
   test.afterAll(async ({ request }) => {
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
