@@ -7452,6 +7452,116 @@ test.describe.serial('S61 Client Submission pipeline stage: real client-facing s
   });
 });
 
+test.describe.serial('S62 General Compose: resume auto-attach + real tracking-sheet insert', () => {
+  // Real gap fix (2026-08-25) — the general Compose tool (Conversations
+  // page) could only ever attach a manually-picked local file and paste
+  // an empty blank table via "Insert Table". Both new controls reuse
+  // existing, already-proven engines rather than duplicating them: the
+  // "Resume" button calls the real single-candidate Resume Generator
+  // (POST /resume-generator/candidates/{id}/generate + its download
+  // endpoint) and attaches the result as a real File; "Tracking Sheet"
+  // calls a new, read-only GET /applications/{id}/tracking-sheet-preview
+  // (built alongside this feature, reusing _app_context/_resolve_template/
+  // _build_tracking_html_table — the exact same cumulative-sheet logic
+  // Submit-to-KAE already uses) and inserts the real, populated HTML
+  // table directly into the email body via execCommand('insertHTML').
+  // Both are optional — a plain email with neither still works.
+  let token = '';
+  let candId = '';
+  let reqId = '';
+  let appId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test('setup: real throwaway candidate + open requisition + application', async ({ request }) => {
+    token = await getApiToken(request);
+    const r = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `QA S62 Compose Role ${stamp}`, status: 'open' },
+    });
+    reqId = (await r.json()).id;
+    const c = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S62 Compose Candidate ${stamp}`, phone: `7${String(stamp).slice(-9)}`, skills: ['Python', 'SAP'] },
+    });
+    candId = (await c.json()).id;
+    const app = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: candId, stage: 'screened' } });
+    appId = (await app.json()).id;
+  });
+
+  test('GET /applications/{id}/tracking-sheet-preview returns a real, populated HTML table (read-only, no submission written)', async ({ request }) => {
+    const before = await (await request.get(`${API}/applications/${appId}/submissions`, { headers: auth() })).json();
+
+    const r = await request.get(`${API}/applications/${appId}/tracking-sheet-preview`, { headers: auth() });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    const body = await r.json();
+    expect(body.role_title).toContain('QA S62 Compose Role');
+    expect(body.candidate_name).toContain('QA S62 Compose Candidate');
+    expect(body.tracking_html).toContain('<table');
+    expect(body.tracking_html).toContain('<th');
+    // The real candidate's own name must appear as a real cell value, not
+    // just a placeholder table shell.
+    expect(body.tracking_html).toContain('QA S62 Compose Candidate');
+
+    // Read-only: no candidate_submissions row was created by the preview.
+    const after = await (await request.get(`${API}/applications/${appId}/submissions`, { headers: auth() })).json();
+    expect(after.length).toBe(before.length);
+  });
+
+  test('resume-generator single-candidate generate + download round-trip produces a real PDF', async ({ request }) => {
+    const templates = await (await request.get(`${API}/resume-generator/templates`, { headers: auth() })).json();
+    expect(templates.length).toBeGreaterThan(0);
+    const gen = await request.post(`${API}/resume-generator/candidates/${candId}/generate`, {
+      headers: auth(), data: { template_id: templates[0].id, output_format: 'pdf' },
+    });
+    expect(gen.ok(), await gen.text()).toBeTruthy();
+    const genBody = await gen.json();
+    const dl = await request.get(`${API}/resume-generator/${genBody.id}/download`, { headers: auth() });
+    expect(dl.ok()).toBeTruthy();
+    const buf = await dl.body();
+    expect(buf.slice(0, 4).toString()).toBe('%PDF');
+  });
+
+  test('real headless UI: Compose’s Resume and Tracking Sheet buttons only appear for a real candidate recipient, and both flows genuinely work', async ({ page }) => {
+    await page.goto('/conversations');
+    await page.getByRole('button', { name: /compose/i }).first().click();
+    await page.waitForTimeout(600);
+
+    // Before picking a candidate recipient, neither control exists.
+    await expect(page.locator('[data-testid="compose-resume-btn"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="compose-tracking-btn"]')).toHaveCount(0);
+
+    const toInput = page.locator('input[placeholder*="Type name" i]').first();
+    await toInput.fill(`QA S62 Compose Candidate ${stamp}`);
+    await page.waitForTimeout(1200);
+    await page.locator(`text=QA S62 Compose Candidate ${stamp}`).first().click();
+    await page.waitForTimeout(800);
+
+    await expect(page.locator('[data-testid="compose-resume-btn"]')).toBeVisible();
+    await expect(page.locator('[data-testid="compose-tracking-btn"]')).toBeVisible();
+
+    // Tracking Sheet: pick the real role, confirm the real table lands in the body.
+    await page.locator('[data-testid="compose-tracking-btn"]').click();
+    await expect(page.locator('[data-testid="compose-tracking-menu"]')).toContainText('QA S62 Compose Role');
+    await page.locator(`[data-testid="compose-tracking-app-${appId}"]`).click();
+    await page.waitForTimeout(1200);
+    const bodyHtml = await page.locator('div[contenteditable="true"]').first().innerHTML();
+    expect(bodyHtml).toContain('<table');
+    expect(bodyHtml).toContain('QA S62 Compose Candidate');
+
+    // Resume: pick a format, confirm a real attachment chip appears.
+    await page.locator('[data-testid="compose-resume-btn"]').click();
+    await page.waitForTimeout(300);
+    await page.locator('[data-testid="compose-resume-menu"] button').first().click();
+    await page.waitForTimeout(4000);
+    await expect(page.locator('text=/Resume_.*\\.pdf/i').first()).toBeVisible({ timeout: 10000 });
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: auth() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+});
+
 test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not Invalid/Expired', () => {
   // Regression for the exact same dead-code bug already fixed for NDA
   // e-sign (sql/74): sign_offer_by_token() used to null offer_letters.

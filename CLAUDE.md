@@ -13546,3 +13546,84 @@ extension (the second half of the original plan) — the Client
 Submission stage wiring (the user's original, more specific ask) was
 built and verified first; the Compose extension remains a real, scoped,
 still-open follow-up.
+
+## General Compose: resume auto-attach + real tracking-sheet insert, 2026-08-25
+Direct follow-up, same day — the deferred second half of the Client
+Submission plan above, now built. User's exact ask: let a recruiter
+using the plain Conversations Compose tool (not the dedicated Submit-to-
+KAE/Submit-to-Client flows) auto-attach a candidate's resume and insert
+a real, populated tracking sheet, both optional. Answered via 3
+clarifying questions earlier the same day: confirm Submit-to-Client
+already covers the client-facing case (it does) and extend Compose too;
+tracking-sheet scope resolved via a second dropdown ("pick their role");
+resume version resolved via a format picker (clean/redacted/etc.), not
+auto-picked.
+
+Both new controls reuse existing, already-proven engines rather than
+building a third document/tracking system:
+- **Resume** — calls the real single-candidate Resume Generator
+  (`POST /resume-generator/candidates/{id}/generate` with a chosen
+  `template_id`, then `GET /resume-generator/{id}/download`), fetches
+  the result as a Blob, wraps it as a `File`, and pushes it into the
+  SAME `attachments` state array the manual file-picker already
+  populates — `handleSend`'s existing `FormData` append loop needed zero
+  changes to actually send it.
+- **Tracking Sheet** — new read-only `GET /applications/{id}/
+  tracking-sheet-preview` (`kae_submission.py`), built from the exact
+  same pieces `_do_kae_submission`'s real send path already uses
+  (`_app_context`, `_resolve_template(..., 'recruiter_to_kae')`, the
+  same cumulative-`sl_no` prior-submissions query, `_build_tracking_
+  html_table`) — never sends anything, never writes `candidate_
+  submissions`, never advances the real `sl_no` sequence a genuine send
+  would. The frontend inserts the returned HTML directly into the email
+  body via `document.execCommand('insertHTML', ...)` — the identical
+  mechanism the pre-existing "Insert Table" toolbar button already used
+  for a blank table, just with real, live data instead.
+
+Both controls are gated on `to?.id` (a real candidate picked via the
+"To" autocomplete, not a bare typed email) — a plain email to a
+non-candidate address is completely unaffected, and picking neither
+control still works exactly as before. The Resume button opens a
+dropdown of the tenant's real resume-generator templates (`GET
+/resume-generator/templates`); the Tracking Sheet button opens a
+dropdown of that candidate's real applications (`GET /candidates/{id}/
+applications`, already existing) and is hidden entirely when they have
+none.
+
+Verified for real end-to-end, not code review: called the new
+`tracking-sheet-preview` endpoint directly against a real production
+candidate/application and confirmed a genuine 6,781-char populated
+`<table>` (real name, real role, real column set matching the KAE-
+submission sheet's own shape); called the resume-generator generate+
+download round-trip and confirmed a real 64KB `%PDF`-prefixed file. A
+full real headless-browser pass through the actual Conversations page:
+opened Compose, typed a real candidate's name into the To field
+(catching and fixing a real test-locator mistake in my own verification
+script along the way — the first attempt typed into the sidebar's
+global search bar, which shares no relation to the compose "To" field,
+not an app bug), picked them, confirmed both new buttons render only
+once a candidate is selected, clicked Tracking Sheet → picked their real
+role → confirmed the real HTML table (SL No/Date/Partner/Name/Role/
+Total Exp/Relevant Exp/Skills columns, matching the tracking-sheet
+screenshot referenced in the original request) landed in the editable
+body — screenshot-confirmed, not just checked for a passing locator;
+then clicked Resume → picked a format → confirmed a real
+`Resume_<name>.pdf (63KB)` attachment chip appeared next to the existing
+Send/Attach/Save Draft buttons, with zero console errors throughout.
+
+New permanent "S62 General Compose" suite (4 tests) added to
+`qa_automation.spec.ts`, using a fresh throwaway candidate/requisition/
+application rather than real production data (unlike the manual
+verification above) so it stays deterministic regardless of what real
+candidates exist at test-run time — covers the read-only guarantee (no
+`candidate_submissions` row created by the preview), the real PDF
+round-trip, and the full real click-through (including confirming
+neither button exists before a candidate is picked). Broader regression
+sweep across every suite touching the 2 modified files
+(S13/S17/S29/S54/S61/S62, 63 tests) passed clean: 63/63, 0 failed. Zero-
+token audit: `CONFIRMED CLEAN` (408 files, 0 external API refs).
+
+With this, both halves of the original "check the client submission
+stage and email format" request are complete — the dedicated Client
+Submission automation and the general Compose tool's own resume/
+tracking-sheet controls.

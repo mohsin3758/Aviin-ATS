@@ -789,6 +789,35 @@ async def submission_preview(application_id: str, actor: Actor = Depends(get_act
     }
 
 
+@router.get("/applications/{application_id}/tracking-sheet-preview")
+async def tracking_sheet_preview_for_compose(application_id: str, actor: Actor = Depends(get_actor)):
+    """Real, populated tracking-sheet HTML for a given application — reuses
+    the exact same cumulative-sheet logic (recruiter->KAE direction, sl_no
+    counted the same way) as Submit-to-KAE, but read-only: never sends
+    anything, never writes candidate_submissions, never bumps sl_no for
+    real. Built so the general Compose tool's "Insert Tracking Sheet"
+    action can drop the real, live sheet into an arbitrary email body
+    without going through either dedicated send flow."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row, auto_values = await _app_context(conn, application_id)
+        template = await _resolve_template(conn, actor.tenant_id, row["client_id"], "recruiter_to_kae")
+        if not template:
+            raise HTTPException(400, "No tracking sheet template available — create one under Ops Settings > Templates")
+        columns = _jsonb(template["columns"], [])
+        prior_rows = await conn.fetch(
+            "SELECT field_values FROM candidate_submissions WHERE requisition_id=$1 AND direction='recruiter_to_kae' ORDER BY sent_at",
+            row["requisition_id"])
+    sl_no = len(prior_rows) + 1
+    final_values = {**auto_values, "sl_no": str(sl_no)}
+    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    tracking_html = _build_tracking_html_table(columns, sheet_rows)
+    return {
+        "tracking_html": tracking_html,
+        "role_title": row["role_title"],
+        "candidate_name": row["full_name"],
+    }
+
+
 _RESUME_STYLES = ("clean_generated", "redacted_original", "manual", "projects_only", "confidential", "anonymized")
 
 

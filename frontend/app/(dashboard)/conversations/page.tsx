@@ -125,6 +125,16 @@ function ComposePane({
   const [fullscreen, setFullscreen] = useState(false);
   const [priority, setPriority] = useState<'normal'|'high'|'low'>('normal');
   const [attachments, setAttachments] = useState<File[]>([]);
+  // Resume auto-attach + tracking-sheet insert (2026-08-25) — reuses the
+  // real Resume Generator + Submit-to-KAE tracking-sheet engines rather
+  // than building a second one; both are optional, a plain email with
+  // neither still works exactly as before.
+  const [resumeTemplates, setResumeTemplates] = useState<any[]>([]);
+  const [showResumeMenu, setShowResumeMenu] = useState(false);
+  const [attachingResume, setAttachingResume] = useState(false);
+  const [candApps, setCandApps] = useState<any[]>([]);
+  const [showTrackMenu, setShowTrackMenu] = useState(false);
+  const [insertingTrack, setInsertingTrack] = useState(false);
   const [readReceipt, setReadReceipt] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleAt, setScheduleAt] = useState('');
@@ -171,6 +181,14 @@ function ComposePane({
     setShowSugg(true);
   }, [toInput, candidates, to]);
 
+  // Only a real candidate recipient (to.id set) has a resume/pipeline
+  // history to draw from — a plain typed-in email address gets neither.
+  useEffect(() => {
+    if (!to?.id) { setResumeTemplates([]); setCandApps([]); return; }
+    apiFetch('/resume-generator/templates').then(setResumeTemplates).catch(()=>setResumeTemplates([]));
+    apiFetch('/candidates/'+to.id+'/applications').then(setCandApps).catch(()=>setCandApps([]));
+  }, [to?.id]);
+
   // Auto-save draft every 30s
   useEffect(() => {
     autoTimer.current = setInterval(async()=>{
@@ -214,6 +232,36 @@ function ComposePane({
     html += '</tbody></table><p><br></p>';
     document.execCommand('insertHTML', false, html);
     bodyRef.current?.focus();
+  };
+
+  const attachResume = async (templateId: string) => {
+    if (!to?.id) return;
+    setAttachingResume(true);
+    try {
+      const gen = await apiFetch(`/resume-generator/candidates/${to.id}/generate`, {
+        method: 'POST', body: JSON.stringify({ template_id: templateId, output_format: 'pdf' }),
+      });
+      const { authHeaders } = await import('@/lib/auth');
+      const resp = await fetch((process.env.NEXT_PUBLIC_API_URL ?? '/api') + `/resume-generator/${gen.id}/download`, { headers: authHeaders() });
+      if (!resp.ok) throw new Error('Resume download failed');
+      const blob = await resp.blob();
+      const safeName = (to.name || 'candidate').replace(/[^A-Za-z0-9]+/g, '_');
+      const file = new File([blob], `Resume_${safeName}.pdf`, { type: blob.type || 'application/pdf' });
+      setAttachments(prev => [...prev, file]);
+    } catch (e: any) { alert(e?.message || 'Resume generation failed'); }
+    finally { setAttachingResume(false); setShowResumeMenu(false); }
+  };
+
+  const insertTrackingSheet = async (applicationId: string) => {
+    setInsertingTrack(true);
+    try {
+      const r = await apiFetch(`/applications/${applicationId}/tracking-sheet-preview`);
+      bodyRef.current?.focus();
+      document.execCommand('insertHTML', false,
+        `<p><br></p><p style="font-size:12px;color:#475569;font-weight:600;margin:4px 0">Tracking Sheet — ${r.role_title || ''}</p>${r.tracking_html}<p><br></p>`);
+      updateWordCount();
+    } catch (e: any) { alert(e?.message || 'Could not load tracking sheet'); }
+    finally { setInsertingTrack(false); setShowTrackMenu(false); }
   };
 
   const applyFontFamily = (f: string) => { exec('fontName', f); setShowFontFamily(false); };
@@ -651,6 +699,69 @@ function ComposePane({
         </button>
         <input ref={fileRef} type="file" multiple style={{display:'none'}}
           onChange={e=>setAttachments(prev=>[...prev,...Array.from(e.target.files||[])])}/>
+        {to?.id && (
+          <div style={{position:'relative'}}>
+            <button data-testid="compose-resume-btn" onClick={()=>{setShowResumeMenu(v=>!v);setShowTrackMenu(false);}}
+              disabled={attachingResume}
+              title="Auto-attach this candidate's resume"
+              style={{display:'flex',alignItems:'center',gap:'5px',padding:'9px 14px',
+                border:'1.5px solid #e2e8f0',borderRadius:'8px',background:'white',
+                color:'#475569',fontSize:'13px',fontWeight:'600',cursor:attachingResume?'not-allowed':'pointer'}}>
+              {attachingResume?<Loader2 size={13} className="animate-spin"/>:<FileText size={13}/>} Resume
+            </button>
+            {showResumeMenu && (
+              <div data-testid="compose-resume-menu" style={{position:'absolute',bottom:'110%',left:0,minWidth:'220px',
+                background:'white',border:'1px solid #e2e8f0',borderRadius:'8px',boxShadow:'0 8px 24px rgba(0,0,0,0.12)',
+                zIndex:50,maxHeight:'240px',overflowY:'auto'}}>
+                <div style={{padding:'8px 12px',fontSize:'11px',fontWeight:'700',color:'#64748b',borderBottom:'1px solid #f1f5f9'}}>
+                  Pick a format to attach
+                </div>
+                {resumeTemplates.length===0 && <div style={{padding:'10px 12px',fontSize:'12px',color:'#94a3b8'}}>No formats configured</div>}
+                {resumeTemplates.map((t:any)=>(
+                  <button key={t.id} data-testid={`compose-resume-format-${t.id}`}
+                    onClick={()=>attachResume(t.id)}
+                    style={{display:'block',width:'100%',textAlign:'left',padding:'9px 12px',border:'none',
+                      background:'white',fontSize:'12px',color:'#1e293b',cursor:'pointer'}}
+                    onMouseEnter={e=>(e.currentTarget.style.background='#f8fafc')}
+                    onMouseLeave={e=>(e.currentTarget.style.background='white')}>
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {to?.id && candApps.length>0 && (
+          <div style={{position:'relative'}}>
+            <button data-testid="compose-tracking-btn" onClick={()=>{setShowTrackMenu(v=>!v);setShowResumeMenu(false);}}
+              disabled={insertingTrack}
+              title="Insert the real, live tracking sheet for one of this candidate's roles"
+              style={{display:'flex',alignItems:'center',gap:'5px',padding:'9px 14px',
+                border:'1.5px solid #e2e8f0',borderRadius:'8px',background:'white',
+                color:'#475569',fontSize:'13px',fontWeight:'600',cursor:insertingTrack?'not-allowed':'pointer'}}>
+              {insertingTrack?<Loader2 size={13} className="animate-spin"/>:<Table size={13}/>} Tracking Sheet
+            </button>
+            {showTrackMenu && (
+              <div data-testid="compose-tracking-menu" style={{position:'absolute',bottom:'110%',left:0,minWidth:'260px',
+                background:'white',border:'1px solid #e2e8f0',borderRadius:'8px',boxShadow:'0 8px 24px rgba(0,0,0,0.12)',
+                zIndex:50,maxHeight:'240px',overflowY:'auto'}}>
+                <div style={{padding:'8px 12px',fontSize:'11px',fontWeight:'700',color:'#64748b',borderBottom:'1px solid #f1f5f9'}}>
+                  Pick their role
+                </div>
+                {candApps.map((a:any)=>(
+                  <button key={a.id} data-testid={`compose-tracking-app-${a.id}`}
+                    onClick={()=>insertTrackingSheet(a.id)}
+                    style={{display:'block',width:'100%',textAlign:'left',padding:'9px 12px',border:'none',
+                      background:'white',fontSize:'12px',color:'#1e293b',cursor:'pointer'}}
+                    onMouseEnter={e=>(e.currentTarget.style.background='#f8fafc')}
+                    onMouseLeave={e=>(e.currentTarget.style.background='white')}>
+                    {a.requisition_title} <span style={{color:'#94a3b8'}}>· {a.stage}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <button onClick={handleDraft}
           style={{display:'flex',alignItems:'center',gap:'5px',padding:'9px 14px',
             border:'1.5px solid #e2e8f0',borderRadius:'8px',background:'white',
