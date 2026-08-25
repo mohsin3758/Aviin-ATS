@@ -773,6 +773,7 @@ export default function CandidatesPage() {
   // recruiter sees "already in database" within a second of typing,
   // not only after clicking Add Candidate.
   const [liveDup,setLiveDup] = useState<any>(null);
+  const [liveDupChecking,setLiveDupChecking] = useState(false);
   const liveDupTimer = useRef<any>(null);
   const [resumeFile,setResumeFile] = useState<File|null>(null);
   const [lwdFile,setLwdFile] = useState<File|null>(null);
@@ -895,7 +896,7 @@ export default function CandidatesPage() {
   const toggleSel = (id:string)=>{ const s=new Set(selected); s.has(id)?s.delete(id):s.add(id); setSelected(s); };
 
   // handlers
-  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);};
+  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);setLiveDupChecking(false);};
   const openCreate = ()=>{setForm({...EMPTY});setEditId(null);setErr('');setDupWarning(null);setSkipDupCheck(false);resetDocState();setShowModal(true);};
   const openEdit   = (d:any)=>{
     setForm({full_name:d.full_name||'',email:d.email||'',phone:d.phone||'',location:d.location||'',
@@ -918,13 +919,15 @@ export default function CandidatesPage() {
     if (!showModal || editId) return;
     if (liveDupTimer.current) clearTimeout(liveDupTimer.current);
     const email = form.email.trim(), phone = form.phone.trim();
-    if (!email && phone.replace(/\D/g,'').length < 7) { setLiveDup(null); return; }
+    if (!email && phone.replace(/\D/g,'').length < 7) { setLiveDup(null); setLiveDupChecking(false); return; }
+    setLiveDupChecking(true);
     liveDupTimer.current = setTimeout(async ()=>{
       const p = new URLSearchParams();
       if (email) p.append('email', email);
       if (phone) p.append('phone', phone);
       try { const dup = await apiFetch('/candidates/check-duplicate?'+p.toString()); setLiveDup(dup); }
       catch { /* non-blocking — silently skip a failed live check */ }
+      finally { setLiveDupChecking(false); }
     }, 500);
     return ()=>{ if (liveDupTimer.current) clearTimeout(liveDupTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1418,12 +1421,22 @@ export default function CandidatesPage() {
         )}
         <SectionDivider label="Personal Information"/>
         <FormRow><FormField label="Full Name" required><input style={INP} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))}/></FormField><FormField label="Email"><input type="email" style={INP} placeholder="rahul@example.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></FormField></FormRow>
-        {!editId&&liveDup?.has_duplicate&&(
-          <div style={{display:'flex',alignItems:'center',gap:'6px',marginTop:'-8px',marginBottom:'12px',padding:'6px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'7px',fontSize:'11px',color:'#dc2626',fontWeight:'700'}}>
-            <AlertTriangle size={12}/> Duplicate — {(liveDup.duplicates||[]).map((d:any)=>d.candidate.full_name).join(', ')} already {(liveDup.duplicates||[]).length>1?'exist':'exists'} with this {(liveDup.duplicates||[]).map((d:any)=>d.match_type).join('/')}
+        <FormRow><FormField label="Phone"><input style={INP} placeholder="+91 9876543210" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))}/></FormField><FormField label="Current Location" required><input style={INP} placeholder="e.g. Bengaluru, Karnataka" value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))}/></FormField></FormRow>
+        {!editId&&liveDupChecking&&!liveDup?.has_duplicate&&(form.email||form.phone.replace(/\D/g,'').length>=7)&&(
+          <div style={{display:'flex',alignItems:'center',gap:'6px',marginTop:'-8px',marginBottom:'12px',fontSize:'11px',color:'#94a3b8'}}>
+            <Search size={11}/> Checking database for duplicates…
           </div>
         )}
-        <FormRow><FormField label="Phone"><input style={INP} placeholder="+91 9876543210" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))}/></FormField><FormField label="Current Location" required><input style={INP} placeholder="e.g. Bengaluru, Karnataka" value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))}/></FormField></FormRow>
+        {!editId&&liveDup?.has_duplicate&&(
+          <div style={{marginTop:'-8px',marginBottom:'12px',padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'7px',fontSize:'11px',color:'#dc2626'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'6px',fontWeight:'700',marginBottom:'2px'}}>
+              <AlertTriangle size={12}/> {(liveDup.duplicates||[]).length} duplicate candidate{(liveDup.duplicates||[]).length>1?'s':''} found in the database
+            </div>
+            {(liveDup.duplicates||[]).map((d:any,i:number)=>(
+              <div key={i} style={{marginLeft:'18px'}}>{d.candidate.full_name} — matches on {d.match_type}</div>
+            ))}
+          </div>
+        )}
         <FormRow><FormField label="Desired Location" hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField><FormField label="LinkedIn URL"><input style={INP} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>setForm(f=>({...f,linkedin_url:e.target.value}))}/></FormField></FormRow>
         <FormRow><FormField label="Source"><select style={INP} value={form.source} onChange={e=>setForm(f=>({...f,source:e.target.value}))}>{SRC.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></FormField><div/></FormRow>
         <SectionDivider label="Professional Details"/>

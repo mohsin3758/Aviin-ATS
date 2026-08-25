@@ -7380,6 +7380,42 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
     expect(items[0].total_exp_mo).toBe(54);
   });
 
+  test('real headless UI: live duplicate check shows a real count, right below the field you\'re typing into (2026-08-25 follow-up — was rendered above Phone, disconnected from where a recruiter is actually looking)', async ({ request, page }) => {
+    const stamp = Date.now();
+    const dupPhone = '99' + String(stamp).slice(-8);
+    const dupEmail = `qa.s58.dupcheck.${stamp}@qatest.example`;
+    const base = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S58 Dup Base ${stamp}`, email: dupEmail, phone: dupPhone, location: 'Pune' },
+    });
+    expect(base.ok()).toBeTruthy();
+    const baseId = (await base.json()).id;
+
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /Add Candidate/i }).first().click();
+    await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
+
+    // Phone match — banner must render BELOW the Phone/Current Location
+    // row (not above it, next to Email) and state a real count.
+    const phoneInput = page.locator('input[placeholder="+91 9876543210"]');
+    await phoneInput.fill(dupPhone);
+    const dupBanner = page.locator('text=/duplicate candidate.*found/i');
+    await expect(dupBanner).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=matches on phone')).toBeVisible();
+    const phoneBox = await phoneInput.boundingBox();
+    const bannerBox = await dupBanner.boundingBox();
+    expect(bannerBox!.y).toBeGreaterThan(phoneBox!.y);
+
+    // Clearing the phone and using the matching email instead must still
+    // trigger the same real-time check via the other field.
+    await phoneInput.fill('');
+    await expect(dupBanner).not.toBeVisible({ timeout: 5000 });
+    await page.locator('input[placeholder="rahul@example.com"]').fill(dupEmail);
+    await expect(dupBanner).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=matches on email')).toBeVisible();
+
+    await request.delete(`${API}/candidates/${baseId}`, { headers: auth() }).catch(() => {});
+  });
+
   test.afterAll(async ({ request }) => {
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
     const search = await request.get(`${API}/candidates?search=QA S58 UI Test`, { headers: auth() }).catch(() => null);

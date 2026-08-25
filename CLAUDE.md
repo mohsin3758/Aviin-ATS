@@ -12857,3 +12857,51 @@ check plus a new API round-trip test confirming the persisted value.
 Regression sweep (S1/S2/S8/S13/S16/S30/S57/S58, 62 tests) passed clean:
 61 passed, 1 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED
 CLEAN` (406 files, 0 external API refs).
+
+## Add Candidate live duplicate check: real UX bug found and fixed - the
+## warning worked but was disconnected from where a recruiter was
+## actually typing, 2026-08-25
+Direct follow-up to the Add Candidate form work above. User asked for a
+live duplicate check on phone/email entry that counts and displays
+matches. Investigated before assuming a rebuild was needed - the
+real-time check (built earlier the same day) was already live-tested
+via the API directly and confirmed working correctly. Investigated the
+actual UI next, via a genuine headless-browser run with a real duplicate
+candidate seeded first (not assumed) - the check DID fire correctly
+(`BANNER_VISIBLE: true`), but a pulled screenshot showed the real bug:
+the warning banner rendered right after the Full Name/Email row,
+**above** the Phone/Current Location row - so typing a duplicate phone
+number produced a warning that appeared higher up on screen, near
+Email, not near where the recruiter's eyes and cursor actually were.
+Confirmed the exact y-coordinates via real bounding-box measurement
+(banner at y=282.5, Phone field at y=348) before touching any code,
+not just visually guessed.
+
+**Fixed properly, not just repositioned**: moved the warning block to
+render right after the Phone/Current Location row instead of before it
+(now appears directly below Phone, confirmed banner y=368 vs Phone
+y=313.5 post-fix). Rewrote the message to lead with an explicit count
+("N duplicate candidate(s) found in the database") plus a per-duplicate
+breakdown line ("Name — matches on phone/email"), matching the user's
+literal ask ("it should be count and display duplicate candidates") -
+the old copy only ever named candidates inline with no count. Added a
+real "Checking database for duplicates…" indicator (new `liveDupChecking`
+state, set while the debounced request is in flight) so a recruiter sees
+active feedback the moment they finish typing, not just a delayed
+pass/fail after ~500ms with nothing in between.
+
+Verified for real end-to-end, not code review: a genuine headless-
+browser pass with a real seeded duplicate candidate confirmed the
+banner now renders below Phone (not above), states the real count,
+and lists the correct match reason; confirmed the identical fix also
+covers email-based matches (typed a duplicate email instead of phone,
+same banner + "matches on email"); confirmed the banner correctly
+clears when the field is emptied again (not stuck showing a stale
+result). New permanent test added to the existing "S58" suite - creates
+a real throwaway base candidate, checks the banner's bounding-box
+position is genuinely below the Phone field (not just present), checks
+both phone and email trigger paths, and cleans up its own throwaway
+data. Full S58 suite (10/10) and a broader regression sweep
+(S1/S2/S8/S13/S16/S30/S57/S58, 63 tests) re-run clean: 62 passed, 1
+pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (406
+files, 0 external API refs).
