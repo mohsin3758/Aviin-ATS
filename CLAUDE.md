@@ -12905,3 +12905,37 @@ data. Full S58 suite (10/10) and a broader regression sweep
 (S1/S2/S8/S13/S16/S30/S57/S58, 63 tests) re-run clean: 62 passed, 1
 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (406
 files, 0 external API refs).
+
+## Add Candidate live duplicate check: no visible confirmation when a
+## check completes with no match, 2026-08-25
+Direct follow-up to the same-day duplicate-check positioning fix. User
+reported the check "not showing correctly and check mark" after typing
+a real phone number. Investigated the exact number first, not assumed:
+`GET /candidates/check-duplicate?phone=9738333493` genuinely returned
+`has_duplicate:false` — the number really wasn't a duplicate, so the
+check was correctly finding nothing. The real bug was downstream of
+that: confirmed via a genuine headless-browser pass (typed the number,
+waited past the 500ms debounce, pulled a screenshot) that once a clean
+check completes, **nothing at all renders** — no confirmation, no
+checkmark, no visible sign the search ever ran. Indistinguishable from
+"it's not checking," exactly matching what was reported.
+
+Added a real green "✓ No duplicates found — this phone/email is not
+already in the database" confirmation, shown whenever `liveDup` holds a
+resolved response with `has_duplicate===false` (distinct from `null`,
+which still means "hasn't checked yet" and correctly shows nothing).
+The existing red "N duplicate candidate(s) found" banner and the
+"Checking database…" in-flight indicator (both built earlier the same
+day) were untouched — this fix only adds the missing third state.
+
+Verified for real, not code review: a genuine headless-browser pass
+against the exact same phone number from the report confirmed the new
+green confirmation now renders directly below Phone; a second pass with
+a real seeded duplicate for the same number confirmed the red banner
+still renders correctly and unaffected (both states visually pulled and
+compared, not assumed from reading the JSX). Extended the existing
+"S58" suite's duplicate-check UI test with the clean-check confirmation
+case. Full S58 suite (10/10) and a broader regression sweep
+(S1/S2/S8/S13/S16/S30/S57/S58, 63 tests) re-run clean: 62 passed, 1
+pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (406
+files, 0 external API refs).

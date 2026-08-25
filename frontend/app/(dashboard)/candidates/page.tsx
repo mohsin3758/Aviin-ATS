@@ -8,7 +8,7 @@ import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
   FileText, Users, GitMerge, Eye, Clock, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Layers,
-  Bookmark, Sparkles, ArrowLeft,
+  Bookmark, Sparkles, ArrowLeft, Check,
 } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1435,6 +1435,11 @@ export default function CandidatesPage() {
             {(liveDup.duplicates||[]).map((d:any,i:number)=>(
               <div key={i} style={{marginLeft:'18px'}}>{d.candidate.full_name} — matches on {d.match_type}</div>
             ))}
+          </div>
+        )}
+        {!editId&&liveDup&&liveDup.has_duplicate===false&&(
+          <div style={{display:'flex',alignItems:'center',gap:'6px',marginTop:'-8px',marginBottom:'12px',padding:'6px 12px',background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:'7px',fontSize:'11px',color:'#166534',fontWeight:'600'}}>
+            <Check size={12}/> No duplicates found — this phone/email is not already in the database
           </div>
         )}
         <FormRow><FormField label="Desired Location" hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField><FormField label="LinkedIn URL"><input style={INP} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>setForm(f=>({...f,linkedin_url:e.target.value}))}/></FormField></FormRow>

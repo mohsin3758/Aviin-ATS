@@ -7413,6 +7413,18 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
     await expect(dupBanner).toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=matches on email')).toBeVisible();
 
+    // 2026-08-25 follow-up: a genuinely clean phone/email used to show
+    // NOTHING once the check finished, indistinguishable from "the check
+    // never ran" — now a real green confirmation. Confirm it shows for a
+    // real, definitely-not-duplicate number, and that it's gone again
+    // for the still-duplicate email left in the field above.
+    await page.locator('input[placeholder="rahul@example.com"]').fill('');
+    const cleanPhone = '97' + String(Date.now()).slice(-8);
+    await phoneInput.fill(cleanPhone);
+    const cleanBanner = page.locator('text=/No duplicates found/i');
+    await expect(cleanBanner).toBeVisible({ timeout: 5000 });
+    await expect(dupBanner).not.toBeVisible();
+
     await request.delete(`${API}/candidates/${baseId}`, { headers: auth() }).catch(() => {});
   });
 
