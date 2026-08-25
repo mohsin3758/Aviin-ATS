@@ -13032,3 +13032,103 @@ S58, 77 tests) re-run clean: 76 passed, 1 pre-existing skip, 0 failed.
 Zero-token audit: `CONFIRMED CLEAN` (406 files, 0 external API refs) -
 the LinkedIn probe hits linkedin.com directly, not an LLM/AI API, so it
 correctly falls outside HARD RULE #1's scope.
+
+## Skill / Project Experience table added to Add Candidate — plus a real,
+## previously-undiscovered data-collision bug found via genuine test
+## load, 2026-08-25
+User pasted a sample table (Sl.No/Skill-Technology/Project Name/Project
+Duration From-To/Role (Implementation/Support/Enhancement/Rollout)/
+Relevant Experience/Last Used) and asked for it added to the Add
+Candidate form before saving to the database.
+
+**Schema** (`sql/85_candidate_skill_experience.sql`, table owned by
+`postgres`) — a new `candidate_skill_experience` child table (skill_name,
+project_name, duration_from, duration_to, role_types TEXT[], relevant_
+experience, last_used, sort_order), FORCE RLS. Built as its own table
+rather than folded into `candidates.skills` (a flat tag list — wrong
+shape for structured per-skill project history). `duration_from`/
+`duration_to`/`relevant_experience`/`last_used` are all free text on
+purpose — real recruiter input is inherently messy ("Jan 2024", "2024",
+"Current", "8 Years", "6 months"), and forcing strict date/number typing
+would just reject realistic input.
+
+**Backend** (`backend/routers/candidates.py`) — `GET/PUT .../skill-
+experience`. The PUT is a full replace (real DELETE + re-INSERT in one
+transaction), not a diff — matches this project's established pattern
+for a small per-candidate child list nothing else references (same
+shape as this modal's own document uploads). Both routes registered
+before the dynamic `/{candidate_id}` route, same safe-ordering
+convention already established for `/{candidate_id}/documents`.
+
+**Frontend** (`candidates/page.tsx`) — a compact mini-form (skill/tech,
+project name, duration from/to, 4 role checkboxes, relevant experience,
+last used) + an "+ Add Row" button, with the running table rendered
+below matching the sample's exact columns. Rows live in local component
+state (`skillExpRows`) until the candidate itself is saved — on Add,
+saved via the PUT right after the candidate record and any document
+uploads; on Edit, existing rows are fetched via GET when the modal opens
+and can be freely added to/removed before saving.
+
+**A real, previously-undiscovered bug found only because this feature's
+own verification ran as the 14th test in the full S58 suite, not in
+isolation** — confirmed via direct backend log inspection, not guessed:
+`POST /candidates` intermittently 500'd with `asyncpg.exceptions.
+UniqueViolationError: duplicate key value violates unique constraint
+"uq_candidates_email_per_tenant"`, immediately followed by a second,
+unrelated `InFailedSQLTransactionError` on the very next query. Two
+distinct bugs stacked:
+1. **Root cause**: `uq_candidates_email_per_tenant` is a partial unique
+   index on `(tenant_id, email) WHERE is_active IS NOT FALSE` — SQL
+   never treats two NULLs as equal, but it does treat two empty strings
+   `''` as equal. The Add Candidate form's Email field defaults to `''`,
+   and `CandidateCreate` never normalized that — so any two real
+   candidates saved with no email both landed on `email=''` and
+   genuinely collided on the unique index, something that could happen
+   in real production use too (not just under test load), not only in
+   this test. Fixed with a Pydantic `field_validator` on `email`
+   (`schemas.py`, applied to both `CandidateCreate` and
+   `CandidateUpdate`) normalizing a blank string to `None` before
+   anything else sees it.
+2. **A second, independent bug that made the first one worse**:
+   `db.tenant_conn()` wraps its entire `async with` block in one outer
+   transaction (required so the transaction-local `set_config('app.
+   tenant_id',...)` stays in effect across every statement in the
+   block). `create_candidate()`'s existing exception handler for this
+   exact unique-violation case ran a fallback re-query on the SAME
+   connection after the INSERT failed — but by then the outer
+   transaction was already aborted, so the fallback query itself threw
+   `InFailedSQLTransactionError` instead of ever reaching the intended
+   clean 409. This meant even the *legitimate* real-duplicate-email case
+   (not just the empty-string bug) had a real race window where it could
+   500 instead of 409. Fixed by wrapping just the INSERT in a nested
+   `async with conn.transaction():` — a genuine asyncpg SAVEPOINT when a
+   transaction is already open, so a failure there rolls back only that
+   insert, leaving the outer connection usable for the fallback query —
+   the same established fix pattern already used elsewhere in this
+   project for the identical "poisoned outer transaction" shape (e.g.
+   `scheduler.py`'s tier-2 escalation handler).
+
+Verified both fixes for real, not code review: created 2 real candidates
+with no email back-to-back and confirmed both now succeed with
+`email:null` (previously the 2nd would 500); created 2 real candidates
+with a genuine matching email and confirmed a clean 409 with real
+ownership context; then fired 2 truly concurrent requests with the same
+email (`curl ... & curl ... & wait`) to directly exercise the actual
+race-condition exception-handler path, confirming it now correctly
+returns a 409, not a 500, under real concurrent load. Re-ran the full
+Skill/Project Experience UI test twice in a row inside the complete
+14-test S58 suite after both fixes landed — clean both times, where it
+had failed consistently before (root-caused via direct backend log
+inspection during the investigation, not assumed from the test alone).
+
+New permanent test added to the existing "S58" suite (14 tests total):
+a real PUT/GET round-trip proving the full-replace semantics (a 2nd PUT
+with 1 row genuinely leaves exactly 1, not 3), and a full real headless-
+UI pass — add a row, add a second multi-role row ("Support &
+Enhancement" display), remove the first via its × button, submit with a
+resume attached, and confirm via a direct API call that the saved set
+matches exactly what was left in the UI. Full S58 suite (14/14, run
+twice for stability) and a broader regression sweep
+(S1/S2/S8/S13/S16/S30/S51/S57/S58, 78 tests) re-run clean: 77 passed, 1
+pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (407
+files, 0 external API refs).

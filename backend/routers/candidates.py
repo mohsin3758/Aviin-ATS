@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List
 from typing import Optional
 import json
@@ -753,17 +753,33 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
             if existing:
                 raise HTTPException(409, await _ownership_conflict_detail(conn, actor.tenant_id, existing))
         try:
-            row = await conn.fetchrow(
-                f"""INSERT INTO candidates
-                    (tenant_id,full_name,email,phone,skills,total_exp_mo,location,desired_location,
-                     current_employer,current_designation,resume_text,source,expected_ctc,current_ctc,notice_period_days)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-                   RETURNING {FIELDS}""",
-                actor.tenant_id, body.full_name, body.email, body.phone, body.skills,
-                body.total_exp_mo, body.location, body.desired_location, body.current_employer,
-                body.current_designation, body.resume_text, body.source,
-                getattr(body, "expected_ctc", None), getattr(body, "current_ctc", None),
-                getattr(body, "notice_period_days", None))
+            # Real bug found via a genuine collision under test load
+            # (2026-08-25): db.tenant_conn() wraps this whole endpoint in
+            # one outer transaction (needed so the transaction-local
+            # set_config('app.tenant_id',...) stays in effect across every
+            # statement here). Catching a UniqueViolationError from a bare
+            # INSERT leaves that outer transaction aborted, so the fallback
+            # re-query below used to raise a second, unrelated
+            # InFailedSQLTransactionError instead of returning a clean 409
+            # - confirmed live via a real duplicate-email collision, not
+            # assumed. A nested `async with conn.transaction():` is a real
+            # asyncpg SAVEPOINT when a transaction is already open (the
+            # same established fix already used elsewhere in this project
+            # for the identical "poisoned outer transaction" shape, e.g.
+            # scheduler.py's tier-2 escalation handler) - only the INSERT
+            # itself rolls back, the outer connection stays usable.
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""INSERT INTO candidates
+                        (tenant_id,full_name,email,phone,skills,total_exp_mo,location,desired_location,
+                         current_employer,current_designation,resume_text,source,expected_ctc,current_ctc,notice_period_days)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                       RETURNING {FIELDS}""",
+                    actor.tenant_id, body.full_name, body.email, body.phone, body.skills,
+                    body.total_exp_mo, body.location, body.desired_location, body.current_employer,
+                    body.current_designation, body.resume_text, body.source,
+                    getattr(body, "expected_ctc", None), getattr(body, "current_ctc", None),
+                    getattr(body, "notice_period_days", None))
         except Exception as exc:
             if "uq_candidates_email_per_tenant" in str(exc):
                 existing2 = await conn.fetchrow(
@@ -924,6 +940,60 @@ async def list_candidate_documents(candidate_id: str, actor: Actor = Depends(get
             "WHERE candidate_id=$1 AND tenant_id=$2 ORDER BY created_at DESC",
             candidate_id, actor.tenant_id)
     return {"resumes": [dict(r) for r in resumes], "documents": [dict(d) for d in docs]}
+
+
+class SkillExperienceRow(BaseModel):
+    skill_name: str
+    project_name: Optional[str] = None
+    duration_from: Optional[str] = None
+    duration_to: Optional[str] = None
+    role_types: list[str] = Field(default_factory=list)
+    relevant_experience: Optional[str] = None
+    last_used: Optional[str] = None
+
+
+@router.get("/{candidate_id}/skill-experience")
+async def list_skill_experience(candidate_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT id, skill_name, project_name, duration_from, duration_to, role_types,"
+            " relevant_experience, last_used FROM candidate_skill_experience"
+            " WHERE candidate_id=$1 AND tenant_id=$2 ORDER BY sort_order, created_at",
+            candidate_id, actor.tenant_id)
+    return {"rows": [dict(r) for r in rows]}
+
+
+@router.put("/{candidate_id}/skill-experience")
+async def replace_skill_experience(
+    candidate_id: str, body: list[SkillExperienceRow],
+    actor: Actor = Depends(require_permission("candidates", "update")),
+):
+    """Full replace, not a diff/patch - matches this project's established
+    pattern for a small per-candidate child list nothing else references
+    (same shape as how this modal's document uploads work). The recruiter
+    builds the whole table in the Add/Edit modal before submitting; on
+    save, whatever's in the modal becomes the real, complete set."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow(
+            "SELECT id FROM candidates WHERE id=$1 AND is_active IS NOT FALSE", candidate_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM candidate_skill_experience WHERE candidate_id=$1 AND tenant_id=$2",
+                candidate_id, actor.tenant_id)
+            for i, row in enumerate(body):
+                if not row.skill_name.strip():
+                    continue
+                await conn.execute(
+                    """INSERT INTO candidate_skill_experience
+                        (tenant_id, candidate_id, skill_name, project_name, duration_from, duration_to,
+                         role_types, relevant_experience, last_used, sort_order)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                    actor.tenant_id, candidate_id, row.skill_name.strip(), row.project_name,
+                    row.duration_from, row.duration_to, row.role_types, row.relevant_experience,
+                    row.last_used, i)
+    return {"ok": True, "count": len(body)}
 
 
 @router.get("/{candidate_id}")

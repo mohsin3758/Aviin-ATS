@@ -8,7 +8,24 @@ no response models are declared.
 from datetime import date
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _blank_to_none(v):
+    """Real bug found 2026-08-25 via a genuine collision under test load:
+    candidates.email has a partial UNIQUE index (tenant_id, email) WHERE
+    is_active IS NOT FALSE — NULL is never equal to NULL under SQL
+    uniqueness, but an empty string '' is a real, colliding value. The
+    Add Candidate form's Email input defaults to '', so any two real
+    candidates saved with no email both landed on email='' and the
+    SECOND one hit the unique constraint (a raw 500 before a separate
+    fix, now a confusing 409 "already exists" against someone they're
+    not actually a duplicate of). Normalizing '' to None here makes an
+    unset email behave the way it always should have — like no email at
+    all, not like a shared one."""
+    if isinstance(v, str) and v.strip() == "":
+        return None
+    return v
 
 EmploymentType = Literal["contract", "fulltime", "c2h", "fte", "part_time", "fl_contract"]
 WorkMode = Literal["remote", "onsite", "hybrid"]
@@ -35,6 +52,7 @@ class LoginRequest(BaseModel):
 class CandidateCreate(BaseModel):
     full_name: str
     email: Optional[str] = None
+    _normalize_email = field_validator("email", mode="before")(_blank_to_none)
     phone: Optional[str] = None
     skills: list[str] = Field(default_factory=list)
     total_exp_mo: int = 0
@@ -67,6 +85,7 @@ class CandidateCreate(BaseModel):
 class CandidateUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
+    _normalize_email = field_validator("email", mode="before")(_blank_to_none)
     phone: Optional[str] = None
     skills: Optional[list[str]] = None
     total_exp_mo: Optional[int] = None

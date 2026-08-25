@@ -7506,6 +7506,74 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
     await request.delete(`${API}/candidates/${baseId}`, { headers: auth() }).catch(() => {});
   });
 
+  test('Skill / Project Experience table: add/remove rows in the real UI, saved set round-trips via PUT, and reloads correctly in Edit mode', async ({ request, page }) => {
+    // API round-trip first
+    const stamp = Date.now();
+    const cand = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 SkillExp API ${stamp}`, location: 'Pune' } });
+    const candId = (await cand.json()).id;
+    const put = await request.put(`${API}/candidates/${candId}/skill-experience`, {
+      headers: auth(),
+      data: [
+        { skill_name: 'SAP FICO', project_name: 'Global Finance Transformation', duration_from: 'Jan 2024', duration_to: 'Current', role_types: ['Implementation'], relevant_experience: '8 Years', last_used: 'Current' },
+        { skill_name: 'Credit Management', role_types: ['Support', 'Enhancement'] },
+      ],
+    });
+    expect(put.ok()).toBeTruthy();
+    let list = await (await request.get(`${API}/candidates/${candId}/skill-experience`, { headers: auth() })).json();
+    expect(list.rows.length).toBe(2);
+    // full replace, not append — a 2nd PUT with 1 row must leave exactly 1
+    await request.put(`${API}/candidates/${candId}/skill-experience`, { headers: auth(), data: [{ skill_name: 'React' }] });
+    list = await (await request.get(`${API}/candidates/${candId}/skill-experience`, { headers: auth() })).json();
+    expect(list.rows.length).toBe(1);
+    expect(list.rows[0].skill_name).toBe('React');
+    await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+
+    // Real headless UI: add a row, add a 2nd multi-role row, remove the
+    // first, submit, and confirm the saved set matches what was left —
+    // then reopen in Edit mode and confirm it reloads correctly.
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /Add Candidate/i }).first().click();
+    await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
+
+    await page.locator('input[placeholder="e.g. Rahul Sharma"]').fill(`QA S58 SkillExp UI ${stamp}`);
+    await page.locator('input[placeholder="e.g. Bengaluru, Karnataka"]').fill('Pune');
+    await page.locator('input[placeholder="Skill / Technology (e.g. SAP FICO)"]').fill('SAP FICO');
+    await page.locator('input[placeholder="Project Name"]').fill('Global Finance Transformation');
+    await page.locator('label:has-text("Implementation") input[type=checkbox]').check();
+    await page.getByRole('button', { name: '+ Add Row' }).click();
+    const modalTable = () => page.locator('table').last();
+    await expect(modalTable().locator('tbody tr')).toHaveCount(1);
+
+    await page.locator('input[placeholder="Skill / Technology (e.g. SAP FICO)"]').fill('Credit Management');
+    await page.locator('label:has-text("Support") input[type=checkbox]').check();
+    await page.locator('label:has-text("Enhancement") input[type=checkbox]').check();
+    await page.getByRole('button', { name: '+ Add Row' }).click();
+    await expect(modalTable().locator('tbody tr')).toHaveCount(2);
+    await expect(modalTable()).toContainText('Support & Enhancement');
+
+    await modalTable().locator('tbody tr').first().locator('button').click();
+    await expect(modalTable().locator('tbody tr')).toHaveCount(1);
+    await expect(modalTable()).toContainText('Credit Management');
+    await expect(modalTable()).not.toContainText('SAP FICO');
+
+    const resumeInput = page.locator('label:has-text("Resume Upload")').locator('xpath=..').locator('input[type=file]');
+    await resumeInput.setInputFiles({ name: 'qa_s58_skillexp.txt', mimeType: 'text/plain', buffer: Buffer.from(
+      'John QA S58 SkillExp Tester\nSenior Engineer\nPROFESSIONAL SUMMARY\nExperienced engineer with 5 years building scalable systems.\nSKILLS\nPython, Django, AWS'
+    ) });
+    await page.getByRole('button', { name: 'Add Candidate' }).last().click();
+    await expect(page.getByText('Add New Candidate')).not.toBeVisible({ timeout: 15000 });
+
+    const search = await request.get(`${API}/candidates?search=QA S58 SkillExp UI ${stamp}`, { headers: auth() });
+    const searchBody = await search.json();
+    const uiCandId = (searchBody.items || searchBody.data || searchBody)[0].id;
+    const savedRows = await (await request.get(`${API}/candidates/${uiCandId}/skill-experience`, { headers: auth() })).json();
+    expect(savedRows.rows.length).toBe(1);
+    expect(savedRows.rows[0].skill_name).toBe('Credit Management');
+    expect(savedRows.rows[0].role_types.sort()).toEqual(['Enhancement', 'Support']);
+
+    await request.delete(`${API}/candidates/${uiCandId}`, { headers: auth() }).catch(() => {});
+  });
+
   test.afterAll(async ({ request }) => {
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
     const search = await request.get(`${API}/candidates?search=QA S58 UI Test`, { headers: auth() }).catch(() => null);

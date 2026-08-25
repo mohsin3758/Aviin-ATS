@@ -776,6 +776,13 @@ export default function CandidatesPage() {
   const [liveDupChecking,setLiveDupChecking] = useState(false);
   const [linkedinCheck,setLinkedinCheck] = useState<any>(null);
   const [linkedinChecking,setLinkedinChecking] = useState(false);
+  // Skill / Project Experience table (2026-08-25) — built up locally in
+  // the modal, saved as a whole set on submit (real DELETE+INSERT,
+  // matching PUT /candidates/{id}/skill-experience).
+  const [skillExpRows,setSkillExpRows] = useState<any[]>([]);
+  const EMPTY_SKILL_EXP = {skill_name:'',project_name:'',duration_from:'',duration_to:'',role_types:[] as string[],relevant_experience:'',last_used:''};
+  const [skillExpForm,setSkillExpForm] = useState({...EMPTY_SKILL_EXP});
+  const ROLE_TYPES = ['Implementation','Support','Enhancement','Rollout'];
   const liveDupTimer = useRef<any>(null);
   const [resumeFile,setResumeFile] = useState<File|null>(null);
   const [lwdFile,setLwdFile] = useState<File|null>(null);
@@ -898,7 +905,14 @@ export default function CandidatesPage() {
   const toggleSel = (id:string)=>{ const s=new Set(selected); s.has(id)?s.delete(id):s.add(id); setSelected(s); };
 
   // handlers
-  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);setLiveDupChecking(false);setLinkedinCheck(null);setLinkedinChecking(false);};
+  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);setLiveDupChecking(false);setLinkedinCheck(null);setLinkedinChecking(false);setSkillExpRows([]);setSkillExpForm({...EMPTY_SKILL_EXP});};
+  const addSkillExpRow = ()=>{
+    if (!skillExpForm.skill_name.trim()) return;
+    setSkillExpRows(rows=>[...rows,{...skillExpForm}]);
+    setSkillExpForm({...EMPTY_SKILL_EXP});
+  };
+  const removeSkillExpRow = (i:number)=>setSkillExpRows(rows=>rows.filter((_,idx)=>idx!==i));
+  const toggleSkillExpRole = (r:string)=>setSkillExpForm(f=>({...f,role_types:f.role_types.includes(r)?f.role_types.filter(x=>x!==r):[...f.role_types,r]}));
   const verifyLinkedin = async()=>{
     if (!form.linkedin_url.trim()) return;
     setLinkedinChecking(true);setLinkedinCheck(null);
@@ -907,7 +921,7 @@ export default function CandidatesPage() {
     finally { setLinkedinChecking(false); }
   };
   const openCreate = ()=>{setForm({...EMPTY});setEditId(null);setErr('');setDupWarning(null);setSkipDupCheck(false);resetDocState();setShowModal(true);};
-  const openEdit   = (d:any)=>{
+  const openEdit   = async(d:any)=>{
     setForm({full_name:d.full_name||'',email:d.email||'',phone:d.phone||'',location:d.location||'',
       desired_location:d.desired_location||'',
       current_employer:d.current_employer||'',current_designation:d.current_designation||'',
@@ -915,6 +929,7 @@ export default function CandidatesPage() {
       notice_period_days:d.notice_period_days||'',linkedin_url:d.linkedin_url||'',
       source:d.source||'linkedin',skills:d.skills||[],resume_text:d.resume_text||''});
     setEditId(d.id);setErr('');resetDocState();setShowModal(true);
+    try { const res:any = await apiFetch(`/candidates/${d.id}/skill-experience`); setSkillExpRows(res.rows||[]); } catch { /* non-blocking */ }
   };
   const addSk=(s:string)=>{const t=s.trim();if(t&&!form.skills.includes(t))setForm(f=>({...f,skills:[...f.skills,t]}));setSkIn('');};
   const rmSk =(s:string)=>setForm(f=>({...f,skills:f.skills.filter((x:string)=>x!==s)}));
@@ -978,6 +993,10 @@ export default function CandidatesPage() {
           // upload from the candidate's own profile.
           alert('Candidate saved, but a document upload failed: '+(upErr?.message||'unknown error'));
         } finally { setUploadingDocs(false); }
+      }
+      if (candId) {
+        try { await apiFetch(`/candidates/${candId}/skill-experience`,{method:'PUT',body:JSON.stringify(skillExpRows)}); }
+        catch (skErr:any) { alert('Candidate saved, but skill/project experience could not be saved: '+(skErr?.message||'unknown error')); }
       }
       setShowModal(false);refetch();
     } catch(e:any){setErr(e.message||'Save failed');}
@@ -1499,6 +1518,63 @@ export default function CandidatesPage() {
             <button key={s} type="button" onClick={()=>addSk(s)} style={{padding:'3px 8px',borderRadius:'6px',background:'#f8fafc',color:'#64748b',border:'1px solid #e2e8f0',fontSize:'11px',cursor:'pointer'}}>{s}</button>
           ))}
         </div>
+
+        <SectionDivider label="Skill / Project Experience (optional)"/>
+        <div style={{border:'1px solid #e2e8f0',borderRadius:'8px',padding:'10px',marginBottom:'12px',background:'#f8fafc'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+            <input style={INP} placeholder="Skill / Technology (e.g. SAP FICO)" value={skillExpForm.skill_name} onChange={e=>setSkillExpForm(f=>({...f,skill_name:e.target.value}))}/>
+            <input style={INP} placeholder="Project Name" value={skillExpForm.project_name} onChange={e=>setSkillExpForm(f=>({...f,project_name:e.target.value}))}/>
+            <input style={INP} placeholder="Duration From (e.g. Jan 2024)" value={skillExpForm.duration_from} onChange={e=>setSkillExpForm(f=>({...f,duration_from:e.target.value}))}/>
+            <input style={INP} placeholder="Duration To (e.g. Current)" value={skillExpForm.duration_to} onChange={e=>setSkillExpForm(f=>({...f,duration_to:e.target.value}))}/>
+            <input style={INP} placeholder="Relevant Experience (e.g. 8 Years)" value={skillExpForm.relevant_experience} onChange={e=>setSkillExpForm(f=>({...f,relevant_experience:e.target.value}))}/>
+            <input style={INP} placeholder="Last Used (e.g. Current / 2023)" value={skillExpForm.last_used} onChange={e=>setSkillExpForm(f=>({...f,last_used:e.target.value}))}/>
+          </div>
+          <div style={{display:'flex',alignItems:'center',flexWrap:'wrap',gap:'10px',marginBottom:'8px'}}>
+            <span style={{fontSize:'11px',fontWeight:'700',color:'#64748b'}}>Role:</span>
+            {ROLE_TYPES.map(r=>(
+              <label key={r} style={{display:'flex',alignItems:'center',gap:'4px',fontSize:'11px',color:'#374151',cursor:'pointer'}}>
+                <input type="checkbox" checked={skillExpForm.role_types.includes(r)} onChange={()=>toggleSkillExpRole(r)}/>{r}
+              </label>
+            ))}
+          </div>
+          <button type="button" onClick={addSkillExpRow} disabled={!skillExpForm.skill_name.trim()}
+            style={{padding:'7px 14px',borderRadius:'7px',border:'none',background:skillExpForm.skill_name.trim()?'#1e40af':'#94a3b8',color:'white',cursor:skillExpForm.skill_name.trim()?'pointer':'not-allowed',fontSize:'12px',fontWeight:'700'}}>
+            + Add Row
+          </button>
+        </div>
+        {skillExpRows.length>0&&(
+          <div style={{overflowX:'auto',marginBottom:'12px'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:'11px'}}>
+              <thead>
+                <tr style={{background:'#f1f5f9',textAlign:'left'}}>
+                  <th style={{padding:'6px 8px'}}>Sl.No</th>
+                  <th style={{padding:'6px 8px'}}>Skill / Technology</th>
+                  <th style={{padding:'6px 8px'}}>Project Name</th>
+                  <th style={{padding:'6px 8px'}}>Duration (From–To)</th>
+                  <th style={{padding:'6px 8px'}}>Role</th>
+                  <th style={{padding:'6px 8px'}}>Relevant Exp.</th>
+                  <th style={{padding:'6px 8px'}}>Last Used</th>
+                  <th style={{padding:'6px 8px'}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {skillExpRows.map((r:any,i:number)=>(
+                  <tr key={i} style={{borderTop:'1px solid #e2e8f0'}}>
+                    <td style={{padding:'6px 8px',color:'#64748b'}}>{i+1}</td>
+                    <td style={{padding:'6px 8px',fontWeight:'700',color:'#1e40af'}}>{r.skill_name}</td>
+                    <td style={{padding:'6px 8px'}}>{r.project_name||'—'}</td>
+                    <td style={{padding:'6px 8px'}}>{[r.duration_from,r.duration_to].filter(Boolean).join(' – ')||'—'}</td>
+                    <td style={{padding:'6px 8px'}}>{(r.role_types||[]).join(' & ')||'—'}</td>
+                    <td style={{padding:'6px 8px'}}>{r.relevant_experience||'—'}</td>
+                    <td style={{padding:'6px 8px'}}>{r.last_used||'—'}</td>
+                    <td style={{padding:'6px 8px'}}><button type="button" onClick={()=>removeSkillExpRow(i)} style={{background:'none',border:'none',cursor:'pointer',color:'#dc2626',fontWeight:'700'}}>×</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         <SectionDivider label="Resume / Notes"/>
         {!editId&&(
           <FormField label="Resume Upload" required hint="PDF, Word or image — auto-extracted skills/experience gap-fill any blank fields you haven't already typed">
