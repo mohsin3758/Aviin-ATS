@@ -27,6 +27,26 @@ def _blank_to_none(v):
         return None
     return v
 
+
+def _validate_phone(v):
+    """Real gap found 2026-08-25: the phone field accepted anything,
+    including a 9-digit number (too short to be a real Indian mobile
+    number even without a country code). A real Indian mobile is 10
+    digits; with the 91 country code (with or without a leading +) that's
+    12 digits total — never fewer than 10, never more than 12. Phone
+    stays genuinely optional (no digits at all is fine); this only fires
+    once something is actually typed."""
+    if v is None:
+        return v
+    if isinstance(v, str) and v.strip() == "":
+        return None
+    digits = "".join(ch for ch in str(v) if ch.isdigit())
+    if len(digits) < 10 or len(digits) > 12:
+        raise ValueError(
+            f"Phone must have 10 digits (or 12 with the 91 country code) — got {len(digits)} digit(s)"
+        )
+    return v
+
 EmploymentType = Literal["contract", "fulltime", "c2h", "fte", "part_time", "fl_contract"]
 WorkMode = Literal["remote", "onsite", "hybrid"]
 RequisitionStatus = Literal["open", "on_hold", "filled", "closed"]
@@ -54,6 +74,7 @@ class CandidateCreate(BaseModel):
     email: Optional[str] = None
     _normalize_email = field_validator("email", mode="before")(_blank_to_none)
     phone: Optional[str] = None
+    _validate_phone_ = field_validator("phone", mode="before")(_validate_phone)
     skills: list[str] = Field(default_factory=list)
     total_exp_mo: int = 0
     # "location" is the real current-location field (kept under its
@@ -87,6 +108,7 @@ class CandidateUpdate(BaseModel):
     email: Optional[str] = None
     _normalize_email = field_validator("email", mode="before")(_blank_to_none)
     phone: Optional[str] = None
+    _validate_phone_ = field_validator("phone", mode="before")(_validate_phone)
     skills: Optional[list[str]] = None
     total_exp_mo: Optional[int] = None
     location: Optional[str] = None

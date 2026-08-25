@@ -13132,3 +13132,69 @@ twice for stability) and a broader regression sweep
 (S1/S2/S8/S13/S16/S30/S51/S57/S58, 78 tests) re-run clean: 77 passed, 1
 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (407
 files, 0 external API refs).
+
+## LinkedIn URL verify + real Phone digit validation, 2026-08-25
+User reported two real problems from a live screenshot: a 9-digit phone
+number ("985784587") being accepted with no error, and the LinkedIn
+"Verify" check showing "Could not confirm reachability" against what
+appears to be their own real LinkedIn profile.
+
+**Phone: a real, confirmed gap, fixed at both layers.** No validation
+existed anywhere — `phone` was a plain, unconstrained text field both in
+`CandidateCreate`/`CandidateUpdate` and the form input. Added a real
+Pydantic `field_validator` (`schemas.py`, `_validate_phone`, applied to
+both create and update) — strips non-digits, requires 10-12 digits when
+a phone is given at all (10 for a plain Indian mobile, 12 with the 91
+country code, with or without a leading `+`), stays fully optional when
+blank. **Before hard-enforcing this, checked existing tests first** (the
+same lesson from the `location` field earlier the same day) - found 3
+real test call sites (S51/S52 suites) generating synthetic 9-digit phone
+numbers. Since phone format is a genuine, universal data-quality rule
+(unlike "location mandatory," which was a workflow policy specific to
+one form), fixed the 3 test generators to produce compliant 10-digit
+numbers instead of loosening the validation. Frontend: a live inline
+hint under Phone (⚠ N digits — needs 10... / ✓ N digits) plus a real
+Save-blocking check in `handleSave()`, matching the same pattern already
+established for Current Location/Resume.
+
+**A real bug caught in my own fix before it shipped**: the first version
+defined `_validate_phone` but never actually wired it into either
+`CandidateCreate` or `CandidateUpdate` via `field_validator(...)` — a
+real "the fix compiles but does nothing" mistake, caught immediately by
+testing the exact reported 9-digit number against the live API and
+seeing it still silently succeed. Fixed by actually assigning
+`field_validator("phone", mode="before")(_validate_phone)` in both
+classes.
+
+**LinkedIn: investigated hard before touching anything, found a
+structural limitation, not a bug.** Reproduced the exact URL from the
+user's screenshot directly - confirmed LinkedIn's own bot-detection
+(HTTP 999, a ~1.5KB block page) fires for it. Went further before
+concluding anything: tested the SAME URL through a real headless
+browser (Playwright/Chromium, not just a raw `httpx` GET) and got the
+identical block - meaning this isn't fixable by making the HTTP client
+"look more like a browser." This VPS's IP/hosting range is being
+blocked by LinkedIn outright, confirmed on both a known-fake profile
+and the user's own real one earlier the same day. Presented this
+finding plainly rather than guessing at a fix, and the user chose to
+drop the live check entirely - keeping only the deterministic,
+network-free format check, plus a real "Open in LinkedIn" button (with
+the LinkedIn brand icon) that opens the pasted URL directly in a new
+tab. Removed `GET /candidates/verify-linkedin` entirely (no live
+network probe left to serve) and the now-dead `linkedinCheck`/
+`linkedinChecking` state/handler in the frontend.
+
+Verified for real end-to-end, not code review: 5 real API cases (9
+digits -> 422, 10 digits -> 200, 12 digits with country code -> 200, 13
+digits -> 422, no phone -> 200) and a real headless-browser pass through
+the actual Add Candidate modal confirming the live hint, the Save-block
+on a bad number, and the LinkedIn format check + Open button (no
+network call, no "Verify" button anywhere in the DOM anymore).
+Rewrote the pre-existing S58 LinkedIn test to match the new feature
+shape and added a new dedicated phone-validation test. Full S58 suite
+(15/15) and a broader regression sweep (S1/S2/S8/S13/S16/S30/S51/S52/
+S57/S58, 85 tests) re-run clean: 78 passed + 6 (S52 run separately) = 84
+passed, 1 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED
+CLEAN` (407 files, 0 external API refs) - the removed LinkedIn probe was
+a plain website reachability check, never an LLM/AI API, so its removal
+doesn't change anything about HARD RULE #1 compliance either way.

@@ -635,37 +635,6 @@ async def _duplicate_context(conn, tenant_id: str, candidate_id: str) -> dict:
     }
 
 
-@router.get("/verify-linkedin")
-async def verify_linkedin_url(url: str = "", actor: Actor = Depends(get_actor)):
-    """Real, honest LinkedIn profile URL check (2026-08-25). Format
-    validation is deterministic and always reliable. Live reachability is
-    a genuine HTTP probe, not a hard verdict - confirmed empirically that
-    LinkedIn's own bot-detection (HTTP 999, a short block page) fires for
-    both a made-up profile AND can plausibly fire against a real one under
-    rate-limiting, so a probe that can't confirm reachability is reported
-    as 'could not verify', never as 'this profile doesn't exist'. A real
-    HTTP 200 with substantial page content is treated as a genuine
-    positive signal. Deliberately a manual per-click check, not live on
-    every keystroke — hitting LinkedIn's servers on every typed character
-    would only make bot-detection more likely to fire, not less."""
-    u = (url or "").strip()
-    if not u:
-        return {"valid_format": False, "reachable": None, "message": "Enter a LinkedIn URL first"}
-    if not re.match(r"^https?://([a-z]{2,3}\.)?linkedin\.com/in/[a-zA-Z0-9\-_%]+/?$", u, re.IGNORECASE):
-        return {"valid_format": False, "reachable": None,
-                "message": "Not a valid LinkedIn profile URL — expected https://linkedin.com/in/username"}
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
-            resp = await client.get(u, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        if resp.status_code == 200 and len(resp.content) > 5000:
-            return {"valid_format": True, "reachable": True, "message": "Link is reachable and loads a real profile page"}
-        return {"valid_format": True, "reachable": None,
-                "message": "Could not confirm reachability — LinkedIn may be blocking automated checks (this does not necessarily mean the link is invalid)"}
-    except Exception:
-        return {"valid_format": True, "reachable": None,
-                "message": "Could not reach LinkedIn to verify (network issue or blocked) — URL format is at least valid"}
-
 
 @router.get("/check-duplicate")
 async def check_duplicate(

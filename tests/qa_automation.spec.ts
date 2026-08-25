@@ -6376,7 +6376,7 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
 
     const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: { Authorization: `Bearer ${token}` } });
     const reqId = (await reqRes.json())[0].id;
-    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Force Del Candidate ${stamp}`, email: `qa_s51_forcedelcand_${stamp}@aviinjobs.com`, phone: `999002${String(stamp).slice(-3)}` } })).json();
+    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Force Del Candidate ${stamp}`, email: `qa_s51_forcedelcand_${stamp}@aviinjobs.com`, phone: `999002${String(stamp).slice(-4)}` } })).json();
     const app = await (await request.post(`${API}/applications`, { headers: { Authorization: `Bearer ${token}` }, data: { candidate_id: cand.id, requisition_id: reqId, assigned_recruiter_id: recruiter.id } })).json();
     expect(app.assigned_recruiter_id).toBe(recruiter.id);
 
@@ -6430,7 +6430,7 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     // first bug for free; the assignment_event row itself covers the second.
     const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: auth });
     const reqId = (await reqRes.json())[0].id;
-    const cand = await (await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S51 FK Repro Cand ${stamp}`, email: `qa_s51_fkrepro_cand_${stamp}@aviinjobs.com`, phone: `999003${String(stamp).slice(-3)}` } })).json();
+    const cand = await (await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S51 FK Repro Cand ${stamp}`, email: `qa_s51_fkrepro_cand_${stamp}@aviinjobs.com`, phone: `999003${String(stamp).slice(-4)}` } })).json();
     const assignRes = await request.post(`${API}/requisitions/${reqId}/assign`, {
       headers: auth, data: { recruiter_id: u.id },
     }).catch(() => null);
@@ -6532,7 +6532,7 @@ test.describe.serial('S52 Per-Stage Email Send Mode (Automatic vs Manual)', () =
     reqId = (await reqRes.json())[0].id;
     const cand = await (await request.post(`${API}/candidates`, {
       headers: { Authorization: `Bearer ${token}` },
-      data: { full_name: `QA S52 SendMode ${stamp}`, email: `qa_s52_sendmode_${stamp}@aviinjobs.com`, phone: `999006${String(stamp).slice(-3)}` },
+      data: { full_name: `QA S52 SendMode ${stamp}`, email: `qa_s52_sendmode_${stamp}@aviinjobs.com`, phone: `999006${String(stamp).slice(-4)}` },
     })).json();
     candId = cand.id;
     const app = await (await request.post(`${API}/applications`, {
@@ -7443,30 +7443,69 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
     await expect(page.getByText('Add New Candidate')).not.toBeVisible({ timeout: 5000 });
   });
 
-  test('LinkedIn URL verify: format validation via the API, real headless UI shows a live check', async ({ request, page }) => {
-    const bad = await request.get(`${API}/candidates/verify-linkedin?url=https://twitter.com/foo`, { headers: auth() });
-    const badBody = await bad.json();
-    expect(badBody.valid_format).toBe(false);
-
-    const empty = await request.get(`${API}/candidates/verify-linkedin?url=`, { headers: auth() });
-    expect((await empty.json()).valid_format).toBe(false);
-
-    // A real, well-known LinkedIn profile — genuinely reachable, but the
-    // endpoint reports "could not verify" rather than a hard failure on
-    // any non-200 response (LinkedIn's own bot-detection is expected to
-    // fire unpredictably), so this only asserts valid_format + a real
-    // message came back, not a specific reachable value.
-    const real = await request.get(`${API}/candidates/verify-linkedin?url=https://linkedin.com/in/satyanadella`, { headers: auth() });
-    const realBody = await real.json();
-    expect(realBody.valid_format).toBe(true);
-    expect(realBody.message).toBeTruthy();
-
+  test('LinkedIn URL: no live reachability check (2026-08-25 — dropped, LinkedIn blocks this VPS\'s IP outright, confirmed with a real headless browser on both a fake AND a real profile), just an instant client-side format check + a real "Open in LinkedIn" button', async ({ page }) => {
     await page.goto('/candidates');
     await page.getByRole('button', { name: /Add Candidate/i }).first().click();
     await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
-    await page.locator('input[placeholder="https://linkedin.com/in/..."]').fill('https://twitter.com/notlinkedin');
-    await page.getByRole('button', { name: 'Verify' }).click();
-    await expect(page.locator('text=/Not a valid LinkedIn/i')).toBeVisible({ timeout: 8000 });
+
+    // No more "Verify" button anywhere in the modal.
+    await expect(page.getByRole('button', { name: 'Verify' })).toHaveCount(0);
+
+    const li = page.locator('input[placeholder="https://linkedin.com/in/..."]');
+    const openBtn = page.getByRole('button', { name: 'Open' });
+
+    // Empty — Open is disabled, no format message shown yet.
+    await expect(openBtn).toBeDisabled();
+
+    // Invalid format
+    await li.fill('https://twitter.com/notlinkedin');
+    await expect(page.locator('text=/Doesn.t look like a LinkedIn profile URL/')).toBeVisible({ timeout: 3000 });
+
+    // Valid format — real profile URL, no network call happens for this check at all
+    await li.fill('https://www.linkedin.com/in/satyanadella');
+    await expect(page.locator('text=/Looks like a valid LinkedIn profile URL/')).toBeVisible({ timeout: 3000 });
+    await expect(openBtn).toBeEnabled();
+  });
+
+  test('phone digit validation (2026-08-25): a 9-digit number is rejected both server-side (422) and in the real UI, 10/12-digit numbers are accepted', async ({ request, page }) => {
+    // API: the exact reported bug (a 9-digit number silently accepted)
+    const bad = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 Phone Bad ${Date.now()}`, phone: '985784587' } });
+    expect(bad.status()).toBe(422);
+
+    const good10 = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 Phone Good10 ${Date.now()}`, phone: '9876543214' } });
+    expect(good10.ok()).toBeTruthy();
+    const good10Id = (await good10.json()).id;
+
+    const good12 = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 Phone Good12 ${Date.now()}`, phone: '+919876543215' } });
+    expect(good12.ok()).toBeTruthy();
+    const good12Id = (await good12.json()).id;
+
+    const tooLong = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 Phone TooLong ${Date.now()}`, phone: '1234567890123' } });
+    expect(tooLong.status()).toBe(422);
+
+    const noPhone = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 Phone None ${Date.now()}` } });
+    expect(noPhone.ok()).toBeTruthy();
+    const noPhoneId = (await noPhone.json()).id;
+
+    await request.delete(`${API}/candidates/${good10Id}`, { headers: auth() }).catch(() => {});
+    await request.delete(`${API}/candidates/${good12Id}`, { headers: auth() }).catch(() => {});
+    await request.delete(`${API}/candidates/${noPhoneId}`, { headers: auth() }).catch(() => {});
+
+    // Real UI: the exact reported flow — typing a 9-digit number blocks Save
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /Add Candidate/i }).first().click();
+    await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
+    const phoneInput = page.locator('input[placeholder="+91 9876543210"]');
+    await phoneInput.fill('985784587');
+    await expect(page.locator('text=/9 digits.*needs 10/')).toBeVisible({ timeout: 3000 });
+
+    await page.locator('input[placeholder="e.g. Rahul Sharma"]').fill(`QA S58 Phone UI ${Date.now()}`);
+    await page.locator('input[placeholder="e.g. Bengaluru, Karnataka"]').fill('Pune');
+    await page.getByRole('button', { name: 'Add Candidate' }).last().click();
+    await expect(page.locator('text=/Phone must have 10 digits/')).toBeVisible({ timeout: 5000 });
+
+    await phoneInput.fill('9876543216');
+    await expect(page.locator('text=/✓ 10 digits/')).toBeVisible({ timeout: 3000 });
   });
 
   test('duplicate-check enrichment: resume file name, ownership days left, and current pipeline status all surface for a real duplicate', async ({ request, page }) => {

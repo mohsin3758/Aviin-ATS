@@ -8,7 +8,7 @@ import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
   FileText, Users, GitMerge, Eye, Clock, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Layers,
-  Bookmark, Sparkles, ArrowLeft, Check,
+  Bookmark, Sparkles, ArrowLeft, Check, Linkedin,
 } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -774,8 +774,6 @@ export default function CandidatesPage() {
   // not only after clicking Add Candidate.
   const [liveDup,setLiveDup] = useState<any>(null);
   const [liveDupChecking,setLiveDupChecking] = useState(false);
-  const [linkedinCheck,setLinkedinCheck] = useState<any>(null);
-  const [linkedinChecking,setLinkedinChecking] = useState(false);
   // Skill / Project Experience table (2026-08-25) — built up locally in
   // the modal, saved as a whole set on submit (real DELETE+INSERT,
   // matching PUT /candidates/{id}/skill-experience).
@@ -905,7 +903,7 @@ export default function CandidatesPage() {
   const toggleSel = (id:string)=>{ const s=new Set(selected); s.has(id)?s.delete(id):s.add(id); setSelected(s); };
 
   // handlers
-  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);setLiveDupChecking(false);setLinkedinCheck(null);setLinkedinChecking(false);setSkillExpRows([]);setSkillExpForm({...EMPTY_SKILL_EXP});};
+  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);setLiveDupChecking(false);setSkillExpRows([]);setSkillExpForm({...EMPTY_SKILL_EXP});};
   const addSkillExpRow = ()=>{
     if (!skillExpForm.skill_name.trim()) return;
     setSkillExpRows(rows=>[...rows,{...skillExpForm}]);
@@ -913,13 +911,6 @@ export default function CandidatesPage() {
   };
   const removeSkillExpRow = (i:number)=>setSkillExpRows(rows=>rows.filter((_,idx)=>idx!==i));
   const toggleSkillExpRole = (r:string)=>setSkillExpForm(f=>({...f,role_types:f.role_types.includes(r)?f.role_types.filter(x=>x!==r):[...f.role_types,r]}));
-  const verifyLinkedin = async()=>{
-    if (!form.linkedin_url.trim()) return;
-    setLinkedinChecking(true);setLinkedinCheck(null);
-    try { const res = await apiFetch('/candidates/verify-linkedin?url='+encodeURIComponent(form.linkedin_url.trim())); setLinkedinCheck(res); }
-    catch { setLinkedinCheck({valid_format:false,reachable:null,message:'Verification request failed'}); }
-    finally { setLinkedinChecking(false); }
-  };
   const openCreate = ()=>{setForm({...EMPTY});setEditId(null);setErr('');setDupWarning(null);setSkipDupCheck(false);resetDocState();setShowModal(true);};
   const openEdit   = async(d:any)=>{
     setForm({full_name:d.full_name||'',email:d.email||'',phone:d.phone||'',location:d.location||'',
@@ -960,6 +951,10 @@ export default function CandidatesPage() {
   const handleSave = async()=>{
     if (!form.full_name.trim()){setErr('Full name required');return;}
     if (!form.location.trim()){setErr('Current Location is required');return;}
+    if (form.phone.trim()) {
+      const phoneDigits = form.phone.replace(/\D/g,'').length;
+      if (phoneDigits<10||phoneDigits>12){setErr(`Phone must have 10 digits (or 12 with the 91 country code) — got ${phoneDigits} digit(s)`);return;}
+    }
     if (!editId && !resumeFile){setErr('A resume file (PDF, Word or image) is required');return;}
     if (!editId && Number(form.notice_period_days)>0 && !lwdFile){setErr('LWD Confirmation upload is required when a Notice Period is given');return;}
     if (!editId && !skipDupCheck && (form.email||form.phone)) {
@@ -1449,7 +1444,12 @@ export default function CandidatesPage() {
         )}
         <SectionDivider label="Personal Information"/>
         <FormRow><FormField label="Full Name" required><input style={INP} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))}/></FormField><FormField label="Email"><input type="email" style={INP} placeholder="rahul@example.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></FormField></FormRow>
-        <FormRow><FormField label="Phone"><input style={INP} placeholder="+91 9876543210" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))}/></FormField><FormField label="Current Location" required><input style={INP} placeholder="e.g. Bengaluru, Karnataka" value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))}/></FormField></FormRow>
+        <FormRow>
+          <FormField label="Phone" hint={form.phone.trim()?(()=>{const d=form.phone.replace(/\D/g,'').length;return d<10||d>12?`⚠ ${d} digit${d===1?'':'s'} — needs 10 (or 12 with country code)`:`✓ ${d} digits`;})():'10 digits, or 12 with the 91 country code'}>
+            <input style={INP} placeholder="+91 9876543210" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))}/>
+          </FormField>
+          <FormField label="Current Location" required><input style={INP} placeholder="e.g. Bengaluru, Karnataka" value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))}/></FormField>
+        </FormRow>
         {!editId&&liveDupChecking&&!liveDup?.has_duplicate&&(form.email||form.phone.replace(/\D/g,'').length>=7)&&(
           <div style={{display:'flex',alignItems:'center',gap:'6px',marginTop:'-8px',marginBottom:'12px',fontSize:'11px',color:'#94a3b8'}}>
             <Search size={11}/> Checking database for duplicates…
@@ -1479,18 +1479,27 @@ export default function CandidatesPage() {
         <FormRow><FormField label="Desired Location" hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField>
           <FormField label="LinkedIn URL">
             <div style={{display:'flex',gap:'6px'}}>
-              <input style={{...INP,flex:1}} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>{setForm(f=>({...f,linkedin_url:e.target.value}));setLinkedinCheck(null);}}/>
-              <button type="button" onClick={verifyLinkedin} disabled={!form.linkedin_url.trim()||linkedinChecking}
-                style={{padding:'0 12px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:form.linkedin_url.trim()?'pointer':'not-allowed',fontSize:'11px',fontWeight:'700',color:'#374151',whiteSpace:'nowrap'}}>
-                {linkedinChecking?'Checking…':'Verify'}
+              <input style={{...INP,flex:1}} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>setForm(f=>({...f,linkedin_url:e.target.value}))}/>
+              <button type="button"
+                onClick={()=>window.open(form.linkedin_url.trim(),'_blank','noopener,noreferrer')}
+                disabled={!form.linkedin_url.trim()} title="Open this link in LinkedIn"
+                style={{display:'flex',alignItems:'center',gap:'5px',padding:'0 12px',borderRadius:'8px',border:'1px solid #e2e8f0',
+                  background:form.linkedin_url.trim()?'#0a66c2':'#f1f5f9',cursor:form.linkedin_url.trim()?'pointer':'not-allowed',
+                  fontSize:'11px',fontWeight:'700',color:form.linkedin_url.trim()?'white':'#94a3b8',whiteSpace:'nowrap'}}>
+                <Linkedin size={13}/> Open
               </button>
             </div>
-            {linkedinCheck&&(
-              <div style={{display:'flex',alignItems:'flex-start',gap:'4px',marginTop:'5px',fontSize:'11px',fontWeight:'600',
-                color:!linkedinCheck.valid_format?'#dc2626':linkedinCheck.reachable?'#166534':'#b45309'}}>
-                {!linkedinCheck.valid_format?<X size={12} style={{flexShrink:0,marginTop:'1px'}}/>:linkedinCheck.reachable?<Check size={12} style={{flexShrink:0,marginTop:'1px'}}/>:<AlertTriangle size={12} style={{flexShrink:0,marginTop:'1px'}}/>}
-                <span>{linkedinCheck.message}</span>
-              </div>
+            {/* Real, live reachability checks (tried before building this) turned out
+               to be structurally unreliable from this server — LinkedIn blocks the
+               VPS's IP outright, confirmed with even a real headless browser, on both
+               a fake profile AND a genuinely real one. A live network probe here would
+               show a false "could not verify" for almost every real link, so this stays
+               a plain, instant, client-side format check with no network call at all —
+               honest about what it actually knows, never wrongly alarming. */}
+            {form.linkedin_url.trim()&&(
+              /^https?:\/\/([a-z]{2,3}\.)?linkedin\.com\/in\/[a-zA-Z0-9\-_%]+\/?$/i.test(form.linkedin_url.trim())
+                ? <div style={{display:'flex',alignItems:'center',gap:'4px',marginTop:'5px',fontSize:'11px',fontWeight:'600',color:'#166534'}}><Check size={12}/> Looks like a valid LinkedIn profile URL</div>
+                : <div style={{display:'flex',alignItems:'center',gap:'4px',marginTop:'5px',fontSize:'11px',fontWeight:'600',color:'#dc2626'}}><X size={12}/> Doesn't look like a LinkedIn profile URL (expected linkedin.com/in/username)</div>
             )}
           </FormField>
         </FormRow>
