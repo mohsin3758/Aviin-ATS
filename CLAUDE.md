@@ -12939,3 +12939,26 @@ case. Full S58 suite (10/10) and a broader regression sweep
 (S1/S2/S8/S13/S16/S30/S57/S58, 63 tests) re-run clean: 62 passed, 1
 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (406
 files, 0 external API refs).
+
+## Add Candidate modal: no longer closes (and loses typed data) on a
+## backdrop click, 2026-08-25
+Direct follow-up, same day. User asked for the exact same fix already
+built once before in this project for the Users & Roles Invite modal
+(2026-08-22): the shared `Modal` component already has a
+`closeOnBackdropClick` prop for exactly this — defaults to `true` for
+every other page, opt-out per modal. Added `closeOnBackdropClick={false}`
+to the Add/Edit Candidate modal's `<Modal>` call - the one remaining
+real-data-entry modal in this app that didn't already have it.
+
+Verified for real end-to-end, not code review: a genuine headless-
+browser pass typed real text into Full Name, clicked well outside the
+modal panel on the dark backdrop, and confirmed both that the modal
+stayed open AND the typed value was still there (`inputValue()` read
+back exactly what was typed) — then confirmed Cancel and the X button
+both still close it correctly, unaffected. New permanent test added to
+the existing "S58" suite covering the same flow. Full S58 suite (11/11)
+and a broader regression sweep (S1/S2/S8/S13/S16/S30/S51/S57/S58, 75
+tests - including S51, the original backdrop-click fix's own suite, to
+confirm no regression there) re-run clean: 74 passed, 1 pre-existing
+skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (406 files, 0
+external API refs).

@@ -1397,7 +1397,7 @@ export default function CandidatesPage() {
       {bulkResumeGenOpen && <BulkResumeGenModal candidateIds={Array.from(selected)} onClose={()=>setBulkResumeGenOpen(false)}/>}
 
       {/* ── Add / Edit modal ─────────────────────────────────────────────── */}
-      <Modal open={showModal} onClose={()=>setShowModal(false)} title={editId?'Edit Candidate':'Add New Candidate'} subtitle="Fill in candidate details" size="lg"
+      <Modal open={showModal} onClose={()=>setShowModal(false)} title={editId?'Edit Candidate':'Add New Candidate'} subtitle="Fill in candidate details" size="lg" closeOnBackdropClick={false}
         footer={<FormActions onClose={()=>setShowModal(false)} onSubmit={handleSave} loading={saving||uploadingDocs} submitLabel={editId?'Update Candidate':(uploadingDocs?'Uploading…':'Add Candidate')}/>}>
         {err&&<div style={{marginBottom:'16px',padding:'10px 14px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',fontSize:'13px',color:'#dc2626'}}>{err}</div>}
         {dupWarning?.has_duplicate&&(

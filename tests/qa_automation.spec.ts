@@ -7428,6 +7428,21 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
     await request.delete(`${API}/candidates/${baseId}`, { headers: auth() }).catch(() => {});
   });
 
+  test('real headless UI: clicking outside the Add Candidate modal does NOT close it or lose typed data — only X/Cancel/successful submit do (2026-08-25)', async ({ page }) => {
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /Add Candidate/i }).first().click();
+    await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
+
+    await page.locator('input[placeholder="e.g. Rahul Sharma"]').fill('QA S58 Backdrop Test');
+    await page.mouse.click(20, 20); // well outside the modal panel, on the dark backdrop
+    await page.waitForTimeout(500);
+    await expect(page.getByText('Add New Candidate')).toBeVisible();
+    await expect(page.locator('input[placeholder="e.g. Rahul Sharma"]')).toHaveValue('QA S58 Backdrop Test');
+
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByText('Add New Candidate')).not.toBeVisible({ timeout: 5000 });
+  });
+
   test.afterAll(async ({ request }) => {
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
     const search = await request.get(`${API}/candidates?search=QA S58 UI Test`, { headers: auth() }).catch(() => null);
