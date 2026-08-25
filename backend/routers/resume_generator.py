@@ -23,7 +23,7 @@ from deps import Actor, get_actor
 from services.resume_formatting import (
     render_resume_pdf, render_resume_docx, mask_name, DEFAULT_CONFIG,
     _resolve_body_text, _company_line, _client_line, VISUAL_THEMES, _VALID_THEMES,
-    LOGO_POSITION_OPTIONS, _VALID_LOGO_POSITIONS,
+    LOGO_POSITION_OPTIONS, _VALID_LOGO_POSITIONS, build_resume_filename,
 )
 
 router = APIRouter(prefix="/resume-generator", tags=["resume-generator"])
@@ -344,6 +344,11 @@ async def _generate_one(candidate_id: str, body: "GenerateIn", actor: Actor) -> 
         file_bytes, file_path, status, error_msg = b"", "", "failed", str(exc)
 
     template_name = (template or {}).get("name") or "Custom"
+    # Real feature (2026-08-26): "Candidate Name_Position_TotalExp.ext" —
+    # computed once here (a frozen snapshot, same as display_name) so the
+    # download filename never depends on the candidate's designation/
+    # experience possibly changing after this specific version was generated.
+    file_name = build_resume_filename(display_name, candidate.get("current_designation"), candidate.get("total_exp_mo"), body.output_format)
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
@@ -351,13 +356,13 @@ async def _generate_one(candidate_id: str, body: "GenerateIn", actor: Actor) -> 
                  (tenant_id, candidate_id, source_resume_file_id, template_id, requisition_id, client_id,
                   template_name, name_format, display_name, show_mobile, show_email, show_location,
                   company_mode, company_replacement, project_mode, client_name_mode, client_name_replacement,
-                  visual_theme, logo_position, output_format, file_path, file_size, version, generation_status, error_message, generated_by)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+                  visual_theme, logo_position, output_format, file_path, file_size, version, generation_status, error_message, generated_by, file_name)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
                RETURNING *""",
             actor.tenant_id, candidate_id, source_resume_file_id, body.template_id, body.requisition_id, client_id,
             template_name, cfg["name_format"], display_name, cfg["show_mobile"], cfg["show_email"], cfg["show_location"],
             cfg["company_mode"], cfg["company_replacement"], cfg["project_mode"], cfg["client_name_mode"], cfg["client_name_replacement"],
-            cfg["visual_theme"], cfg["logo_position"], body.output_format, file_path, len(file_bytes), version, status, error_msg, actor.user_id,
+            cfg["visual_theme"], cfg["logo_position"], body.output_format, file_path, len(file_bytes), version, status, error_msg, actor.user_id, file_name,
         )
         if status == "completed":
             await events.write_outbox(
@@ -410,12 +415,11 @@ async def generate_resume(candidate_id: str, body: GenerateIn, actor: Actor = De
             out["submitted_to_kae"] = False
             out["submit_error"] = "No application links this candidate to this requisition — cannot resolve a submission record"
         else:
-            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", row["display_name"] or "candidate")
             ext = "pdf" if body.output_format == "pdf" else "docx"
             try:
                 submission = await _do_kae_submission(
                     actor.tenant_id, str(app_row["id"]), actor, file_bytes,
-                    f"Resume_{safe_name}_{template_name.replace(' ', '_')}.{ext}", "custom_generated",
+                    row["file_name"], "custom_generated",
                     f"{template_name} ({ext.upper()}, via Resume Generator)",
                     generated_resume_id=str(row["id"]), cc_self=body.cc_self,
                 )
@@ -517,7 +521,13 @@ async def download_generated(generated_id: str, actor: Actor = Depends(get_actor
     data = path.read_bytes()
     ext = row["output_format"]
     media_type = "application/pdf" if ext == "pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", row["display_name"] or "resume")
-    filename = f"{safe_name}_{row['template_name'].replace(' ', '_')}.{ext}"
+    # Real feature (2026-08-26): rows generated after this shipped carry a
+    # real, stored "Candidate Name_Position_TotalExp.ext" filename; a row
+    # generated before it (file_name still NULL) falls back to the older
+    # template-name-based convention so an existing download link never breaks.
+    filename = row["file_name"]
+    if not filename:
+        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", row["display_name"] or "resume")
+        filename = f"{safe_name}_{row['template_name'].replace(' ', '_')}.{ext}"
     return Response(content=data, media_type=media_type,
                      headers={"Content-Disposition": f'attachment; filename="{filename}"'})

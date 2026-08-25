@@ -89,8 +89,13 @@ async function downloadStandardResume(candidateId: string, fullName: string) {
     if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
     const blob = await resp.blob();
     const url  = URL.createObjectURL(blob);
+    // Real feature (2026-08-26): use the server's real "Candidate Name_
+    // Position_TotalExp.pdf" filename (Content-Disposition) instead of a
+    // hardcoded "Standard_Resume_" prefix + name-only fallback.
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m  = cd.match(/filename="([^"]+)"/);
     const a    = document.createElement('a');
-    a.href = url; a.download = `Standard_Resume_${(fullName || 'candidate').replace(/[^A-Za-z0-9_-]+/g, '_')}.pdf`;
+    a.href = url; a.download = m ? m[1] : `Standard_Resume_${(fullName || 'candidate').replace(/[^A-Za-z0-9_-]+/g, '_')}.pdf`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   } catch (e) { alert('Download error: ' + String(e)); }

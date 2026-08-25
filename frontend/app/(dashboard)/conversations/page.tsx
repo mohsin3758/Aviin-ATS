@@ -245,8 +245,11 @@ function ComposePane({
       const resp = await fetch((process.env.NEXT_PUBLIC_API_URL ?? '/api') + `/resume-generator/${gen.id}/download`, { headers: authHeaders() });
       if (!resp.ok) throw new Error('Resume download failed');
       const blob = await resp.blob();
-      const safeName = (to.name || 'candidate').replace(/[^A-Za-z0-9]+/g, '_');
-      const file = new File([blob], `Resume_${safeName}.pdf`, { type: blob.type || 'application/pdf' });
+      // Real feature (2026-08-26): the generate response's own file_name
+      // is the real "Candidate Name_Position_TotalExp.pdf" the backend
+      // just computed — use it directly rather than a name-only rebuild.
+      const fileName = gen.file_name || `Resume_${(to.name || 'candidate').replace(/[^A-Za-z0-9]+/g, '_')}.pdf`;
+      const file = new File([blob], fileName, { type: blob.type || 'application/pdf' });
       setAttachments(prev => [...prev, file]);
     } catch (e: any) { alert(e?.message || 'Resume generation failed'); }
     finally { setAttachingResume(false); setShowResumeMenu(false); }

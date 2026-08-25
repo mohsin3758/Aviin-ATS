@@ -13706,3 +13706,74 @@ already written into this project's history multiple times (S20's
 identical bug, found and fixed the same day). Confirmed zero
 recurrence across 5 days of continued heavy testing since. This
 investigation is now closed.
+
+## Resume filename convention: "Candidate Name_Position_TotalExp.ext",
+## every resume-generation surface in the app, 2026-08-26
+User asked, with a reference screenshot ("Usha N_SAP FICO
+Consultant_12Yrs.pdf"), for every generated resume — in any format — to
+automatically get that filename instead of a generic name.
+
+New shared `build_resume_filename(display_name, position, total_exp_mo,
+ext)` in `resume_formatting.py` — the same shared engine already used
+by the standalone Resume Generator and the KAE/client-submission
+attachments (one document engine, per this project's own established
+convention). Only genuinely filesystem-illegal characters (`\/:*?"<>|`)
+are stripped; spaces WITHIN each field are kept (only underscores
+separate the 3 fields themselves), matching the reference exactly — a
+missing field (no designation on file, no experience recorded) is
+simply omitted, never rendered as a blank/trailing segment.
+
+`generated_resumes.file_name` (new column, `sql/87_resume_filename_
+convention.sql`) stores the computed name once, at generation time —
+a frozen snapshot, same convention already used for `display_name`
+(so a later edit to the candidate's designation doesn't retroactively
+rename an already-generated document). Pre-existing rows keep
+`file_name` NULL; `download_generated()` falls back to the old
+template-name-based convention only for those, so no historical
+download link ever breaks.
+
+Applied everywhere a resume gets named, not just the standalone
+generator: `resume_generator.py`'s `_generate_one()`/`download_generated()`
+and its Generate-&-Submit attachment; `kae_submission.py`'s 4 real
+call sites (`_auto_notify_screening_team`, `_auto_submit_to_client_on_
+stage`, `submit_to_kae`, `submit_to_client`) — the "manual" resume
+style uses whatever name/designation the recruiter actually typed
+(matching the document itself) rather than the stored candidate
+record, since manual mode exists precisely to let them override it;
+`candidates.py`'s Standard Resume endpoint. Frontend: every download
+site (`BulkResumeGenModal`, `ResumeGeneratorModal`, Candidate 360's
+Standard Resume button, Compose's resume auto-attach from yesterday)
+now reads the real filename from the response — either the generate
+call's own `file_name` field, or the download response's real
+`Content-Disposition` header (same-origin request, so the header is
+readable without any `Access-Control-Expose-Headers` config) — instead
+of hand-building one client-side, so client and server can never
+disagree.
+
+Verified for real, not code review: a direct API cycle confirmed
+`file_name: "Ravi Kumar Test_SAP FICO Consultant_12Yrs.pdf"` (12yr
+exactly), the DOCX variant getting `.docx`, a candidate with neither
+designation nor experience correctly collapsing to `"Bare Name
+Test.pdf"` with no blank/trailing segments, and the Standard Resume
+endpoint's Content-Disposition matching. Two independent real headless-
+browser runs (a fresh login + the Candidate 360 "Generate Resume" flow)
+both produced a genuine download event named exactly right (e.g.
+"UI Test Candidate_Java Developer_5Yrs.pdf", "Debug S63 Candidate_SAP
+FICO Consultant_12Yrs.pdf") — confirming the feature itself works
+correctly end-to-end through the real UI.
+
+New permanent "S63 Resume filename convention" suite (6 tests) added
+to `qa_automation.spec.ts`. **One flaky assertion found and fixed
+during verification, not an app bug**: the suite's own UI test
+initially asserted on Chromium's `download.suggestedFilename()`, which
+showed non-deterministic behavior specifically when run inside this
+suite's shared `storageState` browser context (a `page.on('response')`
+listener added for diagnosis proved the real HTTP response's
+`Content-Disposition` header was correct on every single run,
+including the ones where `suggestedFilename()` disagreed — isolated to
+Chromium's download-manager/Playwright interaction in this
+environment, not the app, since the identical click flow in a fresh,
+independently-logged-in browser context reliably named the file
+correctly every time). Rewritten to assert on the real network
+response instead, which is both more precise (validates the exact
+thing the fix changed) and deterministic.

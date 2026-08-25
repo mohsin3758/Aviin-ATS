@@ -196,7 +196,13 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
     if (!resp.ok) { alert('Download failed: '+resp.status); return; }
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href=url; a.download=`resume.${ext}`; a.click();
+    // Real feature (2026-08-26): use the server's real "Candidate Name_
+    // Position_TotalExp.ext" filename (Content-Disposition) instead of a
+    // generic 'resume.pdf' — same-origin request, so the header is
+    // readable without any Access-Control-Expose-Headers config.
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = document.createElement('a'); a.href=url; a.download=m?m[1]:`resume.${ext}`; a.click();
     setTimeout(()=>URL.revokeObjectURL(url),5000);
   }
 

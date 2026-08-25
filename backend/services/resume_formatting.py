@@ -113,6 +113,32 @@ def fmt_exp(months) -> str:
     return f"{m}m"
 
 
+_FS_UNSAFE_RE = re.compile(r'[\\/:*?"<>|]')
+
+
+def build_resume_filename(display_name: str, position: Optional[str], total_exp_mo, ext: str) -> str:
+    """"Candidate Name_Position_TotalExp.ext" — e.g. "Usha N_SAP FICO
+    Consultant_12Yrs.pdf" — the one shared naming convention every resume-
+    generation surface in the app uses (the standalone Resume Generator,
+    the KAE/client-submission attachments, Standard Resume). Only
+    genuinely filesystem-illegal characters are stripped; spaces WITHIN
+    each field are kept (only underscores separate the 3 fields
+    themselves), matching the reference format exactly rather than the
+    older convention elsewhere in this codebase that replaced every space
+    too. display_name already reflects masking (mask_name()) when that
+    name_format is selected, so the filename stays consistent with the
+    document's own header. A field that has no real value (no
+    designation on file, no experience recorded) is simply omitted, never
+    rendered as a blank segment."""
+    def _clean(s):
+        return _FS_UNSAFE_RE.sub("", (s or "").strip())
+    name = _clean(display_name) or "Candidate"
+    pos = _clean(position)
+    exp = f"{round(total_exp_mo / 12)}Yrs" if total_exp_mo else ""
+    parts = [p for p in (name, pos, exp) if p]
+    return "_".join(parts) + f".{ext}"
+
+
 DEFAULT_CONFIG = {
     "name_format": "full",          # full | masked
     "show_mobile": True,

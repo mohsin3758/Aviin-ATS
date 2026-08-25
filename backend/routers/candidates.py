@@ -1087,8 +1087,8 @@ async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get
     for the KAE-submission "Clean Summary" style, rather than a second
     near-duplicate PDF builder."""
     from fastapi.responses import StreamingResponse
-    import io as _io, re as _re
-    from services.resume_formatting import render_resume_pdf
+    import io as _io
+    from services.resume_formatting import render_resume_pdf, build_resume_filename
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
@@ -1101,10 +1101,10 @@ async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get
         "name_format": "full", "show_mobile": False, "show_email": False, "show_location": True,
         "company_mode": "original", "project_mode": "include",
     })
-    safe_name = _re.sub(r"[^A-Za-z0-9_-]+", "_", row["full_name"] or "candidate")
+    filename = build_resume_filename(row["full_name"], row["current_designation"], row["total_exp_mo"], "pdf")
     return StreamingResponse(
         _io.BytesIO(pdf_bytes), media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="Standard_Resume_{safe_name}.pdf"'})
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @router.patch("/{candidate_id}")

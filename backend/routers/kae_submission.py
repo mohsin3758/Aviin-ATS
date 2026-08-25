@@ -40,7 +40,7 @@ import events
 from deps import Actor, get_actor, require_role
 from permissions import require_permission
 from routers.pipeline_stages import is_valid_stage
-from services.resume_formatting import render_resume_pdf, redact_contact, mask_name, _VALID_THEMES, _VALID_LOGO_POSITIONS
+from services.resume_formatting import render_resume_pdf, redact_contact, mask_name, _VALID_THEMES, _VALID_LOGO_POSITIONS, build_resume_filename
 from services import template_merge
 
 router = APIRouter(tags=["kae-submission"])
@@ -527,11 +527,11 @@ async def _auto_notify_screening_team(tenant_id: str, application_id: str, actor
         # every other unattended flow in this codebase defaults to — an
         # auto-fired email has no recruiter present to pick a style.
         resume_bytes = render_resume_pdf(candidate, _STYLE_CONFIGS["clean_generated"])
-        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
+        filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
 
         await _do_kae_submission(
             tenant_id, application_id, actor, resume_bytes,
-            f"Resume_{safe_name}_clean_generated.pdf", "clean_generated",
+            filename, "clean_generated",
             _RESUME_LABELS["clean_generated"],
             override_to_emails=settings["to_emails"], trigger_source="auto_screened",
         )
@@ -574,11 +574,11 @@ async def _auto_submit_to_client_on_stage(tenant_id: str, application_id: str, a
             "skills": row["skills"], "resume_text": row["resume_text"],
         }
         resume_bytes = render_resume_pdf(candidate, _STYLE_CONFIGS["clean_generated"])
-        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
+        filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
 
         await _do_client_submission(
             tenant_id, application_id, actor, resume_bytes,
-            f"Resume_{safe_name}_clean_generated.pdf", "clean_generated",
+            filename, "clean_generated",
             _RESUME_LABELS["clean_generated"],
             template_id=None, columns_override=None, hidden_columns=[],
             field_values=None, to_emails_override=None, cc_self=True, save_as_default=False,
@@ -1040,6 +1040,14 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
     }
     if body.resume_style == "manual":
         resume_bytes = _build_manual_resume_pdf(body.manual_resume or {})
+        # Manual mode lets the recruiter type a different name/designation
+        # than what's on file — use what they actually typed for the
+        # filename too, matching what's on the document itself. total_exp
+        # stays the real, numeric candidate field regardless (the manual
+        # form's own total_exp is a free-text string like "5y 2m", not
+        # reliably parseable back into whole years for "NYrs").
+        mr = body.manual_resume or {}
+        filename = build_resume_filename(mr.get("name") or candidate["full_name"], mr.get("designation") or candidate["current_designation"], candidate["total_exp_mo"], "pdf")
     else:
         cfg = {**_STYLE_CONFIGS[body.resume_style]}
         if body.visual_theme:
@@ -1047,11 +1055,11 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
         if body.logo_position:
             cfg["logo_position"] = body.logo_position
         resume_bytes = render_resume_pdf(candidate, cfg)
+        filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
 
-    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
     return await _do_kae_submission(
         actor.tenant_id, application_id, actor, resume_bytes,
-        f"Resume_{safe_name}_{body.resume_style}.pdf", body.resume_style,
+        filename, body.resume_style,
         _RESUME_LABELS.get(body.resume_style, body.resume_style),
         template_id=body.template_id, field_values=body.field_values, cc_self=body.cc_self,
     )
@@ -1388,6 +1396,8 @@ async def submit_to_client(
     }
     if body.resume_style == "manual":
         resume_bytes = _build_manual_resume_pdf(body.manual_resume or {})
+        mr = body.manual_resume or {}
+        filename = build_resume_filename(mr.get("name") or candidate["full_name"], mr.get("designation") or candidate["current_designation"], candidate["total_exp_mo"], "pdf")
     else:
         cfg = {**_STYLE_CONFIGS[body.resume_style]}
         if body.visual_theme:
@@ -1395,11 +1405,11 @@ async def submit_to_client(
         if body.logo_position:
             cfg["logo_position"] = body.logo_position
         resume_bytes = render_resume_pdf(candidate, cfg)
+        filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
 
-    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
     return await _do_client_submission(
         actor.tenant_id, application_id, actor, resume_bytes,
-        f"Resume_{safe_name}_{body.resume_style}.pdf", body.resume_style,
+        filename, body.resume_style,
         _RESUME_LABELS.get(body.resume_style, body.resume_style),
         template_id=body.template_id, columns_override=body.columns, hidden_columns=body.hidden_columns,
         field_values=body.field_values, to_emails_override=body.to_emails, cc_self=body.cc_self,
