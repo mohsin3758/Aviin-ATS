@@ -7217,6 +7217,160 @@ test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not
   });
 });
 
+test.describe.serial('S58 Add Candidate: Current/Desired Location, documents, real-time duplicate check', () => {
+  // Real spec (2026-08-25, numbered items 26-33): Current Location
+  // (mandatory — reuses the existing "location" column, not renamed),
+  // Desired Location (new column), LWD Confirmation + Other Documents
+  // upload (new candidate_documents table), resume upload in PDF/Word/
+  // image (reuses the established resume_files table + extract/
+  // classify/parse pipeline, same as WhatsApp/email/public-apply
+  // intake), a real-time duplicate check, and a "recruiter name" /
+  // ownership-claim indicator on the Add Candidate form itself.
+  let token = '';
+  let candId = '';
+  let docId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const denseResumeText = `John QA S58 Tester
+Senior Software Engineer
+Email: qa.s58.tester@example.com Phone: 9876500058
+
+PROFESSIONAL SUMMARY
+Experienced backend engineer with 5 years building scalable web applications
+and REST APIs. Skilled in Python, Django, React, AWS, Docker and PostgreSQL.
+
+PROFESSIONAL EXPERIENCE
+Senior Software Engineer, Tata Consultancy Services, 2021 - Present
+Led backend development for a large-scale platform, implemented microservices
+using Python and Django, deployed on AWS with Docker.
+
+EDUCATION
+Bachelor of Engineering in Computer Science
+
+SKILLS
+Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
+
+  test('setup', async ({ request }) => {
+    token = await getApiToken(request);
+  });
+
+  // location stays Optional at the API layer on purpose (other real
+  // callers of this same endpoint don't always supply one, confirmed
+  // by 2 pre-existing suites in this file) — "Mandatory" is enforced
+  // client-side in the Add Candidate modal specifically, covered by
+  // the real headless UI test further down, not here.
+  test('POST /candidates without a location still succeeds (API layer stays permissive; UI enforces the mandatory rule)', async ({ request }) => {
+    const res = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 No Location ${Date.now()}` } });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    await request.delete(`${API}/candidates/${body.id}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('create with desired_location + current_designation — both now genuinely persist, not silently dropped', async ({ request }) => {
+    const res = await request.post(`${API}/candidates`, {
+      headers: auth(),
+      data: {
+        full_name: `QA S58 Test Candidate ${Date.now()}`,
+        email: `qa.s58.${Date.now()}@qatest.example`,
+        phone: '98' + String(Date.now()).slice(-8),
+        location: 'Bengaluru', desired_location: 'Pune', current_designation: 'Senior Engineer',
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    candId = body.id;
+    expect(body.location).toBe('Bengaluru');
+    expect(body.desired_location).toBe('Pune');
+    expect(body.current_designation).toBe('Senior Engineer');
+  });
+
+  test('resume upload: real gap-fill enrichment lands (skills/resume_text) without overwriting anything already set', async ({ request }) => {
+    const res = await request.post(`${API}/candidates/${candId}/upload-document`, {
+      headers: auth(),
+      multipart: { document_type: 'resume', file: { name: 'qa_s58.txt', mimeType: 'text/plain', buffer: Buffer.from(denseResumeText, 'utf-8') } },
+    });
+    expect(res.ok()).toBeTruthy();
+    const uploaded = await res.json();
+    expect(uploaded.document_type).toBe('resume');
+
+    const cand = await (await request.get(`${API}/candidates/${candId}`, { headers: auth() })).json();
+    expect(cand.skills.length).toBeGreaterThan(0);
+    expect(cand.resume_text).toBeTruthy();
+    // gap-fill must never clobber the already-set current_designation from the previous test
+    expect(cand.current_designation).toBe('Senior Engineer');
+  });
+
+  test('LWD confirmation + other document upload, invalid document_type cleanly 400s', async ({ request }) => {
+    const lwd = await request.post(`${API}/candidates/${candId}/upload-document`, {
+      headers: auth(),
+      multipart: { document_type: 'lwd_confirmation', file: { name: 'lwd.txt', mimeType: 'text/plain', buffer: Buffer.from('LWD confirmation content') } },
+    });
+    expect(lwd.ok()).toBeTruthy();
+    docId = (await lwd.json()).id;
+
+    const other = await request.post(`${API}/candidates/${candId}/upload-document`, {
+      headers: auth(),
+      multipart: { document_type: 'other', file: { name: 'aadhaar.txt', mimeType: 'text/plain', buffer: Buffer.from('other doc content') }, notes: 'Aadhaar copy' },
+    });
+    expect(other.ok()).toBeTruthy();
+
+    const bad = await request.post(`${API}/candidates/${candId}/upload-document`, {
+      headers: auth(),
+      multipart: { document_type: 'bogus', file: { name: 'x.txt', mimeType: 'text/plain', buffer: Buffer.from('x') } },
+    });
+    expect(bad.status()).toBe(400);
+  });
+
+  test('GET .../documents lists both the resume and the new documents; download returns the real bytes', async ({ request }) => {
+    const list = await (await request.get(`${API}/candidates/${candId}/documents`, { headers: auth() })).json();
+    expect(list.resumes.length).toBe(1);
+    expect(list.documents.length).toBe(2);
+    expect(list.documents.map((d: any) => d.document_type).sort()).toEqual(['lwd_confirmation', 'other']);
+
+    const dl = await request.get(`${API}/candidates/documents/${docId}/download`, { headers: auth() });
+    expect(dl.ok()).toBeTruthy();
+    expect(await dl.text()).toBe('LWD confirmation content');
+  });
+
+  test('real-time duplicate check: the same endpoint the live-typing check calls flags the phone this candidate was created with', async ({ request }) => {
+    const cand = await (await request.get(`${API}/candidates/${candId}`, { headers: auth() })).json();
+    const res = await request.get(`${API}/candidates/check-duplicate?phone=${cand.phone}`, { headers: auth() });
+    const body = await res.json();
+    expect(body.has_duplicate).toBe(true);
+  });
+
+  test('real headless UI: mandatory-field validation, the "Adding as" ownership indicator, and a real end-to-end create with resume attached', async ({ page }) => {
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /Add Candidate/i }).first().click();
+    await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText(/Adding as:/i)).toBeVisible();
+    await expect(page.getByText('Current Location')).toBeVisible();
+    await expect(page.getByText('Desired Location')).toBeVisible();
+
+    const stamp = Date.now();
+    await page.locator('input[placeholder="e.g. Rahul Sharma"]').fill('QA S58 UI Test ' + stamp);
+    await page.locator('input[placeholder="e.g. Bengaluru, Karnataka"]').fill('Bengaluru');
+    await page.getByRole('button', { name: 'Add Candidate' }).last().click();
+    await expect(page.getByText(/resume file.*required/i)).toBeVisible({ timeout: 5000 });
+
+    const resumeInput = page.locator('label:has-text("Resume Upload")').locator('xpath=..').locator('input[type=file]');
+    await resumeInput.setInputFiles({ name: 'qa_s58_ui.txt', mimeType: 'text/plain', buffer: Buffer.from(denseResumeText, 'utf-8') });
+    await expect(page.locator('text=✓ qa_s58_ui.txt')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Add Candidate' }).last().click();
+    await expect(page.getByText('Add New Candidate')).not.toBeVisible({ timeout: 15000 });
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    const search = await request.get(`${API}/candidates?search=QA S58 UI Test`, { headers: auth() }).catch(() => null);
+    if (search?.ok()) {
+      const body = await search.json().catch(() => ({}));
+      const items = body.items || body.data || body || [];
+      for (const c of items) await request.delete(`${API}/candidates/${c.id}`, { headers: auth() }).catch(() => {});
+    }
+  });
+});
+
 test.describe.serial('S57 Referral Links: job-less "General referral" no longer 500s, redirect actually works', () => {
   // Two real bugs found and fixed together: (1) referral_links.
   // requisition_id was NOT NULL, so the "General referral" (job-less)

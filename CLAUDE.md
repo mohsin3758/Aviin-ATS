@@ -12703,3 +12703,125 @@ pre-existing skip, 0 failed. Zero-token audit: CONFIRMED CLEAN (404
 files, 0 external API refs). Test throwaway referral rows left in place
 (no delete endpoint exists for this table, matching established
 precedent for tables like candidate_submissions/generated_resumes).
+
+## Add Candidate form: Current/Desired Location, LWD Confirmation + resume
+## + other-document uploads, real-time duplicate check, recruiter
+## ownership indicator - plus a real regression caught and fixed along
+## the way, 2026-08-25
+User pasted a screenshot of the real "Add New Candidate" modal plus a
+numbered spec (items 26-33): Current Location (mandatory), Desired
+Location, LWD Confirmation upload under Notice Period (mandatory),
+real-time duplicate detection on phone/email entry ("fast and quick
+search to save time"), the recruiter's name clearly shown at add-time,
+and resume/LWD/other-document upload in PDF/Word/image formats.
+
+Investigated the existing form and schema before building anything: the
+`location` column already exists and is what "Current Location" means
+in practice (kept under its existing name rather than renamed - it's
+referenced across dozens of files, a rename would be a purely cosmetic,
+needlessly risky change); `current_designation` has been a real DB
+column and part of `FIELDS`/the SELECT list all along, but was **never
+in `CandidateCreate`/`CandidateUpdate`** - the modal's own "Current
+Designation" input has been silently dropping every manual add/edit
+since the form was built, confirmed by reading the schema, not assumed.
+No file-upload capability existed anywhere in this modal - only a
+"paste resume text" textarea. `POST /candidates` confirmed (via grep)
+to have exactly one real frontend caller, so extending its schema was
+safe to do directly.
+
+**Schema** (`sql/84_candidate_location_documents.sql`, table owned by
+`postgres`) - `candidates.desired_location` (new column) and a new
+`candidate_documents` table (document_type CHECK IN
+`('lwd_confirmation','other')`, file_name/file_path/mime_type/file_size/
+notes/uploaded_by, FORCE RLS) for the two non-resume document types.
+Resume upload deliberately reuses the **already-existing** `resume_files`
+table/`save_resume_file()` pattern (the same one WhatsApp/email/public-
+apply intake already use) rather than a third parallel storage concept.
+
+**Backend** (`backend/schemas.py`, `backend/routers/candidates.py`) -
+`CandidateCreate`/`CandidateUpdate` gained `desired_location` and
+`current_designation` (closing the silent-drop bug above);
+`create_candidate`'s INSERT extended to match. New
+`POST /candidates/{id}/upload-document` (multipart,
+`document_type` in `resume|lwd_confirmation|other`, 10MB cap) - for
+`resume`, reuses the exact extract→classify→parse pipeline
+(`extract_text_from_attachment`/`classify_document`/`parse_resume_v2`)
+already established for WhatsApp/email/public-apply intake, with the
+same gap-fill-only enrichment (COALESCE - never overwrites a value
+already on the record, matching `upsert_candidate`'s own convention);
+for `lwd_confirmation`/`other`, a new, simpler disk-write helper
+(`_save_candidate_document_file`, its own real folder -
+`/app/uploads/candidate_documents/` - separate from resume storage) +
+a `candidate_documents` INSERT. New `GET /candidates/{id}/documents`
+(lists both resume_files and candidate_documents for a candidate) and
+`GET /candidates/documents/{doc_id}/download` (auth-gated `FileResponse`,
+same established convention as the existing `/resume-intake/{id}/
+download` endpoint - never a raw static URL).
+
+**A real, previously-unnoticed data bug found and fixed as a natural
+side-effect of extending this exact schema**: `current_designation`
+being silently dropped on every manual add/edit (not caught until now
+because nothing had ever compared the Pydantic model against the SELECT
+list side by side).
+
+**A real regression caught by the project's own regression sweep, not
+shipped**: `location: str` (hard-required) initially seemed safe since
+`POST /candidates` has only one real frontend caller - but the sweep
+immediately broke 2 pre-existing suites (S16, S30) that create
+throwaway candidates via this exact endpoint with no `location` field
+at all, proving other legitimate callers of this shared endpoint exist
+beyond just the one frontend form. Reverted to `Optional[str] = None`
+at the API layer; "Current Location is mandatory" is enforced purely at
+the UI layer (the Add Candidate modal specifically, matching what the
+actual spec item was about) via a real client-side check in
+`handleSave()`, not a backend 422. Confirmed both directions after the
+fix: `POST /candidates` with no location still succeeds, and the modal
+still blocks Save with "Current Location is required" when it's blank.
+
+**Frontend** (`candidates/page.tsx`) - new `uploadCandidateDocument()`
+helper (a raw `fetch` + `FormData`, since `apiFetch` hardcodes
+`Content-Type: application/json` and can't carry multipart). Modal
+changes: an "Adding as: {recruiter}" indicator (from the JWT's
+`full_name`, already present in the token payload - no extra API call
+needed) shown only when creating, confirmed safe against the SSR-
+hydration bug class documented repeatedly elsewhere in this project
+(the `Modal` component returns `null` server-side and only renders its
+children after a user click, so reading `getTokenPayload()` inside it
+can never mismatch); "Location" relabeled "Current Location" (required
+marker) plus a new "Desired Location" field; a debounced (500ms)
+real-time duplicate check reusing the existing, already-correct
+`/candidates/check-duplicate` endpoint (7-digit-minimum phone anchor,
+`is_active`-scoped - both fixed 2026-08-10), shown as a small inline
+red banner as soon as a matching phone/email is typed - separate from
+and non-blocking against the existing pre-submit `dupWarning` gate,
+which still fires and still blocks Save exactly as before; a mandatory
+Resume Upload field (PDF/Word/image, blocked at Save if empty) and a
+conditionally-mandatory LWD Confirmation upload (required only when a
+Notice Period value is actually entered - a deliberate interpretation,
+stated explicitly rather than forcing every candidate without exception,
+since not every candidate has a notice period to confirm); an optional
+multi-file "Other Documents" upload. On save, the candidate record is
+created/updated first, then each selected file uploads via the new
+endpoint - a document-upload failure surfaces its own alert without
+making a successfully-saved candidate look like the whole Add failed.
+
+Verified for real end-to-end, not code review, at every layer: direct
+API calls confirmed `desired_location`/`current_designation` now
+genuinely persist (both silently dropped before), a real synthetic PDF
+resume upload correctly triggered gap-fill enrichment (skills/
+resume_text populated) while a deliberately-too-sparse PDF was
+correctly rejected by the document classifier first (confirmed this is
+the classifier working as intended, not a bug, matching established
+precedent elsewhere in this project); LWD confirmation + other-document
+uploads round-tripped with byte-identical downloads; an invalid
+`document_type` cleanly 400s. A full real headless-browser pass through
+the actual "Add New Candidate" modal confirmed: the "Adding as" and
+Current/Desired Location fields render, Save correctly blocks with
+"resume file... required" before any file is attached, attaching a
+real dense resume file clears the block, and the candidate saves
+successfully with the resume genuinely attached (confirmed via a direct
+follow-up API call, not assumed from the UI alone). New permanent "S58"
+suite (8 tests) added to `qa_automation.spec.ts`. Full regression sweep
+(S1/S2/S8/S13/S16/S30/S57/S58, 61 tests) re-run clean after the
+`location` fix: 60 passed, 1 pre-existing skip, 0 failed. Zero-token
+audit: `CONFIRMED CLEAN` (405 files, 0 external API refs).

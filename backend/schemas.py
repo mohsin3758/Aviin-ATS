@@ -38,8 +38,24 @@ class CandidateCreate(BaseModel):
     phone: Optional[str] = None
     skills: list[str] = Field(default_factory=list)
     total_exp_mo: int = 0
+    # "location" is the real current-location field (kept under its
+    # existing name — referenced across dozens of files — rather than
+    # renamed for a purely cosmetic label change). Deliberately NOT hard-
+    # required here even though the Add Candidate form's own spec calls
+    # it mandatory — a real regression sweep caught 2 existing test
+    # suites (S16, S30) calling this same endpoint without a location,
+    # standing in for other legitimate internal callers this project's
+    # own history doesn't fully enumerate. "Mandatory" is enforced at
+    # the UI layer (the Add Candidate modal) instead, where it's
+    # actually about that one form's UX, not this whole shared endpoint.
     location: Optional[str] = None
+    desired_location: Optional[str] = None
     current_employer: Optional[str] = None
+    # Real, previously-existing gap: this column has been in FIELDS/the
+    # SELECT list all along (populated by resume parsing), but was never
+    # in this model — the modal's own "Current Designation" input has
+    # been silently dropped on every manual add/edit since it was built.
+    current_designation: Optional[str] = None
     resume_text: Optional[str] = None
     source: Optional[str] = None
     consent_text: Optional[str] = None
@@ -55,7 +71,9 @@ class CandidateUpdate(BaseModel):
     skills: Optional[list[str]] = None
     total_exp_mo: Optional[int] = None
     location: Optional[str] = None
+    desired_location: Optional[str] = None
     current_employer: Optional[str] = None
+    current_designation: Optional[str] = None
     resume_text: Optional[str] = None
     source: Optional[str] = None
     expected_ctc: Optional[float] = None

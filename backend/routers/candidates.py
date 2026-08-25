@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import List
 from typing import Optional
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/candidates", tags=["candidates"])
 
 FIELDS = (
     "id, tenant_id, full_name, email, phone, skills, total_exp_mo, "
-    "location, current_employer, current_designation, resume_text, source, "
+    "location, desired_location, current_employer, current_designation, resume_text, source, "
     "expected_ctc, current_ctc, notice_period_days, "
     "ai_match_score, color_indicator, last_activity, created_at, updated_at"
 )
@@ -686,12 +686,13 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
         try:
             row = await conn.fetchrow(
                 f"""INSERT INTO candidates
-                    (tenant_id,full_name,email,phone,skills,total_exp_mo,location,
-                     current_employer,resume_text,source,expected_ctc,current_ctc,notice_period_days)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                    (tenant_id,full_name,email,phone,skills,total_exp_mo,location,desired_location,
+                     current_employer,current_designation,resume_text,source,expected_ctc,current_ctc,notice_period_days)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                    RETURNING {FIELDS}""",
                 actor.tenant_id, body.full_name, body.email, body.phone, body.skills,
-                body.total_exp_mo, body.location, body.current_employer, body.resume_text, body.source,
+                body.total_exp_mo, body.location, body.desired_location, body.current_employer,
+                body.current_designation, body.resume_text, body.source,
                 getattr(body, "expected_ctc", None), getattr(body, "current_ctc", None),
                 getattr(body, "notice_period_days", None))
         except Exception as exc:
@@ -723,6 +724,137 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
         await events.write_outbox(conn, actor.tenant_id, "candidate.created",
             {"candidate_id": str(cid), "full_name": body.full_name}, f"candidate.created:{cid}")
     return dict(row)
+
+
+def _save_candidate_document_file(data: bytes, tenant_id: str, filename: str) -> str:
+    """Generic disk-write for candidate_documents (LWD confirmation / other),
+    a real, separate folder from save_resume_file's own resume-specific one —
+    never served as a raw URL, only ever read back through the auth-gated
+    download endpoint below, matching this codebase's established
+    resume_files/generated_resumes download convention."""
+    from pathlib import Path
+    from datetime import datetime
+    import re as _re, uuid as _uuid
+    base = Path('/app/uploads/candidate_documents')
+    date_str = datetime.now().strftime('%Y/%m/%d')
+    folder = base / tenant_id / date_str
+    folder.mkdir(parents=True, exist_ok=True)
+    safe = _re.sub(r'[^\w.\-]', '_', filename)[:200]
+    uid = _uuid.uuid4().hex[:8]
+    dest = folder / f'{uid}_{safe}'
+    dest.write_bytes(data)
+    return f'/uploads/candidate_documents/{tenant_id}/{date_str}/{uid}_{safe}'
+
+
+@router.post("/{candidate_id}/upload-document")
+async def upload_candidate_document(
+    candidate_id: str,
+    document_type: str = Form(...),
+    file: UploadFile = File(...),
+    notes: Optional[str] = Form(None),
+    actor: Actor = Depends(require_permission("candidates", "update")),
+):
+    """Resume upload reuses the already-established resume_files table +
+    save_resume_file() (same disk-storage helper WhatsApp/email/public-apply
+    intake already use) plus the same extract->classify->parse enrichment,
+    gap-fill-only (never overwrites a manually-typed field — same COALESCE
+    convention as upsert_candidate/public_apply). LWD confirmation and other
+    documents use the new, simpler candidate_documents table — no parsing
+    semantics apply to either of those."""
+    if document_type not in ("resume", "lwd_confirmation", "other"):
+        raise HTTPException(400, "document_type must be one of: resume, lwd_confirmation, other")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file")
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(400, "File too large (max 10MB)")
+    filename = file.filename or "upload"
+    mime = file.content_type or ""
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow(
+            "SELECT id, full_name, email FROM candidates WHERE id=$1 AND is_active IS NOT FALSE",
+            candidate_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+
+        if document_type == "resume":
+            from services.resume_intake_service import save_resume_file, extract_text_from_attachment
+            from services.document_classifier import classify_document
+            from services.improved_parser import parse_resume_v2
+            file_path = save_resume_file(data, actor.tenant_id, filename)
+            parsed: dict = {}
+            try:
+                text = extract_text_from_attachment(data, mime, filename)
+                doc_result = classify_document(text, filename, mime)
+                if doc_result.is_resume:
+                    parsed = parse_resume_v2(text, from_name=cand["full_name"], from_email=cand["email"], filename=filename)
+                    parsed["_resume_text"] = text
+            except Exception:
+                parsed = {}
+            row = await conn.fetchrow(
+                """INSERT INTO resume_files
+                    (tenant_id, candidate_id, job_board, job_board_label,
+                     file_name, file_path, mime_type, file_size,
+                     parse_status, parsed_data, parse_confidence, routing_decision)
+                   VALUES ($1,$2,'manual_add','Manual Add Candidate',$3,$4,$5,$6,$7,$8,$9,$10)
+                   RETURNING id""",
+                actor.tenant_id, candidate_id, filename, file_path, mime, len(data),
+                "auto_accepted" if parsed else "not_a_resume",
+                json.dumps(parsed) if parsed else "{}",
+                round(float(parsed.get("_confidence", 0.7) or 0.7), 3) if parsed else 0.0,
+                "auto_accepted" if parsed else "manual_upload")
+            if parsed.get("_resume_text"):
+                await conn.execute(
+                    """UPDATE candidates SET
+                        resume_text = CASE WHEN (resume_text IS NULL OR resume_text='') THEN $2 ELSE resume_text END,
+                        skills = CASE WHEN skills = '{}' AND $3::text[] <> '{}' THEN $3 ELSE skills END
+                       WHERE id=$1""",
+                    candidate_id, parsed.get("_resume_text"), parsed.get("skills") or [])
+            return {"id": str(row["id"]), "document_type": "resume", "file_name": filename}
+
+        file_path = _save_candidate_document_file(data, actor.tenant_id, filename)
+        row = await conn.fetchrow(
+            """INSERT INTO candidate_documents
+                (tenant_id, candidate_id, document_type, file_name, file_path, mime_type, file_size, notes, uploaded_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
+            actor.tenant_id, candidate_id, document_type, filename, file_path, mime, len(data),
+            notes, actor.user_id)
+        return {"id": str(row["id"]), "document_type": document_type, "file_name": filename}
+
+
+@router.get("/documents/{doc_id}/download")
+async def download_candidate_document(doc_id: str, actor: Actor = Depends(get_actor)):
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT file_name, file_path, mime_type FROM candidate_documents WHERE id=$1 AND tenant_id=$2",
+            doc_id, actor.tenant_id)
+    if not row:
+        raise HTTPException(404, "Document not found")
+    fp = (row["file_path"] or "").lstrip("/")
+    abs_path = Path("/app") / fp
+    if not abs_path.exists():
+        raise HTTPException(404, "File missing from disk")
+    mime = row["mime_type"] or "application/octet-stream"
+    fn = row["file_name"] or abs_path.name
+    return FileResponse(str(abs_path), media_type=mime, filename=fn,
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
+@router.get("/{candidate_id}/documents")
+async def list_candidate_documents(candidate_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        resumes = await conn.fetch(
+            "SELECT id, file_name, mime_type, file_size, created_at FROM resume_files "
+            "WHERE candidate_id=$1 AND tenant_id=$2 ORDER BY created_at DESC",
+            candidate_id, actor.tenant_id)
+        docs = await conn.fetch(
+            "SELECT id, document_type, file_name, mime_type, file_size, notes, created_at FROM candidate_documents "
+            "WHERE candidate_id=$1 AND tenant_id=$2 ORDER BY created_at DESC",
+            candidate_id, actor.tenant_id)
+    return {"resumes": [dict(r) for r in resumes], "documents": [dict(d) for d in docs]}
 
 
 @router.get("/{candidate_id}")

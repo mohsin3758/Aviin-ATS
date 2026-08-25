@@ -48,6 +48,22 @@ async function downloadResume(fileId: string, fileName: string) {
   } catch (e) { alert('Download error: ' + String(e)); }
 }
 
+// Multipart upload for the new document types (resume/LWD confirmation/
+// other) added to Add Candidate — apiFetch hardcodes Content-Type:
+// application/json so can't carry FormData, uses a raw fetch instead,
+// same authHeaders() pattern as downloadResume above (never manually set
+// Content-Type on a multipart body — the browser needs to generate its
+// own boundary string).
+async function uploadCandidateDocument(candidateId: string, documentType: 'resume'|'lwd_confirmation'|'other', file: File, notes?: string) {
+  const fd = new FormData();
+  fd.append('document_type', documentType);
+  fd.append('file', file);
+  if (notes) fd.append('notes', notes);
+  const resp = await fetch(`${API}/candidates/${candidateId}/upload-document`, { method: 'POST', headers: authHeaders(), body: fd });
+  if (!resp.ok) { const t = await resp.json().catch(()=>({})); throw new Error(t?.detail || 'Upload failed: ' + resp.status); }
+  return resp.json();
+}
+
 // Fallback (used only until /settings/pipeline-stages loads). Also the
 // live keys were wrong here before this fix (nda_pre_contract/hired don't
 // match the real stage keys nda/placed, so candidates in those stages —
@@ -69,7 +85,7 @@ const DEFAULT_STAGE_C: Record<string,{bg:string;color:string;label:string}> = {
 };
 
 const EMPTY = {
-  full_name:'',email:'',phone:'',location:'',
+  full_name:'',email:'',phone:'',location:'',desired_location:'',
   current_employer:'',current_designation:'',
   total_exp_mo:0,expected_ctc:'' as any,current_ctc:'' as any,
   notice_period_days:'' as any,linkedin_url:'',source:'linkedin',
@@ -751,6 +767,17 @@ export default function CandidatesPage() {
   const [dupWarning,setDupWarning] = useState<any>(null);
   const [skipDupCheck,setSkipDupCheck] = useState(false);
   const [skIn,setSkIn] = useState('');
+  // Real-time ("as you type") duplicate check — separate from the
+  // existing pre-submit dupWarning gate above, which still fires and
+  // still blocks Save; this is a fast, non-blocking inline signal so a
+  // recruiter sees "already in database" within a second of typing,
+  // not only after clicking Add Candidate.
+  const [liveDup,setLiveDup] = useState<any>(null);
+  const liveDupTimer = useRef<any>(null);
+  const [resumeFile,setResumeFile] = useState<File|null>(null);
+  const [lwdFile,setLwdFile] = useState<File|null>(null);
+  const [otherFiles,setOtherFiles] = useState<File[]>([]);
+  const [uploadingDocs,setUploadingDocs] = useState(false);
 
   // filters
   const [search,setSearch] = useState('');
@@ -868,20 +895,46 @@ export default function CandidatesPage() {
   const toggleSel = (id:string)=>{ const s=new Set(selected); s.has(id)?s.delete(id):s.add(id); setSelected(s); };
 
   // handlers
-  const openCreate = ()=>{setForm({...EMPTY});setEditId(null);setErr('');setDupWarning(null);setSkipDupCheck(false);setShowModal(true);};
+  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);};
+  const openCreate = ()=>{setForm({...EMPTY});setEditId(null);setErr('');setDupWarning(null);setSkipDupCheck(false);resetDocState();setShowModal(true);};
   const openEdit   = (d:any)=>{
     setForm({full_name:d.full_name||'',email:d.email||'',phone:d.phone||'',location:d.location||'',
+      desired_location:d.desired_location||'',
       current_employer:d.current_employer||'',current_designation:d.current_designation||'',
       total_exp_mo:d.total_exp_mo||0,expected_ctc:d.expected_ctc||'',current_ctc:d.current_ctc||'',
       notice_period_days:d.notice_period_days||'',linkedin_url:d.linkedin_url||'',
       source:d.source||'linkedin',skills:d.skills||[],resume_text:d.resume_text||''});
-    setEditId(d.id);setErr('');setShowModal(true);
+    setEditId(d.id);setErr('');resetDocState();setShowModal(true);
   };
   const addSk=(s:string)=>{const t=s.trim();if(t&&!form.skills.includes(t))setForm(f=>({...f,skills:[...f.skills,t]}));setSkIn('');};
   const rmSk =(s:string)=>setForm(f=>({...f,skills:f.skills.filter((x:string)=>x!==s)}));
 
+  // Real-time duplicate check ("fast and quick search to save time" —
+  // as soon as a phone/email is typed, not only on Save click). Debounced
+  // 500ms, only while adding (not editing) a candidate — the existing
+  // check-duplicate endpoint is already correctly is_active-scoped and
+  // 7-digit-minimum-anchored (fixed 2026-08-10), reused as-is here.
+  useEffect(()=>{
+    if (!showModal || editId) return;
+    if (liveDupTimer.current) clearTimeout(liveDupTimer.current);
+    const email = form.email.trim(), phone = form.phone.trim();
+    if (!email && phone.replace(/\D/g,'').length < 7) { setLiveDup(null); return; }
+    liveDupTimer.current = setTimeout(async ()=>{
+      const p = new URLSearchParams();
+      if (email) p.append('email', email);
+      if (phone) p.append('phone', phone);
+      try { const dup = await apiFetch('/candidates/check-duplicate?'+p.toString()); setLiveDup(dup); }
+      catch { /* non-blocking — silently skip a failed live check */ }
+    }, 500);
+    return ()=>{ if (liveDupTimer.current) clearTimeout(liveDupTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[form.email,form.phone,showModal,editId]);
+
   const handleSave = async()=>{
     if (!form.full_name.trim()){setErr('Full name required');return;}
+    if (!form.location.trim()){setErr('Current Location is required');return;}
+    if (!editId && !resumeFile){setErr('A resume file (PDF, Word or image) is required');return;}
+    if (!editId && Number(form.notice_period_days)>0 && !lwdFile){setErr('LWD Confirmation upload is required when a Notice Period is given');return;}
     if (!editId && !skipDupCheck && (form.email||form.phone)) {
       const p=new URLSearchParams();
       if(form.email) p.append('email',form.email);
@@ -897,8 +950,23 @@ export default function CandidatesPage() {
         expected_ctc:form.expected_ctc?Number(form.expected_ctc):null,
         current_ctc:form.current_ctc?Number(form.current_ctc):null,
         notice_period_days:form.notice_period_days?Number(form.notice_period_days):null};
+      let candId = editId;
       if(editId) await apiFetch(`/candidates/${editId}`,{method:'PUT',body:JSON.stringify(payload)});
-      else       await apiFetch('/candidates',{method:'POST',body:JSON.stringify(payload)});
+      else       { const created:any = await apiFetch('/candidates',{method:'POST',body:JSON.stringify(payload)}); candId = created.id; }
+      if (candId && (resumeFile||lwdFile||otherFiles.length)) {
+        setUploadingDocs(true);
+        try {
+          if (resumeFile) await uploadCandidateDocument(candId, 'resume', resumeFile);
+          if (lwdFile) await uploadCandidateDocument(candId, 'lwd_confirmation', lwdFile);
+          for (const f of otherFiles) await uploadCandidateDocument(candId, 'other', f);
+        } catch (upErr:any) {
+          // Candidate record itself already saved successfully — a
+          // document-upload failure shouldn't look like the whole Add
+          // failed, just surface it and let the recruiter retry the
+          // upload from the candidate's own profile.
+          alert('Candidate saved, but a document upload failed: '+(upErr?.message||'unknown error'));
+        } finally { setUploadingDocs(false); }
+      }
       setShowModal(false);refetch();
     } catch(e:any){setErr(e.message||'Save failed');}
     finally{setSaving(false);}
@@ -1327,7 +1395,7 @@ export default function CandidatesPage() {
 
       {/* ── Add / Edit modal ─────────────────────────────────────────────── */}
       <Modal open={showModal} onClose={()=>setShowModal(false)} title={editId?'Edit Candidate':'Add New Candidate'} subtitle="Fill in candidate details" size="lg"
-        footer={<FormActions onClose={()=>setShowModal(false)} onSubmit={handleSave} loading={saving} submitLabel={editId?'Update Candidate':'Add Candidate'}/>}>
+        footer={<FormActions onClose={()=>setShowModal(false)} onSubmit={handleSave} loading={saving||uploadingDocs} submitLabel={editId?'Update Candidate':(uploadingDocs?'Uploading…':'Add Candidate')}/>}>
         {err&&<div style={{marginBottom:'16px',padding:'10px 14px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',fontSize:'13px',color:'#dc2626'}}>{err}</div>}
         {dupWarning?.has_duplicate&&(
           <div style={{background:'#fffbeb',border:'2px solid #f59e0b',borderRadius:'10px',padding:'14px',marginBottom:'16px'}}>
@@ -1343,13 +1411,30 @@ export default function CandidatesPage() {
             </div>
           </div>
         )}
+        {!editId&&(
+          <div style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'14px',padding:'6px 12px',background:'#eff6ff',borderRadius:'7px',fontSize:'12px',color:'#1e40af',fontWeight:'600'}}>
+            <Users size={13}/> Adding as: {getTokenPayload()?.full_name || 'You'} — this candidate will be claimed under your name
+          </div>
+        )}
         <SectionDivider label="Personal Information"/>
         <FormRow><FormField label="Full Name" required><input style={INP} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))}/></FormField><FormField label="Email"><input type="email" style={INP} placeholder="rahul@example.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></FormField></FormRow>
-        <FormRow><FormField label="Phone"><input style={INP} placeholder="+91 9876543210" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))}/></FormField><FormField label="Location"><input style={INP} placeholder="e.g. Bengaluru, Karnataka" value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))}/></FormField></FormRow>
-        <FormRow><FormField label="LinkedIn URL"><input style={INP} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>setForm(f=>({...f,linkedin_url:e.target.value}))}/></FormField><FormField label="Source"><select style={INP} value={form.source} onChange={e=>setForm(f=>({...f,source:e.target.value}))}>{SRC.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></FormField></FormRow>
+        {!editId&&liveDup?.has_duplicate&&(
+          <div style={{display:'flex',alignItems:'center',gap:'6px',marginTop:'-8px',marginBottom:'12px',padding:'6px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'7px',fontSize:'11px',color:'#dc2626',fontWeight:'700'}}>
+            <AlertTriangle size={12}/> Duplicate — {(liveDup.duplicates||[]).map((d:any)=>d.candidate.full_name).join(', ')} already {(liveDup.duplicates||[]).length>1?'exist':'exists'} with this {(liveDup.duplicates||[]).map((d:any)=>d.match_type).join('/')}
+          </div>
+        )}
+        <FormRow><FormField label="Phone"><input style={INP} placeholder="+91 9876543210" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))}/></FormField><FormField label="Current Location" required><input style={INP} placeholder="e.g. Bengaluru, Karnataka" value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))}/></FormField></FormRow>
+        <FormRow><FormField label="Desired Location" hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField><FormField label="LinkedIn URL"><input style={INP} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>setForm(f=>({...f,linkedin_url:e.target.value}))}/></FormField></FormRow>
+        <FormRow><FormField label="Source"><select style={INP} value={form.source} onChange={e=>setForm(f=>({...f,source:e.target.value}))}>{SRC.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></FormField><div/></FormRow>
         <SectionDivider label="Professional Details"/>
         <FormRow><FormField label="Current Employer"><input style={INP} placeholder="e.g. Infosys" value={form.current_employer} onChange={e=>setForm(f=>({...f,current_employer:e.target.value}))}/></FormField><FormField label="Current Designation"><input style={INP} placeholder="e.g. Senior Engineer" value={form.current_designation} onChange={e=>setForm(f=>({...f,current_designation:e.target.value}))}/></FormField></FormRow>
         <FormRow cols={3}><FormField label="Experience (months)" hint={form.total_exp_mo>0?`= ${Math.floor(Number(form.total_exp_mo)/12)}y ${Number(form.total_exp_mo)%12}m`:'e.g. 48 = 4 years'}><input type="number" style={INP} min={0} max={600} value={form.total_exp_mo} onChange={e=>setForm(f=>({...f,total_exp_mo:+e.target.value}))}/></FormField><FormField label="Notice Period (days)"><input type="number" style={INP} min={0} max={365} placeholder="e.g. 30" value={form.notice_period_days} onChange={e=>setForm(f=>({...f,notice_period_days:e.target.value}))}/></FormField></FormRow>
+        {!editId&&(
+          <FormField label="LWD Confirmation" required={Number(form.notice_period_days)>0} hint={Number(form.notice_period_days)>0?'Required — upload the Last Working Day confirmation':'Only required if a Notice Period is entered above'}>
+            <input type="file" accept=".pdf,.doc,.docx,image/*" style={INP} onChange={e=>setLwdFile(e.target.files?.[0]||null)}/>
+            {lwdFile&&<div style={{fontSize:'11px',color:'#166534',marginTop:'4px'}}>✓ {lwdFile.name}</div>}
+          </FormField>
+        )}
         <FormRow><FormField label="Expected CTC" hint="Annual, e.g. 1500000 = 15 LPA"><input type="number" style={INP} placeholder="e.g. 1500000" value={form.expected_ctc} onChange={e=>setForm(f=>({...f,expected_ctc:e.target.value}))}/></FormField><FormField label="Current CTC"><input type="number" style={INP} placeholder="e.g. 1200000" value={form.current_ctc} onChange={e=>setForm(f=>({...f,current_ctc:e.target.value}))}/></FormField></FormRow>
         <SectionDivider label="Skills"/>
         <div style={{display:'flex',gap:'8px',marginBottom:'8px'}}>
@@ -1365,7 +1450,20 @@ export default function CandidatesPage() {
           ))}
         </div>
         <SectionDivider label="Resume / Notes"/>
+        {!editId&&(
+          <FormField label="Resume Upload" required hint="PDF, Word or image — auto-extracted skills/experience gap-fill any blank fields you haven't already typed">
+            <input type="file" accept=".pdf,.doc,.docx,image/*" style={INP} onChange={e=>setResumeFile(e.target.files?.[0]||null)}/>
+            {resumeFile&&<div style={{fontSize:'11px',color:'#166534',marginTop:'4px'}}>✓ {resumeFile.name}</div>}
+          </FormField>
+        )}
         <textarea style={{...INP,height:'100px',resize:'vertical'}} placeholder="Paste resume text or notes..." value={form.resume_text} onChange={e=>setForm(f=>({...f,resume_text:e.target.value}))}/>
+        {!editId&&(
+          <FormField label="Other Documents" hint="Optional — Aadhaar, PAN, offer letters, or anything else relevant. Multiple files allowed.">
+            <input type="file" multiple accept=".pdf,.doc,.docx,image/*" style={INP} onChange={e=>setOtherFiles(Array.from(e.target.files||[]))}/>
+            {otherFiles.length>0&&<div style={{fontSize:'11px',color:'#166534',marginTop:'4px'}}>✓ {otherFiles.map(f=>f.name).join(', ')}</div>}
+          </FormField>
+        )}
+        {uploadingDocs&&<div style={{fontSize:'12px',color:'#64748b',marginTop:'8px'}}>Uploading documents…</div>}
       </Modal>
 
       {/* ── JD Match modal ───────────────────────────────────────────────── */}
