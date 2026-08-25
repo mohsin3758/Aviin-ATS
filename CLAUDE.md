@@ -12962,3 +12962,73 @@ tests - including S51, the original backdrop-click fix's own suite, to
 confirm no regression there) re-run clean: 74 passed, 1 pre-existing
 skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (406 files, 0
 external API refs).
+
+## Add Candidate: LinkedIn URL verify + real context (resume/ownership/
+## pipeline) inside the duplicate-check banner, 2026-08-25
+Direct follow-up, same day. User asked for two things against the Add
+Candidate form: a real "check mark" verifying whether a typed LinkedIn
+URL actually works, and enriching the duplicate-check banner with the
+uploaded resume name, ownership claim days remaining, and current
+pipeline status for each matched duplicate.
+
+**Duplicate-check enrichment.** New `_duplicate_context()` helper
+(`candidates.py`) computes, per matched candidate: the latest
+`resume_files.file_name`, active ownership (`candidate_ownership.get_
+ownership()`, reused as-is — the same function `_ownership_conflict_
+detail()` already uses for the create-time 409) with real days-remaining
+computed from `ownership_expires_at`, and the current pipeline stage
++ requisition title from the most recent active (`is_active IS NOT
+FALSE`) application. Called once per unique candidate id (not once per
+match row, so a person matching on both email and phone isn't queried
+twice), and folded into each `duplicates[]` entry the existing
+`GET /candidates/check-duplicate` already returns — no new endpoint,
+no frontend re-plumbing of the live-check wiring built earlier the same
+day. Frontend renders each of the three, conditionally, right under the
+existing "N duplicate candidates found" banner (📄 resume filename, 🔒
+owner + days left, 📍 pipeline stage + role) — or an honest "No resume,
+ownership claim, or active pipeline on file" line when none apply,
+rather than silently showing nothing.
+
+**LinkedIn URL verify.** New `GET /candidates/verify-linkedin` — format
+validation first (a real `linkedin.com/in/username` pattern, always
+reliable, no network call), then a genuine `httpx` GET probe. Tested
+empirically before deciding the design, not assumed: a real, well-known
+profile (`linkedin.com/in/satyanadella`) returned a genuine 200 with a
+full page; both a plausible-looking fake profile AND a definitely-
+nonexistent one both returned LinkedIn's own bot-detection status
+(HTTP 999, a ~1.5KB block page) — meaning a raw pass/fail on
+reachability would be dishonest, since LinkedIn's bot-detection could
+plausibly also fire against a genuinely real profile under different
+conditions (rate-limiting, IP reputation). Reported honestly as 3
+states instead: `valid_format:false` (a hard, deterministic rejection —
+not a linkedin.com/in/ URL at all), `reachable:true` (a real 200 with
+substantial content — a genuine positive signal), or `reachable:null`
+("could not confirm reachability... does not necessarily mean the link
+is invalid" — covers both a 999 block and a network error, deliberately
+never phrased as "this profile doesn't exist"). Built as a manual
+"Verify" button next to the field, not a live-on-keystroke check like
+the phone/email duplicate search — hitting LinkedIn's own servers on
+every typed character would only make bot-detection escalate faster,
+with no real benefit over a one-click check on a field that's normally
+pasted once. Frontend shows a red ✕ (invalid format), green ✓
+(reachable), or amber ⚠ (could-not-verify) with the real message text.
+
+Verified for real end-to-end, not code review: built a real throwaway
+candidate with an actual uploaded resume, an active ownership claim
+(confirmed `days_left:29`, matching the real 30-day window), and a real
+pipeline assignment via `bulk-assign`, then confirmed via direct API
+call that `check-duplicate` returns all 3 enrichments correctly
+attached to the matched duplicate; a genuine headless-browser pass
+against the live Add Candidate modal visually confirmed the same 3
+lines render in the actual banner (pulled and inspected a real
+screenshot, not assumed from the API response alone). For LinkedIn:
+confirmed the invalid-format case (a Twitter URL) cleanly rejects with
+no network call, and confirmed the real `satyanadella` profile shows
+"✓ Link is reachable and loads a real profile page" through the actual
+UI (also visually confirmed via screenshot). New permanent tests added
+to the existing "S58" suite (2 more tests, 13 total). Full S58 suite
+(13/13) and a broader regression sweep (S1/S2/S8/S13/S16/S30/S51/S57/
+S58, 77 tests) re-run clean: 76 passed, 1 pre-existing skip, 0 failed.
+Zero-token audit: `CONFIRMED CLEAN` (406 files, 0 external API refs) -
+the LinkedIn probe hits linkedin.com directly, not an LLM/AI API, so it
+correctly falls outside HARD RULE #1's scope.

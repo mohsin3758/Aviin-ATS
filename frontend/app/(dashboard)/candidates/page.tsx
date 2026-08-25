@@ -774,6 +774,8 @@ export default function CandidatesPage() {
   // not only after clicking Add Candidate.
   const [liveDup,setLiveDup] = useState<any>(null);
   const [liveDupChecking,setLiveDupChecking] = useState(false);
+  const [linkedinCheck,setLinkedinCheck] = useState<any>(null);
+  const [linkedinChecking,setLinkedinChecking] = useState(false);
   const liveDupTimer = useRef<any>(null);
   const [resumeFile,setResumeFile] = useState<File|null>(null);
   const [lwdFile,setLwdFile] = useState<File|null>(null);
@@ -896,7 +898,14 @@ export default function CandidatesPage() {
   const toggleSel = (id:string)=>{ const s=new Set(selected); s.has(id)?s.delete(id):s.add(id); setSelected(s); };
 
   // handlers
-  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);setLiveDupChecking(false);};
+  const resetDocState = ()=>{setResumeFile(null);setLwdFile(null);setOtherFiles([]);setLiveDup(null);setLiveDupChecking(false);setLinkedinCheck(null);setLinkedinChecking(false);};
+  const verifyLinkedin = async()=>{
+    if (!form.linkedin_url.trim()) return;
+    setLinkedinChecking(true);setLinkedinCheck(null);
+    try { const res = await apiFetch('/candidates/verify-linkedin?url='+encodeURIComponent(form.linkedin_url.trim())); setLinkedinCheck(res); }
+    catch { setLinkedinCheck({valid_format:false,reachable:null,message:'Verification request failed'}); }
+    finally { setLinkedinChecking(false); }
+  };
   const openCreate = ()=>{setForm({...EMPTY});setEditId(null);setErr('');setDupWarning(null);setSkipDupCheck(false);resetDocState();setShowModal(true);};
   const openEdit   = (d:any)=>{
     setForm({full_name:d.full_name||'',email:d.email||'',phone:d.phone||'',location:d.location||'',
@@ -1429,11 +1438,17 @@ export default function CandidatesPage() {
         )}
         {!editId&&liveDup?.has_duplicate&&(
           <div style={{marginTop:'-8px',marginBottom:'12px',padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'7px',fontSize:'11px',color:'#dc2626'}}>
-            <div style={{display:'flex',alignItems:'center',gap:'6px',fontWeight:'700',marginBottom:'2px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'6px',fontWeight:'700',marginBottom:'6px'}}>
               <AlertTriangle size={12}/> {(liveDup.duplicates||[]).length} duplicate candidate{(liveDup.duplicates||[]).length>1?'s':''} found in the database
             </div>
             {(liveDup.duplicates||[]).map((d:any,i:number)=>(
-              <div key={i} style={{marginLeft:'18px'}}>{d.candidate.full_name} — matches on {d.match_type}</div>
+              <div key={i} style={{marginLeft:'18px',marginBottom:i<(liveDup.duplicates||[]).length-1?'8px':0,paddingBottom:i<(liveDup.duplicates||[]).length-1?'8px':0,borderBottom:i<(liveDup.duplicates||[]).length-1?'1px solid #fecaca':'none'}}>
+                <div style={{fontWeight:'700'}}>{d.candidate.full_name} — matches on {d.match_type}</div>
+                {d.resume_file_name&&<div style={{color:'#991b1b'}}>📄 Resume on file: {d.resume_file_name}</div>}
+                {d.owner&&<div style={{color:'#991b1b'}}>🔒 Owned by {d.owner.recruiter_name} — {d.owner.days_left} day{d.owner.days_left===1?'':'s'} left on claim</div>}
+                {d.pipeline&&<div style={{color:'#991b1b'}}>📍 Currently in pipeline: {d.pipeline.stage} ({d.pipeline.requisition_title})</div>}
+                {!d.resume_file_name&&!d.owner&&!d.pipeline&&<div style={{color:'#b91c1c'}}>No resume, ownership claim, or active pipeline on file</div>}
+              </div>
             ))}
           </div>
         )}
@@ -1442,7 +1457,24 @@ export default function CandidatesPage() {
             <Check size={12}/> No duplicates found — this phone/email is not already in the database
           </div>
         )}
-        <FormRow><FormField label="Desired Location" hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField><FormField label="LinkedIn URL"><input style={INP} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>setForm(f=>({...f,linkedin_url:e.target.value}))}/></FormField></FormRow>
+        <FormRow><FormField label="Desired Location" hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField>
+          <FormField label="LinkedIn URL">
+            <div style={{display:'flex',gap:'6px'}}>
+              <input style={{...INP,flex:1}} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>{setForm(f=>({...f,linkedin_url:e.target.value}));setLinkedinCheck(null);}}/>
+              <button type="button" onClick={verifyLinkedin} disabled={!form.linkedin_url.trim()||linkedinChecking}
+                style={{padding:'0 12px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:form.linkedin_url.trim()?'pointer':'not-allowed',fontSize:'11px',fontWeight:'700',color:'#374151',whiteSpace:'nowrap'}}>
+                {linkedinChecking?'Checking…':'Verify'}
+              </button>
+            </div>
+            {linkedinCheck&&(
+              <div style={{display:'flex',alignItems:'flex-start',gap:'4px',marginTop:'5px',fontSize:'11px',fontWeight:'600',
+                color:!linkedinCheck.valid_format?'#dc2626':linkedinCheck.reachable?'#166534':'#b45309'}}>
+                {!linkedinCheck.valid_format?<X size={12} style={{flexShrink:0,marginTop:'1px'}}/>:linkedinCheck.reachable?<Check size={12} style={{flexShrink:0,marginTop:'1px'}}/>:<AlertTriangle size={12} style={{flexShrink:0,marginTop:'1px'}}/>}
+                <span>{linkedinCheck.message}</span>
+              </div>
+            )}
+          </FormField>
+        </FormRow>
         <FormRow><FormField label="Source"><select style={INP} value={form.source} onChange={e=>setForm(f=>({...f,source:e.target.value}))}>{SRC.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></FormField><div/></FormRow>
         <SectionDivider label="Professional Details"/>
         <FormRow><FormField label="Current Employer"><input style={INP} placeholder="e.g. Infosys" value={form.current_employer} onChange={e=>setForm(f=>({...f,current_employer:e.target.value}))}/></FormField><FormField label="Current Designation"><input style={INP} placeholder="e.g. Senior Engineer" value={form.current_designation} onChange={e=>setForm(f=>({...f,current_designation:e.target.value}))}/></FormField></FormRow>

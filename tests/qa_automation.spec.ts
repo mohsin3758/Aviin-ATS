@@ -7443,6 +7443,69 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
     await expect(page.getByText('Add New Candidate')).not.toBeVisible({ timeout: 5000 });
   });
 
+  test('LinkedIn URL verify: format validation via the API, real headless UI shows a live check', async ({ request, page }) => {
+    const bad = await request.get(`${API}/candidates/verify-linkedin?url=https://twitter.com/foo`, { headers: auth() });
+    const badBody = await bad.json();
+    expect(badBody.valid_format).toBe(false);
+
+    const empty = await request.get(`${API}/candidates/verify-linkedin?url=`, { headers: auth() });
+    expect((await empty.json()).valid_format).toBe(false);
+
+    // A real, well-known LinkedIn profile — genuinely reachable, but the
+    // endpoint reports "could not verify" rather than a hard failure on
+    // any non-200 response (LinkedIn's own bot-detection is expected to
+    // fire unpredictably), so this only asserts valid_format + a real
+    // message came back, not a specific reachable value.
+    const real = await request.get(`${API}/candidates/verify-linkedin?url=https://linkedin.com/in/satyanadella`, { headers: auth() });
+    const realBody = await real.json();
+    expect(realBody.valid_format).toBe(true);
+    expect(realBody.message).toBeTruthy();
+
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /Add Candidate/i }).first().click();
+    await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
+    await page.locator('input[placeholder="https://linkedin.com/in/..."]').fill('https://twitter.com/notlinkedin');
+    await page.getByRole('button', { name: 'Verify' }).click();
+    await expect(page.locator('text=/Not a valid LinkedIn/i')).toBeVisible({ timeout: 8000 });
+  });
+
+  test('duplicate-check enrichment: resume file name, ownership days left, and current pipeline status all surface for a real duplicate', async ({ request, page }) => {
+    const stamp = Date.now();
+    const dupPhone = '98' + String(stamp).slice(-8);
+    const base = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `QA S58 Enrich Base ${stamp}`, phone: dupPhone, location: 'Chennai' } });
+    const baseId = (await base.json()).id;
+
+    const upload = await request.post(`${API}/candidates/${baseId}/upload-document`, {
+      headers: auth(), multipart: { document_type: 'resume', file: { name: 'qa_s58_enrich.txt', mimeType: 'text/plain', buffer: Buffer.from('resume content') } },
+    });
+    expect(upload.ok()).toBeTruthy();
+
+    const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: auth() });
+    const reqBody = await reqRes.json();
+    const reqId = (Array.isArray(reqBody) ? reqBody : reqBody.requisitions || reqBody.items)[0].id;
+    await request.post(`${API}/candidates/bulk-assign`, { headers: auth(), data: { candidate_ids: [baseId], requisition_id: reqId } });
+
+    const check = await request.get(`${API}/candidates/check-duplicate?phone=${dupPhone}`, { headers: auth() });
+    const body = await check.json();
+    expect(body.has_duplicate).toBe(true);
+    const dup = body.duplicates[0];
+    expect(dup.resume_file_name).toBe('qa_s58_enrich.txt');
+    expect(dup.owner).toBeTruthy();
+    expect(dup.owner.days_left).toBeGreaterThanOrEqual(28);
+    expect(dup.pipeline).toBeTruthy();
+    expect(dup.pipeline.stage).toBeTruthy();
+
+    await page.goto('/candidates');
+    await page.getByRole('button', { name: /Add Candidate/i }).first().click();
+    await expect(page.getByText('Add New Candidate')).toBeVisible({ timeout: 10000 });
+    await page.locator('input[placeholder="+91 9876543210"]').fill(dupPhone);
+    await expect(page.locator('text=/Resume on file: qa_s58_enrich.txt/')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=/days? left on claim/')).toBeVisible();
+    await expect(page.locator('text=/Currently in pipeline:/')).toBeVisible();
+
+    await request.delete(`${API}/candidates/${baseId}`, { headers: auth() }).catch(() => {});
+  });
+
   test.afterAll(async ({ request }) => {
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
     const search = await request.get(`${API}/candidates?search=QA S58 UI Test`, { headers: auth() }).catch(() => null);

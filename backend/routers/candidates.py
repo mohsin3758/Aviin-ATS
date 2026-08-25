@@ -606,6 +606,67 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
 
     return {"created": created, "skipped": skipped, "requisition_title": req["title"], "stage": stage}
 
+async def _duplicate_context(conn, tenant_id: str, candidate_id: str) -> dict:
+    """Real context for the live duplicate-check banner (2026-08-25 follow-
+    up — the plain name+match_type banner gave a recruiter no way to judge
+    whether this is worth investigating further): the candidate's latest
+    uploaded resume file name, whether they're under an active 30-day
+    ownership claim (and how many days are left on it), and their current
+    pipeline stage if they're actively in one anywhere."""
+    from datetime import datetime, timezone
+    rf = await conn.fetchrow(
+        "SELECT file_name FROM resume_files WHERE candidate_id=$1 AND tenant_id=$2"
+        " ORDER BY created_at DESC LIMIT 1", candidate_id, tenant_id)
+    owner_out = None
+    owner = await ownership.get_ownership(conn, tenant_id, candidate_id)
+    if owner and owner["status"] == "active":
+        expires = owner["ownership_expires_at"]
+        days_left = max(0, (expires - datetime.now(timezone.utc)).days)
+        owner_out = {"recruiter_name": owner["recruiter_name"], "days_left": days_left}
+    pl_row = await conn.fetchrow(
+        "SELECT a.stage, r.title AS requisition_title"
+        " FROM applications a JOIN requisitions r ON r.id=a.requisition_id"
+        " WHERE a.candidate_id=$1 AND a.is_active IS NOT FALSE"
+        " ORDER BY a.updated_at DESC LIMIT 1", candidate_id)
+    return {
+        "resume_file_name": rf["file_name"] if rf else None,
+        "owner": owner_out,
+        "pipeline": {"stage": pl_row["stage"], "requisition_title": pl_row["requisition_title"]} if pl_row else None,
+    }
+
+
+@router.get("/verify-linkedin")
+async def verify_linkedin_url(url: str = "", actor: Actor = Depends(get_actor)):
+    """Real, honest LinkedIn profile URL check (2026-08-25). Format
+    validation is deterministic and always reliable. Live reachability is
+    a genuine HTTP probe, not a hard verdict - confirmed empirically that
+    LinkedIn's own bot-detection (HTTP 999, a short block page) fires for
+    both a made-up profile AND can plausibly fire against a real one under
+    rate-limiting, so a probe that can't confirm reachability is reported
+    as 'could not verify', never as 'this profile doesn't exist'. A real
+    HTTP 200 with substantial page content is treated as a genuine
+    positive signal. Deliberately a manual per-click check, not live on
+    every keystroke — hitting LinkedIn's servers on every typed character
+    would only make bot-detection more likely to fire, not less."""
+    u = (url or "").strip()
+    if not u:
+        return {"valid_format": False, "reachable": None, "message": "Enter a LinkedIn URL first"}
+    if not re.match(r"^https?://([a-z]{2,3}\.)?linkedin\.com/in/[a-zA-Z0-9\-_%]+/?$", u, re.IGNORECASE):
+        return {"valid_format": False, "reachable": None,
+                "message": "Not a valid LinkedIn profile URL — expected https://linkedin.com/in/username"}
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+            resp = await client.get(u, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        if resp.status_code == 200 and len(resp.content) > 5000:
+            return {"valid_format": True, "reachable": True, "message": "Link is reachable and loads a real profile page"}
+        return {"valid_format": True, "reachable": None,
+                "message": "Could not confirm reachability — LinkedIn may be blocking automated checks (this does not necessarily mean the link is invalid)"}
+    except Exception:
+        return {"valid_format": True, "reachable": None,
+                "message": "Could not reach LinkedIn to verify (network issue or blocked) — URL format is at least valid"}
+
+
 @router.get("/check-duplicate")
 async def check_duplicate(
     email: str = None,
@@ -639,6 +700,14 @@ async def check_duplicate(
                     "%" + clean[-10:])
                 for row in rows:
                     results.append({"match_type": "phone", "candidate": dict(row)})
+        # Real context per unique candidate — computed once even if the
+        # same person matched both email and phone, not once per match row.
+        ctx_cache: dict = {}
+        for r in results:
+            cid = str(r["candidate"]["id"])
+            if cid not in ctx_cache:
+                ctx_cache[cid] = await _duplicate_context(conn, actor.tenant_id, cid)
+            r.update(ctx_cache[cid])
         return {"duplicates": results, "has_duplicate": len(results) > 0}
 
 
