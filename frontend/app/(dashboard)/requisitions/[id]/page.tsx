@@ -184,6 +184,22 @@ export default function RequisitionPipelinePage() {
 
   const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, sendEmailOverride?: boolean, extra: Record<string, any> = {}) => {
     if (fromStage === toStage) return;
+    // Real "Client Submission" wiring (2026-08-25) — this smaller, embedded
+    // board has no Submit-to-Client UI of its own (that rich review panel
+    // — resume style, tracking sheet, SPOC picker — only lives on the main
+    // Pipeline board), so it can't show a real review here the way that
+    // page can. Automatic mode still works correctly either way (the
+    // backend's own stage-change hook fires the real client email
+    // regardless of which page triggered the move); Manual mode just
+    // commits the move and points the recruiter at the page that can
+    // actually review/send it.
+    if (toStage === 'client_submission') {
+      await commitStageMove(appId, fromStage, toStage, extra, false);
+      if (getSendMode(toStage) === 'manual') {
+        showToast('Moved — open this candidate on the Pipeline board\'s "Submit to Client" tab to review and send.');
+      }
+      return;
+    }
     if (sendEmailOverride === undefined && getSendMode(toStage) === 'manual') {
       let preview: any = { subject: '', message: '' };
       try { preview = await apiFetch(`/applications/${appId}/stage-preview?stage=${toStage}`); } catch { /* best-effort */ }

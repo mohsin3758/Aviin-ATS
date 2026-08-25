@@ -384,35 +384,62 @@ export default function EmailSettingsPage() {
                 </div>
               </div>
 
-              <div style={{marginBottom:'12px'}}>
-                <label style={LBL}>Subject Line</label>
-                <input style={INP} value={templates[st.key]?.subject||''} placeholder={DEFAULT_SUBJS[st.key]||'Subject...'}
-                  onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:e.target.value,message:(t[st.key]?.message)||''}}))}/>
-                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Leave blank to use default subject</div>
-              </div>
-              <div style={{marginBottom:'12px'}}>
-                <label style={LBL}>Message Body</label>
-                <textarea rows={6} style={{...INP,resize:'vertical',lineHeight:'1.6'}}
-                  value={templates[st.key]?.message||''} placeholder={DEFAULT_MSGS[st.key]||'Message...'}
-                  onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:(t[st.key]?.subject)||'',message:e.target.value}}))}/>
-                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Leave blank to use the built-in default message</div>
-              </div>
-              <div style={{marginBottom:'4px'}}>
-                <label style={LBL}>Attachment</label>
-                <select style={INP} value={templates[st.key]?.attachment||'none'}
-                  onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:(t[st.key]?.subject)||'',message:(t[st.key]?.message)||'',attachment:e.target.value}}))}>
-                  <option value="none">No attachment</option>
-                  <option value="nda_template" disabled={!docTemplates?.nda}>{docTemplates?.nda ? `NDA Template (${docTemplates.nda.file_name})` : 'NDA Template — none uploaded'}</option>
-                  <option value="contract_template" disabled={!docTemplates?.contract}>{docTemplates?.contract ? `Contract Template (${docTemplates.contract.file_name})` : 'Contract Template — none uploaded'}</option>
-                </select>
-                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>
-                  Manage the uploaded files on the <a href="/nda-documents" style={{color:'#1e40af',fontWeight:600}}>NDA Documents</a> page
+              {/* Real fix (2026-08-25): "Client Submission" is a real
+                  client-facing send (candidate resume + tracking sheet to
+                  the client's own SPOC), not a candidate-facing
+                  notification — the generic subject/message/attachment
+                  editor here never actually reached the client at all
+                  (this email always went to the CANDIDATE, and neither
+                  [Client Name] nor [Role Name] were real substitution
+                  tokens). Send Mode above still applies (read by the real
+                  backend automation on this exact stage); the rest of
+                  this stage's email is a fixed, tracking-sheet-aware
+                  template configured on its own dedicated screen. */}
+              {st.key === 'client_submission' ? (
+                <div style={{padding:'14px',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px'}}>
+                  <div style={{fontSize:'12px',fontWeight:'700',color:'#1e40af',marginBottom:'6px'}}>This stage sends a real client email, not a candidate notification</div>
+                  <div style={{fontSize:'12px',color:'#1e3a8a',lineHeight:'1.6'}}>
+                    Moving a candidate into <b>{st.label}</b> sends their resume + a real, live tracking sheet to the client's SPOC — using the dedicated Submit-to-Client engine, not this generic editor. Subject/body are fixed
+                    (&ldquo;Profile Shared – [Role]&rdquo; / your standard client-submission wording) so they always include real, resolved data instead of a typed-in placeholder.
+                  </div>
+                  <div style={{fontSize:'12px',color:'#1e3a8a',marginTop:'8px'}}>
+                    • Manage which SPOC(s) receive it on <a href="/companies" style={{color:'#1e40af',fontWeight:700}}>Companies → this client → Client SPOCs</a><br/>
+                    • Review/edit before sending (Manual mode) from the Pipeline board's candidate drawer → <b>Submit to Client</b> tab
+                  </div>
                 </div>
-              </div>
-              <button onClick={()=>setTemplates(t=>{const n={...t};delete n[st.key];return n;})}
-                style={{marginTop:'10px',padding:'6px 12px',border:'1px solid #fee2e2',borderRadius:'6px',background:'#fef2f2',color:'#dc2626',fontSize:'12px',cursor:'pointer'}}>
-                Reset to Default
-              </button>
+              ) : (
+                <>
+                  <div style={{marginBottom:'12px'}}>
+                    <label style={LBL}>Subject Line</label>
+                    <input style={INP} value={templates[st.key]?.subject||''} placeholder={DEFAULT_SUBJS[st.key]||'Subject...'}
+                      onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:e.target.value,message:(t[st.key]?.message)||''}}))}/>
+                    <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Leave blank to use default subject</div>
+                  </div>
+                  <div style={{marginBottom:'12px'}}>
+                    <label style={LBL}>Message Body</label>
+                    <textarea rows={6} style={{...INP,resize:'vertical',lineHeight:'1.6'}}
+                      value={templates[st.key]?.message||''} placeholder={DEFAULT_MSGS[st.key]||'Message...'}
+                      onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:(t[st.key]?.subject)||'',message:e.target.value}}))}/>
+                    <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Leave blank to use the built-in default message</div>
+                  </div>
+                  <div style={{marginBottom:'4px'}}>
+                    <label style={LBL}>Attachment</label>
+                    <select style={INP} value={templates[st.key]?.attachment||'none'}
+                      onChange={e=>setTemplates(t=>({...t,[st.key]:{...(t[st.key]||{}),subject:(t[st.key]?.subject)||'',message:(t[st.key]?.message)||'',attachment:e.target.value}}))}>
+                      <option value="none">No attachment</option>
+                      <option value="nda_template" disabled={!docTemplates?.nda}>{docTemplates?.nda ? `NDA Template (${docTemplates.nda.file_name})` : 'NDA Template — none uploaded'}</option>
+                      <option value="contract_template" disabled={!docTemplates?.contract}>{docTemplates?.contract ? `Contract Template (${docTemplates.contract.file_name})` : 'Contract Template — none uploaded'}</option>
+                    </select>
+                    <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>
+                      Manage the uploaded files on the <a href="/nda-documents" style={{color:'#1e40af',fontWeight:600}}>NDA Documents</a> page
+                    </div>
+                  </div>
+                  <button onClick={()=>setTemplates(t=>{const n={...t};delete n[st.key];return n;})}
+                    style={{marginTop:'10px',padding:'6px 12px',border:'1px solid #fee2e2',borderRadius:'6px',background:'#fef2f2',color:'#dc2626',fontSize:'12px',cursor:'pointer'}}>
+                    Reset to Default
+                  </button>
+                </>
+              )}
             </div>
           ))}
         </div>

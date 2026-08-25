@@ -156,6 +156,14 @@ function PipelineInner() {
   // before sending").
   const { data: emailSettings } = useFetch<any>('/settings/email');
   const [pendingEmailReview, setPendingEmailReview] = useState<{ appId: string; fromStage: string; toStage: string; extra: Record<string, any>; candidateName: string; subject: string; message: string } | null>(null);
+  // Real "Client Submission" stage wiring (2026-08-25) — a real custom
+  // stage this tenant created. Manual send mode for this ONE stage opens
+  // the actual Submit-to-Client engine (resume + real tracking sheet to
+  // the client's SPOC) instead of the generic subject/body review modal,
+  // which has no way to show tracking-sheet columns or a SPOC picker.
+  // Automatic mode skips this entirely — the backend's own stage-change
+  // hook fires the real send in the background once the move commits.
+  const [pendingClientSubmission, setPendingClientSubmission] = useState<{ appId: string; fromStage: string; toStage: string; extra: Record<string, any>; candidateName: string } | null>(null);
 
   // Bulk multi-select — checkboxes on cards, a floating action bar for
   // bulk stage-move (via the existing /pipeline/bulk-action endpoint,
@@ -255,6 +263,23 @@ function PipelineInner() {
 
   const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, extra: Record<string, any> = {}) => {
     if (fromStage === toStage) return;
+    // Real "Client Submission" wiring (2026-08-25) — this stage's email
+    // is a client-facing send, not a candidate notification, so it never
+    // goes through the generic per-stage email path at all (sendEmail is
+    // always false here; nothing in SUBJS/MSGS matches this custom stage
+    // anyway). Manual mode opens the real Submit-to-Client review panel
+    // BEFORE the move commits; Automatic mode just commits the move and
+    // lets the backend's own stage-change hook fire the real send.
+    if (toStage === 'client_submission') {
+      if (getSendMode(toStage) === 'manual') {
+        const candidateName = board[fromStage]?.find((a: any) => a.id === appId)?.candidate_name
+          || board[fromStage]?.find((a: any) => a.id === appId)?.full_name || 'this candidate';
+        setPendingClientSubmission({ appId, fromStage, toStage, extra, candidateName });
+        return;
+      }
+      await commitStageMove(appId, fromStage, toStage, extra, false);
+      return;
+    }
     if (getSendMode(toStage) === 'manual') {
       let preview: any = { subject: '', message: '' };
       try { preview = await apiFetch(`/applications/${appId}/stage-preview?stage=${toStage}`); } catch { /* best-effort */ }
@@ -742,6 +767,21 @@ function PipelineInner() {
           }} />
       )}
 
+      {/* ── CLIENT SUBMISSION MOVE MODAL (Manual send mode) ──────────────── */}
+      {pendingClientSubmission && (
+        <ClientSubmissionMoveModal
+          appId={pendingClientSubmission.appId}
+          candidateName={pendingClientSubmission.candidateName}
+          stageLabel={ALL_STAGES.find((s: any) => s.key === 'client_submission')?.label || 'Client Submission'}
+          showToast={showToast}
+          onCancel={() => setPendingClientSubmission(null)}
+          onSent={async () => {
+            const r = pendingClientSubmission;
+            setPendingClientSubmission(null);
+            await commitStageMove(r.appId, r.fromStage, r.toStage, r.extra, false);
+          }} />
+      )}
+
       {/* ── CANDIDATE COMPARISON MODAL ─────────────────────────────────── */}
       {compareOpen && (
         <CompareModal
@@ -854,6 +894,15 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+  // Real gate (2026-08-25): the backend now requires admin/manager/kae/kam
+  // to actually send a client submission (was reachable by any
+  // authenticated user before) — hide the tab for anyone who'd only hit a
+  // 403, rather than let them click into a dead end. SSR-safe deferred
+  // localStorage read, same pattern used throughout this codebase.
+  const [canSubmitToClient, setCanSubmitToClient] = useState(false);
+  useEffect(() => {
+    setCanSubmitToClient(['admin', 'super_admin', 'manager', 'kae', 'kam'].includes(getTokenPayload()?.role || ''));
+  }, []);
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end' }} onClick={onClose}>
@@ -889,7 +938,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
               {stages.filter((s: any) => s.key !== 'rejected' && s.key !== 'hold').map((s: any) => (
-                <button key={s.key} onClick={() => onMoveStage(s.key)}
+                <button key={s.key} data-testid={`stage-pill-${s.key}`} onClick={() => onMoveStage(s.key)}
                   style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: `1px solid ${s.color}40`, background: app.stage === s.key ? s.color : `${s.color}15`, color: app.stage === s.key ? '#fff' : s.color, transition: 'all 0.15s' }}>
                   {s.label}
                 </button>
@@ -915,7 +964,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
               { key: 'nda', icon: <FileSignature size={12} />, label: 'NDA' },
               { key: 'kae', icon: <Send size={12} />, label: 'Submit to KAE' },
-              { key: 'client', icon: <Building2 size={12} />, label: 'Submit to Client' },
+              ...(canSubmitToClient ? [{ key: 'client', icon: <Building2 size={12} />, label: 'Submit to Client' }] : []),
               { key: 'resume-gen', icon: <FileText size={12} />, label: 'Generate Resume' },
               { key: 'call-letter', icon: <Calendar size={12} />, label: 'Call Letter' },
               { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes', count: Array.isArray(app.app_notes) ? app.app_notes.length : 0 },
@@ -938,7 +987,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
           {drawerTab === 'profile' && <ProfileTab app={app} apiUrl={API_URL} />}
           {drawerTab === 'nda' && <NdaTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'kae' && <SubmitKaeTab appId={app.id} showToast={showToast} onSubmitted={onSubmittedToKae} />}
-          {drawerTab === 'client' && <SubmitClientTab appId={app.id} showToast={showToast} onSubmitted={onSubmittedToKae} />}
+          {drawerTab === 'client' && canSubmitToClient && <SubmitClientTab appId={app.id} showToast={showToast} onSubmitted={onSubmittedToKae} />}
           {drawerTab === 'resume-gen' && <ResumeGenTab candidateId={app.candidate_id} candidateName={app.candidate_name} requisitionId={requisitionId} clientName={clientName} />}
           {drawerTab === 'call-letter' && <CallLetterTab appId={app.id} showToast={showToast} />}
           {drawerTab === 'notes' && <NotesTab appId={app.id} showToast={showToast} />}
@@ -1812,6 +1861,43 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Modal wrapper reusing SubmitClientTab as-is, self-contained given only
+// appId (2026-08-25) — invoked by moveStage() when a candidate is being
+// moved into the real "Client Submission" stage with Manual send mode:
+// the actual resume/tracking-sheet/SPOC review happens here, and the
+// stage move itself only commits once the recruiter sends (or explicitly
+// chooses to move without sending).
+function ClientSubmissionMoveModal({ appId, candidateName, stageLabel, showToast, onCancel, onSent }: any) {
+  const [sending, setSending] = useState(false);
+  return (
+    <div data-testid="client-submission-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
+      <div style={{ width: 560, maxWidth: '94vw', maxHeight: '88vh', overflowY: 'auto', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+          <div>
+            {/* Real bug fix (2026-08-25) — was a hardcoded "Client
+                Submission" title, stale the moment a tenant renames this
+                real, tenant-configurable custom stage (this tenant's own
+                current label is "Submit to Client", confirmed live) —
+                now shows the actual current label instead of assuming one. */}
+            <div data-testid="client-submission-modal-title" style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Submit to Client — Moving to {stageLabel || 'Client Submission'}</div>
+            <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{candidateName} — review the resume, tracking sheet and SPOC before sending.</div>
+          </div>
+          <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 4 }}><X size={16} /></button>
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <SubmitClientTab appId={appId} showToast={showToast} onSubmitted={() => onSent()} />
+        </div>
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'flex-end' }}>
+          <button data-testid="client-submission-move-only" disabled={sending} onClick={async () => { setSending(true); await onSent(); }}
+            style={{ padding: '8px 14px', background: '#F1F5F9', color: '#475569', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer' }}>
+            {sending ? 'Moving…' : 'Move Without Sending'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

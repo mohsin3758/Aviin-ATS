@@ -7262,6 +7262,196 @@ test.describe.serial('S54 KAE -> Client/KAM Submission (2nd hop, file templates,
   });
 });
 
+test.describe.serial('S61 Client Submission pipeline stage: real client-facing send wired to a real custom stage', () => {
+  // Real gap fix (2026-08-25) — this tenant's own real custom pipeline
+  // stage "Client Submission" (stage_key='client_submission', created
+  // independently by the tenant) previously went through the generic
+  // candidate-facing per-stage email path, which could never reach a
+  // client at all ([Client Name]/[Role Name] were never real
+  // substitution tokens, and the email always went to the CANDIDATE).
+  // Now moving into this exact stage_key fires the real, already-built
+  // KAE->Client engine (_do_client_submission) — Automatic mode via a
+  // background hook mirroring the pre-existing "screened" auto-notify
+  // automation; Manual mode via the frontend opening the real Submit-to-
+  // Client review panel (SPOC picker + tracking sheet + resume) before
+  // the stage move commits. Also closed a real, previously-latent bug
+  // this work exposed: a conditionally-imported local `asyncio` inside
+  // update_stage() shadowed the module-level import for the WHOLE
+  // function (Python scoping), silently breaking any stage-move whose
+  // earlier candidate-notification branch was skipped (e.g. a candidate
+  // with no email) — including the pre-existing screened-stage hook.
+  let token = '';
+  let clientId = '';
+  let reqId = '';
+  let candId1 = '';
+  let candId2 = '';
+  let appId1 = '';
+  let appId2 = '';
+  let recruiterId = '';
+  let origSendMode: any = undefined;
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test('setup: real client + 2 SPOCs + requisition + 2 candidates (one with NO email, to guard the asyncio-shadow bug) + applications', async ({ request }) => {
+    token = await getApiToken(request);
+
+    // Preserve the tenant's real current client_submission send_mode so
+    // this suite can restore it afterward, not leave a real setting changed.
+    const es = await (await request.get(`${API}/settings/email`, { headers: auth() })).json();
+    origSendMode = es?.stage_templates?.client_submission;
+
+    const c = await request.post(`${API}/clients`, { headers: auth(), data: { name: `QA S61 ClientSub Client ${stamp}` } });
+    clientId = (await c.json()).id;
+    await request.post(`${API}/clients/${clientId}/contacts`, {
+      headers: auth(), data: { contact_name: 'QA S61 SPOC Primary', email: `qa.s61.primary.${stamp}@qatest.example`, is_primary: true },
+    });
+    await request.post(`${API}/clients/${clientId}/contacts`, {
+      headers: auth(), data: { contact_name: 'QA S61 SPOC Backup', email: `qa.s61.backup.${stamp}@qatest.example` },
+    });
+
+    const r = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `QA S61 ClientSub Role ${stamp}`, client_id: clientId, status: 'open' },
+    });
+    reqId = (await r.json()).id;
+
+    // Deliberately no email on cand1 — this is the exact real condition
+    // that exposed the asyncio-shadowing bug (the earlier candidate-
+    // notification branch is skipped, so `import asyncio` there never
+    // ran; a real regression test for that specific fix, not just for
+    // the client-submission feature itself).
+    const cand1 = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S61 Candidate1 ${stamp}`, phone: `9${String(stamp).slice(-9)}`, skills: ['Python'] },
+    });
+    candId1 = (await cand1.json()).id;
+    const cand2 = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S61 Candidate2 ${stamp}`, phone: `8${String(stamp).slice(-9)}`, skills: ['Python'] },
+    });
+    candId2 = (await cand2.json()).id;
+
+    const app1 = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: candId1, stage: 'screened' } });
+    appId1 = (await app1.json()).id;
+    const app2 = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: candId2, stage: 'screened' } });
+    appId2 = (await app2.json()).id;
+
+    const rec = await request.post(`${API}/users`, {
+      headers: auth(), data: { full_name: 'QA S61 RoleGate Recruiter', email: `qa.s61.rolegate.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    recruiterId = (await rec.json()).id;
+  });
+
+  test('Automatic mode: moving into client_submission auto-fires a real kae_to_client submission (regression guard for the asyncio-shadow bug — candidate has no email)', async ({ request }) => {
+    await request.put(`${API}/settings/email`, { headers: auth(), data: { stage_templates: { client_submission: { send_mode: 'auto' } } } });
+
+    const move = await request.patch(`${API}/applications/${appId1}/stage`, { headers: auth(), data: { stage: 'client_submission' } });
+    expect(move.ok(), await move.text()).toBeTruthy();
+
+    // Poll rather than a fixed sleep — the real background task (a genuine
+    // SMTP send) can occasionally take longer than a fixed wait under
+    // concurrent test load, the same lesson already learned elsewhere in
+    // this suite (e.g. the pipeline job-picker race).
+    let auto: any;
+    for (let i = 0; i < 10; i++) {
+      const subs = await (await request.get(`${API}/applications/${appId1}/submissions`, { headers: auth() })).json();
+      auto = subs.find((s: any) => s.trigger_source === 'auto_client_submission');
+      if (auto) break;
+      await new Promise(res => setTimeout(res, 1000));
+    }
+    expect(auto).toBeTruthy();
+    expect(auto.direction).toBe('kae_to_client');
+    expect(auto.status).toBe('sent');
+    expect(auto.to_emails).toEqual([`qa.s61.primary.${stamp}@qatest.example`]);
+  });
+
+  test('Manual mode: moving a second candidate into client_submission does NOT auto-fire — frontend handles the review, backend correctly skips', async ({ request }) => {
+    await request.put(`${API}/settings/email`, { headers: auth(), data: { stage_templates: { client_submission: { send_mode: 'manual' } } } });
+
+    const move = await request.patch(`${API}/applications/${appId2}/stage`, { headers: auth(), data: { stage: 'client_submission' } });
+    expect(move.ok(), await move.text()).toBeTruthy();
+    await new Promise(res => setTimeout(res, 2000));
+
+    const subs = await (await request.get(`${API}/applications/${appId2}/submissions`, { headers: auth() })).json();
+    expect(subs.filter((s: any) => s.direction === 'kae_to_client').length).toBe(0);
+  });
+
+  test('role gate: a plain recruiter is blocked (403) from the submit-to-client preview/send endpoints; admin is not', async ({ request }) => {
+    const login = await request.post(`${API}/auth/login`, { data: { email: `qa.s61.rolegate.${stamp}@test.com`, password: 'TestPass123!' } });
+    const recToken = (await login.json()).access_token;
+    const recAuth = { Authorization: `Bearer ${recToken}` };
+    const recRes = await request.get(`${API}/applications/${appId1}/submit-to-client/preview`, { headers: recAuth });
+    expect(recRes.status()).toBe(403);
+    const adminRes = await request.get(`${API}/applications/${appId1}/submit-to-client/preview`, { headers: auth() });
+    expect(adminRes.ok()).toBeTruthy();
+  });
+
+  test('real headless UI: the drawer stage pill for client_submission opens the real Submit-to-Client review panel (multi-SPOC picker), sending it commits the real stage move', async ({ page, request }) => {
+    const stages = await (await request.get(`${API}/settings/pipeline-stages`, { headers: auth() })).json();
+    const realLabel = stages.find((s: any) => s.stage_key === 'client_submission')?.label || 'Client Submission';
+
+    // Real bug found while writing this test, not an app bug: the
+    // previous "Manual mode" test already moved appId2/candId2 INTO
+    // client_submission — clicking that same stage's pill again would be
+    // a genuine no-op (moveStage() returns immediately when
+    // fromStage===toStage), never opening any modal. Reset to 'screened'
+    // first so there's a real transition for this UI test to exercise.
+    await request.patch(`${API}/applications/${appId2}/stage`, { headers: auth(), data: { stage: 'screened' } });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    const card = page.locator('div', { hasText: `QA S61 Candidate2 ${stamp}` }).last();
+    await card.waitFor({ state: 'visible', timeout: 15000 });
+    await card.click();
+    await page.waitForTimeout(1000);
+
+    // Real data-testid hook (added alongside this test) — a plain text
+    // locator is genuinely ambiguous here since this exact stage's label
+    // ("Submit to Client") is shared with the drawer's OWN tab of the
+    // same name; the testid targets the stage pill unambiguously.
+    const pill = page.locator('[data-testid="stage-pill-client_submission"]');
+    await pill.waitFor({ state: 'visible', timeout: 10000 });
+    await pill.click();
+    // Real data-testid hooks (added alongside this test), not fragile
+    // interpolated-text locators — the modal correctly shows the real,
+    // current stage label (verified directly, "Submit to Client" for
+    // this tenant), but Playwright's string-form text= locator proved
+    // unreliable matching an em-dash-containing interpolated string here
+    // even when the exact text was independently confirmed on the page.
+    const modal = page.locator('[data-testid="client-submission-modal"]');
+    await expect(modal).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('[data-testid="client-submission-modal-title"]')).toContainText(realLabel);
+
+    const spocSelect = modal.locator('select').filter({ has: page.locator('option', { hasText: 'QA S61 SPOC Primary' }) });
+    await expect(spocSelect).toBeVisible();
+    const opts = await spocSelect.locator('option').allTextContents();
+    expect(opts.some((o: string) => o.includes('QA S61 SPOC Primary'))).toBeTruthy();
+    expect(opts.some((o: string) => o.includes('QA S61 SPOC Backup'))).toBeTruthy();
+
+    const sendBtn = modal.getByRole('button', { name: /Approve & Send to Client/ }).first();
+    await sendBtn.scrollIntoViewIfNeeded();
+    await sendBtn.click();
+    await expect(modal).not.toBeVisible({ timeout: 10000 });
+
+    const apps = await (await request.get(`${API}/candidates/${candId2}/applications`, { headers: auth() })).json();
+    expect(apps[0].stage).toBe('client_submission');
+    const subs = await (await request.get(`${API}/applications/${appId2}/submissions`, { headers: auth() })).json();
+    expect(subs.filter((s: any) => s.direction === 'kae_to_client' && s.trigger_source === 'manual').length).toBeGreaterThan(0);
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (origSendMode !== undefined) {
+      await request.put(`${API}/settings/email`, { headers: auth(), data: { stage_templates: { client_submission: origSendMode } } }).catch(() => {});
+    }
+    if (recruiterId) {
+      await request.patch(`${API}/users/${recruiterId}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${recruiterId}/purge`, { headers: auth() }).catch(() => {});
+    }
+    if (appId1) await request.delete(`${API}/applications/${appId1}`, { headers: auth() }).catch(() => {});
+    if (appId2) await request.delete(`${API}/applications/${appId2}`, { headers: auth() }).catch(() => {});
+    if (candId1) await request.delete(`${API}/candidates/${candId1}`, { headers: auth() }).catch(() => {});
+    if (candId2) await request.delete(`${API}/candidates/${candId2}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+  });
+});
+
 test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not Invalid/Expired', () => {
   // Regression for the exact same dead-code bug already fixed for NDA
   // e-sign (sql/74): sign_offer_by_token() used to null offer_letters.

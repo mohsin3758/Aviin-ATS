@@ -539,6 +539,55 @@ async def _auto_notify_screening_team(tenant_id: str, application_id: str, actor
         print(f"Auto screening-team notification error (application {application_id}): {exc}")
 
 
+async def _auto_submit_to_client_on_stage(tenant_id: str, application_id: str, actor: Actor):
+    """Fired (best-effort, background) when a candidate is moved into a
+    real, tenant-created custom stage named "client_submission" — the
+    literal stage_key this tenant's own "Client Submission" stage uses.
+    Mirrors _auto_notify_screening_team's exact shape (same settings-gate
+    convention, same "never raise" discipline) but reuses the already-
+    built KAE->Client engine (_do_client_submission) instead of duplicating
+    it. Only fires in the stage's configured Automatic send mode — Manual
+    mode is handled entirely by the frontend (opens the real Submit-to-
+    Client review panel before the stage move commits), matching how
+    every other per-stage Manual email already works in this codebase.
+    Only fires for a KAE/KAM/admin/manager actor — a plain recruiter can
+    still move a card into this stage, it just won't auto-email a client
+    on their behalf."""
+    try:
+        if actor.role not in ("admin", "super_admin", "manager", "kae", "kam"):
+            return
+        async with db.tenant_conn(tenant_id) as conn:
+            es_row = await conn.fetchrow("SELECT stage_templates FROM email_settings WHERE tenant_id=$1", tenant_id)
+        stage_templates = _jsonb(es_row["stage_templates"], {}) if es_row else {}
+        send_mode = (stage_templates.get("client_submission") or {}).get("send_mode", "manual")
+        if send_mode != "auto":
+            return  # Manual mode — the frontend's review panel handles the actual send.
+
+        async with db.tenant_conn(tenant_id) as conn:
+            row, _ = await _app_context(conn, application_id)
+        if not row["client_id"]:
+            return  # No client linked to this requisition — nothing to send, silently skip.
+        candidate = {
+            "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
+            "location": row["location"], "current_employer": row["current_employer"],
+            "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
+            "skills": row["skills"], "resume_text": row["resume_text"],
+        }
+        resume_bytes = render_resume_pdf(candidate, _STYLE_CONFIGS["clean_generated"])
+        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate["full_name"] or "candidate")
+
+        await _do_client_submission(
+            tenant_id, application_id, actor, resume_bytes,
+            f"Resume_{safe_name}_clean_generated.pdf", "clean_generated",
+            _RESUME_LABELS["clean_generated"],
+            template_id=None, columns_override=None, hidden_columns=[],
+            field_values=None, to_emails_override=None, cc_self=True, save_as_default=False,
+            trigger_source="auto_client_submission",
+        )
+    except Exception as exc:
+        print(f"Auto client-submission error (application {application_id}): {exc}")
+
+
 # ─────────────────────────── Redaction + document generation ───────────────────────────
 
 def _redact_text(text: str, candidate) -> str:
@@ -1065,7 +1114,10 @@ async def delete_client_contact(contact_id: str, actor: Actor = Depends(require_
 
 
 @router.get("/applications/{application_id}/submit-to-client/preview")
-async def submit_to_client_preview(application_id: str, actor: Actor = Depends(get_actor)):
+async def submit_to_client_preview(
+    application_id: str,
+    actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
+):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row, auto_values = await _app_context(conn, application_id)
         contacts = await _resolve_client_contacts(conn, actor.tenant_id, row["client_id"])
@@ -1110,6 +1162,7 @@ async def _do_client_submission(
     resume_bytes: bytes, resume_filename: str, resume_style: str, resume_style_label: str,
     template_id: Optional[str], columns_override: Optional[list], hidden_columns: list,
     field_values: Optional[dict], to_emails_override: Optional[list], cc_self: bool, save_as_default: bool,
+    trigger_source: str = "manual",
 ) -> dict:
     """The KAE->Client hop: mirrors _do_kae_submission's shape (same
     _app_context, same resume attachment, same audit/outbox discipline) but
@@ -1223,14 +1276,17 @@ async def _do_client_submission(
                          ([recruiter_email] if cc_self and recruiter_email else [])
         greeting = f"Hi {primary_contact['contact_name'] or ''},"
 
-    subject = f"Candidate Submission — {row['full_name']} for {row['role_title']}"
+    # Real wording match (2026-08-25) — the tenant's own requested exact
+    # format ("Hi [Client Name], Please find the attached profile for the
+    # [Role Name] position along with the updated tracking sheet. Thanks &
+    # Regards, [Your Name]"). Greeting still addresses the real named SPOC
+    # when one is resolved (more professional than addressing a company
+    # name as if it were a person) rather than literally "Hi {client},".
+    subject = f"Profile Shared – {row['role_title']}"
     body_text = (
         f"{greeting}\n\n"
-        f"Please find attached the profile for {row['full_name']} against \"{row['role_title']}\""
-        f"{' (' + client_row['name'] + ')' if client_row else ''}. "
-        f"{'The tracking sheet is attached.' if attachments and len(attachments) > 1 and body_html_extra == '' else 'The tracking sheet is below.'}\n\n"
-        f"Resume attached: {resume_style_label}.\n\n"
-        f"Regards,\n{actor.full_name or 'AVIIN ATS'}"
+        f"Please find the attached profile for the {row['role_title']} position along with the updated tracking sheet.\n\n"
+        f"Thanks & Regards,\n{actor.full_name or 'AVIIN ATS'}"
     )
     email_sent, email_error = await _send_kae_email(
         tenant_id, to_recipients, cc_recipients, subject, body_text, attachments,
@@ -1243,12 +1299,13 @@ async def _do_client_submission(
                  (tenant_id, application_id, candidate_id, requisition_id, client_id, template_id,
                   resume_style, field_values, recipient_emails, to_emails, status, error_message, sent_by,
                   direction, hidden_columns, recipient_contact_id, trigger_source)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'kae_to_client',$14,$15,'manual') RETURNING *""",
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'kae_to_client',$14,$15,$16) RETURNING *""",
             tenant_id, application_id, row["candidate_id"], row["requisition_id"], client_id,
             template["id"] if template else None, resume_style, json.dumps(final_values),
             list(dict.fromkeys(to_recipients + cc_recipients)), to_recipients,
             "sent" if email_sent else "failed", email_error, actor.user_id,
             hidden_columns or [], primary_contact["id"] if (primary_contact and not to_emails_override) else None,
+            trigger_source,
         )
 
         await events.write_outbox(
@@ -1274,7 +1331,10 @@ async def _do_client_submission(
 
 
 @router.post("/applications/{application_id}/submit-to-client")
-async def submit_to_client(application_id: str, body: SubmitToClientIn, actor: Actor = Depends(get_actor)):
+async def submit_to_client(
+    application_id: str, body: SubmitToClientIn,
+    actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
+):
     """One-Click Approve & Send: everything defaults from real, live data
     (auto_values, the client's configured default template, clean_generated
     resume) — a caller that sends an empty-ish body genuinely completes the

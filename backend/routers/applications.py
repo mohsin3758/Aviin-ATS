@@ -810,9 +810,27 @@ async def update_stage(
                 pass  # webhook delivery is best-effort, never blocks the actual stage change
 
     # Send notification using candidate info fetched inside conn block
+    #
+    # REAL BUG FOUND 2026-08-25, via genuine testing (a real candidate with
+    # no email on file, moved into the new "client_submission" stage) — not
+    # a bug in the new code alone, but a PRE-EXISTING latent one this
+    # exposed: `asyncio` is already imported at module level (top of this
+    # file), but the local `import asyncio` that used to sit here (only
+    # ever reached when body.send_email and the candidate had a real
+    # email) made Python's compiler treat `asyncio` as a LOCAL name for
+    # THIS ENTIRE FUNCTION — shadowing the module-level import everywhere
+    # in update_stage(), including the "screened" auto-notify hook below,
+    # which has called `asyncio.create_task(...)` unconditionally since
+    # 2026-08-19. Any stage-move whose notification branch above was
+    # skipped (no candidate email, or send_email=False) would have hit a
+    # genuine UnboundLocalError on that hook too — it just happened to
+    # never get caught by this project's own testing/production traffic,
+    # since real production candidates being screened have almost always
+    # had a real email on file. Fixed at the root: the redundant local
+    # import is removed; the real module-level `asyncio` (line 8) now
+    # resolves correctly for the whole function, unconditionally.
     try:
         if _notif_cand and _notif_cand["email"] and body.send_email:
-            import asyncio
             asyncio.create_task(_notify_stage_change_bg(
                 _notif_cand["cid"], body.stage,
                 _notif_cand["email"], _notif_cand["full_name"],
@@ -839,6 +857,24 @@ async def update_stage(
             asyncio.create_task(_auto_notify_screening_team(actor.tenant_id, application_id, actor))
         except Exception as _ex:
             print(f"Auto screening-team notification dispatch error: {_ex}")
+
+    # Real automation (2026-08-25): moving a candidate into "Client
+    # Submission" (a real custom stage this tenant created) auto-fires
+    # the already-built KAE->Client engine — real resume + real tracking
+    # sheet to the client's actual SPOC — instead of the generic
+    # candidate-facing stage email, which was never a fit here (no
+    # client-name/role-name substitution existed for it, and it would
+    # have emailed the CANDIDATE, not the client). Only fires when this
+    # stage's own Send Mode (Settings > Email Configuration) is set to
+    # Automatic; Manual mode is handled entirely by the frontend, which
+    # opens the real Submit-to-Client review panel before the move even
+    # commits. Best-effort, same pattern as the screened-stage hook above.
+    if old["stage"] != "client_submission" and body.stage == "client_submission":
+        try:
+            from routers.kae_submission import _auto_submit_to_client_on_stage
+            asyncio.create_task(_auto_submit_to_client_on_stage(actor.tenant_id, application_id, actor))
+        except Exception as _ex:
+            print(f"Auto client-submission dispatch error: {_ex}")
     return dict(row)
 
 @router.get("/{application_id}/notes")

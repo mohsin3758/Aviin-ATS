@@ -116,7 +116,7 @@ function ClientContactsRow({ client }: { client: any }) {
   return (
     <div data-testid="client-contacts-row" style={{ padding: '16px', borderBottom: '1px solid #f1f5f9' }}>
       <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#94a3b8', marginBottom: '10px' }}>
-        Client / KAM Contacts
+        Client SPOCs
       </div>
       {(contacts || []).map((c: any) => (
         <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', background: c.is_primary ? '#eff6ff' : '#f8fafc', border: `1px solid ${c.is_primary ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 8, marginBottom: 6 }}>
@@ -130,21 +130,21 @@ function ClientContactsRow({ client }: { client: any }) {
           <button onClick={() => remove(c)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}><Trash2 size={13} /></button>
         </div>
       ))}
-      {!contacts?.length && <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>No contacts yet — add the client's KAM below.</div>}
+      {!contacts?.length && <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>No SPOCs yet — add this client's point(s) of contact below. A client can have several SPOCs (e.g. one per role type); the KAE/KAM picks the right one when sending.</div>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-        <input placeholder="Contact name" value={form.contact_name} onChange={e => setForm({ ...form, contact_name: e.target.value })}
+        <input placeholder="SPOC name" value={form.contact_name} onChange={e => setForm({ ...form, contact_name: e.target.value })}
           style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
         <input placeholder="Email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })}
           style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
-        <input placeholder="Role (e.g. KAM) — optional" value={form.role_label} onChange={e => setForm({ ...form, role_label: e.target.value })}
+        <input placeholder="Role / handles (e.g. KAM, SAP roles) — optional" value={form.role_label} onChange={e => setForm({ ...form, role_label: e.target.value })}
           style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
         {err && <div style={{ color: '#dc2626', fontSize: 11 }}>{err}</div>}
         <button onClick={add} disabled={saving} style={{ padding: '6px 10px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer', alignSelf: 'flex-start' }}>
-          {saving ? 'Adding…' : '+ Add Contact'}
+          {saving ? 'Adding…' : '+ Add SPOC'}
         </button>
       </div>
       <p style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 8 }}>
-        The primary contact is the default recipient when a KAE clicks "Approve & Send" to this client.
+        The primary SPOC is the default recipient when a KAE/KAM sends a profile to this client — if there's more than one, they'll be able to pick the right one at send time.
       </p>
     </div>
   );

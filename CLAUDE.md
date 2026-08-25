@@ -13391,3 +13391,158 @@ match-auto-links / partial-match-does-not-link pair. Broader regression
 sweep (S1/S2/S8/S13/S22/S47/S48/S60, 52 tests) passed clean: 51 passed,
 1 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (407
 files, 0 external API refs).
+
+## Client Submission pipeline stage wired to the real KAE->Client engine, plus a real pre-existing asyncio-shadowing bug found, 2026-08-25
+Direct follow-up to the same-day research-only "check the Client Submission
+stage and email format" investigation — user asked to build it after
+reviewing the plan. Full scope: wiring the tenant's own real custom
+pipeline stage ("Client Submission" — later independently renamed by the
+tenant to "Submit to Client" mid-build, same real stage_key
+`client_submission` throughout) to the already-built KAE->Client
+submission engine, role-gating that engine to KAE/KAM/admin/manager, and
+adding candidate-resume-auto-attach + tracking-sheet-insert to the
+general Compose email tool.
+
+**Backend** (`kae_submission.py`, `applications.py`) — new
+`_auto_submit_to_client_on_stage(tenant_id, application_id, actor)`
+mirrors the existing 2026-08-19 "screened" auto-notify-screening-team
+automation exactly (same settings-gate convention, same never-raise
+discipline) but calls the already-built `_do_client_submission()`
+instead of duplicating it — no second document/email engine. Only fires
+when this stage's own Send Mode (Settings > Email Configuration) is
+Automatic AND the actor is admin/super_admin/manager/kae/kam; Manual
+mode is handled entirely by the frontend, which opens the real
+Submit-to-Client review panel BEFORE the stage move commits, matching
+how every other per-stage Manual email already works in this codebase.
+Wired into `update_stage()` via the same `old.stage != X and body.stage
+== X` hook shape as the sibling screened-stage automation. Subject/body
+rewritten to the tenant's exact requested wording (`Profile Shared –
+{Role}` / `Hi {SPOC}, Please find the attached profile for the {Role}
+position along with the updated tracking sheet. Thanks & Regards,
+{sender}`) — applies to both this new automatic path and the existing
+manual drawer-tab send, one consistent template, not two. Added a real
+`trigger_source` parameter to `_do_client_submission()` (was hardcoded
+`'manual'` in the INSERT SQL) so the audit trail can tell an automated
+send apart from a real human click — `auto_client_submission` for this
+new path, matching the sibling `auto_screened` convention exactly.
+`sql/86_client_submission_trigger_source.sql` widens the CHECK
+constraint. `submit_to_client_preview`/`submit_to_client` HTTP endpoints
+gated to `require_role("admin","super_admin","manager","kae","kam")`
+(were reachable by any authenticated user before).
+
+**A real, previously-undiscovered pre-existing bug found via genuine
+testing, not from the new code alone**: the very first live test (a real
+candidate with no email on file, moved into the new stage) crashed with
+`UnboundLocalError: cannot access local variable 'asyncio'`. Root cause:
+`asyncio` is imported at module level in `applications.py`, but
+`update_stage()`'s body ALSO had a redundant `import asyncio` inside a
+conditional branch (`if candidate has email and send_email`) — Python's
+compiler treats any name imported/assigned ANYWHERE in a function body as
+LOCAL to that entire function (determined statically, before any code
+runs), silently shadowing the module-level import for the whole
+function. Any stage-move whose notification branch was skipped (no
+candidate email, or `send_email=False`) would hit this — including the
+pre-existing "screened" auto-notify hook, unconditionally calling
+`asyncio.create_task(...)`, which had simply never been exercised with a
+candidate lacking an email in this project's testing/production history.
+Fixed at the root by removing the redundant local import (the module-
+level one already covers the whole file) rather than patching each call
+site — closes the bug for both the new and the pre-existing automation
+in one motion.
+
+**Frontend** (`pipeline/page.tsx`) — `moveStage()` special-cases
+`client_submission`: Automatic mode commits the move with `send_email:
+false` (this stage never had a real candidate-facing email path to
+begin with — nothing in `SUBJS`/`MSGS` ever matched this custom stage
+key, confirmed before assuming); Manual mode opens a new
+`ClientSubmissionMoveModal` wrapping the ALREADY-BUILT `SubmitClientTab`
+component as-is (zero refactor needed — it was already self-contained
+given just `appId`), with a "Move Without Sending" fallback. Role-gated
+the drawer's existing "Submit to Client" tab to the same 5 roles (was
+visible to everyone before, would have just hit a 403). A parallel,
+lighter fix on `requisitions/[id]/page.tsx`'s smaller embedded board
+(which has no Submit-to-Client UI of its own, matching this project's
+established precedent for that page pair): Automatic mode still works
+correctly there too (the backend hook fires regardless of which page
+triggered the PATCH); Manual mode commits the move with a guidance
+toast pointing at the main Pipeline board instead of opening a broken,
+content-less generic review modal.
+
+**Settings > Email Configuration** (`settings/email/page.tsx`) — the
+generic Subject/Message/Attachment editor is replaced with an
+explanatory panel specifically for `client_submission` (Send Mode still
+configurable there, since the new backend hook reads it) — explains this
+is a real client-facing send with a fixed template, and links to
+Companies → Client SPOCs and the Pipeline board's Submit-to-Client tab.
+**Companies page** — "Client / KAM Contacts" relabeled "Client SPOCs"
+throughout (header, empty state, add-button, helper text), matching the
+tenant's own terminology and the "multiple SPOCs per client, picked at
+send time" capability that was already fully built (2026-08-23) but
+apparently not discovered by the tenant under its old label.
+
+**Two real bugs caught during the UI verification itself, both fixed
+before shipping — neither was an app bug in the end for the second one,
+but both were real findings**:
+1. `ClientSubmissionMoveModal`'s title hardcoded the literal string
+   "Client Submission" — stale the moment the tenant renamed the real
+   stage's label (which they did mid-build, to "Submit to Client") since
+   the modal never read the real, current label at all. Fixed by passing
+   `ALL_STAGES.find(s=>s.key==='client_submission')?.label` down as a
+   prop, with the old hardcoded string only as a last-resort fallback.
+2. A genuine test-locator reliability issue (not an app bug, confirmed
+   by an independent real headless-browser check that the correct text
+   WAS rendering on the page): Playwright's string-form `text=` locator
+   proved unreliable matching an em-dash-containing interpolated string
+   for this exact assertion, even after the real bug above was fixed.
+   Added real `data-testid` hooks (`client-submission-modal`,
+   `client-submission-modal-title`, `stage-pill-{key}` on every stage
+   pill) instead of fighting locator-string escaping — the same
+   established "give the test a real hook" convention used dozens of
+   times elsewhere in this project.
+
+**A third, genuine test-DESIGN bug found only by the permanent suite's
+own execution, not by manual verification**: the "real headless UI" test
+initially reused the same candidate/application the prior "Manual mode"
+API test had already moved INTO `client_submission` — clicking that
+same stage's pill again was a real no-op (`moveStage()`'s own
+`if (fromStage === toStage) return;` guard, working correctly), so no
+modal ever opened on that specific run. Fixed by resetting that
+application back to `screened` at the start of the UI test, so there's
+a genuine transition to exercise.
+
+Verified for real end-to-end, not code review, at every layer: a real
+throwaway client with 2 real SPOCs + a linked requisition + 2 candidates
+(one deliberately with no email, to exercise the asyncio-shadow
+regression specifically); Automatic mode confirmed via direct DB check —
+a real `candidate_submissions` row with `direction=kae_to_client`,
+`trigger_source=auto_client_submission`, correct SPOC resolution, real
+tracking-sheet field values; Manual mode confirmed to NOT auto-fire;
+role gate confirmed both directions (403 for a real throwaway plain-
+recruiter login, 200 for admin); the full real UI flow confirmed via
+network-request interception (not just visual inspection) — a real
+`POST .../submit-to-client` (200, real SPOC email, real field values)
+immediately followed by a real `PATCH .../stage` (200,
+`{"stage":"client_submission","send_email":false}`) — and confirmed the
+application's real stage afterward. All throwaway data (2 requisitions
+worth of client/contacts/candidates/applications, 1 throwaway recruiter,
+2 real tenant settings temporarily changed and restored) cleaned up
+afterward, confirmed zero residue.
+
+New permanent "S61 Client Submission pipeline stage" suite (5 tests)
+added to `qa_automation.spec.ts`. Broader regression sweep (S1/S2/S8/
+S13/S14/S16/S17/S22/S29/S30/S37/S43/S54/S61, 113 tests) passed clean on
+the primary run: 112 passed, 1 pre-existing skip, 0 failed — confirming
+no regressions from the `applications.py`/`kae_submission.py` changes
+across every suite that exercises those files. A second, larger combined
+sweep hit this session's own extensively-documented per-IP login rate-
+limit (6 real 429s confirmed directly in the backend logs during that
+window) on 2 tests plus their downstream `.serial()` cascade — not a
+regression, re-verified clean after the cooldown window. Zero-token
+audit: `CONFIRMED CLEAN` (408 files, 0 external API refs).
+
+**Explicitly deferred, not built in this pass**: the general Compose
+email tool's candidate-resume-auto-attach + tracking-sheet-insert
+extension (the second half of the original plan) — the Client
+Submission stage wiring (the user's original, more specific ask) was
+built and verified first; the Compose extension remains a real, scoped,
+still-open follow-up.
