@@ -13198,3 +13198,65 @@ passed, 1 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED
 CLEAN` (407 files, 0 external API refs) - the removed LinkedIn probe was
 a plain website reachability check, never an LLM/AI API, so its removal
 doesn't change anything about HARD RULE #1 compliance either way.
+
+## Candidates drawer: real "Move to Pipeline" action panel + Skill/Project Experience table, matching Resume Inbox, 2026-08-25
+User pasted 3 screenshots (the Candidates page's quick-view drawer showing
+only a passive "In Pipeline" badge, Resume Inbox's own drawer showing a
+real job-selector + clickable stage-pill action panel, and the Skill/
+Project Experience mini-form) and asked to add the same pipeline-stage
+action to Candidates' drawer, plus surface the skill table there too.
+
+Read Resume Inbox's `DetailDrawer` in full first (its `handleMoveToStage`,
+the job-selector, and the stage-pill rendering, including the
+current-stage "●" highlight built 2026-08-24) rather than guessing at the
+shape, then ported the same real mechanism — `POST /applications` with
+`candidate_id`/`requisition_id`/`stage`, the same success/exists/error
+states, the same `PIPELINE_STAGES_LIVE` (live `/settings/pipeline-stages`
+config, filtered to visible + not rejected/hold, sorted by
+`display_order`, with a hardcoded fallback list) — into `CandidateDrawer`
+(`candidates/page.tsx`). One real difference from Resume Inbox: a plain
+candidate record has no `matched_requisition_id` the way a resume-inbox
+queue item does (no prior JD auto-match to fall back on), so there's no
+"auto-matched, manual override" toggle here — just a direct requisition
+picker, reusing the same `/requisitions?limit=100&status=open` query
+`BulkAssignModal` already uses elsewhere on this same page.
+
+Also added a read-only "SKILL / PROJECT EXPERIENCE" table to the drawer
+(`GET /candidates/{id}/skill-experience`, the endpoint built earlier the
+same day for the Add/Edit form) — previously only visible while editing
+a candidate, now visible on a quick view too.
+
+Verified for real end-to-end, not code review: created a real throwaway
+candidate + a real skill-experience row + a real throwaway open
+requisition via direct API calls, then a genuine headless-browser pass
+against the live page — opened the drawer via the real "Quick view"
+button (a plain `<tr>` click doesn't open it; the button or the name
+cell does, caught by an early false-negative reproduction attempt before
+fixing the test script itself, not the app), confirmed the Skill/Project
+Experience table renders the exact real row (SAP ABAP / Core Banking
+Rollout / Jan 2022 – Dec 2023 / Implementation, Support), selected the
+requisition, clicked "Interested," and confirmed a real
+`POST /applications` succeeded with a "✓ Moved to Interested" banner —
+then, in a second pass, confirmed clicking the same stage again on the
+same job correctly hit the real 409 "already in pipeline" branch (not a
+silent re-success) and that in that state the stage-pill row reappears
+showing the current-stage "●" highlight, exactly matching the reference
+screenshot's own behavior. A pulled screenshot visually confirmed the
+whole panel (skills chips, the skill/project table, the "🔄 MOVE TO
+PIPELINE" section with the real "⚠ Already in pipeline for this job"
+banner and the highlighted "● Interested" pill) rendering correctly with
+zero console errors.
+
+New permanent "S59 Candidates drawer" suite (3 tests) added to
+`qa_automation.spec.ts`. One real test-design fix caught by the suite's
+own first run: asserting the "●" highlight immediately after a fresh
+success state failed, because the pill row is deliberately hidden once
+`pipelineStatus==='success'` (matching Resume Inbox's own drawer, which
+only shows the pill row again once the job/stage is re-selected) — fixed
+by reloading the page and re-selecting the same job/stage, which
+correctly lands on the `exists` state where the pill row (and its
+highlight) is genuinely visible, matching the manual verification's own
+real second-click behavior rather than a guessed assertion point.
+Broader regression sweep (S1/S2/S8/S13/S16/S30/S48/S56/S58/S59, 79 tests)
+passed clean: 78 passed, 1 pre-existing skip, 0 failed. Zero-token audit:
+`CONFIRMED CLEAN` (407 files, 0 external API refs).

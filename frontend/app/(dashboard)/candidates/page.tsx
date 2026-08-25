@@ -84,6 +84,25 @@ const DEFAULT_STAGE_C: Record<string,{bg:string;color:string;label:string}> = {
   rejected:         {bg:'#fee2e2',color:'#991b1b',label:'Rejected'},
 };
 
+// Ordered fallback list for the drawer's "Move to Pipeline" stage pills
+// (2026-08-25) — mirrors resume-inbox/page.tsx's own PIPELINE_STAGES
+// fallback/live-config pattern exactly, so this page's drawer offers the
+// same real, working action the Resume Inbox drawer already has instead
+// of only ever showing a passive status badge.
+const PIPELINE_STAGES_FALLBACK = [
+  { key:'sourced',       label:'Sourced',       color:'#6366f1' },
+  { key:'contacted',     label:'Contacted',     color:'#06b6d4' },
+  { key:'interested',    label:'Interested',    color:'#3b82f6' },
+  { key:'nda',           label:'NDA',           color:'#f59e0b' },
+  { key:'screened',      label:'Screened',      color:'#0891b2' },
+  { key:'submitted',     label:'Submitted',     color:'#64748b' },
+  { key:'l1_interview',  label:'L1 Interview',  color:'#7c3aed' },
+  { key:'l2_interview',  label:'L2 Interview',  color:'#9333ea' },
+  { key:'offer',         label:'Offer',         color:'#ca8a04' },
+  { key:'placed',        label:'Placed',        color:'#16a34a' },
+  { key:'hold',          label:'Hold',          color:'#94a3b8' },
+];
+
 const EMPTY = {
   full_name:'',email:'',phone:'',location:'',desired_location:'',
   current_employer:'',current_designation:'',
@@ -248,7 +267,7 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
 
 // ── Quick-View Drawer ─────────────────────────────────────────────────────────
 function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChanged}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void;stageMap:Record<string,{bg:string;color:string;label:string}>;allTags:any[];onTagsChanged:()=>void}) {
-  const {data:apps} = useFetch<any>(`/candidates/${candidate.id}/applications`);
+  const {data:apps,refetch:refetchApps} = useFetch<any>(`/candidates/${candidate.id}/applications`);
   // List rows don't carry latest_resume_file_id (only the single-candidate
   // GET does) - fetched separately here rather than widening the list
   // query, same pattern this drawer already uses for /applications.
@@ -261,6 +280,51 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
   const [tagErr,setTagErr] = useState('');
   const exp = gx(candidate.total_exp_mo);
   const sc = candidate.pipeline_stage ? (stageMap[candidate.pipeline_stage]||null) : null;
+
+  // Move to Pipeline (2026-08-25) — the Candidates drawer only ever showed
+  // a PASSIVE "In Pipeline: X" badge (above); Resume Inbox's own drawer
+  // has a real action panel (job selector + clickable stage pills) that
+  // this one never had. Reused endpoint/shape exactly
+  // (POST /applications with candidate_id/requisition_id/stage), no
+  // "auto-matched job" step here since a plain candidate record has no
+  // matched_requisition_id the way a resume-inbox queue item does — just
+  // a direct requisition picker, same as BulkAssignModal's own proven
+  // /requisitions?limit=100&status=open pattern above.
+  const {data:pipelineStageConfig} = useFetch<any[]>('/settings/pipeline-stages');
+  const PIPELINE_STAGES_LIVE = (() => {
+    const live = (pipelineStageConfig||[])
+      .filter((s:any)=>s.is_visible && !['rejected','hold'].includes(s.stage_key))
+      .sort((a:any,b:any)=>a.display_order-b.display_order)
+      .map((s:any)=>({key:s.stage_key,label:s.label,color:s.color}));
+    return live.length>0 ? live : PIPELINE_STAGES_FALLBACK;
+  })();
+  const {data:openReqs} = useFetch<any>('/requisitions?limit=100&status=open');
+  const openReqList:any[] = Array.isArray((openReqs as any)?.data)?(openReqs as any).data:Array.isArray(openReqs)?(openReqs as any):[];
+  const [pipelineReqId,setPipelineReqId] = useState('');
+  const [pipelineStatus,setPipelineStatus] = useState<'idle'|'loading'|'success'|'exists'|'error'>('idle');
+  const [pipelineStage,setPipelineStage] = useState('');
+  const [pipelineMsg,setPipelineMsg] = useState('');
+  async function handleMoveToStage(stage:string) {
+    if (!pipelineReqId) { setPipelineStatus('error'); setPipelineMsg('Select a requisition first'); return; }
+    setPipelineStatus('loading'); setPipelineStage(stage);
+    try {
+      await apiFetch('/applications',{method:'POST',body:JSON.stringify({candidate_id:candidate.id,requisition_id:pipelineReqId,stage})});
+      setPipelineStatus('success');
+      setPipelineMsg('Moved to '+(PIPELINE_STAGES_LIVE.find((s:any)=>s.key===stage)?.label||stage));
+      refetchApps(); onTagsChanged();
+    } catch(e:any) {
+      const msg = (e?.message||String(e)).toLowerCase();
+      if (msg.includes('409')||msg.includes('already')) { setPipelineStatus('exists'); setPipelineMsg('Already in pipeline for this job'); }
+      else { setPipelineStatus('error'); setPipelineMsg(String(e?.message||'Failed')); }
+    }
+  }
+
+  // Skill / Project Experience table (2026-08-25) — read-only display of
+  // the structured per-skill project history captured on the Add/Edit
+  // Candidate form (GET /candidates/{id}/skill-experience), mirrored here
+  // so a recruiter reviewing a candidate can see it without opening Edit.
+  const {data:skillExpData} = useFetch<any>(`/candidates/${candidate.id}/skill-experience`);
+  const skillExpRows:any[] = (skillExpData as any)?.rows||[];
   const availableTags = allTags.filter((t:any)=>!candTags.some((ct:any)=>ct.id===t.id));
 
   const addTag = async(tagId:string)=>{
@@ -376,6 +440,92 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
             </div>
           </div>
         )}
+        {/* Skill / Project Experience table — read-only mirror of what's
+            captured on the Add/Edit Candidate form (2026-08-25). */}
+        {skillExpRows.length>0 && (
+          <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9'}}>
+            <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>SKILL / PROJECT EXPERIENCE ({skillExpRows.length})</div>
+            <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:'8px'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:'11px',minWidth:'520px'}}>
+                <thead>
+                  <tr style={{background:'#f8fafc'}}>
+                    {['#','Skill','Project','Duration','Role','Rel. Exp','Last Used'].map(h=>(
+                      <th key={h} style={{textAlign:'left',padding:'6px 8px',fontWeight:'700',color:'#64748b',borderBottom:'1px solid #e2e8f0',whiteSpace:'nowrap'}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {skillExpRows.map((r:any,i:number)=>(
+                    <tr key={r.id||i} style={{borderBottom:i<skillExpRows.length-1?'1px solid #f1f5f9':'none'}}>
+                      <td style={{padding:'6px 8px',color:'#94a3b8'}}>{i+1}</td>
+                      <td style={{padding:'6px 8px',fontWeight:'600',color:'#1e293b'}}>{r.skill_name||'—'}</td>
+                      <td style={{padding:'6px 8px',color:'#374151'}}>{r.project_name||'—'}</td>
+                      <td style={{padding:'6px 8px',color:'#374151',whiteSpace:'nowrap'}}>{r.duration_from||'—'}{r.duration_to?` – ${r.duration_to}`:''}</td>
+                      <td style={{padding:'6px 8px',color:'#374151'}}>{(r.role_types||[]).join(', ')||'—'}</td>
+                      <td style={{padding:'6px 8px',color:'#374151'}}>{r.relevant_experience||'—'}</td>
+                      <td style={{padding:'6px 8px',color:'#374151'}}>{r.last_used||'—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        {/* Move to Pipeline — real action panel (job picker + clickable
+            stage pills), matching Resume Inbox's own drawer (2026-08-25) —
+            this drawer previously only ever showed the passive "In
+            Pipeline" badge above, with no way to act. */}
+        <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9'}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'10px',gap:'8px'}}>
+            <div style={{fontSize:'11px',fontWeight:'800',color:'#374151',letterSpacing:'0.06em',textTransform:'uppercase'}}>🔄 Move to Pipeline</div>
+          </div>
+          <select data-testid="drawer-pipeline-req-select" value={pipelineReqId} onChange={e=>{setPipelineReqId(e.target.value);setPipelineStatus('idle');setPipelineMsg('');}}
+            style={{width:'100%',padding:'7px 9px',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',marginBottom:'10px',color:'#1e293b'}}>
+            <option value="">-- Select requisition --</option>
+            {openReqList.map((r:any)=><option key={r.id} value={r.id}>{r.title}</option>)}
+          </select>
+          {!pipelineReqId && (
+            <div style={{fontSize:'11px',color:'#94a3b8',fontStyle:'italic'}}>Select a requisition above to move this candidate into its pipeline.</div>
+          )}
+          {pipelineReqId && pipelineStatus==='success' && (
+            <div style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 12px',background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:'8px',fontSize:'12px',fontWeight:'700',color:'#15803d'}}>
+              ✓ {pipelineMsg}
+              <a href={'/pipeline?job='+pipelineReqId} target="_blank" rel="noreferrer" style={{marginLeft:'auto',fontSize:'11px',color:'#059669',textDecoration:'none',fontWeight:'600'}}>View Pipeline →</a>
+            </div>
+          )}
+          {pipelineReqId && pipelineStatus==='exists' && (
+            <div style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 12px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:'8px',fontSize:'12px',fontWeight:'700',color:'#92400e'}}>
+              ⚠ {pipelineMsg}
+              <a href={'/pipeline?job='+pipelineReqId} target="_blank" rel="noreferrer" style={{marginLeft:'auto',fontSize:'11px',color:'#b45309',textDecoration:'none',fontWeight:'600'}}>View Pipeline →</a>
+            </div>
+          )}
+          {pipelineReqId && pipelineStatus==='error' && (
+            <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',fontSize:'12px',color:'#dc2626'}}>{pipelineMsg}</div>
+          )}
+          {pipelineReqId && pipelineStatus!=='success' && (
+            <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
+              {PIPELINE_STAGES_LIVE.map((s:any)=>{
+                const isCurrent = candidate.pipeline_stage===s.key;
+                return (
+                  <button key={s.key} data-testid={`drawer-pipeline-stage-${s.key}`} onClick={()=>handleMoveToStage(s.key)}
+                    disabled={pipelineStatus==='loading'}
+                    title={isCurrent?'Candidate is currently at this stage':undefined}
+                    style={{fontSize:'11px',fontWeight:'700',padding:'5px 11px',borderRadius:'20px',
+                      cursor:pipelineStatus==='loading'?'wait':'pointer',
+                      display:'inline-flex',alignItems:'center',gap:'4px',
+                      border:isCurrent?`2px solid ${s.color}`:'1px solid '+s.color+'50',
+                      background:(pipelineStatus==='loading'&&pipelineStage===s.key)?s.color:(isCurrent?s.color+'33':s.color+'15'),
+                      color:(pipelineStatus==='loading'&&pipelineStage===s.key)?'#fff':s.color,
+                      opacity:(pipelineStatus==='loading'&&pipelineStage!==s.key)?0.5:1,
+                      transition:'all 0.15s'}}>
+                    {isCurrent && <span style={{fontSize:'9px'}}>●</span>}
+                    {(pipelineStatus==='loading'&&pipelineStage===s.key)?'...':s.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
         {/* Applications */}
         {Array.isArray(apps) && apps.length>0 && (
           <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9'}}>

@@ -7624,6 +7624,95 @@ Python, Django, React, AWS, Docker, PostgreSQL, REST APIs`;
   });
 });
 
+test.describe.serial('S59 Candidates drawer: Move to Pipeline action panel + Skill/Project Experience table', () => {
+  // Real gap fix (2026-08-25) — the Candidates page's own quick-view
+  // drawer only ever showed a PASSIVE "In Pipeline: X" badge, unlike
+  // Resume Inbox's drawer which has a real job-selector + clickable
+  // stage-pills action panel. Reused the exact same endpoint/shape
+  // (POST /applications, candidate_id/requisition_id/stage) and current-
+  // stage-highlight styling. Also added a read-only display of the
+  // structured Skill/Project Experience rows (already captured via the
+  // Add/Edit Candidate form, built earlier the same day), previously
+  // only ever visible while editing.
+  let token = '';
+  let candId = '';
+  let reqId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test('setup', async ({ request }) => {
+    token = await getApiToken(request);
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S59 DrawerPipeline Test ${stamp}`, phone: `9${String(stamp).slice(-9)}`, location: 'Bangalore', skills: ['Python', 'AWS'] },
+    });
+    candId = (await cand.json()).id;
+    await request.put(`${API}/candidates/${candId}/skill-experience`, {
+      headers: auth(),
+      data: [{ skill_name: 'SAP ABAP', project_name: 'Core Banking Rollout', duration_from: 'Jan 2022', duration_to: 'Dec 2023', role_types: ['Implementation', 'Support'], relevant_experience: '2 yrs', last_used: '2023' }],
+    });
+    const req = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `QA S59 DrawerPipeline Role ${stamp}`, status: 'open' },
+    });
+    reqId = (await req.json()).id;
+  });
+
+  test('GET skill-experience returns the real saved row (drawer reads the same endpoint)', async ({ request }) => {
+    const res = await request.get(`${API}/candidates/${candId}/skill-experience`, { headers: auth() });
+    const body = await res.json();
+    expect(body.rows.length).toBe(1);
+    expect(body.rows[0].skill_name).toBe('SAP ABAP');
+    expect(body.rows[0].project_name).toBe('Core Banking Rollout');
+  });
+
+  test('Real UI: drawer shows the Skill/Project Experience table and a working Move to Pipeline panel', async ({ page, request }) => {
+    await page.goto(`/candidates?search=QA S59 DrawerPipeline Test ${stamp}`);
+    const row = page.locator('table tbody tr', { hasText: `QA S59 DrawerPipeline Test ${stamp}` }).first();
+    await row.locator('button[title="Quick view"]').click({ timeout: 15000 });
+
+    await expect(page.locator('text=SKILL / PROJECT EXPERIENCE')).toBeVisible({ timeout: 10000 });
+    const skillTable = page.locator('table', { hasText: 'Core Banking Rollout' }).first();
+    await expect(skillTable).toContainText('SAP ABAP');
+    await expect(skillTable).toContainText('Jan 2022');
+    await expect(skillTable).toContainText('Implementation, Support');
+
+    await expect(page.locator('text=🔄 Move to Pipeline')).toBeVisible();
+    const reqSelect = page.locator('select[data-testid="drawer-pipeline-req-select"]');
+    await reqSelect.selectOption(reqId);
+
+    const interestedBtn = page.locator('button[data-testid="drawer-pipeline-stage-interested"]');
+    await expect(interestedBtn).toBeVisible();
+    await interestedBtn.click();
+    await expect(page.locator('text=/Moved to Interested/')).toBeVisible({ timeout: 10000 });
+
+    // On a fresh 'success' state only the confirmation banner renders (the
+    // stage pills are hidden by design, matching Resume Inbox's own
+    // drawer). Reopen the drawer fresh (real page reload — component
+    // remounts to 'idle') and repeat the same job+stage: clicking a
+    // stage the candidate is ALREADY at correctly hits the real 409
+    // "already in pipeline" branch, not a silent re-success — and it's
+    // in THIS state (pipelineStatus='exists') that the pill row renders
+    // again, showing the current-stage "●" highlight.
+    await page.reload();
+    const row2 = page.locator('table tbody tr', { hasText: `QA S59 DrawerPipeline Test ${stamp}` }).first();
+    await row2.locator('button[title="Quick view"]').click({ timeout: 15000 });
+    await expect(page.locator('text=🔄 Move to Pipeline')).toBeVisible({ timeout: 10000 });
+    await page.locator('select[data-testid="drawer-pipeline-req-select"]').selectOption(reqId);
+    const interestedBtn2 = page.locator('button[data-testid="drawer-pipeline-stage-interested"]');
+    await expect(interestedBtn2).toContainText('●');
+    await interestedBtn2.click();
+    await expect(page.locator('text=/Already in pipeline for this job/')).toBeVisible({ timeout: 10000 });
+
+    const appRes = await request.get(`${API}/candidates/${candId}/applications`, { headers: auth() });
+    const apps = await appRes.json();
+    expect(Array.isArray(apps) ? apps.length : (apps.items || []).length).toBeGreaterThan(0);
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+});
+
 test.describe.serial('S57 Referral Links: job-less "General referral" no longer 500s, redirect actually works', () => {
   // Two real bugs found and fixed together: (1) referral_links.
   // requisition_id was NOT NULL, so the "General referral" (job-less)
