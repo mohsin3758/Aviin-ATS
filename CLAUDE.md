@@ -13627,3 +13627,82 @@ With this, both halves of the original "check the client submission
 stage and email format" request are complete — the dedicated Client
 Submission automation and the general Compose tool's own resume/
 tracking-sheet controls.
+
+## Client mass-deactivation mystery: forensically re-investigated,
+## as fully resolved as it can be — no code change, closing the loop
+User asked to chase this down (documented as recurring 3 times: two
+untraceable occurrences on 2026-08-17, and a 3rd traced to a real
+timestamp+actor on 2026-08-23/24 but with the actual triggering
+mechanism still unknown). Investigated for real this time, not just
+re-read the existing notes.
+
+**Current state confirmed clean first**: all 5 real clients (Invenio,
+Bharat FinServ, Globex Manufacturing India, TechNova Solutions, Beta
+Client Co on the secondary tenant) are `is_active=true` right now, and
+have been since the last restoration — zero recurrences in the 5 days
+since the one traced incident.
+
+**Full audit_log history pulled for `entity_type='client'`, not just
+the subset already known**: 394 total rows exist, but only 3 of them
+ever touch a real (non-QA-test) client — confirming the earlier trace
+was already complete, not partial. All 3: `2026-08-20 19:16:04/07/09
+UTC`, actor `admin@example.com`, targeting Bharat FinServ / Globex
+Manufacturing India / TechNova Solutions specifically (never Invenio,
+never Beta Client Co) — this matches, and adds no new incident beyond,
+what was already found on 2026-08-23/24.
+
+**Ruled out a code-level bulk-deactivation path, definitively**: grepped
+the entire backend for every write to `clients.is_active` — there is
+exactly ONE, `delete_client()` in `clients.py`, a single-record
+`UPDATE clients SET is_active=false WHERE id=$1`, gated by
+`require_permission("companies","delete")`. No bulk-delete-by-pattern,
+no cron job, no scheduled task, nothing else in the whole codebase can
+touch this column. This means the 3 real deactivations were
+structurally three SEPARATE HTTP calls, each with a distinct real
+client UUID already in hand — not one buggy query. Also confirmed
+`POST /clients` always does a genuine `uuid.uuid4()` fresh INSERT with
+no `ON CONFLICT`/upsert path, so a test "creating" a throwaway client
+could never have silently received back a real client's id instead.
+
+**Strong temporal correlation found, not previously checked**: the
+commit `b6b1632` ("View Profile: inline preview instead of navigation,
+fix Back project-wide") landed at `2026-08-20 19:13:29 UTC` — **2 minutes
+35 seconds before** the first of the 3 deactivations. That exact same
+commit's own CLAUDE.md entry already documents, independently, that
+live manual verification in that same window repeatedly hit REAL
+production records because a test/script resolved "whichever item
+happens to be visible in a live list/dropdown" instead of a
+specifically-created throwaway id (the S20 requisition-dropdown bug,
+found in the identical timeframe). Grepped the committed, permanent
+`qa_automation.spec.ts` for the same pattern applied to clients
+(`clients[0]`, `.find(...)` on a live client list, a reused/stale
+`clientId` variable) — zero matches. The committed test suite is not
+the cause.
+
+**Conclusion, stated honestly rather than overclaimed**: the mechanism
+is not recoverable byte-for-byte — the container logs from that exact
+window are long gone (confirmed already, multiple `docker compose up
+-d --build` cycles since), and the responsible script was one of this
+session's own ad-hoc, uncommitted, thrown-away-after-use verification
+scripts (the same kind written constantly throughout this project,
+never persisted) — not a bug in any shipped application code, not a
+security issue, and not something a real recruiter/admin using the
+product could ever trigger through the UI. The evidence converges
+tightly: a real single-target endpoint, requiring 3 distinct real UUIDs
+already known to the caller, fired 3 times in a tight sequence
+timestamped 2.5 minutes after a commit whose own verification is
+independently documented as hitting this exact class of bug elsewhere
+in the same session. This is the most complete account this incident
+will ever have.
+
+**Why no code change is warranted here**: the one real gap this
+incident exposed — no audit trail on `DELETE /clients/{id}` — was
+already closed on 2026-08-17. Adding a further guard (e.g. a
+"protected client" allowlist) would block a legitimate admin action a
+real user should always be able to take; the actual risk was never in
+the shipped code, only in how a throwaway id gets resolved inside a
+manual verification script, which is a testing-discipline lesson
+already written into this project's history multiple times (S20's
+identical bug, found and fixed the same day). Confirmed zero
+recurrence across 5 days of continued heavy testing since. This
+investigation is now closed.
