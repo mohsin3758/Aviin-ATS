@@ -425,6 +425,113 @@ async def _compute_jd_block(tenant_id, stage, requisition_id):
     return ""
 
 
+# Real placeholder-substitution engine (2026-08-26). Stage-email/WhatsApp
+# templates only ever had one working token ({name}, lowercase) — a
+# recruiter typing the more natural {Candidate Name}, {Position Name},
+# {Client Name}, {Date}/{Time}, {Joining Date}, {Meeting Link},
+# {Location}, {Remote/Hybrid/Onsite}, {Job Description} got the literal
+# text sent, unsubstituted, to a real candidate. _PLACEHOLDER_TOKENS maps
+# every real token spelling found in live tenant data (plus reasonable
+# case/underscore variants) to one canonical field; _build_placeholder_map
+# resolves each field from real data (requisition, the application's most
+# recently scheduled interview, its most recent offer) — never fabricated.
+# {Meeting ID}/{Passcode}/{Calendar_Link} have no real source anywhere in
+# this schema (interview_schedules has no meeting-id/passcode columns, and
+# no safe public per-interview calendar link exists) — resolved to an
+# honest empty string rather than invented, same "document the gap, don't
+# fake the data" discipline already used elsewhere in this codebase (e.g.
+# match_recruiters()'s documented zero-weight seniority/language factors).
+_PLACEHOLDER_TOKENS = {
+    "candidate_name": ["{name}", "{Candidate Name}", "{Candidate_Name}"],
+    "position_name":  ["{Position Name}", "{Position_Name}", "{Role}"],
+    "client_name":    ["{Client Name}", "{Client_Name}"],
+    "job_description":["{Job Description}", "{Job_Description}"],
+    "location":       ["{Location}"],
+    "work_mode":      ["{Remote/Hybrid/Onsite}", "{Work Mode}", "{Work_Mode}"],
+    "date":           ["{Date}"],
+    "time":           ["{Time}"],
+    "meeting_link":   ["{Meeting Link}", "{Meeting_Link}"],
+    "meeting_id":     ["{Meeting ID}", "{Meeting_ID}"],
+    "passcode":       ["{Passcode}"],
+    "joining_date":   ["{Joining Date}", "{Joining_Date}"],
+    "calendar_link":  ["{Calendar_Link}", "{Calendar Link}"],
+}
+
+
+def _apply_placeholders(text, pmap):
+    """Replace every known {token} in text with its resolved value from
+    pmap. A token with no real value (e.g. no interview scheduled yet)
+    resolves to "" rather than being left as literal placeholder text."""
+    if not text:
+        return text
+    for key, tokens in _PLACEHOLDER_TOKENS.items():
+        val = pmap.get(key) or ""
+        for tok in tokens:
+            if tok in text:
+                text = text.replace(tok, val)
+    return text
+
+
+_GREETING_WORDS = ("dear", "hi ", "hi,", "hello", "hey", "namaste", "greetings")
+
+
+def _already_has_greeting(text: str) -> bool:
+    """True if a message already opens with its own greeting (checked
+    AFTER placeholder substitution, so "Dear {Candidate Name}," correctly
+    counts once the real name is filled in) — used to skip the wrapper's
+    own auto-prepended "Dear {name}," and avoid a double greeting."""
+    if not text:
+        return False
+    head = text.strip()[:60].lower()
+    return any(head.startswith(w) for w in _GREETING_WORDS)
+
+
+async def _build_placeholder_map(tenant_id, candidate_id, name, requisition_id, application_id):
+    """Resolve every real placeholder value this stage's email/WhatsApp
+    template might reference. Always returns a complete dict (every key
+    present, "" when unresolved) so callers never need a defensive .get."""
+    pmap = {
+        "candidate_name": str(name or ""), "position_name": "", "client_name": "",
+        "job_description": "", "location": "", "work_mode": "", "date": "",
+        "time": "", "meeting_link": "", "meeting_id": "", "passcode": "",
+        "joining_date": "", "calendar_link": "",
+    }
+    try:
+        async with db.tenant_conn(tenant_id) as conn:
+            if requisition_id:
+                req = await conn.fetchrow(
+                    """SELECT r.title, r.location, r.work_mode, r.description, r.client_name,
+                              c.name AS client_row_name
+                       FROM requisitions r LEFT JOIN clients c ON c.id = r.client_id
+                       WHERE r.id=$1""", requisition_id)
+                if req:
+                    pmap["position_name"] = req["title"] or ""
+                    pmap["client_name"] = req["client_name"] or req["client_row_name"] or ""
+                    pmap["job_description"] = req["description"] or ""
+                    pmap["location"] = req["location"] or ""
+                    pmap["work_mode"] = (req["work_mode"] or "").replace("_", " ").title()
+            if application_id:
+                interview = await conn.fetchrow(
+                    """SELECT scheduled_at, meeting_link FROM interview_schedules
+                       WHERE application_id=$1 AND status IN ('scheduled','confirmed')
+                       ORDER BY scheduled_at DESC LIMIT 1""", application_id)
+                if interview and interview["scheduled_at"]:
+                    pmap["date"] = interview["scheduled_at"].strftime("%d %b %Y")
+                    pmap["time"] = interview["scheduled_at"].strftime("%I:%M %p") + " IST"
+                    pmap["meeting_link"] = interview["meeting_link"] or ""
+                offer = await conn.fetchrow(
+                    """SELECT joining_date FROM offers WHERE application_id=$1
+                       AND joining_date IS NOT NULL ORDER BY updated_at DESC LIMIT 1""", application_id)
+                if offer and offer["joining_date"]:
+                    pmap["joining_date"] = offer["joining_date"].strftime("%d %b %Y")
+    except Exception as _pex:
+        print(f"Placeholder resolution failed (non-fatal, unresolved tokens fall back to blank): {_pex}")
+    if not pmap["date"]:
+        import datetime as _dtmod
+        pmap["date"] = _dtmod.date.today().strftime("%d %b %Y")
+    return pmap
+
+
 async def _resolve_email_template(tenant_id, stage):
     """This tenant's configured email_settings.stage_templates entry for
     the stage, or (None, None, None) if nothing's been configured —
@@ -458,6 +565,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
     base_msg = custom_msg if custom_msg else MSGS.get(stage, "")
     custom_override = bool(custom_msg)
     email_tmpl_subj, email_tmpl_msg, attach_choice = await _resolve_email_template(tenant_id, stage)
+    pmap = await _build_placeholder_map(tenant_id, candidate_id, name, requisition_id, application_id)
 
     # WhatsApp via WAHA — HARD RULE #7/#12: consent-gated, real recipient,
     # real per-stage template (previously broadcast a placeholder to a fixed
@@ -478,7 +586,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
         wa_tmpl_msg = (wa_templates.get(stage, {}) or {}).get("message")
         wa_text = base_msg if custom_override else (wa_tmpl_msg or base_msg)
         if wa_text:
-            wa_text = wa_text.replace("{name}", str(name)) + jd_block
+            wa_text = _apply_placeholders(wa_text, pmap) + jd_block
 
         if has_consent and phone and wa_text:
             session_info = await _check_waha()
@@ -535,17 +643,18 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _f=_cfg["smtp_from"] or _u; _fn=_cfg["smtp_from_name"] or "AVIIN ATS"
                     _tls=_cfg["smtp_tls"] if _cfg["smtp_tls"] is not None else True
                     _em=MIMEMultipart()
-                    _subj = email_tmpl_subj or SUBJS.get(stage,"AVIIN Jobs - Update")
+                    _subj = _apply_placeholders(email_tmpl_subj or SUBJS.get(stage,"AVIIN Jobs - Update"), pmap)
                     # BUG FIX (2026-08-22): {name} was substituted for WhatsApp
                     # (see wa_text.replace above) but never for email — any
                     # stage template using {name} (the settings page's own
                     # default templates do, e.g. "Hi {name},") sent the
                     # literal, unsubstituted text to every real candidate.
-                    msg_text = email_msg.replace("{name}", str(name)) if email_msg else email_msg
+                    msg_text = _apply_placeholders(email_msg, pmap) if email_msg else email_msg
                     _em["Subject"]=_subj
                     _em["From"]=f"{_fn} <{_f}>"
                     _em["To"]=email
-                    _body = "Dear " + str(name) + "," + chr(10) + chr(10) + str(msg_text) + jd_block + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviinjobs.com"
+                    _greeting = "" if _already_has_greeting(msg_text) else ("Dear " + str(name) + "," + chr(10) + chr(10))
+                    _body = _greeting + str(msg_text) + jd_block + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviinjobs.com"
 
                     # Log to candidate_messages so it shows in Conversations
                     # and so open-tracking has a row to key against — stage-
@@ -623,10 +732,15 @@ async def stage_email_preview(
     name = (cand["full_name"] if cand else None) or "Candidate"
     jd_block = await _compute_jd_block(actor.tenant_id, stage, app["requisition_id"])
     tmpl_subj, tmpl_msg, attachment = await _resolve_email_template(actor.tenant_id, stage)
-    subject = tmpl_subj or SUBJS.get(stage, "AVIIN Jobs - Update")
-    message = tmpl_msg or MSGS.get(stage, "")
-    message = message.replace("{name}", name) if message else message
-    message = (message or "") + jd_block
+    pmap = await _build_placeholder_map(actor.tenant_id, app["candidate_id"], name, app["requisition_id"], application_id)
+    subject = _apply_placeholders(tmpl_subj or SUBJS.get(stage, "AVIIN Jobs - Update"), pmap)
+    message = _apply_placeholders(tmpl_msg or MSGS.get(stage, ""), pmap)
+    # Same greeting rule the real send applies (_already_has_greeting) —
+    # a preview that omitted this looked shorter/different from the real
+    # email that follows, breaking the "preview == exactly what's sent"
+    # guarantee this endpoint exists to provide.
+    greeting = "" if _already_has_greeting(message) else (f"Dear {name},\n\n")
+    message = greeting + (message or "") + jd_block
     return {"subject": subject, "message": message, "attachment": attachment}
 
 

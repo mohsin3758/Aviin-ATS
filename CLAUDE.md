@@ -13965,3 +13965,91 @@ separately for a decision on scope (real substitution logic needs a
 richer set of resolvable fields — position/client/interview details —
 not just candidate name, similar to the JD-block/`{name}` pattern
 already established for the 'contacted' stage).
+
+## Real placeholder-substitution engine for stage emails + a double-greeting
+## fix, 2026-08-26
+Direct follow-up to the same-day auto-advance-to-Submitted work — the
+flagged-but-not-yet-fixed placeholder bug found during that segment's
+verification (stage-email templates using `{Candidate Name}` and a dozen
+other tokens the backend never resolved, producing broken literal text
+and a double greeting in real candidate emails). User: "yes do it and fix
+it." Both fixed.
+
+**Real substitution engine, not another bare .replace("{name}",...)** —
+new `_PLACEHOLDER_TOKENS` (`applications.py`) maps every real token
+spelling found in live tenant data, plus reasonable case/underscore
+variants, to one canonical field: `{Candidate Name}`/`{name}`,
+`{Position Name}`, `{Client Name}`, `{Location}`,
+`{Remote/Hybrid/Onsite}`, `{Job Description}`, `{Date}`/`{Time}`,
+`{Meeting Link}`, `{Joining Date}`. New `_build_placeholder_map()`
+resolves each from real data — the requisition (title/location/work_mode/
+description/client_name, falling back to a real `clients.name` join when
+`client_name` is blank), the application's most recently scheduled
+interview (`interview_schedules`, status scheduled/confirmed, ordered by
+`scheduled_at DESC`) for date/time/meeting link, and its most recent
+offer for joining date — never fabricated. `{Meeting ID}`/`{Passcode}`/
+`{Calendar_Link}` have no real source anywhere in this schema
+(`interview_schedules` has no meeting-id/passcode columns, and no safe
+public per-interview calendar link exists) — resolved to an honest empty
+string, same "document the gap, don't fake the data" discipline already
+used elsewhere in this codebase (e.g. `match_recruiters()`'s documented
+zero-weight seniority/language factors). Applied to BOTH the WhatsApp
+text and the email subject+body (subject substitution was a real, second
+gap — never applied before at all, only the body ever got `{name}`
+substitution) and to the `/stage-preview` endpoint via the exact same
+helpers, so what an admin previews in the Manual-mode review modal can
+never drift from what actually sends.
+
+**Double-greeting bug, found live during the prior segment's
+verification, fixed in the same pass**: the SMTP wrapper always
+prepended "Dear {name},\n\n" regardless of whether the tenant's own
+template already opened with its own greeting (e.g. a template starting
+"Dear {Candidate Name},...") — producing a real, visible double greeting
+in production email. New `_already_has_greeting()` checks the first ~60
+chars (after placeholder substitution, so a resolved "Dear <real name>,"
+correctly counts) against common greeting words (dear/hi/hello/hey/
+namaste/greetings); the wrapper only auto-prepends when the message
+genuinely has none. Applied identically to both the real send path and
+`/stage-preview`, preserving the same "preview == send" guarantee.
+Verified backward-compatible: every hardcoded default `MSGS[stage]`
+value has no greeting of its own, so those stages still correctly get
+the auto-prepended "Dear name," exactly as before — confirmed via a real
+send on a stage with no custom template configured.
+
+**Frontend** (`settings/email/page.tsx`) — a real placeholder legend box
+added above the Subject/Message editor (only in the generic per-stage
+branch, not the `client_submission` special case, which already has its
+own fixed, tracking-sheet-driven template) — lists every resolvable
+token plus an honest "not yet supported, always sends blank" line for
+the 3 with no data source, so a recruiter typing one of these now knows
+exactly what will and won't resolve, rather than discovering it the hard
+way in a sent email.
+
+Verified for real end-to-end, not code review: a real throwaway client +
+requisition (with description/location/work_mode set) + candidate +
+application, a template using the full richer token set
+(`{Position Name}`/`{Client Name}`/`{Location}`/
+`{Remote/Hybrid/Onsite}`/`{Job Description}`/`{Candidate Name}`) —
+confirmed the preview endpoint resolved every one correctly, confirmed
+the real sent `candidate_messages` row matched the preview byte-for-byte
+including subject, and confirmed exactly one "Dear" line in both
+(no double greeting). Confirmed the 3 unresolvable tokens
+(`{Meeting ID}`/`{Passcode}`/`{Calendar_Link}`) render as clean blanks,
+never literal unresolved text. Confirmed a hardcoded-default stage (no
+custom template) still auto-prepends the real greeting in both preview
+and the real sent email — the backward-compatibility guarantee genuinely
+holds. New permanent "S66 Stage-email placeholder substitution engine +
+double-greeting fix" suite (5 tests) added to `qa_automation.spec.ts` —
+one real test-authoring mistake caught and fixed by the suite's own
+first run, not an app bug: an early assertion expected a bare
+unresolved-token message with no greeting, when the real, correct
+behavior (matching the backward-compat fix) is to auto-prepend the
+greeting since that specific test message has none of its own; fixed to
+assert the unresolved-token blanks specifically rather than the whole
+message's exact text. Broader regression sweep
+(`S1|S2|S13|S14|S16|S17|S37|S52|S54|S61|S65`, 85 tests) passed clean
+(one S61 UI test flaked under the combined run's load and passed clean
+in isolation immediately after — this suite's well-documented back-to-
+back-run characteristic, not a regression; confirmed via backend logs
+showing no related errors in that window). Zero-token audit: `CONFIRMED
+CLEAN` (411 files, 0 external API refs).

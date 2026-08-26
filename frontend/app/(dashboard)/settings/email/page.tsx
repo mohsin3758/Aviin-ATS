@@ -6,6 +6,7 @@ import { Mail, Server, Eye, EyeOff, CheckCircle, XCircle, Send, Wifi, AlertTrian
 const INP: any = { width:'100%', border:'1px solid #e2e8f0', borderRadius:'8px', padding:'10px 12px', fontSize:'13px', outline:'none', color:'#1e293b', background:'white', boxSizing:'border-box' as const };
 const CARD: any = { background:'white', borderRadius:'12px', border:'1px solid #e2e8f0', padding:'20px', marginBottom:'16px' };
 const LBL: any = { display:'block', fontSize:'12px', fontWeight:'600', color:'#374151', marginBottom:'5px' };
+const CODE: any = { background:'#e2e8f0', color:'#1e40af', padding:'1px 5px', borderRadius:'4px', fontFamily:'monospace', fontWeight:600 };
 
 const EMAIL_STAGES = [
   {key:'contacted',label:'Contacted'},
@@ -409,6 +410,21 @@ export default function EmailSettingsPage() {
                 </div>
               ) : (
                 <>
+                  {/* Real placeholder-substitution engine (2026-08-26) —
+                      previously only bare {name} actually resolved; a
+                      recruiter typing anything richer silently sent the
+                      literal, unresolved text to a real candidate. */}
+                  <div style={{marginBottom:'14px',padding:'12px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:'8px'}}>
+                    <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',marginBottom:'6px'}}>Placeholders you can use — resolved with real data automatically</div>
+                    <div style={{fontSize:'11px',color:'#475569',lineHeight:'1.9'}}>
+                      <code style={CODE}>{'{Candidate Name}'}</code> or <code style={CODE}>{'{name}'}</code> · <code style={CODE}>{'{Position Name}'}</code> · <code style={CODE}>{'{Client Name}'}</code> · <code style={CODE}>{'{Location}'}</code> · <code style={CODE}>{'{Remote/Hybrid/Onsite}'}</code> · <code style={CODE}>{'{Job Description}'}</code><br/>
+                      <code style={CODE}>{'{Date}'}</code> / <code style={CODE}>{'{Time}'}</code> — this candidate's next scheduled interview (falls back to today's date if none is scheduled) · <code style={CODE}>{'{Meeting Link}'}</code> — same interview<br/>
+                      <code style={CODE}>{'{Joining Date}'}</code> — from a real offer, once one exists
+                    </div>
+                    <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'6px'}}>
+                      Not yet supported (always sends blank — no real source for these exists yet): <code style={CODE}>{'{Meeting ID}'}</code>, <code style={CODE}>{'{Passcode}'}</code>, <code style={CODE}>{'{Calendar_Link}'}</code>
+                    </div>
+                  </div>
                   <div style={{marginBottom:'12px'}}>
                     <label style={LBL}>Subject Line</label>
                     <input style={INP} value={templates[st.key]?.subject||''} placeholder={DEFAULT_SUBJS[st.key]||'Subject...'}

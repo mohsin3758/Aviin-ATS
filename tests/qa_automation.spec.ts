@@ -7990,6 +7990,130 @@ test.describe.serial('S65 Submit to Client auto-advances stage to Submitted', ()
   });
 });
 
+test.describe.serial('S66 Stage-email placeholder substitution engine + double-greeting fix', () => {
+  // 2026-08-26: previously ONLY bare {name} (lowercase) ever resolved in a
+  // stage-email/WhatsApp template — a recruiter typing {Candidate Name},
+  // {Position Name}, {Client Name}, {Date}/{Time}, {Joining Date},
+  // {Meeting Link}, {Location}, {Remote/Hybrid/Onsite}, {Job Description}
+  // got the literal, unresolved text sent to a real candidate. Also fixes
+  // a real double-greeting bug: the wrapper always prepended "Dear {name},"
+  // even when the tenant's own template already opened with its own
+  // greeting (e.g. "Dear {Candidate Name},...").
+  let token: string;
+  let candId: string, reqId: string, appId: string, clientId: string;
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    try {
+      const es = await (await request.get(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` } })).json();
+      const tmpl = { ...(es.stage_templates || {}) };
+      delete tmpl['interested'];
+      await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: tmpl } });
+    } catch {}
+    await request.delete(`${API}/applications/${appId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    await request.delete(`${API}/candidates/${candId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    await request.delete(`${API}/requisitions/${reqId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    await request.delete(`${API}/clients/${clientId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+  });
+
+  test('setup: real client + requisition (with description/location/work_mode) + candidate + application', async ({ request }) => {
+    token = await getApiToken(request);
+    const client = await (await request.post(`${API}/clients`, { headers: { Authorization: `Bearer ${token}` }, data: { name: `QA S66 Client ${stamp}` } })).json();
+    clientId = client.id;
+    const req = await (await request.post(`${API}/requisitions`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { title: `QA S66 Role ${stamp}`, client_id: clientId, status: 'open', location: 'Pune, India', work_mode: 'remote', description: 'A real S66 job description.' },
+    })).json();
+    reqId = req.id;
+    const cand = await (await request.post(`${API}/candidates`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { full_name: `QA S66 Candidate ${stamp}`, phone: `9${String(stamp).slice(-9)}`, email: `qa.s66.cand.${stamp}@qatest.example`, skills: ['Python'] },
+    })).json();
+    candId = cand.id;
+    const app = await (await request.post(`${API}/applications`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { requisition_id: reqId, candidate_id: candId, stage: 'screened' },
+    })).json();
+    appId = app.id;
+    expect(appId).toBeTruthy();
+  });
+
+  test('a real richer placeholder set resolves correctly, and preview == exactly what actually gets sent (including the greeting)', async ({ request }) => {
+    const es = await (await request.get(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const tmpl = { ...(es.stage_templates || {}) };
+    tmpl['interested'] = {
+      send_mode: 'auto',
+      subject: 'Update for {Position Name} at {Client Name}',
+      message: 'Dear {Candidate Name},\n\nRole: {Position Name} at {Client Name}\nLocation: {Location} ({Remote/Hybrid/Onsite})\n\n{Job Description}',
+    };
+    const put = await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: tmpl } });
+    expect(put.status()).toBe(200);
+
+    const prevRes = await request.get(`${API}/applications/${appId}/stage-preview?stage=interested`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(prevRes.status()).toBe(200);
+    const prev = await prevRes.json();
+    expect(prev.subject).toContain(`QA S66 Role ${stamp}`);
+    expect(prev.subject).toContain(`QA S66 Client ${stamp}`);
+    expect(prev.message).toContain(`QA S66 Candidate ${stamp}`);
+    expect(prev.message).toContain('Pune, India');
+    expect(prev.message).toContain('Remote');
+    expect(prev.message).toContain('A real S66 job description.');
+    // The template already opens with its own "Dear {Candidate Name},"
+    // greeting — the wrapper must NOT stack a second one on top.
+    expect((prev.message.match(/Dear /g) || []).length).toBe(1);
+
+    const mv = await request.patch(`${API}/applications/${appId}/stage`, { headers: { Authorization: `Bearer ${token}` }, data: { stage: 'interested', send_email: true } });
+    expect(mv.status()).toBe(200);
+
+    let realMsg: any;
+    for (let i = 0; i < 10; i++) {
+      const thread = await (await request.get(`${API}/communications/thread/${candId}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+      realMsg = (thread.messages || []).find((m: any) => m.subject);
+      if (realMsg) break;
+      await new Promise(res => setTimeout(res, 1000));
+    }
+    expect(realMsg).toBeTruthy();
+    expect(realMsg.subject).toBe(prev.subject);
+    expect((realMsg.body.match(/Dear /g) || []).length).toBe(1);
+    expect(realMsg.body).toContain(`QA S66 Candidate ${stamp}`);
+  });
+
+  test('placeholders with no real data source (Meeting ID / Passcode / Calendar_Link) resolve to blank — never left as literal unresolved text', async ({ request }) => {
+    const es = await (await request.get(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const tmpl = { ...(es.stage_templates || {}) };
+    tmpl['interested'] = {
+      send_mode: 'manual',
+      subject: 'S66 unresolved check',
+      message: 'Meeting ID: {Meeting ID} | Passcode: {Passcode} | Calendar: {Calendar_Link}',
+    };
+    await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: tmpl } });
+    const prev = await (await request.get(`${API}/applications/${appId}/stage-preview?stage=interested`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(prev.message).not.toContain('{Meeting ID}');
+    expect(prev.message).not.toContain('{Passcode}');
+    expect(prev.message).not.toContain('{Calendar_Link}');
+    // The message itself has no greeting of its own, so the real auto-prepend still applies here — correct, matching the backward-compat guarantee verified elsewhere in this suite.
+    expect(prev.message).toContain('Meeting ID:  | Passcode:  | Calendar: ');
+  });
+
+  test('a hardcoded-default stage (no custom template configured) still gets the real auto-prepended "Dear name," greeting — backward compatible', async ({ request }) => {
+    const es = await (await request.get(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    const tmpl = { ...(es.stage_templates || {}) };
+    delete tmpl['hold'];
+    await request.put(`${API}/settings/email`, { headers: { Authorization: `Bearer ${token}` }, data: { stage_templates: tmpl } });
+    const prev = await (await request.get(`${API}/applications/${appId}/stage-preview?stage=hold`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(prev.message.startsWith(`Dear QA S66 Candidate ${stamp},`)).toBe(true);
+  });
+
+  test('real headless UI: the Settings > Email Configuration page shows the new placeholder legend', async ({ page }) => {
+    await page.goto('/settings/email');
+    await page.waitForLoadState('networkidle');
+    const bodyText = await page.locator('body').innerText();
+    expect(bodyText).toContain('Placeholders you can use');
+    expect(bodyText).toContain('Position Name');
+    expect(bodyText).toContain('Client Name');
+  });
+});
+
 test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not Invalid/Expired', () => {
   // Regression for the exact same dead-code bug already fixed for NDA
   // e-sign (sql/74): sign_offer_by_token() used to null offer_letters.
