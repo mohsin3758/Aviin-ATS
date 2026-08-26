@@ -1084,6 +1084,146 @@ async def submission_history(application_id: str, actor: Actor = Depends(get_act
     return out
 
 
+# ══════════════════════ KAE Review Queue (2026-08-26) ══════════════════════
+# When 2+ recruiters each submit their own candidate for the SAME
+# requisition, the only place a KAE could previously compare them was the
+# cumulative emailed tracking sheet — nothing in the app itself. These 3
+# endpoints add that: a cross-role inbox (every requisition with pending
+# recruiter->KAE submissions, scoped to the KAE's own clients), a per-
+# requisition comparison ranked by the real, already-computed AI JD Match
+# Score (candidate_scores, the same source the emailed tracking sheet's
+# ai_jd_score column already used — no second scoring engine), and a
+# lightweight Shortlisted/Not Selected marker. The marker is deliberately
+# a SOFT signal only — it never blocks or auto-rejects the other
+# candidates, since a role genuinely having 2+ real finalists is normal.
+
+async def _kae_owned_client_ids(conn, tenant_id: str, user_id: str) -> list:
+    rows = await conn.fetch(
+        "SELECT client_id FROM client_owners WHERE tenant_id=$1 AND user_id=$2 AND is_active",
+        tenant_id, user_id)
+    return [r["client_id"] for r in rows]
+
+
+@router.get("/kae/review-queue")
+async def kae_review_queue(actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam"))):
+    """Cross-role inbox — every requisition with at least one real
+    recruiter->KAE submission, most-recent activity first. A kae/kam only
+    sees requisitions on clients they actually own (client_owners) —
+    admin/manager/super_admin see every requisition tenant-wide, matching
+    the exemption pattern already used throughout this codebase."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        scope_clients = None
+        if actor.role in ("kae", "kam"):
+            scope_clients = await _kae_owned_client_ids(conn, actor.tenant_id, actor.user_id)
+            if not scope_clients:
+                return []
+        rows = await conn.fetch(
+            """WITH latest AS (
+                 SELECT DISTINCT ON (cs.requisition_id, cs.candidate_id)
+                   cs.requisition_id, cs.candidate_id, cs.kae_decision, cs.sent_at
+                 FROM candidate_submissions cs
+                 WHERE cs.tenant_id=$1 AND cs.direction='recruiter_to_kae' AND cs.requisition_id IS NOT NULL
+                 ORDER BY cs.requisition_id, cs.candidate_id, cs.sent_at DESC
+               )
+               SELECT r.id AS requisition_id, r.title AS requisition_title, cl.name AS client_name,
+                      COUNT(*)::int AS candidate_count,
+                      COUNT(*) FILTER (WHERE latest.kae_decision IS NULL)::int AS undecided_count,
+                      MAX(sc.readiness_index) AS top_score,
+                      MAX(latest.sent_at) AS last_submission_at
+               FROM latest
+               JOIN requisitions r ON r.id = latest.requisition_id
+               LEFT JOIN clients cl ON cl.id = r.client_id
+               LEFT JOIN candidate_scores sc ON sc.candidate_id = latest.candidate_id AND sc.requisition_id = latest.requisition_id
+               WHERE ($2::uuid[] IS NULL OR r.client_id = ANY($2::uuid[]))
+               GROUP BY r.id, r.title, cl.name
+               ORDER BY last_submission_at DESC""",
+            actor.tenant_id, scope_clients)
+    return [dict(r) for r in rows]
+
+
+@router.get("/kae/review-queue/{requisition_id}")
+async def kae_review_queue_for_requisition(requisition_id: str, actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam"))):
+    """The actual comparison view — every distinct candidate submitted for
+    this ONE requisition (latest submission per candidate, in case of a
+    resubmission), ranked by real AI JD Match Score (candidate_scores,
+    correctly scoped to this exact candidate+requisition pair — never the
+    tenant-wide applications.fit_score, which can be stale/cross-role)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        req = await conn.fetchrow("SELECT id, title, client_id FROM requisitions WHERE id=$1 AND tenant_id=$2", requisition_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+        if actor.role in ("kae", "kam"):
+            owned = await _kae_owned_client_ids(conn, actor.tenant_id, actor.user_id)
+            if not req["client_id"] or req["client_id"] not in owned:
+                raise HTTPException(403, "You don't own this requisition's client")
+
+        rows = await conn.fetch(
+            """WITH latest AS (
+                 SELECT DISTINCT ON (cs.candidate_id)
+                   cs.id AS submission_id, cs.candidate_id, cs.sent_by, cs.sent_at,
+                   cs.kae_decision, cs.kae_decision_at, cs.kae_decision_by
+                 FROM candidate_submissions cs
+                 WHERE cs.tenant_id=$1 AND cs.direction='recruiter_to_kae' AND cs.requisition_id=$2
+                 ORDER BY cs.candidate_id, cs.sent_at DESC
+               )
+               SELECT latest.submission_id, latest.candidate_id, c.full_name AS candidate_name,
+                      latest.sent_by, ub.full_name AS submitted_by_name, latest.sent_at,
+                      latest.kae_decision, latest.kae_decision_at, kdb.full_name AS kae_decision_by_name,
+                      sc.readiness_index, sc.readiness_grade, sc.skill_match_details,
+                      app.stage AS current_stage, app.id AS application_id
+               FROM latest
+               JOIN candidates c ON c.id = latest.candidate_id
+               LEFT JOIN users ub ON ub.id = latest.sent_by
+               LEFT JOIN users kdb ON kdb.id = latest.kae_decision_by
+               LEFT JOIN candidate_scores sc ON sc.candidate_id = latest.candidate_id AND sc.requisition_id=$2
+               LEFT JOIN LATERAL (
+                   SELECT id, stage FROM applications
+                   WHERE candidate_id = latest.candidate_id AND requisition_id=$2 AND is_active IS NOT FALSE
+                   ORDER BY updated_at DESC LIMIT 1
+               ) app ON true
+               ORDER BY sc.readiness_index DESC NULLS LAST, latest.sent_at""",
+            actor.tenant_id, requisition_id)
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        details = _jsonb(d.pop("skill_match_details"), {})
+        d["matched_skills"] = details.get("keyword_matched_skills") or []
+        d["missing_skills"] = details.get("keyword_missing_skills") or []
+        out.append(d)
+    return {"requisition_id": req["id"], "requisition_title": req["title"], "candidates": out}
+
+
+class KaeDecisionIn(BaseModel):
+    decision: Optional[str] = None  # 'shortlisted' | 'not_selected' | null (clear)
+
+
+@router.patch("/candidate-submissions/{submission_id}/decision")
+async def set_kae_decision(submission_id: str, body: KaeDecisionIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam"))):
+    if body.decision not in (None, "shortlisted", "not_selected"):
+        raise HTTPException(400, "decision must be 'shortlisted', 'not_selected', or null")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        before = await conn.fetchrow(
+            "SELECT kae_decision, candidate_id, requisition_id FROM candidate_submissions WHERE id=$1 AND tenant_id=$2 AND direction='recruiter_to_kae'",
+            submission_id, actor.tenant_id)
+        if not before:
+            raise HTTPException(404, "Submission not found")
+        row = await conn.fetchrow(
+            """UPDATE candidate_submissions
+               SET kae_decision=$1,
+                   kae_decision_at=CASE WHEN $1::text IS NULL THEN NULL ELSE now() END,
+                   kae_decision_by=CASE WHEN $1::text IS NULL THEN NULL ELSE $2::uuid END
+               WHERE id=$3 AND tenant_id=$4
+               RETURNING *""",
+            body.decision, actor.user_id, submission_id, actor.tenant_id)
+        await events.write_audit(
+            conn, actor.tenant_id, actor.user_id, "kae_decision", "candidate_submission", submission_id,
+            before={"kae_decision": before["kae_decision"]},
+            after={"kae_decision": body.decision, "candidate_id": str(before["candidate_id"]), "requisition_id": str(before["requisition_id"]) if before["requisition_id"] else None},
+        )
+    return dict(row)
+
+
 # ══════════════════════ KAE -> Client / KAM submission (2nd hop) ══════════════════════
 # Everything above this line is the recruiter -> KAE hop, built 2026-07-29
 # onward. There was no second hop at all: nothing routed a candidate onward

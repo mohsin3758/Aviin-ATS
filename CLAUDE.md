@@ -13777,3 +13777,99 @@ independently-logged-in browser context reliably named the file
 correctly every time). Rewritten to assert on the real network
 response instead, which is both more precise (validates the exact
 thing the fix changed) and deterministic.
+
+## KAE Review Queue: compare competing submissions by real AI JD Match
+## Score, soft shortlist decision, 2026-08-26
+User asked (research-only first, "dont start any development") what
+happens when 2+ recruiters each submit their own candidate for the same
+requisition — could the KAE easily see which one to shortlist by AI JD
+Match Score. Investigated via a background research agent before
+proposing anything: confirmed the AI score already exists per candidate+
+requisition (`candidate_scores.readiness_index`, already emailed in the
+tracking sheet's `ai_jd_score` column) and the correct comparison query
+already existed too (`pipeline_p2.py`'s `/pipeline/enriched/{requisition_
+id}`, dead code, never called by any frontend) — but there was no in-app
+place to actually SEE multiple recruiters' submissions for one role side
+by side, and no decision/shortlist concept anywhere. Proposed a process;
+user answered both open questions ("shortlist marker is enough of a
+decision — no hard gate" and "both" surfaces — cross-role inbox AND
+per-role home) and said "built."
+
+`sql/88_kae_review_decision.sql` — `candidate_submissions` gains
+`kae_decision` (`'shortlisted'|'not_selected'|NULL`, deliberately soft —
+never blocks or auto-rejects the other candidates, since a role
+genuinely having 2+ real finalists is normal), `kae_decision_at`,
+`kae_decision_by`.
+
+3 new endpoints in `kae_submission.py` (reusing `candidate_scores` —
+never a second scoring engine, matching this project's established
+"one engine" convention): `GET /kae/review-queue` (cross-role inbox —
+every requisition with a real recruiter->KAE submission, most-recent-
+activity first, with candidate/undecided counts and the top score;
+scoped to the KAE's own clients via `client_owners` for `kae`/`kam`,
+tenant-wide for admin/manager/super_admin — closing the exact
+`job_visibility_scope`-mismatch gap the research agent flagged, since
+that mechanism is keyed to recruiter assignments, not KAE-owned
+clients); `GET /kae/review-queue/{requisition_id}` (the actual
+comparison — latest submission per distinct candidate, ranked by real
+`readiness_index` DESC NULLS LAST, with `skill_match_details`'s already-
+stored `keyword_matched_skills`/`keyword_missing_skills`, the real
+submitting recruiter's name, and current pipeline stage via a `LEFT
+JOIN LATERAL` on `applications`); `PATCH /candidate-submissions/
+{submission_id}/decision` (sets/clears `kae_decision`, writes
+`audit_log`). All 3 role-gated to `admin/super_admin/manager/kae/kam`,
+matching the established bar for every other KAE-facing action in this
+file.
+
+New shared `frontend/components/KaeReviewPanel.tsx` — the actual
+comparison table (candidate, submitted-by, AI Match % badge color-
+graded, matched/missing skill chips, stage, Shortlist/Pass buttons),
+renders `null` when nothing's been submitted yet so it never clutters
+a role with no activity. Reused by both real surfaces, per the user's
+explicit "both": a new "Submitted Candidates — KAE Review" section on
+the requisition detail page's Summary tab (the per-role home), and a
+new "Review Queue" tab on `/kae` (the cross-role inbox — a list of
+roles with pending submissions, each expandable inline to the same
+panel via a `compact` prop, plus an "Open role →" link into the full
+per-role view).
+
+Verified for real end-to-end, not code review: built a real throwaway
+client + requisition + 2 candidates (one genuinely strong match —
+Python/AWS skills matching the requisition's `skills_required`, one
+genuinely weak — unrelated PHP skills) + 2 real recruiter accounts,
+each logging in as themselves to submit their own candidate to the KAE
+(not both submitted by the same admin session, to prove `submitted_by`
+correctly reflects the real submitter). Confirmed via direct API calls:
+the strong candidate scored 90.05% (A+) and correctly ranked first with
+real matched skills `[Python, AWS]`; the weak one scored 25.02% (D) with
+real missing skills `[Python, AWS]`; both showed their correct real
+submitting recruiter; the cross-role inbox showed `candidate_count:2,
+undecided_count:2, top_score:90.05` for this exact role; setting
+`shortlisted` on the top candidate left the other one's `kae_decision`
+untouched (the soft-marker guarantee, proven not just asserted); a
+plain recruiter correctly 403'd on both the comparison view and the
+decision endpoint. A real headless-browser pass confirmed both UI
+surfaces render the same live data and stay in sync — a Shortlist click
+on the requisition page's panel is immediately reflected when the same
+role is expanded from the `/kae` Review Queue tab moments later — with
+zero console errors, via a real screenshot showing the "TOP MATCH"
+badge, both real AI Match badges (green 90% / red 25%), and the correct
+skill chips exactly as designed.
+
+**One real test-hygiene finding along the way, not an app bug**: an
+earlier headless-browser verification attempt crashed mid-flow (before
+reaching its own cleanup) because it hadn't yet accounted for the
+requisition detail page defaulting to its Candidates tab, not Summary —
+the panel it was waiting for genuinely wasn't on screen yet. This left
+one real, still-active throwaway requisition+candidates behind;
+caught by directly querying the database with the correct RLS tenant
+context set (`SET app.tenant_id=...` — the first query without it
+silently returned zero rows, per FORCE ROW LEVEL SECURITY, not because
+the data didn't exist) and cleaned up via the real DELETE APIs before
+concluding the feature was done.
+
+New permanent "S64 KAE Review Queue" suite (6 tests) added to
+`qa_automation.spec.ts`, using the same real-strong-vs-weak-candidate,
+real-two-recruiter-logins pattern as the manual verification. Broader
+regression sweep (S13/S17/S43/S54/S61/S64, 54 tests) passed clean. Zero-
+token audit: `CONFIRMED CLEAN` (411 files, 0 external API refs).

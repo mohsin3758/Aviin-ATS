@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload, authHeaders, API } from '@/lib/auth';
+import KaeReviewPanel from '@/components/KaeReviewPanel';
 import {
   ArrowLeft, MapPin, Users, Clock, Briefcase, Edit, BarChart2,
   Plus, X, ChevronDown, Mail, Phone, Download, ExternalLink,
@@ -1327,6 +1328,7 @@ function SummaryTab({ req, stats, board, stages }: any) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <AssignedRecruiterCard reqId={req.id} />
+      <KaeReviewPanel requisitionId={req.id} />
       {req.approval_status !== 'approved' && <ApprovalChainCard reqId={req.id} approvalStatus={req.approval_status} />}
       {req.submission_limit_per_recruiter != null && <SubmissionLimitCard reqId={req.id} limit={req.submission_limit_per_recruiter} />}
       <Card title="Job Details">

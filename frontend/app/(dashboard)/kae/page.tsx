@@ -1,21 +1,22 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Handshake, Users, Eye, Building2, TrendingUp, Award, CheckCircle, XCircle, Shield, Trophy, Plus } from 'lucide-react';
+import { Handshake, Users, Eye, Building2, TrendingUp, Award, CheckCircle, XCircle, Shield, Trophy, Plus, ClipboardList, ChevronDown, ChevronRight } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Table, Thead, Th, Tbody, Tr, Td } from '@/components/ui/Table';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
+import KaeReviewPanel from '@/components/KaeReviewPanel';
 
 const input: React.CSSProperties = { fontSize: 13, padding: '6px 10px', border: '1px solid #e2e8f0', borderRadius: 8, outline: 'none' };
 const smallBtn = 'text-xs px-3 py-1.5 rounded-lg font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed';
 
-type KaeTab = 'owners' | 'scorecards' | 'visibility' | 'retention' | 'leaderboard';
+type KaeTab = 'owners' | 'review' | 'scorecards' | 'visibility' | 'retention' | 'leaderboard';
 const MONTH_NAMES = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const GRADE_COLOR: Record<string,string> = {'A+':'bg-emerald-100 text-emerald-700 font-bold','A':'bg-green-100 text-green-700 font-bold','B':'bg-blue-100 text-blue-700 font-bold','C':'bg-amber-100 text-amber-700 font-bold','D':'bg-red-100 text-red-700 font-bold'};
 const LEVEL_COLOR: Record<string,string> = {L5:'bg-purple-100 text-purple-700 font-bold',L4:'bg-blue-100 text-blue-700 font-bold',L3:'bg-green-100 text-green-700 font-bold',L2:'bg-amber-100 text-amber-700',L1:'bg-gray-100 text-gray-500'};
 const LEVEL_LABEL: Record<string,string> = {L5:'L5 Founder',L4:'L4 AccountMgr',L3:'L3 KAE',L2:'L2 Senior',L1:'L1 Recruiter'};
-const TABS = [{key:'owners' as KaeTab,label:'Account Ownership',icon:Handshake},{key:'scorecards' as KaeTab,label:'KAE Scorecards',icon:Award},{key:'visibility' as KaeTab,label:'L1-L5 Visibility',icon:Eye},{key:'retention' as KaeTab,label:'Retention Bonuses',icon:Shield},{key:'leaderboard' as KaeTab,label:'Leaderboard',icon:Trophy}];
+const TABS = [{key:'owners' as KaeTab,label:'Account Ownership',icon:Handshake},{key:'review' as KaeTab,label:'Review Queue',icon:ClipboardList},{key:'scorecards' as KaeTab,label:'KAE Scorecards',icon:Award},{key:'visibility' as KaeTab,label:'L1-L5 Visibility',icon:Eye},{key:'retention' as KaeTab,label:'Retention Bonuses',icon:Shield},{key:'leaderboard' as KaeTab,label:'Leaderboard',icon:Trophy}];
 function fmt(n:number|null|undefined){if(n==null)return'—';return new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(n);}
 function pct(n:number|null|undefined){return n!=null?`${Number(n).toFixed(1)}%`:'—';}
 function KpiCard({icon:Icon,label,value,color,bg}:{icon:any;label:string;value:any;color:string;bg:string}){return(<Card><CardContent className="flex items-center gap-3 py-5"><div className={`p-2.5 rounded-xl ${bg} ${color} shrink-0`}><Icon className="h-5 w-5"/></div><div className="min-w-0"><p className="text-xl font-bold text-gray-900 truncate">{value===null?<Spinner size="sm"/>:value}</p><p className="text-xs text-gray-500 mt-0.5 truncate">{label}</p></div></CardContent></Card>);}
@@ -28,6 +29,8 @@ export default function KaePage() {
   const qs=`?month=${month}&year=${year}`;
   const {data:summary,loading:sumLoading}=useFetch<any>(`/kae/summary${qs}`);
   const {data:owners,loading:ownLoading,refetch:refetchOwners}=useFetch<any[]>('/kae/owners');
+  const {data:reviewQueue,loading:reviewLoading}=useFetch<any[]>(tab==='review'?'/kae/review-queue':null);
+  const [expandedReqId,setExpandedReqId]=useState<string|null>(null);
   const {data:scorecards,loading:scLoading,refetch:refetchSc}=useFetch<any[]>(tab==='scorecards'?`/kae/scorecard${qs}`:null);
   const {data:visibility,loading:visLoading,refetch:refetchVis}=useFetch<any[]>(tab==='visibility'?'/kae/visibility':null);
   const {data:retention,loading:retLoading,refetch:refetchRet}=useFetch<any[]>(tab==='retention'?'/kae/retention':null);
@@ -105,6 +108,44 @@ export default function KaePage() {
             )}
           </CardContent>
         </Card>
+        </div>
+      )}
+
+      {tab==='review'&&(
+        <div className="space-y-3" data-testid="kae-review-queue-panel">
+          <p className="text-xs text-gray-500">Every open role with at least one candidate submitted by a recruiter — most recent activity first. When 2+ recruiters have submitted for the same role, expand it to compare them by real AI JD Match Score.</p>
+          {reviewLoading?<div className="flex justify-center py-10"><Spinner size="lg"/></div>:(
+            !reviewQueue?.length?(
+              <Card><CardContent className="text-center text-gray-400 py-10 text-sm">Nothing awaiting review right now.</CardContent></Card>
+            ):(
+              <div className="space-y-2">
+                {reviewQueue.map(r=>(
+                  <Card key={r.requisition_id}>
+                    <button onClick={()=>setExpandedReqId(expandedReqId===r.requisition_id?null:r.requisition_id)} className="w-full flex items-center justify-between px-4 py-3 text-left">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {expandedReqId===r.requisition_id?<ChevronDown className="h-4 w-4 text-gray-400 shrink-0"/>:<ChevronRight className="h-4 w-4 text-gray-400 shrink-0"/>}
+                        <div className="min-w-0">
+                          <div className="font-medium text-sm text-gray-900 truncate">{r.requisition_title}</div>
+                          <div className="text-xs text-gray-400">{r.client_name||'No client'}</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4 shrink-0">
+                        <span className="text-xs text-gray-500">{r.candidate_count} candidate{r.candidate_count!==1?'s':''}</span>
+                        {r.undecided_count>0&&<span className="text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">{r.undecided_count} undecided</span>}
+                        {r.top_score!=null&&<span className={`text-xs font-bold px-2 py-0.5 rounded-full ${r.top_score>=70?'bg-green-100 text-green-700':r.top_score>=45?'bg-amber-100 text-amber-700':'bg-red-100 text-red-700'}`}>Top {Math.round(r.top_score)}%</span>}
+                        <a href={`/requisitions/${r.requisition_id}`} onClick={e=>e.stopPropagation()} className="text-xs text-[--color-primary] font-semibold hover:underline">Open role →</a>
+                      </div>
+                    </button>
+                    {expandedReqId===r.requisition_id&&(
+                      <div className="px-4 pb-4">
+                        <KaeReviewPanel requisitionId={r.requisition_id} compact/>
+                      </div>
+                    )}
+                  </Card>
+                ))}
+              </div>
+            )
+          )}
         </div>
       )}
 

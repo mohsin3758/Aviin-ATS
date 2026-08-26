@@ -7675,6 +7675,178 @@ test.describe.serial('S63 Resume filename convention: Candidate Name_Position_To
   });
 });
 
+test.describe.serial('S64 KAE Review Queue: compare competing submissions by AI JD Match Score, soft shortlist decision', () => {
+  // Real feature (2026-08-26) — when 2+ recruiters each submit their own
+  // candidate for the SAME requisition, the KAE previously had no in-app
+  // way to compare them; the only signal was the cumulative emailed
+  // tracking sheet. GET /kae/review-queue/{requisition_id} ranks every
+  // distinct submitted candidate by their real, requisition-scoped AI JD
+  // Match Score (candidate_scores) and lets the KAE mark one Shortlisted —
+  // a soft marker, never a hard gate on the others. GET /kae/review-queue
+  // is the cross-role inbox (scoped to the KAE's own clients via
+  // client_owners for kae/kam; tenant-wide for admin/manager).
+  let token = '';
+  let clientId = '';
+  let reqId = '';
+  let candIdStrong = '';
+  let candIdWeak = '';
+  let appIdStrong = '';
+  let appIdWeak = '';
+  let recruiterAId = '';
+  let recruiterBId = '';
+  let submissionIdStrong = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test('setup: real client + requisition + 2 candidates (one genuinely strong match, one genuinely weak) + 2 real recruiters', async ({ request }) => {
+    token = await getApiToken(request);
+    const c = await request.post(`${API}/clients`, { headers: auth(), data: { name: `QA S64 Client ${stamp}` } });
+    clientId = (await c.json()).id;
+    const r = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `QA S64 Role ${stamp}`, client_id: clientId, status: 'open', skills_required: ['Python', 'AWS'] },
+    });
+    reqId = (await r.json()).id;
+    const me = await (await request.get(`${API}/auth/me`, { headers: auth() })).json();
+    await request.post(`${API}/kae/owners`, { headers: auth(), data: { client_id: clientId, user_id: me.id, owner_type: 'kae' } });
+
+    const recA = await request.post(`${API}/users`, { headers: auth(), data: { full_name: 'QA S64 Recruiter A', email: `qa.s64.a.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' } });
+    recruiterAId = (await recA.json()).id;
+    const recB = await request.post(`${API}/users`, { headers: auth(), data: { full_name: 'QA S64 Recruiter B', email: `qa.s64.b.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' } });
+    recruiterBId = (await recB.json()).id;
+
+    const strong = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S64 Strong ${stamp}`, phone: `9${String(stamp).slice(-9)}`, skills: ['Python', 'AWS'], resume_text: 'Senior Python AWS engineer.' },
+    });
+    candIdStrong = (await strong.json()).id;
+    const weak = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S64 Weak ${stamp}`, phone: `8${String(stamp).slice(-9)}`, skills: ['PHP'], resume_text: 'PHP developer.' },
+    });
+    candIdWeak = (await weak.json()).id;
+
+    const appS = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: candIdStrong, stage: 'screened' } });
+    appIdStrong = (await appS.json()).id;
+    const appW = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: candIdWeak, stage: 'screened' } });
+    appIdWeak = (await appW.json()).id;
+
+    await request.post(`${API}/intelligence/score`, { headers: auth(), data: { candidate_id: candIdStrong, requisition_id: reqId } });
+    await request.post(`${API}/intelligence/score`, { headers: auth(), data: { candidate_id: candIdWeak, requisition_id: reqId } });
+
+    const loginA = await request.post(`${API}/auth/login`, { data: { email: `qa.s64.a.${stamp}@test.com`, password: 'TestPass123!' } });
+    const tokA = (await loginA.json()).access_token;
+    const subA = await request.post(`${API}/applications/${appIdStrong}/submit-to-kae`, { headers: { Authorization: `Bearer ${tokA}` }, data: { resume_style: 'clean_generated' } });
+    expect(subA.ok(), await subA.text()).toBeTruthy();
+
+    const loginB = await request.post(`${API}/auth/login`, { data: { email: `qa.s64.b.${stamp}@test.com`, password: 'TestPass123!' } });
+    const tokB = (await loginB.json()).access_token;
+    const subB = await request.post(`${API}/applications/${appIdWeak}/submit-to-kae`, { headers: { Authorization: `Bearer ${tokB}` }, data: { resume_style: 'clean_generated' } });
+    expect(subB.ok(), await subB.text()).toBeTruthy();
+  });
+
+  test('cross-role inbox: GET /kae/review-queue shows this requisition with the correct candidate/undecided counts and top score', async ({ request }) => {
+    const r = await request.get(`${API}/kae/review-queue`, { headers: auth() });
+    expect(r.ok()).toBeTruthy();
+    const entry = (await r.json()).find((x: any) => x.requisition_id === reqId);
+    expect(entry).toBeTruthy();
+    expect(entry.candidate_count).toBe(2);
+    expect(entry.undecided_count).toBe(2);
+    expect(entry.top_score).toBeGreaterThan(60);
+  });
+
+  test('per-requisition comparison: the genuinely strong candidate outranks the weak one, with real matched/missing skills and the real submitting recruiter', async ({ request }) => {
+    const r = await request.get(`${API}/kae/review-queue/${reqId}`, { headers: auth() });
+    expect(r.ok()).toBeTruthy();
+    const body = await r.json();
+    expect(body.candidates.length).toBe(2);
+    const top = body.candidates[0];
+    const bottom = body.candidates[1];
+    expect(top.candidate_name).toBe(`QA S64 Strong ${stamp}`);
+    expect(top.submitted_by_name).toBe('QA S64 Recruiter A');
+    expect(top.matched_skills).toEqual(expect.arrayContaining(['Python', 'AWS']));
+    expect(top.readiness_index).toBeGreaterThan(bottom.readiness_index);
+    expect(bottom.candidate_name).toBe(`QA S64 Weak ${stamp}`);
+    expect(bottom.submitted_by_name).toBe('QA S64 Recruiter B');
+    expect(bottom.missing_skills).toEqual(expect.arrayContaining(['Python', 'AWS']));
+    submissionIdStrong = top.submission_id;
+  });
+
+  test('shortlist decision is a soft marker: setting it on one candidate never touches the other', async ({ request }) => {
+    const dec = await request.patch(`${API}/candidate-submissions/${submissionIdStrong}/decision`, { headers: auth(), data: { decision: 'shortlisted' } });
+    expect(dec.ok(), await dec.text()).toBeTruthy();
+    expect((await dec.json()).kae_decision).toBe('shortlisted');
+
+    const r = await request.get(`${API}/kae/review-queue/${reqId}`, { headers: auth() });
+    const body = await r.json();
+    const top = body.candidates.find((c: any) => c.candidate_name === `QA S64 Strong ${stamp}`);
+    const bottom = body.candidates.find((c: any) => c.candidate_name === `QA S64 Weak ${stamp}`);
+    expect(top.kae_decision).toBe('shortlisted');
+    expect(bottom.kae_decision).toBeNull();
+
+    // Clearing it back to null works too.
+    const clear = await request.patch(`${API}/candidate-submissions/${submissionIdStrong}/decision`, { headers: auth(), data: { decision: null } });
+    expect((await clear.json()).kae_decision).toBeNull();
+  });
+
+  test('role gate: a plain recruiter is blocked (403) from the review queue and from setting a decision; admin is not', async ({ request }) => {
+    const login = await request.post(`${API}/auth/login`, { data: { email: `qa.s64.a.${stamp}@test.com`, password: 'TestPass123!' } });
+    const recToken = (await login.json()).access_token;
+    const recAuth = { Authorization: `Bearer ${recToken}` };
+    const denied1 = await request.get(`${API}/kae/review-queue/${reqId}`, { headers: recAuth });
+    expect(denied1.status()).toBe(403);
+    const denied2 = await request.patch(`${API}/candidate-submissions/${submissionIdStrong}/decision`, { headers: recAuth, data: { decision: 'shortlisted' } });
+    expect(denied2.status()).toBe(403);
+    const allowed = await request.get(`${API}/kae/review-queue/${reqId}`, { headers: auth() });
+    expect(allowed.ok()).toBeTruthy();
+  });
+
+  test('real headless UI: both surfaces (requisition detail page + /kae Review Queue tab) render the real comparison and a Shortlist click is reflected on both', async ({ page, request }) => {
+    await page.goto(`/requisitions/${reqId}`);
+    await page.waitForTimeout(1500);
+    const summaryTabBtn = page.locator('button', { hasText: 'Summary' }).first();
+    if (await summaryTabBtn.count() > 0) { await summaryTabBtn.click(); await page.waitForTimeout(800); }
+    const panel = page.locator('[data-testid="kae-review-panel"]');
+    await panel.waitFor({ state: 'visible', timeout: 10000 });
+    const panelText = await panel.innerText();
+    expect(panelText).toContain(`QA S64 Strong ${stamp}`);
+    expect(panelText).toContain(`QA S64 Weak ${stamp}`);
+    expect(panelText).toContain('TOP MATCH');
+
+    await panel.getByRole('button', { name: /^Shortlist$/ }).first().click();
+    await page.waitForTimeout(1200);
+    await expect(panel).toContainText('Shortlisted');
+
+    await page.goto('/kae');
+    await page.waitForTimeout(1200);
+    await page.locator('[data-tab="review"]').click();
+    await page.waitForTimeout(1200);
+    const queuePanel = page.locator('[data-testid="kae-review-queue-panel"]');
+    await queuePanel.waitFor({ state: 'visible', timeout: 10000 });
+    await expect(queuePanel).toContainText(`QA S64 Role ${stamp}`);
+    const roleRow = queuePanel.locator('button', { hasText: `QA S64 Role ${stamp}` }).first();
+    await roleRow.click();
+    await page.waitForTimeout(1200);
+    const expandedText = await queuePanel.innerText();
+    expect(expandedText).toContain(`QA S64 Strong ${stamp}`);
+    expect(expandedText).toContain('Shortlisted');
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (appIdStrong) await request.delete(`${API}/applications/${appIdStrong}`, { headers: auth() }).catch(() => {});
+    if (appIdWeak) await request.delete(`${API}/applications/${appIdWeak}`, { headers: auth() }).catch(() => {});
+    if (candIdStrong) await request.delete(`${API}/candidates/${candIdStrong}`, { headers: auth() }).catch(() => {});
+    if (candIdWeak) await request.delete(`${API}/candidates/${candIdWeak}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+    if (recruiterAId) {
+      await request.patch(`${API}/users/${recruiterAId}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${recruiterAId}/purge`, { headers: auth() }).catch(() => {});
+    }
+    if (recruiterBId) {
+      await request.patch(`${API}/users/${recruiterBId}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${recruiterBId}/purge`, { headers: auth() }).catch(() => {});
+    }
+  });
+});
+
 test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not Invalid/Expired', () => {
   // Regression for the exact same dead-code bug already fixed for NDA
   // e-sign (sql/74): sign_offer_by_token() used to null offer_letters.
