@@ -775,10 +775,20 @@ function PipelineInner() {
           stageLabel={ALL_STAGES.find((s: any) => s.key === 'client_submission')?.label || 'Client Submission'}
           showToast={showToast}
           onCancel={() => setPendingClientSubmission(null)}
-          onSent={async () => {
+          onSent={async (bumped?: boolean) => {
             const r = pendingClientSubmission;
             setPendingClientSubmission(null);
-            await commitStageMove(r.appId, r.fromStage, r.toStage, r.extra, false);
+            // Real automation (2026-08-26): a real send already moved the
+            // real backend stage straight to "Submitted" (and already sent
+            // the candidate's own "Submitted" notification server-side) —
+            // reflect that real end state on the board instead of re-
+            // patching back to "Submit to Client", which would silently
+            // undo it. send_email stays false either way: a genuine send
+            // already fired its own candidate notification server-side;
+            // "Move Without Sending" (bumped=false) never sent anything at
+            // all, so no notification is appropriate there either.
+            const landingStage = bumped ? 'submitted' : r.toStage;
+            await commitStageMove(r.appId, r.fromStage, landingStage, r.extra, false);
           }} />
       )}
 
@@ -1694,7 +1704,12 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       setSaveAsDefault(false);
       refetchHistory();
       refetchPreview();
-      onSubmitted?.(false);
+      // Real automation (2026-08-26): a real send now auto-advances the
+      // backend stage straight to "Submitted" (see stage_bumped_to_submitted
+      // in the response) — pass that through so callers (the drawer tab AND
+      // the board's own "move into Submit to Client" modal) reflect the
+      // real resulting stage instead of assuming nothing moved.
+      onSubmitted?.(r.stage_bumped_to_submitted);
     } catch (e: any) {
       showToast(String(e?.message || 'Submission failed'), false);
     } finally {
@@ -1889,10 +1904,10 @@ function ClientSubmissionMoveModal({ appId, candidateName, stageLabel, showToast
           <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 4 }}><X size={16} /></button>
         </div>
         <div style={{ marginTop: 14 }}>
-          <SubmitClientTab appId={appId} showToast={showToast} onSubmitted={() => onSent()} />
+          <SubmitClientTab appId={appId} showToast={showToast} onSubmitted={(bumped: boolean) => onSent(bumped)} />
         </div>
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'flex-end' }}>
-          <button data-testid="client-submission-move-only" disabled={sending} onClick={async () => { setSending(true); await onSent(); }}
+          <button data-testid="client-submission-move-only" disabled={sending} onClick={async () => { setSending(true); await onSent(false); }}
             style={{ padding: '8px 14px', background: '#F1F5F9', color: '#475569', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer' }}>
             {sending ? 'Moving…' : 'Move Without Sending'}
           </button>

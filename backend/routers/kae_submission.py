@@ -21,6 +21,7 @@ import io
 import os
 import re
 import json
+import asyncio
 import datetime
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -103,6 +104,13 @@ _DEFAULT_TEMPLATE_COLUMNS = [
 ]
 
 _PRE_SUBMIT_STAGES = {"sourced", "contacted", "interested", "nda", "screened"}
+# Real feature (2026-08-26): the KAE->Client hop's own pre-submit set —
+# includes 'client_submission' itself, since that's the real stage the
+# application is actually in the moment this fires (moving a card into
+# "Submit to Client" is what triggers this send in the first place), on
+# top of every earlier stage in case a KAE sends directly from an earlier
+# point without passing through that stage first.
+_PRE_SUBMIT_CLIENT_STAGES = _PRE_SUBMIT_STAGES | {"client_submission"}
 
 
 def _fmt_exp(months) -> str:
@@ -1499,11 +1507,65 @@ async def _do_client_submission(
                    "saved_as_default": bool(save_as_default and columns_override)},
         )
 
+        # Real automation (2026-08-26): once the real client-facing send
+        # completes, the application automatically advances to "Submitted"
+        # — mirroring _do_kae_submission's own bump-to-submitted above,
+        # just for the client hop, and only from a genuine pre-submission
+        # stage (never regresses/errors on a candidate already further
+        # along, e.g. already at l1_interview). Real pipeline_movements +
+        # candidate_activities rows too, matching update_stage()'s own
+        # convention, so this shows up correctly in the Pipeline Audit Log
+        # / Activity Timeline / stage-conversion analytics — not just the
+        # event outbox.
+        bumped = False
+        if row["stage"] in _PRE_SUBMIT_CLIENT_STAGES and await is_valid_stage(conn, tenant_id, "submitted"):
+            await conn.execute("UPDATE applications SET stage='submitted', updated_at=now() WHERE id=$1", application_id)
+            bumped = True
+            await events.write_outbox(
+                conn, tenant_id, "application.stage_changed",
+                {"application_id": application_id, "from": row["stage"], "to": "submitted", "reason": "submit_to_client"},
+                f"application.stage_changed:{application_id}:{sub_row['sent_at'].isoformat()}",
+            )
+            await conn.execute(
+                """INSERT INTO pipeline_movements
+                     (tenant_id, candidate_id, application_id, stage_from, stage_to, reason, triggered_by)
+                   VALUES ($1,$2,$3,$4,'submitted','submit_to_client',$5)""",
+                tenant_id, row["candidate_id"], application_id, row["stage"],
+                str(actor.user_id) if actor.user_id else "system",
+            )
+            await conn.execute(
+                """INSERT INTO candidate_activities
+                     (tenant_id, candidate_id, user_id, activity_type, title, description)
+                   VALUES ($1,$2,$3,'status_change','Stage changed',$4)""",
+                tenant_id, row["candidate_id"], actor.user_id,
+                f"{row['stage'].replace('_',' ').title()} → Submitted",
+            )
+
+    # Unlike the internal recruiter->KAE bump above, THIS transition is
+    # genuinely candidate-facing (the candidate really has now been
+    # submitted to the client) — the user's explicit ask was for the
+    # real "Submitted" stage default email to actually reach the
+    # candidate, not just move the card silently. Fires the same real
+    # notification path every other stage change uses (email + WhatsApp,
+    # consent-gated, tenant-template-aware) — best-effort, outside the
+    # tenant_conn block since it opens its own connection and must never
+    # be able to take the actual client send down with it if it fails.
+    if bumped and row["email"]:
+        try:
+            from routers.applications import _notify_stage_change_bg
+            asyncio.create_task(_notify_stage_change_bg(
+                row["candidate_id"], "submitted", row["email"], row["full_name"], tenant_id,
+                requisition_id=row["requisition_id"], application_id=application_id,
+            ))
+        except Exception as _ex:
+            print(f"Submitted-stage candidate notification dispatch error: {_ex}")
+
     out = dict(sub_row)
     out["field_values"] = _jsonb(out["field_values"], {})
     out["email_sent"] = email_sent
     out["email_error"] = email_error
     out["recipient_name"] = primary_contact["contact_name"] if (primary_contact and not to_emails_override) else "Client/KAM"
+    out["stage_bumped_to_submitted"] = bumped
     return out
 
 

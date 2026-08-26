@@ -13873,3 +13873,95 @@ New permanent "S64 KAE Review Queue" suite (6 tests) added to
 real-two-recruiter-logins pattern as the manual verification. Broader
 regression sweep (S13/S17/S43/S54/S61/S64, 54 tests) passed clean. Zero-
 token audit: `CONFIRMED CLEAN` (411 files, 0 external API refs).
+
+## Submit-to-Client auto-advances the real stage to Submitted, 2026-08-26
+Direct follow-up to the same-day KAE Review Queue/training-guide work —
+after proposing a real email-threading process for Submit-to-Client and
+being explicitly told to stop (user rejected the clarifying-question
+tool call), the user gave a new, concrete instruction instead: once a
+KAE/KAM actually completes a real Submit-to-Client send, the application
+should automatically advance to the tenant's real "Submitted" pipeline
+stage — and since Submitted has its own real candidate-facing default
+email, that email should genuinely reach the candidate too, not just
+move the card silently.
+
+**Backend** (`kae_submission.py`, `_do_client_submission()`) — mirrors
+the existing `_do_kae_submission()` bump-to-submitted pattern (built
+earlier this project) for the client hop specifically: a new
+`_PRE_SUBMIT_CLIENT_STAGES = _PRE_SUBMIT_STAGES | {"client_submission"}`
+gate — only bumps from a genuine pre-submission stage, never regresses
+or errors on a candidate already further along (e.g. already at
+l1_interview). On a real bump: updates `applications.stage` directly,
+writes a real `event_outbox` row, and — matching `update_stage()`'s own
+established convention so this shows up correctly in the Pipeline Audit
+Log / Activity Timeline / stage-conversion analytics, not just the event
+outbox — a real `pipeline_movements` row (`reason='submit_to_client'`)
+and a real `candidate_activities` row. Then, genuinely candidate-facing
+(unlike the internal recruiter->KAE bump, which stays silent to the
+candidate) — fires the SAME real notification path every other stage
+change uses (`_notify_stage_change_bg`, email + WhatsApp, consent-gated,
+tenant-template-aware), imported locally from `applications.py` matching
+this project's established cross-module-import convention, dispatched
+as a genuine fire-and-forget background task outside the `tenant_conn`
+block so a notification failure can never take the actual client send
+down with it.
+
+**A real, previously-invisible frontend conflict found and fixed before
+this could ship**: the EXISTING Manual-mode `ClientSubmissionMoveModal`
+flow would have immediately undone the new backend bump — its `onSent`
+handler unconditionally PATCHed the stage back to `client_submission`
+after a real send completed. Fixed by threading the real
+`stage_bumped_to_submitted` response field through the whole callback
+chain (`SubmitClientTab` -> `ClientSubmissionMoveModal` -> the parent's
+`onSent`), so a genuine send lands the board on the real resulting stage
+(`submitted`) instead of silently reverting it — "Move Without Sending"
+still correctly lands on `client_submission` as before, unaffected.
+
+Verified for real end-to-end, not code review: direct API calls against
+2 real cases (starting from a genuine pre-submit stage 'screened', and
+starting from a candidate already sitting in 'client_submission') both
+confirmed `email_sent:true, stage_bumped_to_submitted:true`, the real
+stage becoming 'submitted', a real `pipeline_movements` row with the
+correct `reason`, and a real candidate-facing 'Submitted' notification
+logged to `candidate_messages` (via a poll loop, not an immediate
+check — the notification is a genuine fire-and-forget background task,
+the same established timing lesson already applied elsewhere in this
+suite); a real throwaway plain-recruiter login correctly 403'd on
+submit-to-client while admin succeeded; a real headless-browser pass
+confirmed the drawer's Submit-to-Client tab genuinely lands the card on
+"CURRENT STAGE: SUBMITTED" with correct pill highlighting after a real
+send — not stuck showing "Submit to Client." Fixed a now-stale
+assertion in the pre-existing S61 suite (predated this feature, expected
+the old `client_submission`-stays-put behavior) to assert the new,
+correct `submitted` end state instead. New permanent "S65 Submit to
+Client auto-advances stage to Submitted" suite (6 tests) added to
+`qa_automation.spec.ts`. Broader regression sweep
+(`S17|S43|S54|S61|S62|S64|S65`, 49 tests) re-run clean after both this
+feature's own fixes and the S61 update: 49/49, 0 failed. One real S65
+timing race caught and fixed the same way (the 'Submitted' notification
+check switched from an immediate single-shot to a 10x1s poll loop).
+Zero-token audit: `CONFIRMED CLEAN` (411 files, 0 external API refs).
+
+**A real, live, separate bug found during this segment's verification —
+flagged to the user, not yet fixed**: this tenant's stage-email
+templates (Settings > Email Configuration) have been extensively
+rewritten since an earlier data pull the same day, and nearly every one
+(nda/hold/offer/placed/rejected/screened/submitted/interested/l1_l2_l3_
+interview) now uses the literal placeholder `{Candidate Name}`
+(capitalized, spaced) — the system's real substitution logic only ever
+matches lowercase `{name}`, so this placeholder is never replaced.
+Combined with the notification wrapper's own hardcoded "Dear {name},"
+prefix, a real candidate-facing email now shows a broken double greeting
+("Dear <real name>,\n\nDear {Candidate Name},\n\n...") — confirmed live
+via a real sent email during this segment's own verification. Many other
+unresolved placeholders exist in the same templates too:
+`{Position Name}`, `{Client Name}`, `{Joining Date}`, `{Date}`,
+`{Time}`, `{Meeting Link}`, `{Meeting ID}`, `{Passcode}`,
+`{Job Description}`, `{Calendar_Link}`, `{Remote/Hybrid/Onsite}`,
+`{Location}` — none are recognized/substituted anywhere in the backend.
+This is real and live right now, affecting every stage-change email this
+tenant sends — not fixed in this segment, reported to the user
+separately for a decision on scope (real substitution logic needs a
+richer set of resolvable fields — position/client/interview details —
+not just candidate name, similar to the JD-block/`{name}` pattern
+already established for the 'contacted' stage).

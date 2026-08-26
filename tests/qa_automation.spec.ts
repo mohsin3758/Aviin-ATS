@@ -7429,8 +7429,11 @@ test.describe.serial('S61 Client Submission pipeline stage: real client-facing s
     await sendBtn.click();
     await expect(modal).not.toBeVisible({ timeout: 10000 });
 
+    // Real feature (2026-08-26, built after this test): a real client
+    // submission now auto-advances the stage straight to "Submitted" —
+    // it no longer sits at "client_submission" once actually sent.
     const apps = await (await request.get(`${API}/candidates/${candId2}/applications`, { headers: auth() })).json();
-    expect(apps[0].stage).toBe('client_submission');
+    expect(apps[0].stage).toBe('submitted');
     const subs = await (await request.get(`${API}/applications/${appId2}/submissions`, { headers: auth() })).json();
     expect(subs.filter((s: any) => s.direction === 'kae_to_client' && s.trigger_source === 'manual').length).toBeGreaterThan(0);
   });
@@ -7843,6 +7846,146 @@ test.describe.serial('S64 KAE Review Queue: compare competing submissions by AI 
     if (recruiterBId) {
       await request.patch(`${API}/users/${recruiterBId}/deactivate`, { headers: auth() }).catch(() => {});
       await request.delete(`${API}/users/${recruiterBId}/purge`, { headers: auth() }).catch(() => {});
+    }
+  });
+});
+
+test.describe.serial('S65 Submit to Client auto-advances stage to Submitted', () => {
+  // Real feature (2026-08-26) — mirrors _do_kae_submission's existing
+  // bump-to-submitted (the internal recruiter->KAE hop already had this;
+  // the client-facing hop never did). Once a real Submit-to-Client send
+  // completes, the application automatically advances to "Submitted" —
+  // which, being a genuinely candidate-facing transition (the candidate
+  // really has now been submitted to the client), also fires the real
+  // "Submitted" stage default notification to the candidate — unlike the
+  // internal KAE-hop bump, which stays silent since nothing candidate-
+  // facing has actually happened yet at that point.
+  let token = '';
+  let clientId = '';
+  let reqId = '';
+  let candId = '';
+  let appId = '';
+  let candId2 = '';
+  let appId2 = ''; // starts already sitting in client_submission
+  let recruiterId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test('setup: real client + contact + requisition + 2 candidates (one from a pre-submit stage, one already in client_submission)', async ({ request }) => {
+    token = await getApiToken(request);
+    const c = await request.post(`${API}/clients`, { headers: auth(), data: { name: `QA S65 Client ${stamp}` } });
+    clientId = (await c.json()).id;
+    await request.post(`${API}/clients/${clientId}/contacts`, {
+      headers: auth(), data: { contact_name: 'QA S65 SPOC', email: `qa.s65.spoc.${stamp}@qatest.example`, is_primary: true },
+    });
+    const r = await request.post(`${API}/requisitions`, { headers: auth(), data: { title: `QA S65 Role ${stamp}`, client_id: clientId, status: 'open' } });
+    reqId = (await r.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S65 Candidate ${stamp}`, phone: `9${String(stamp).slice(-9)}`, email: `qa.s65.cand.${stamp}@qatest.example`, skills: ['Python'] },
+    });
+    candId = (await cand.json()).id;
+    const app = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: candId, stage: 'screened' } });
+    appId = (await app.json()).id;
+
+    const cand2 = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S65 Candidate2 ${stamp}`, phone: `8${String(stamp).slice(-9)}`, email: `qa.s65.cand2.${stamp}@qatest.example`, skills: ['Python'] },
+    });
+    candId2 = (await cand2.json()).id;
+    const app2 = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: candId2, stage: 'client_submission' } });
+    appId2 = (await app2.json()).id;
+
+    const rec = await request.post(`${API}/users`, {
+      headers: auth(), data: { full_name: 'QA S65 Recruiter', email: `qa.s65.rec.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    recruiterId = (await rec.json()).id;
+  });
+
+  test('submitting from a pre-submit stage (screened) auto-advances the real stage to submitted, with real audit/activity trail', async ({ request }) => {
+    const sub = await request.post(`${API}/applications/${appId}/submit-to-client`, { headers: auth(), data: { resume_style: 'clean_generated' } });
+    expect(sub.ok(), await sub.text()).toBeTruthy();
+    const body = await sub.json();
+    expect(body.email_sent).toBe(true);
+    expect(body.stage_bumped_to_submitted).toBe(true);
+
+    const apps = await (await request.get(`${API}/candidates/${candId}/applications`, { headers: auth() })).json();
+    expect(apps.find((a: any) => a.id === appId)?.stage).toBe('submitted');
+
+    const audit = await (await request.get(`${API}/pipeline/audit`, { headers: auth() })).json();
+    const movement = audit.find((m: any) => m.candidate === `QA S65 Candidate ${stamp}` && m.reason === 'submit_to_client');
+    expect(movement).toBeTruthy();
+    expect(movement.from).toBe('screened');
+    expect(movement.to).toBe('submitted');
+  });
+
+  test('a real "Submitted" stage notification is logged to the candidate (not just a silent stage move)', async ({ request }) => {
+    // Poll rather than a fixed/immediate check — the real notification is a
+    // genuine fire-and-forget background task (a real SMTP send) dispatched
+    // AFTER the submit-to-client HTTP response already returned, the same
+    // lesson already learned once for S61 elsewhere in this suite.
+    let submittedMsg: any;
+    for (let i = 0; i < 10; i++) {
+      const thread = await (await request.get(`${API}/communications/thread/${candId}`, { headers: auth() })).json();
+      submittedMsg = (thread.messages || []).find((m: any) => m.subject && m.direction === 'outbound' && m.channel === 'email');
+      if (submittedMsg) break;
+      await new Promise(res => setTimeout(res, 1000));
+    }
+    expect(submittedMsg).toBeTruthy();
+  });
+
+  test('submitting from a candidate already sitting in client_submission also advances to submitted', async ({ request }) => {
+    const sub2 = await request.post(`${API}/applications/${appId2}/submit-to-client`, { headers: auth(), data: { resume_style: 'clean_generated' } });
+    expect(sub2.ok(), await sub2.text()).toBeTruthy();
+    const body2 = await sub2.json();
+    expect(body2.stage_bumped_to_submitted).toBe(true);
+    const apps2 = await (await request.get(`${API}/candidates/${candId2}/applications`, { headers: auth() })).json();
+    expect(apps2.find((a: any) => a.id === appId2)?.stage).toBe('submitted');
+  });
+
+  test('role gate: a plain recruiter is blocked (403) from submit-to-client; admin is not', async ({ request }) => {
+    const login = await request.post(`${API}/auth/login`, { data: { email: `qa.s65.rec.${stamp}@test.com`, password: 'TestPass123!' } });
+    const recToken = (await login.json()).access_token;
+    const denied = await request.post(`${API}/applications/${appId}/submit-to-client`, { headers: { Authorization: `Bearer ${recToken}` }, data: { resume_style: 'clean_generated' } });
+    expect(denied.status()).toBe(403);
+  });
+
+  test('real headless UI: the drawer\'s Submit to Client tab lands the card on Submitted, not stuck on Submit to Client', async ({ page, request }) => {
+    // A fresh 3rd candidate for this same requisition, so the UI check has
+    // a genuine transition to exercise independent of the API tests above.
+    const cand3 = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `QA S65 Candidate3 ${stamp}`, phone: `7${String(stamp).slice(-9)}`, email: `qa.s65.cand3.${stamp}@qatest.example`, skills: ['Python'] },
+    });
+    const cand3Id = (await cand3.json()).id;
+    const app3 = await request.post(`${API}/applications`, { headers: auth(), data: { requisition_id: reqId, candidate_id: cand3Id, stage: 'screened' } });
+    const app3Id = (await app3.json()).id;
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    const card = page.locator('div', { hasText: `QA S65 Candidate3 ${stamp}` }).last();
+    await card.waitFor({ state: 'visible', timeout: 15000 });
+    await card.click();
+    await page.waitForTimeout(1000);
+    await page.locator('[data-tab="client"]').click();
+    await page.waitForTimeout(1200);
+    await page.getByRole('button', { name: /Approve & Send to Client/i }).first().click();
+    await page.waitForTimeout(3000);
+
+    const apps3 = await (await request.get(`${API}/candidates/${cand3Id}/applications`, { headers: auth() })).json();
+    expect(apps3.find((a: any) => a.id === app3Id)?.stage).toBe('submitted');
+
+    await request.delete(`${API}/applications/${app3Id}`, { headers: auth() }).catch(() => {});
+    await request.delete(`${API}/candidates/${cand3Id}`, { headers: auth() }).catch(() => {});
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: auth() }).catch(() => {});
+    if (appId2) await request.delete(`${API}/applications/${appId2}`, { headers: auth() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (candId2) await request.delete(`${API}/candidates/${candId2}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+    if (recruiterId) {
+      await request.patch(`${API}/users/${recruiterId}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${recruiterId}/purge`, { headers: auth() }).catch(() => {});
     }
   });
 });
