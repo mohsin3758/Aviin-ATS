@@ -14145,3 +14145,140 @@ that led to finding the 3rd bug, second confirming a fully consistent
 empty mailbox after the fix). Regression sweep across every suite
 touching `communications.py` (S11/S52/S54/S66, 26 tests) passed clean.
 Zero-token audit: `CONFIRMED CLEAN` (411 files, 0 external API refs).
+
+## Real end-to-end all-users audit: 4 more genuine bugs found and fixed,
+## 2026-08-27
+Direct follow-up to Shahana's mailbox fix — user asked for a genuine,
+comprehensive re-check: every real user, real API calls, real data, real
+scenarios a user would actually hit, plus a full sidebar connectivity
+sweep, and explicitly asked for honesty about scope rather than a
+rubber-stamp pass.
+
+**Real scope, stated plainly**: this tenant currently has exactly 3 real
+active roles in production (admin x2, kae x1 = Shahana, recruiter x1 =
+khan mer) — 25 of the 28 roles in the catalog have zero real users right
+now, so this pass focused on what's genuinely live, not a synthetic sweep
+of every theoretical role. Tested via real logins for admin and Shahana's
+actual account; the recruiter role was tested via a fresh throwaway
+account rather than resetting khan mer's real, not-reported-broken
+password without being asked — his account was confirmed structurally
+sound (active, valid hash) but his specific real login was not proven
+end-to-end, disclosed here rather than glossed over.
+
+**1. `last_login_at` had never been correctly written for ANY user,
+ever — found while re-checking Shahana's earlier diagnosis, which turned
+out to be partly based on a broken signal.** `auth.py`'s `/login`
+endpoint never touched the column at all; the only write attempt was on
+`/logout` (the wrong event for a column literally named "last_login_at")
+and even that had broken SQL — `"UPDATE users SET last_login_at=NOW()
+WHERE id="` with no `$1` bound — silently swallowed by a bare
+`try/except: pass`. Confirmed live: even `admin@example.com`, logged
+into constantly throughout this entire project's history, showed
+`last_login_at: NULL`. Fixed by moving the write to the real login event
+(best-effort, never blocks a login on failure) and deleting the broken
+logout version entirely. Verified for real: a fresh login now correctly
+stamps a real timestamp.
+
+**2. Sidebar connectivity swept for real across all 3 live roles (72
+routes x 3 = 216 real page loads via a headless browser, not code
+review)** — a new, reusable `tests/sidebar_sweep.js` (role-parametrized,
+credentials via env vars, never hardcoded) logs in as a given role and
+visits every real sidebar route, checking HTTP status, console errors,
+and rendered body length. **Admin: 72/72 clean.** Recruiter and kae:
+3 flagged, 2 of which turned out to be correct-by-design (not bugs):
+`/settings/permissions` correctly 403s for both roles, matching the
+sidebar's own restriction exactly — working as intended. `/intelligence`
+403s the "Scored Candidates" tab specifically for a plain recruiter, but
+the actual rendered page already shows a clean, honest, pre-existing
+message ("This Account Manager view is restricted to admin/manager, or a
+user holding a client ownership assignment...") — confirmed via a real
+screenshot, genuinely graceful degradation, not a bug.
+
+**3. `/whatsapp-setup` was showing a materially FALSE status to every
+role below admin/manager — the one real bug this sweep caught.** The
+page is listed with no role restriction (shown to everyone), but its
+status-check call (`GET /waha/status`) was blanket-restricted to
+admin/manager by the 2026-08-10 security fix (which correctly targeted
+the real risk — unauthenticated real WhatsApp sending — but swept up all
+4 `/waha/*` routes together, including this read-only one). Confirmed
+live before touching anything: the real WhatsApp session was genuinely
+WORKING/connected, but a real screenshot of Shahana's own page showed
+"WhatsApp Not Connected / Status: NOT STARTED" — actively misleading, not
+just an inconvenient 403. Fixed by widening only `/waha/status` (returns
+just `{connected, status, engine}` — no phone numbers, no message
+content, no secrets, genuinely safe to open) to any authenticated user;
+`/start` and `/qr` (real side effects — starting a session, or a QR that
+re-links the actual company device) stay admin/manager-only; `/send`
+untouched. Verified for real: Shahana's `/waha/status` now correctly
+returns `connected: true`, her `/waha/start` attempt still correctly
+403s, and a fresh screenshot of her real page now shows "WhatsApp
+Connected! / WhatsApp is Live!" — matching reality.
+
+**4. `GET /kae/review-queue` and `/kae/review-queue/{id}` (the KAE Review
+Queue feature built just yesterday, 2026-08-26) had no `is_active` filter
+on requisitions or candidates — the exact recurring bug class documented
+dozens of times elsewhere in this project, this time caught live on a
+real user's real dashboard, not via a data-cleanup sweep.** Found while
+verifying Shahana's real end-to-end KAE workflow (submit -> review ->
+shortlist): her live review queue showed 2 already-soft-deleted test
+requisitions as if they were genuine pending work needing her attention.
+Fixed both endpoints — the cross-role inbox now requires
+`r.is_active IS NOT FALSE` and `cand.is_active IS NOT FALSE`; the
+per-requisition comparison view now 404s for a soft-deleted requisition
+instead of silently serving a stale comparison, and excludes soft-deleted
+candidates from the ranked list. Verified for real: Shahana's real
+review queue went from showing 2 stale test items to correctly empty
+(genuinely nothing pending right now); a direct fetch of the
+soft-deleted requisition ID now returns a real 404, not a stale 200.
+New permanent regression test added to the existing "S64" suite.
+
+**Real end-to-end workflow verification, not just page loads — 3 full
+role-based scenarios run against real logins**:
+- **Shahana (kae, her actual account)**: real login -> sees her real 5
+  clients -> real KAE ownership list -> real Review Queue -> admin
+  submits a real candidate to her via ownership -> her queue correctly
+  reflects it in real time -> she sets a real shortlist decision,
+  persisted correctly -> her own mailbox correctly shows 0 (yesterday's
+  fix holds) -> she's correctly blocked (403) from an admin-only action
+  (deleting a requisition).
+- **Recruiter (throwaway, matching khan mer's role)**: real login ->
+  creates a real candidate -> real-time duplicate check works -> adds
+  them to a real open requisition's pipeline -> moves a real stage ->
+  My Day and My Stats both load -> Submit-to-KAE preview correctly
+  resolves the real owning KAE (Shahana) for that client, proving the
+  whole recruiter->KAE ownership chain works end to end -> correctly
+  blocked from an admin-only action.
+- **Admin**: 9 core endpoints spanning dashboards, assignment dashboard,
+  reminders, users, roles/permissions, KAE queue, predictions, and audit
+  log all confirmed 200 with real data.
+
+Every finding was checked against real evidence before being called a
+bug — 2 genuine near-misses caught and corrected before being reported:
+initially flagged 8 "leftover S37 test requisitions" as live pollution
+from a query that forgot to check `is_active`; re-checked and confirmed
+all 8 were already correctly soft-deleted (the test cleanup was working
+fine all along) — the REAL finding underneath was that the KAE Review
+Queue was serving stale soft-deleted rows regardless, a different and
+more serious bug than "test debris," found precisely by not stopping at
+the first plausible explanation. Also caught and fixed 2 of my own
+test-script mistakes (a wrong assumed JSON response shape, a
+`send_email:false` test flag I'd set myself, then flagged as a false
+finding) rather than reporting them as app bugs.
+
+Full regression sweep after all 4 fixes (S1/S2/S11/S43/S54/S64/S66, 35
+tests + the new S64 regression case) passed clean: 34 passed, 1
+pre-existing skip (Ollama check), 0 failed. Zero-token audit: CONFIRMED
+CLEAN (412 files, 0 external API refs). All throwaway test data (1
+recruiter account - correctly left deactivated-but-not-purged by the
+force-purge safety net since it has real activity on record, matching
+established precedent; 1 client/requisition/candidate/application cycle
+for the Shahana workflow test) cleaned up via real APIs.
+
+**Explicitly NOT covered in this pass, stated rather than silently
+skipped**: the other 25 roles in the catalog with zero real users right
+now (nothing to genuinely test against); khan mer's specific real
+credentials (verified structurally sound only, not reset without being
+asked); an exhaustive walk of every one of the ~150 documented features
+individually — this pass covered core, representative real workflows per
+live role plus full sidebar connectivity, not a feature-by-feature replay
+of this file's entire history.

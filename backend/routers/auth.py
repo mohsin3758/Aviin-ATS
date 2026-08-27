@@ -23,6 +23,20 @@ async def login(body: LoginRequest):
     if row is None or not auth.verify_password(body.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    # Real bug fix (2026-08-27): last_login_at had never been written on a
+    # successful login anywhere in this codebase — the only write attempt
+    # was on /logout (the wrong event for a column named "last_login_at"),
+    # and even that had broken SQL ("WHERE id=" with no bound parameter)
+    # silently swallowed by a bare try/except, so the column has been
+    # permanently NULL for every user since it was added. Best-effort:
+    # a failure here must never block a real login.
+    try:
+        async with db.tenant_conn(str(row["tenant_id"])) as _lconn:
+            await _lconn.execute(
+                "UPDATE users SET last_login_at=NOW() WHERE id=$1", row["user_id"])
+    except Exception:
+        pass
+
     claims = {
         "sub": str(row["user_id"]),
         "tenant_id": str(row["tenant_id"]),
@@ -73,12 +87,4 @@ async def logout(actor: Actor = Depends(get_actor)):
     The frontend clears the token from localStorage on this call.
     For immediate invalidation, implement a Redis blacklist here if needed.
     """
-    # Update last_login_at as a logout timestamp (optional audit)
-    try:
-        async with db.tenant_conn(actor.tenant_id) as conn:
-            await conn.execute(
-                "UPDATE users SET last_login_at=NOW() WHERE id=",
-                actor.user_id)
-    except Exception:
-        pass
     return {'logged_out': True, 'message': 'Session cleared. Please discard your token.'}

@@ -1139,7 +1139,8 @@ async def kae_review_queue(actor: Actor = Depends(require_role("admin", "super_a
                       MAX(sc.readiness_index) AS top_score,
                       MAX(latest.sent_at) AS last_submission_at
                FROM latest
-               JOIN requisitions r ON r.id = latest.requisition_id
+               JOIN requisitions r ON r.id = latest.requisition_id AND r.is_active IS NOT FALSE
+               JOIN candidates cand ON cand.id = latest.candidate_id AND cand.is_active IS NOT FALSE
                LEFT JOIN clients cl ON cl.id = r.client_id
                LEFT JOIN candidate_scores sc ON sc.candidate_id = latest.candidate_id AND sc.requisition_id = latest.requisition_id
                WHERE ($2::uuid[] IS NULL OR r.client_id = ANY($2::uuid[]))
@@ -1157,7 +1158,7 @@ async def kae_review_queue_for_requisition(requisition_id: str, actor: Actor = D
     correctly scoped to this exact candidate+requisition pair — never the
     tenant-wide applications.fit_score, which can be stale/cross-role)."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        req = await conn.fetchrow("SELECT id, title, client_id FROM requisitions WHERE id=$1 AND tenant_id=$2", requisition_id, actor.tenant_id)
+        req = await conn.fetchrow("SELECT id, title, client_id FROM requisitions WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE", requisition_id, actor.tenant_id)
         if not req:
             raise HTTPException(404, "Requisition not found")
         if actor.role in ("kae", "kam"):
@@ -1180,7 +1181,7 @@ async def kae_review_queue_for_requisition(requisition_id: str, actor: Actor = D
                       sc.readiness_index, sc.readiness_grade, sc.skill_match_details,
                       app.stage AS current_stage, app.id AS application_id
                FROM latest
-               JOIN candidates c ON c.id = latest.candidate_id
+               JOIN candidates c ON c.id = latest.candidate_id AND c.is_active IS NOT FALSE
                LEFT JOIN users ub ON ub.id = latest.sent_by
                LEFT JOIN users kdb ON kdb.id = latest.kae_decision_by
                LEFT JOIN candidate_scores sc ON sc.candidate_id = latest.candidate_id AND sc.requisition_id=$2

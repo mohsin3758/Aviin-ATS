@@ -7832,6 +7832,24 @@ test.describe.serial('S64 KAE Review Queue: compare competing submissions by AI 
     expect(expandedText).toContain('Shortlisted');
   });
 
+
+  test('BUG FIX (2026-08-27): a soft-deleted requisition never appears in the cross-role review queue, and the per-requisition endpoint 404s instead of serving a stale comparison — found via a genuine end-to-end audit, not code review, when a real KAE\'s live review queue was showing already-soft-deleted test requisitions as pending work', async ({ request }) => {
+    // reqId is still real/active at this point in the .serial() flow — soft-delete it now.
+    const del = await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() });
+    expect(del.status()).toBe(200);
+
+    const queue = await (await request.get(`${API}/kae/review-queue`, { headers: auth() })).json();
+    const stillThere = (queue as any[]).find((q: any) => q.requisition_id === reqId);
+    expect(stillThere).toBeUndefined();
+
+    const direct = await request.get(`${API}/kae/review-queue/${reqId}`, { headers: auth() });
+    expect(direct.status()).toBe(404);
+    // No real "undelete" endpoint exists (RequisitionUpdate has no
+    // is_active field) — this is deliberately the last test in the
+    // suite, so reqId being left soft-deleted here doesn't affect
+    // anything else; afterAll's own DELETE on it is idempotent.
+  });
+
   test.afterAll(async ({ request }) => {
     if (appIdStrong) await request.delete(`${API}/applications/${appIdStrong}`, { headers: auth() }).catch(() => {});
     if (appIdWeak) await request.delete(`${API}/applications/${appIdWeak}`, { headers: auth() }).catch(() => {});

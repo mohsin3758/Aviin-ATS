@@ -593,8 +593,23 @@ WAHA_BASE = "http://waha:3000"
 WAHA_KEY  = os.getenv("WAHA_API_KEY", "aviinATS2026secure")
 
 @waha_router.get("/status")
-async def waha_status(actor: Actor = Depends(require_role("admin", "manager"))):
-    """Get WAHA session status."""
+async def waha_status(actor: Actor = Depends(get_actor)):
+    """Get WAHA session status.
+
+    Real gap fix (2026-08-27): the 2026-08-10 security fix correctly
+    locked down all 4 /waha/* routes to admin/manager as one blanket
+    change (the real risk was /send - an unauthenticated real WhatsApp
+    message dispatch from the company's own number). But this made the
+    WhatsApp Setup page (shown to every role in the sidebar, no roles
+    restriction) silently lie to anyone below admin/manager - the 403
+    on this read-only status check was swallowed by the frontend and
+    rendered as "WhatsApp Not Connected / NOT STARTED", even when the
+    real session was genuinely WORKING. This endpoint returns only
+    {connected, status, engine} - no phone numbers, no message content,
+    no secrets - so it's safe to open to any authenticated user. /start
+    and /qr stay admin/manager-only (real side effects - starting a
+    session, or a QR that re-links the actual company device); /send
+    (message dispatch) is untouched."""
     try:
         import httpx
         async with httpx.AsyncClient(timeout=5.0) as cli:
