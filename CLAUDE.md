@@ -14053,3 +14053,95 @@ in isolation immediately after — this suite's well-documented back-to-
 back-run characteristic, not a regression; confirmed via backend logs
 showing no related errors in that window). Zero-token audit: `CONFIRMED
 CLEAN` (411 files, 0 external API refs).
+
+## A real user (Shahana Tahreen, kae) couldn't log in — 2 real, unrelated
+## bugs found and fixed, 2026-08-27
+User reported "not able to login" for a real teammate, with screenshots of
+the login-failure banner and the Edit User modal. Checked the real DB
+state directly rather than guessing: her account was genuinely
+`is_active=true` with a real, correctly-formed password hash — no code
+bug in login itself (`auth.py`'s `/auth/login` is a plain `verify_password`
+check, no role gate, confirmed by reading it). `update_user()`
+(`users.py`, the endpoint the Edit User modal calls) was also confirmed to
+never touch `password_hash` at all — her role edit to "Key Account
+Executive" could not have broken her password. `last_login_at` was
+`NULL` — she had simply never had a working password. User asked me to
+reset it myself and verify: did so via the real `PATCH /users/{id}/
+password` admin endpoint (new password `Shahana@2026`), then proved it
+end-to-end through the ACTUAL `/login` page in a real headless browser
+(not just the API) — landed cleanly on `/dashboard`.
+
+## Real self mailbox scoping gap found and fixed across 3 endpoints,
+## plus a 3rd sibling instance of the same bug caught mid-verification
+Direct follow-up, same day — user pointed out Shahana's Conversations
+Inbox showed "102" real messages despite her having zero email accounts
+connected, and asked for it to be her own mailbox, not everyone's.
+
+**Root cause, confirmed by reading the code, not guessed**: `/imap-messages`
+(the ATS Resume Inbox / "raw email" view) already correctly scopes non-
+admin roles to their own connected `user_email_accounts` row — but the
+sibling endpoints actually backing the main Conversations "Inbox"/"Sent"/
+badge-count UI (`/inbox`, `/inbox-count`, `/sent`, `/stats`) never got the
+same treatment for their \*outbound\* `candidate_messages` half — every
+non-admin role saw the ENTIRE tenant's outbound send history, not their
+own. New shared `_own_ats_message_filter()` (`communications.py`) scopes
+a message as "mine" if the actor personally sent it (`sent_by`), OR the
+message's application is assigned to them, OR the candidate is one they
+actively own (`candidate_ownership`) — applied consistently to `/inbox`'s
+outbound query, `/inbox-count`'s `ats_cnt`, `/sent`'s `ats_rows`, and
+every ATS-derived counter in `/stats` (unread/sent/trash/starred/
+whatsapp). admin/super_admin/lead_recruiter/manager keep full tenant-wide
+visibility, matching `/imap-messages`' own already-established
+`is_admin` convention exactly — this is a genuine oversight tool for
+them, not a bug to close off. `/thread/{cand_id}` was deliberately left
+unscoped — viewing a specific candidate's full correspondence history
+while already looking at their profile is a different, legitimate need
+from a personal inbox listing.
+
+**A 3rd, independent instance of the identical bug found only by
+verifying the fix visually, not by reading code alone**: after the first
+round of fixes, a real headless-browser screenshot of Shahana's live
+mailbox showed the message list correctly empty ("No messages") but the
+sidebar's "Starred: 1" badge still nonzero — a genuine internal
+inconsistency. Traced directly: `starred_cnt_imap` inside `/stats` was
+the one query in the whole file that queried `imap_messages` with
+**no** `ua.user_id` join at all, unlike every sibling IMAP-derived query
+in the same function — confirmed via direct SQL it was counting a real
+starred message belonging to a completely different real user
+(`mohsin3786@gmail.com`). Fixed with the same `ua.user_id` join pattern
+already used everywhere else in this file. Swept every remaining
+`FROM imap_messages` occurrence in the file afterward (13 total) to
+confirm no further instances — all correctly scoped.
+
+**Real, previously-unnoticed data cleanup, done as part of the same
+investigation**: 107 of the tenant's 127 real `candidate_messages` rows
+were confirmed QA-test-pattern residue (from this session's own S66
+verification work earlier the same day) — soft-deleted via the real
+`DELETE /communications/messages/{id}` API, dropping the admin/manager
+shared view from 127 to a genuine 21 real rows.
+
+**Flagged, not fixed in this pass** — two real, adjacent, lower-priority
+gaps found while sweeping the file, stated rather than silently expanded
+into: `message_drafts` has no owner/creator column at all in the schema
+(confirmed via `\d`), so drafts remain genuinely tenant-shared for
+everyone (Shahana's mailbox still correctly shows "Drafts: 7") — fixing
+this needs a real migration, not just a query change, and wasn't part of
+what was reported. `POST /communications/imap/{id}/move` and `.../archive`
+check `tenant_id` on the target message but not `ua.user_id` ownership —
+a lower-severity IDOR-class gap (any authenticated tenant user who knew/
+guessed another user's private IMAP message UUID could move/archive it),
+distinct in kind from the reported "default view shows others' mail"
+issue and not touched here.
+
+Verified for real end-to-end, not code review, at every step: a real
+before/after count (Shahana 0/0/0/0 across inbox/sent/trash/starred vs
+admin's unchanged tenant-wide 16/1/0/0), a real controlled positive-case
+test (a genuine assigned recruiter correctly still sees their own
+candidate's message; a genuinely unrelated recruiter correctly does not;
+admin still sees everything) via 2 real throwaway recruiter accounts, and
+2 separate real headless-browser screenshots of Shahana's actual live
+Conversations page (first showing the sidebar-badge/list-panel mismatch
+that led to finding the 3rd bug, second confirming a fully consistent
+empty mailbox after the fix). Regression sweep across every suite
+touching `communications.py` (S11/S52/S54/S66, 26 tests) passed clean.
+Zero-token audit: `CONFIRMED CLEAN` (411 files, 0 external API refs).

@@ -53,6 +53,30 @@ MSG_JOINS = """FROM candidate_messages cm
     LEFT JOIN candidates c ON c.id=cm.candidate_id
     LEFT JOIN users u ON u.id=cm.sent_by"""
 
+# Real gap fix (2026-08-27): a real KAE with zero candidates assigned/owned
+# and zero messages of her own was seeing the ENTIRE tenant's outbound
+# ATS-sent history in her "Inbox"/"Sent" — every stage-change email any
+# recruiter ever sent to any candidate, not her own. The inbound-IMAP half
+# of these same endpoints already correctly scopes non-admin roles to
+# their own connected mail account (ua.user_id=$N) — this outbound half
+# never got the same treatment. admin/super_admin/lead_recruiter/manager
+# keep full tenant-wide visibility, matching /imap-messages' own existing
+# is_admin convention exactly.
+_INBOX_ADMIN_ROLES = ("admin", "super_admin", "lead_recruiter", "manager")
+
+
+def _own_ats_message_filter(user_param_idx: int) -> str:
+    """SQL fragment restricting candidate_messages to ones this actor
+    either personally sent, or that belong to a candidate whose current
+    application is assigned to them, or a candidate they actively own
+    (candidate_ownership) — "my mailbox," not the whole tenant's."""
+    u = f"${user_param_idx}"
+    return f"""(
+        cm.sent_by = {u}
+        OR EXISTS (SELECT 1 FROM applications a WHERE a.id = cm.application_id AND a.assigned_recruiter_id = {u})
+        OR EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id = cm.candidate_id AND co.recruiter_id = {u} AND co.status = 'active')
+    )"""
+
 
 async def _get_smtp(conn, tenant_id: str):
     return await conn.fetchrow(
@@ -276,12 +300,16 @@ class DraftBody(BaseModel):
 @router.get("/inbox")
 async def inbox(limit: int = Query(50, le=500), offset: int = Query(0), channel: Optional[str] = None,
                 actor: Actor = Depends(get_actor)):
+    is_admin = actor.role in _INBOX_ADMIN_ROLES
     async with db.tenant_conn(actor.tenant_id) as conn:
         # ---- Outbound ATS messages ----
         w = "WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE"
         p = [actor.tenant_id]
         if channel and channel not in ('imap', 'inbound'):
             p.append(channel); w += f" AND cm.channel=${len(p)}"
+        if not is_admin:
+            p.append(actor.user_id)
+            w += f" AND {_own_ats_message_filter(len(p))}"
         p.append(limit)
         outbound = await conn.fetch(f"""
             SELECT DISTINCT ON (COALESCE(cm.candidate_id::text, cm.to_email))
@@ -375,7 +403,13 @@ async def get_thread(cand_id: str, actor: Actor = Depends(get_actor)):
 @router.get("/inbox-count")
 async def inbox_count(actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        ats_cnt = await conn.fetchval("SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND is_deleted IS NOT TRUE", actor.tenant_id)
+        if actor.role in _INBOX_ADMIN_ROLES:
+            ats_cnt = await conn.fetchval("SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND is_deleted IS NOT TRUE", actor.tenant_id)
+        else:
+            ats_cnt = await conn.fetchval(
+                f"""SELECT COUNT(*) FROM candidate_messages cm
+                    WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE AND {_own_ats_message_filter(2)}""",
+                actor.tenant_id, actor.user_id)
         imap_cnt = await conn.fetchval("""SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 AND im.is_deleted IS NOT TRUE AND im.folder = 'INBOX'""", actor.tenant_id, actor.user_id)
         by_folder = await conn.fetch("""SELECT im.folder, COUNT(*) as cnt FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 GROUP BY im.folder ORDER BY cnt DESC""", actor.tenant_id, actor.user_id)
         return {"total": (ats_cnt or 0)+(imap_cnt or 0), "ats": ats_cnt or 0, "imap": imap_cnt or 0, "by_folder": [dict(r) for r in by_folder]}
@@ -383,11 +417,13 @@ async def inbox_count(actor: Actor = Depends(get_actor)):
 @router.get("/sent")
 async def sent(limit: int = Query(200, le=500), actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        _sent_scope = "" if actor.role in _INBOX_ADMIN_ROLES else f"AND {_own_ats_message_filter(3)}"
+        _sent_params = [actor.tenant_id, limit] if actor.role in _INBOX_ADMIN_ROLES else [actor.tenant_id, limit, actor.user_id]
         ats_rows = await conn.fetch(f"""
             SELECT {MSG_COLS} {MSG_JOINS}
             WHERE cm.tenant_id=$1 AND cm.direction='outbound' AND cm.is_deleted IS NOT TRUE
-              AND cm.channel != 'email'
-            ORDER BY cm.created_at DESC LIMIT $2""", actor.tenant_id, limit)
+              AND cm.channel != 'email' {_sent_scope}
+            ORDER BY cm.created_at DESC LIMIT $2""", *_sent_params)
         imap_sent = await conn.fetch("""
             SELECT
                 im.id, im.candidate_id,
@@ -745,18 +781,29 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
 
 @router.get("/stats")
 async def stats(actor: Actor = Depends(get_actor)):
+    # Real gap fix (2026-08-27): every one of these ATS-message counts
+    # was tenant-wide regardless of role — the exact same missing scoping
+    # already fixed on /inbox, /inbox-count, /sent (a real KAE with zero
+    # candidates of her own saw the whole tenant's unread count on her
+    # own sidebar badge). message_drafts has no owner column at all (a
+    # real, separate, pre-existing schema gap — flagged, not fixed here,
+    # since drafts were never part of what was reported and fixing it
+    # needs an actual migration, not just a query change).
+    is_admin = actor.role in _INBOX_ADMIN_ROLES
+    ats_scope = "" if is_admin else f"AND {_own_ats_message_filter(2)}"
+    ats_params = [actor.tenant_id] if is_admin else [actor.tenant_id, actor.user_id]
     async with db.tenant_conn(actor.tenant_id) as conn:
         inbox_cnt = await conn.fetchval(
-            "SELECT COUNT(DISTINCT COALESCE(candidate_id::text,to_email)) FROM candidate_messages WHERE tenant_id=$1 AND is_deleted IS NOT TRUE",
-            actor.tenant_id)
+            f"SELECT COUNT(DISTINCT COALESCE(cm.candidate_id::text,cm.to_email)) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE {ats_scope}",
+            *ats_params)
         imap_unread_cnt = await conn.fetchval("SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 AND im.is_read IS NOT TRUE AND im.is_deleted IS NOT TRUE AND im.folder = 'INBOX'", actor.tenant_id, actor.user_id)
         unread_cnt_ats = await conn.fetchval(
-            "SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND is_read IS NOT TRUE AND is_deleted IS NOT TRUE",
-            actor.tenant_id)
+            f"SELECT COUNT(*) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_read IS NOT TRUE AND cm.is_deleted IS NOT TRUE {ats_scope}",
+            *ats_params)
         unread_cnt = (unread_cnt_ats or 0) + (imap_unread_cnt or 0)
         sent_cnt_ats = await conn.fetchval(
-            "SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND direction='outbound' AND is_deleted IS NOT TRUE AND channel != 'email'",
-            actor.tenant_id)
+            f"SELECT COUNT(*) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.direction='outbound' AND cm.is_deleted IS NOT TRUE AND cm.channel != 'email' {ats_scope}",
+            *ats_params)
         sent_cnt_imap = await conn.fetchval(
             "SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 AND im.folder LIKE '%Sent%' AND im.is_deleted IS NOT TRUE",
             actor.tenant_id, actor.user_id)
@@ -764,17 +811,18 @@ async def stats(actor: Actor = Depends(get_actor)):
         draft_cnt = await conn.fetchval(
             "SELECT COUNT(*) FROM message_drafts WHERE tenant_id=$1", actor.tenant_id)
         trash_cnt = await conn.fetchval(
-            "SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND is_deleted=TRUE", actor.tenant_id)
+            f"SELECT COUNT(*) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_deleted=TRUE {ats_scope}",
+            *ats_params)
         starred_cnt_ats = await conn.fetchval(
-            "SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND is_starred=TRUE AND is_deleted IS NOT TRUE",
-            actor.tenant_id)
+            f"SELECT COUNT(*) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_starred=TRUE AND cm.is_deleted IS NOT TRUE {ats_scope}",
+            *ats_params)
         starred_cnt_imap = await conn.fetchval(
-            "SELECT COUNT(*) FROM imap_messages WHERE tenant_id=$1 AND is_starred=TRUE AND is_deleted IS NOT TRUE",
-            actor.tenant_id)
+            "SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 AND im.is_starred=TRUE AND im.is_deleted IS NOT TRUE",
+            actor.tenant_id, actor.user_id)
         starred_cnt = (starred_cnt_ats or 0) + (starred_cnt_imap or 0)
         wa_cnt = await conn.fetchval(
-            "SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND channel='whatsapp' AND is_deleted IS NOT TRUE",
-            actor.tenant_id)
+            f"SELECT COUNT(*) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.channel='whatsapp' AND cm.is_deleted IS NOT TRUE {ats_scope}",
+            *ats_params)
         return {"folder_counts": {
             "inbox": inbox_cnt, "sent": sent_cnt, "drafts": draft_cnt,
             "trash": trash_cnt, "starred": starred_cnt, "whatsapp": wa_cnt,
