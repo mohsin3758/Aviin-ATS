@@ -8132,6 +8132,162 @@ test.describe.serial('S66 Stage-email placeholder substitution engine + double-g
   });
 });
 
+test.describe.serial('S67 Individual WhatsApp numbers per recruiter/KAE', () => {
+  // 2026-08-27 — real per-user WAHA sessions (mirrors "My Email
+  // Accounts"), capped by real measured RAM cost (~2GB/session), plus
+  // real chat logging for automated stage-change sends (previously never
+  // logged at all) and a per-account bot-auto-reply toggle.
+  let token: string;
+  let recAId = '', recBId = '', recCId = '';
+  let recATok = '', recBTok = '', recCTok = '';
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    for (const id of [recAId, recBId, recCId]) {
+      if (!id) continue;
+      await request.patch(`${API}/users/${id}/deactivate`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+      await request.delete(`${API}/users/${id}/purge`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    }
+  });
+
+  test('setup: 3 real throwaway recruiters', async ({ request }) => {
+    token = await getApiToken(request);
+    const mk = async (n: string) => {
+      const u = await (await request.post(`${API}/users`, {
+        headers: { Authorization: `Bearer ${token}` },
+        data: { full_name: n, email: `qa.s67.${n.toLowerCase()}.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+      })).json();
+      const login = await request.post(`${API}/auth/login`, { data: { email: u.email, password: 'TestPass123!' } });
+      return { id: u.id, tok: (await login.json()).access_token };
+    };
+    const a = await mk('RecA'); recAId = a.id; recATok = a.tok;
+    const b = await mk('RecB'); recBId = b.id; recBTok = b.tok;
+    const c = await mk('RecC'); recCId = c.id; recCTok = c.tok;
+    expect(recAId && recBId && recCId).toBeTruthy();
+  });
+
+  test('GET /user-whatsapp/account get-or-creates the caller\'s own row, real session name derived from their user_id', async ({ request }) => {
+    const res = await request.get(`${API}/user-whatsapp/account`, { headers: { Authorization: `Bearer ${recATok}` } });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.user_id).toBe(recAId);
+    expect(body.waha_session_name).toBe(`u_${recAId}`);
+    expect(body.status).toBe('stopped');
+    expect(body.bot_auto_reply_enabled).toBe(true);
+  });
+
+  test('real cap enforcement: starting a session beyond the tenant\'s configured limit is cleanly refused, not a crash', async ({ request }) => {
+    // Temporarily set the cap to exactly 1 for a clean, deterministic test.
+    const before = await (await request.get(`${API}/user-whatsapp/config`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    await request.put(`${API}/user-whatsapp/config`, { headers: { Authorization: `Bearer ${token}` }, data: { max_concurrent_personal_sessions: 1 } });
+
+    const start1 = await request.post(`${API}/user-whatsapp/account/start`, { headers: { Authorization: `Bearer ${recATok}` } });
+    expect(start1.status()).toBe(200);
+
+    const start2 = await request.post(`${API}/user-whatsapp/account/start`, { headers: { Authorization: `Bearer ${recBTok}` } });
+    expect(start2.status()).toBe(409);
+    expect((await start2.json()).detail).toContain('personal WhatsApp session');
+
+    // Real cleanup: stop recA's session, restore the real original cap.
+    await request.post(`${API}/user-whatsapp/account/stop`, { headers: { Authorization: `Bearer ${recATok}` } });
+    await request.put(`${API}/user-whatsapp/config`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { max_concurrent_personal_sessions: before.max_concurrent_personal_sessions },
+    });
+  });
+
+  test('per-user bot-auto-reply toggle persists independently per account', async ({ request }) => {
+    await request.get(`${API}/user-whatsapp/account`, { headers: { Authorization: `Bearer ${recCTok}` } });
+    const off = await request.patch(`${API}/user-whatsapp/account/bot-auto-reply`, {
+      headers: { Authorization: `Bearer ${recCTok}` }, data: { enabled: false },
+    });
+    expect(off.status()).toBe(200);
+    expect((await off.json()).bot_auto_reply_enabled).toBe(false);
+
+    // A different user's own account is untouched by recC's toggle.
+    const bAcct = await (await request.get(`${API}/user-whatsapp/account`, { headers: { Authorization: `Bearer ${recBTok}` } })).json();
+    expect(bAcct.bot_auto_reply_enabled).toBe(true);
+  });
+
+  test('admin team-overview shows every real account with correct live status; a plain recruiter cannot read it', async ({ request }) => {
+    const overview = await request.get(`${API}/user-whatsapp/team-overview`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(overview.status()).toBe(200);
+    const body = await overview.json();
+    const names = (body.accounts as any[]).map(a => a.user_id);
+    expect(names).toContain(recAId);
+    expect(names).toContain(recBId);
+    expect(names).toContain(recCId);
+
+    const denied = await request.get(`${API}/user-whatsapp/team-overview`, { headers: { Authorization: `Bearer ${recATok}` } });
+    expect(denied.status()).toBe(403);
+  });
+
+  test('BUG FIX: automated stage-change WhatsApp sends, when WAHA genuinely delivers them, are now logged to candidate_messages (previously never logged at all — only the email half of the same function logged). Real-world WhatsApp delivery to a synthetic test phone number is NOT guaranteed to succeed (WAHA correctly 500s on numbers with no real WhatsApp account) — confirmed live during development that the code correctly logs ONLY on a genuine send success, never fabricating a "sent" record for a delivery that failed. This test asserts the one thing that IS deterministic regardless of delivery outcome: the email half of the same automated notification always fires and logs correctly, proving the stage-change pipeline itself ran end-to-end; the WhatsApp row is checked only informationally, not asserted on, since its presence depends on real external delivery this suite cannot control.', async ({ request }) => {
+    const cand = await (await request.post(`${API}/candidates`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { full_name: `QA S67 Stage Cand ${stamp}`, phone: `9${String(stamp).slice(-9)}`, email: `qa.s67.stage.${stamp}@qatest.example`, skills: ['Python'] },
+    })).json();
+    await request.post(`${API}/consent-records`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { candidate_id: cand.id, data_category: 'candidate_data', channel: 'whatsapp', consent_given: true, consent_text: 'S67 test consent' },
+    });
+    const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: { Authorization: `Bearer ${token}` } });
+    const reqId = (await reqRes.json())[0]?.id;
+    const app = await (await request.post(`${API}/applications`, {
+      headers: { Authorization: `Bearer ${token}` }, data: { requisition_id: reqId, candidate_id: cand.id, stage: 'screened' },
+    })).json();
+
+    await request.patch(`${API}/applications/${app.id}/stage`, {
+      headers: { Authorization: `Bearer ${token}` }, data: { stage: 'interested', send_email: true },
+    });
+
+    let emailMsg: any, waMsg: any;
+    for (let i = 0; i < 10; i++) {
+      const thread = await (await request.get(`${API}/communications/thread/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+      emailMsg = (thread.messages || []).find((m: any) => m.channel === 'email');
+      waMsg = (thread.messages || []).find((m: any) => m.channel === 'whatsapp');
+      if (emailMsg) break;
+      await new Promise(res => setTimeout(res, 1000));
+    }
+    // Deterministic: the same notification pipeline's email half always
+    // logs, proving the code path genuinely ran.
+    expect(emailMsg).toBeTruthy();
+    expect(emailMsg.direction).toBe('outbound');
+    // Informational only, not asserted: real WAHA delivery to a synthetic
+    // test number is not guaranteed. When it DOES succeed, this confirms
+    // the new logging fix fired correctly.
+    if (waMsg) {
+      expect(waMsg.direction).toBe('outbound');
+      expect(waMsg.status).toBe('sent');
+    }
+
+    await request.delete(`${API}/applications/${app.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+
+  test('real headless UI: My WhatsApp Account page renders, and a real click-to-chat button opens the correct wa.me link on Candidate 360', async ({ page, request }) => {
+    const cand = await (await request.post(`${API}/candidates`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { full_name: `QA S67 UI Cand ${stamp}`, phone: `9${String(stamp).slice(-8)}11`, email: `qa.s67.ui.${stamp}@qatest.example`, skills: ['Python'] },
+    })).json();
+
+    await page.goto('/settings/whatsapp-account');
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('body')).toContainText('My WhatsApp Account');
+
+    await page.goto(`/candidates/${cand.id}`);
+    await page.waitForLoadState('networkidle');
+    const waLink = page.locator('a', { hasText: 'Message on WhatsApp' }).first();
+    await expect(waLink).toBeVisible();
+    const href = await waLink.getAttribute('href');
+    expect(href).toContain('wa.me/91');
+    expect(href).toContain(cand.phone.replace(/\D/g, '').slice(-10));
+
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+});
+
+
 test.describe.serial('S55 Offer Letter e-sign: revisit shows Already Signed, not Invalid/Expired', () => {
   // Regression for the exact same dead-code bug already fixed for NDA
   // e-sign (sql/74): sign_offer_by_token() used to null offer_letters.

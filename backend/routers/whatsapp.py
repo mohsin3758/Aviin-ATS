@@ -103,12 +103,36 @@ def _waha_headers() -> dict:
     return {"X-Api-Key": WAHA_KEY, "Content-Type": "application/json"}
 
 
-async def _check_waha() -> dict:
+async def _check_waha(session: str = WAHA_SESSION) -> dict:
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(f"{WAHA_BASE}/api/sessions/{WAHA_SESSION}", headers=_waha_headers())
+        r = await client.get(f"{WAHA_BASE}/api/sessions/{session}", headers=_waha_headers())
         if r.status_code == 200:
             return r.json()
         return {"status": "STOPPED"}
+
+
+async def resolve_send_session(tenant_id: str, user_id: str) -> Optional[str]:
+    """Real per-user WhatsApp numbers (2026-08-27): if this user has their
+    own connected personal WAHA session, manual/direct sends should go out
+    from THEIR real number, not the shared company one. Returns the real
+    session name only when the session is genuinely WORKING right now
+    (checked live against WAHA, not just the cached DB status column,
+    which can lag) - falls back to None (caller uses the shared session)
+    for every other case, including a disconnected/stopped personal
+    session. Deliberately NOT used for automated stage-change/reminder
+    sends (_notify_stage_change_bg) - those stay on the shared session by
+    design, per the explicit "keep automatic messages as-is" decision."""
+    async with db.tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            """SELECT waha_session_name FROM user_whatsapp_accounts
+               WHERE tenant_id=$1 AND user_id=$2 AND is_active=TRUE""",
+            tenant_id, user_id)
+    if not row:
+        return None
+    info = await _check_waha(row["waha_session_name"])
+    if info.get("status") in ("WORKING", "CONNECTED"):
+        return row["waha_session_name"]
+    return None
 
 
 async def _ensure_consent(conn, tenant_id: str, candidate_id: str) -> bool:
@@ -159,7 +183,8 @@ async def session_qr(actor: Actor = Depends(get_actor)):
         )
         if r.status_code != 200:
             raise HTTPException(status_code=503, detail="QR not available — session not ready")
-        return {"qr_data_url": f"data:image/png;base64,{r.content.decode()}"}
+        import base64
+        return {"qr_data_url": f"data:image/png;base64,{base64.b64encode(r.content).decode()}"}
 
 
 # ─── Templates ────────────────────────────────────────────────────────────────

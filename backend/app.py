@@ -75,6 +75,7 @@ from routers import call_letters
 from routers import assignment_dashboard
 from routers import personal_links
 from routers import rediscovery
+from routers import user_whatsapp
 
 # GAP features (1-10) — job-distribution and bgv-api were retired (see
 # gap_features.py module docstring): both duplicated real functionality
@@ -113,9 +114,33 @@ def _check_rate(key: str, limit: int, window: float) -> bool:
     return True
 
 
+def _client_ip(request: Request) -> str:
+    """Real client IP behind nginx.
+
+    nginx (both nginx.conf and nginx.conf.template) always sets X-Real-IP to
+    its own $remote_addr before proxying here - overwriting anything a client
+    sent, so it can't be spoofed by an external caller. But nginx runs on the
+    host and connects to the backend via 127.0.0.1:8080 (a Docker host-port
+    mapping), which NATs every connection's source to the bridge gateway
+    address before it reaches this container - collapsing EVERY real user's
+    login attempts (and every local script's) into one shared bucket keyed on
+    request.client.host alone. Trust X-Real-IP (nginx-set) when present, since
+    the backend port is never reachable except through nginx or a trusted
+    internal caller; fall back to request.client.host for a direct call with
+    no proxy in front (e.g. container-to-container or localhost testing).
+    """
+    xri = request.headers.get("x-real-ip")
+    if xri:
+        return xri.split(",")[0].strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
-        ip = (request.client.host if request.client else "unknown")
+        ip = _client_ip(request)
         path = request.url.path
 
         if path in ("/auth/login", "/auth/register"):
@@ -328,6 +353,7 @@ app.include_router(assignment_dashboard.router)
 app.include_router(personal_links.router)
 app.include_router(personal_links.public_router)
 app.include_router(rediscovery.router)
+app.include_router(user_whatsapp.router)
 
 
 @app.get("/health")

@@ -2,6 +2,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import WhatsAppChatButton from '@/components/WhatsAppChatButton';
 import { authHeaders } from '@/lib/auth';
 import {
   Inbox, RefreshCw, Play, FileText, User, Mail, Phone, MapPin,
@@ -329,6 +330,11 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
         <div style={{ background: '#f8fafc', borderRadius: 10, padding: 14, marginBottom: 16 }}>
           {(item.email || pd.email) && <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginBottom: 6 }}><Mail size={13} color="#6366f1" />{item.email || pd.email}</div>}
           {(item.phone || pd.phone) && <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginBottom: 6 }}><Phone size={13} color="#059669" />{item.phone || pd.phone}</div>}
+          {(item.phone || pd.phone) && (
+            <div style={{ marginBottom: 6 }}>
+              <WhatsAppChatButton phone={item.phone || pd.phone} candidateId={item.candidate_id} candidateName={item.full_name || pd.name} />
+            </div>
+          )}
           {(item.location || pd.location) && <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginBottom: 6 }}><MapPin size={13} color="#f59e0b" />{item.location || pd.location}</div>}
           {(item.total_exp_mo || pd.experience_years) && <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginBottom: 6 }}><Briefcase size={13} color="#0891b2" />{item.total_exp_mo ? gx(item.total_exp_mo) : `${pd.experience_years}yr`} experience</div>}
           {pd.education && <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}><BookOpen size={13} color="#7c3aed" />{pd.education}</div>}

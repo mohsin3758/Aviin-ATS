@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
+import WhatsAppChatButton from '@/components/WhatsAppChatButton';
 import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
@@ -1766,10 +1767,7 @@ export default function CandidateProfilePage() {
               </a>
             )}
             {candidate.phone && (
-              <a href={`https://wa.me/91${(candidate.phone||'').replace(/\D/g,'')}`} target="_blank" rel="noreferrer"
-                style={{display:'flex',alignItems:'center',gap:'5px',fontSize:'13px',color:'#22c55e',textDecoration:'none'}}>
-                <MessageCircle size={13}/> WhatsApp
-              </a>
+              <WhatsAppChatButton phone={candidate.phone} candidateId={candidate.id} candidateName={candidate.full_name} />
             )}
             {candidate.linkedin_url && (
               <a href={candidate.linkedin_url} target="_blank" rel="noreferrer"

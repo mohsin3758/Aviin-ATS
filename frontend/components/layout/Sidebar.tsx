@@ -114,6 +114,7 @@ const NAV_GROUPS = [
   ]},
   { id:'my_account', label:'MY ACCOUNT', defaultOpen:true, items:[
     { icon:Mail,            href:'/settings/mail-accounts', label:'My Email Accounts' },
+    { icon:MessageCircle,   href:'/settings/whatsapp-account', label:'My WhatsApp Account' },
     { icon:MessageSquare,   href:'/settings/signatures',     label:'Email Signatures' },
     { icon:MessageSquare,   href:'/conversations',           label:'My Mailbox' },
     { icon:UserCog,         href:'/profile',                 label:'My Profile' },

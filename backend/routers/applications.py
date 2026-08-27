@@ -596,8 +596,28 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     digits = "91" + digits  # bare 10-digit Indian mobile — assume +91
                 chat_id = digits + "@c.us"
                 async with httpx.AsyncClient(timeout=10.0) as cli:
-                    await cli.post(f"{WAHA_BASE}/api/sendText", headers=_waha_headers(),
+                    _wa_resp = await cli.post(f"{WAHA_BASE}/api/sendText", headers=_waha_headers(),
                         json={"session": WAHA_SESSION, "chatId": chat_id, "text": wa_text})
+                # Real gap fix (2026-08-27, found while building individual
+                # WhatsApp numbers): automated stage-change WhatsApp sends
+                # were never logged to candidate_messages at all - only the
+                # email half of this same function logs (see below). A
+                # real candidate could receive real WhatsApp stage updates
+                # with zero trace in Conversations/the Activity Timeline.
+                # sent_by stays NULL - this is a system-triggered send, not
+                # a specific human actor, matching how the email branch's
+                # own automated sends already work.
+                if _wa_resp.status_code < 400:
+                    try:
+                        async with db.tenant_conn(tenant_id) as _wlog:
+                            await _wlog.execute(
+                                """INSERT INTO candidate_messages
+                                     (tenant_id,candidate_id,application_id,channel,direction,
+                                      body,status,stage_at_send,is_read)
+                                   VALUES ($1,$2,$3,'whatsapp','outbound',$4,'sent',$5,TRUE)""",
+                                tenant_id, candidate_id, application_id, wa_text, stage)
+                    except Exception as _wlog_ex:
+                        print(f"Stage WhatsApp logging failed [{stage}]: {_wlog_ex}")
                 print(f"Stage WhatsApp [{stage}] sent to {chat_id} ({name})")
             else:
                 print(f"Stage WhatsApp [{stage}] skipped: WAHA session not connected")

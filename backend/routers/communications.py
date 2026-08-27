@@ -112,7 +112,12 @@ def _send_email_bg(smtp, to_email, subject, body_html, cc=None, bcc=None):
     threading.Thread(target=go, daemon=True).start()
 
 
-async def _send_wa(phone: str, message: str) -> bool:
+async def _send_wa(phone: str, message: str, session: str = WAHA_SESSION) -> bool:
+    """Real per-user WhatsApp numbers (2026-08-27): callers resolve
+    session via routers.whatsapp.resolve_send_session() (the actor's own
+    connected personal WAHA session, if any) before calling this -
+    defaults to the shared company session, unchanged, when they don't
+    have one or don't pass it (e.g. bulk-send, still shared by design)."""
     p = phone.strip().replace(" ","").replace("-","")
     if not p.startswith("+"): p = "+91" + p.lstrip("0")[-10:]
     chat_id = p.lstrip("+") + "@c.us"
@@ -120,7 +125,7 @@ async def _send_wa(phone: str, message: str) -> bool:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(f"{WAHA_BASE}/api/sendText",
                 headers={"X-Api-Key": WAHA_KEY, "Content-Type": "application/json"},
-                json={"session": WAHA_SESSION, "chatId": chat_id, "text": message})
+                json={"session": session, "chatId": chat_id, "text": message})
             return r.status_code < 400
     except Exception as ex:
         print(f"WhatsApp error: {ex}"); return False
@@ -633,6 +638,29 @@ async def delete_draft(draft_id: str, actor: Actor = Depends(get_actor)):
 
 # ── Send ────────────────────────────────────────────────────────────────────────
 
+@router.post("/log-manual")
+async def log_manual_message(body: dict, actor: Actor = Depends(get_actor)):
+    """Real, honest, manual chat-record entry (2026-08-27) - for outreach
+    that happened OUTSIDE this app (e.g. click-to-chat: wa.me opens the
+    recruiter's own WhatsApp client, which this backend has no API access
+    into) but the recruiter still wants a real record on the candidate's
+    timeline. Never fabricated - only ever written when a human explicitly
+    clicks "Log this outreach"."""
+    cand_id = body.get("candidate_id")
+    channel = body.get("channel", "whatsapp")
+    text = (body.get("body") or "").strip()
+    if not cand_id or not text:
+        raise HTTPException(400, "candidate_id and body are required")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow("SELECT id FROM candidates WHERE id=$1 AND tenant_id=$2", cand_id, actor.tenant_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        logged = await _log(conn, actor.tenant_id, cand_id, None, channel, None, text, "sent", str(actor.user_id))
+    if not logged:
+        raise HTTPException(500, "Could not log this message")
+    return {"logged": True, "id": logged["id"]}
+
+
 @router.post("/send")
 async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -693,7 +721,9 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
             elif body.candidate_id and not await _ensure_consent(conn, actor.tenant_id, body.candidate_id):
                 results["whatsapp"] = "no_consent"
             else:
-                ok = await _send_wa(phone, msg_p)
+                from routers.whatsapp import resolve_send_session
+                personal_session = await resolve_send_session(actor.tenant_id, str(actor.user_id))
+                ok = await _send_wa(phone, msg_p, personal_session or WAHA_SESSION)
                 st = "sent" if ok else "failed"
                 await _log(conn, actor.tenant_id, body.candidate_id, body.application_id,
                            "whatsapp", None, msg_p, st, str(actor.user_id),

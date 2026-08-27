@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import WhatsAppChatButton from '@/components/WhatsAppChatButton';
 import { ResumeGeneratorModal } from '@/components/ResumeGeneratorModal';
 import { authHeaders, API, getTokenPayload } from '@/lib/auth';
 import {
@@ -1033,6 +1034,11 @@ function ProfileTab({ app, apiUrl }: any) {
       <InfoCard title="Contact Info">
         {app.email && <InfoRow icon={<Mail size={12} />} label={app.email} />}
         {app.phone && <InfoRow icon={<Phone size={12} />} label={app.phone} />}
+        {app.phone && (
+          <div style={{ marginTop: 4 }}>
+            <WhatsAppChatButton phone={app.phone} candidateId={app.candidate_id} candidateName={app.candidate_name} />
+          </div>
+        )}
         {app.location && <InfoRow icon={<MapPin size={12} />} label={app.location} />}
         {app.total_exp_mo > 0 && <InfoRow icon={<Briefcase size={12} />} label={`${gx(app.total_exp_mo)} experience`} />}
         {app.notice_period_days != null && <InfoRow icon={<Clock size={12} />} label={`${app.notice_period_days}d notice period`} />}

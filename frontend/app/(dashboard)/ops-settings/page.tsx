@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { authHeaders } from '@/lib/auth';
-import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Copy, Power, Star, Pencil, Trophy, Mail, Clock } from 'lucide-react';
+import { Sliders, AlertTriangle, Ban, ShieldOff, Plus, Trash2, FileSpreadsheet, Copy, Power, Star, Pencil, Trophy, Mail, Clock, MessageCircle } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -15,6 +15,7 @@ const TABS = [
   { key: 'templates', label: 'Tracking Sheet Templates', icon: FileSpreadsheet },
   { key: 'screening', label: 'Screening Notifications', icon: Mail },
   { key: 'gdpr', label: 'Data Retention (GDPR)', icon: ShieldOff },
+  { key: 'whatsapp_sessions', label: 'WhatsApp Sessions', icon: MessageCircle },
 ];
 
 const card: React.CSSProperties = { background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: 18 };
@@ -175,6 +176,83 @@ function PerformanceWeightsTab() {
       </div>
       {err && <div style={{ color: '#DC2626', fontSize: 12, margin: '8px 0' }}>{err}</div>}
       <button onClick={save} disabled={saving} style={{ ...btn, marginTop: 10 }}>{saving ? 'Saving…' : 'Save Weights'}</button>
+    </div>
+  );
+}
+
+function WhatsAppSessionsTab() {
+  // Real per-user WhatsApp numbers (2026-08-27) - each personal session
+  // is a genuine ~2GB-RAM WAHA browser session (measured live on this
+  // VPS), so this is a real, admin-tunable resource cap, not cosmetic.
+  const { data: config, refetch: refetchConfig } = useFetch<any>('/user-whatsapp/config');
+  const { data: overview, refetch: refetchOverview } = useFetch<any>('/user-whatsapp/team-overview');
+  const [maxSessions, setMaxSessions] = useState<number>(2);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (config) setMaxSessions(config.max_concurrent_personal_sessions ?? 2);
+  }, [config]);
+
+  const save = async () => {
+    setSaving(true); setSaved(false);
+    try {
+      await apiFetch('/user-whatsapp/config', { method: 'PUT', body: JSON.stringify({ max_concurrent_personal_sessions: maxSessions }) });
+      refetchConfig();
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={card}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Personal Session Limit</div>
+        <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 12, fontSize: 12, color: '#92400e', marginBottom: 14 }}>
+          Each recruiter/KAE who connects their own WhatsApp number runs a real, persistent browser
+          session — measured at roughly <strong>2GB of RAM each</strong> on this server. Setting this too high
+          can starve the database, AI matching, and other services. Currently{' '}
+          <strong>{overview?.active_sessions ?? 0}</strong> of <strong>{config?.max_concurrent_personal_sessions ?? 2}</strong> slots are in use.
+        </div>
+        <label style={label}>Max concurrent personal sessions</label>
+        <input type="number" min={0} style={input} value={maxSessions}
+          onChange={e => setMaxSessions(parseInt(e.target.value, 10) || 0)} />
+        <button style={btn} disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save'}</button>
+        {saved && <span style={{ marginLeft: 10, color: '#16A34A', fontSize: 12, fontWeight: 700 }}>✓ Saved</span>}
+      </div>
+
+      <div style={card}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Team Connections</div>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ textAlign: 'left', color: '#64748B' }}>
+              <th style={{ padding: '6px 8px' }}>User</th>
+              <th style={{ padding: '6px 8px' }}>Role</th>
+              <th style={{ padding: '6px 8px' }}>Status</th>
+              <th style={{ padding: '6px 8px' }}>Bot Auto-Reply</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(overview?.accounts || []).map((a: any) => (
+              <tr key={a.id} style={{ borderTop: '1px solid #F1F5F9' }}>
+                <td style={{ padding: '8px' }}>{a.full_name}</td>
+                <td style={{ padding: '8px', color: '#64748B' }}>{a.role}</td>
+                <td style={{ padding: '8px' }}>
+                  <span style={{
+                    padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                    background: a.status === 'working' ? '#DCFCE7' : a.status === 'scan_qr' || a.status === 'starting' ? '#FEF3C7' : '#F1F5F9',
+                    color: a.status === 'working' ? '#16A34A' : a.status === 'scan_qr' || a.status === 'starting' ? '#92400E' : '#64748B',
+                  }}>{a.status}</span>
+                </td>
+                <td style={{ padding: '8px', color: '#64748B' }}>{a.bot_auto_reply_enabled ? 'On' : 'Off'}</td>
+              </tr>
+            ))}
+            {(!overview?.accounts || overview.accounts.length === 0) && (
+              <tr><td colSpan={4} style={{ padding: '14px 8px', color: '#94A3B8' }}>No one has connected a personal WhatsApp number yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -716,6 +794,7 @@ export default function OpsSettingsPage() {
       </div>
       {tab === 'scoring' && <ScoringTab />}
       {tab === 'sla' && <SlaTab />}
+      {tab === 'whatsapp_sessions' && <WhatsAppSessionsTab />}
       {tab === 'performance' && <PerformanceWeightsTab />}
       {tab === 'blocks' && <BlocksTab />}
       {tab === 'shift_timings' && <ShiftTimingsTab />}

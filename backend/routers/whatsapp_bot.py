@@ -25,13 +25,13 @@ HELP_LINES = [
 ]
 HELP_MSG = "\n".join(HELP_LINES)
 
-async def send_wa(phone: str, message: str) -> bool:
+async def send_wa(phone: str, message: str, session: str = SESSION) -> bool:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(
                 f"{WAHA_URL}/api/sendText",
                 headers={"X-Api-Key": WAHA_KEY, "Content-Type": "application/json"},
-                json={"session": SESSION, "chatId": f"{phone}@c.us", "text": message}
+                json={"session": session, "chatId": f"{phone}@c.us", "text": message}
             )
             return r.status_code < 400
     except Exception:
@@ -79,7 +79,7 @@ async def _download_waha_media(media: dict) -> Optional[bytes]:
     return None
 
 
-async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str) -> str:
+async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str, whatsapp_account_id: str = None) -> str:
     """Download + parse an inbound WhatsApp resume attachment, upsert a
     candidate (same regex-NER pipeline as email intake), log a resume_files
     row, and return the WhatsApp reply text to send back."""
@@ -136,15 +136,15 @@ async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str) -> str
         # daily. Logged here (resume) and in handle_cmd (commands) below.
         await conn.execute("""
             INSERT INTO candidate_messages
-              (tenant_id, candidate_id, channel, direction, body, status)
-            VALUES ($1,$2,'whatsapp','inbound',$3,'received')
-        """, tenant_id, candidate_id, f"[Resume attachment: {filename}]")
+              (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
+            VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
+        """, tenant_id, candidate_id, f"[Resume attachment: {filename}]", whatsapp_account_id)
 
     first_name = (parsed.get("name") or "").split()[0] if parsed.get("name") else ""
     greeting = f"Thanks {first_name}!" if first_name else "Thanks!"
     return f"{greeting} We've received your resume and added it to our system. Our recruitment team will review it and reach out if there's a matching opportunity."
 
-async def handle_cmd(phone: str, text: str, tenant_id: str) -> str:
+async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id: str = None) -> str:
     cmd = text.strip().upper().split()[0] if text.strip() else "HELP"
     async with db.tenant_conn(tenant_id) as conn:
         cand = await conn.fetchrow(
@@ -157,9 +157,9 @@ async def handle_cmd(phone: str, text: str, tenant_id: str) -> str:
         # _handle_inbound_resume — inbound commands were never logged either.
         await conn.execute("""
             INSERT INTO candidate_messages
-              (tenant_id, candidate_id, channel, direction, body, status)
-            VALUES ($1,$2,'whatsapp','inbound',$3,'received')
-        """, tenant_id, cand["id"], text[:2000])
+              (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
+            VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
+        """, tenant_id, cand["id"], text[:2000], whatsapp_account_id)
         if cmd == "STATUS":
             apps = await conn.fetch(
                 "SELECT a.stage, r.title FROM applications a "
@@ -328,12 +328,48 @@ async def webhook(request: Request):
         if not tenant:
             return {"ok": True}
         tenant_id = str(tenant["id"])
-        if has_media:
-            reply = await _handle_inbound_resume(phone, msg.get("media") or {}, tenant_id)
-            await send_wa(phone, reply)
+
+        # Real per-user WhatsApp numbers (2026-08-27): WAHA's own webhook
+        # payload already names which session received this message - a
+        # personal account's inbound traffic is routed and attributed
+        # here, without needing a second webhook URL per user.
+        session_name = data.get("session") or SESSION
+        wa_account_id = None
+        bot_enabled = True
+        if session_name != SESSION:
+            async with db.tenant_conn(tenant_id) as _wconn:
+                acct = await _wconn.fetchrow(
+                    """SELECT id, bot_auto_reply_enabled FROM user_whatsapp_accounts
+                       WHERE tenant_id=$1 AND waha_session_name=$2""",
+                    tenant_id, session_name)
+            if acct:
+                wa_account_id = str(acct["id"])
+                bot_enabled = acct["bot_auto_reply_enabled"]
+
+        if not bot_enabled:
+            # "Personal numbers are just a normal inbox" (explicit user
+            # choice, per-account toggle) - log the raw message, no
+            # command parsing, no auto-reply, no resume auto-processing.
+            # The recruiter reads and answers it themselves.
+            async with db.tenant_conn(tenant_id) as _lconn:
+                cand = await _lconn.fetchrow(
+                    "SELECT id FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
+                    phone[-10:], tenant_id)
+                if cand:
+                    body = f"[Media attachment]" if has_media else text[:2000]
+                    await _lconn.execute(
+                        """INSERT INTO candidate_messages
+                             (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
+                           VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)""",
+                        tenant_id, cand["id"], body, wa_account_id)
             return {"ok": True}
-        response = await handle_cmd(phone, text, tenant_id)
-        await send_wa(phone, response)
+
+        if has_media:
+            reply = await _handle_inbound_resume(phone, msg.get("media") or {}, tenant_id, wa_account_id)
+            await send_wa(phone, reply, session_name)
+            return {"ok": True}
+        response = await handle_cmd(phone, text, tenant_id, wa_account_id)
+        await send_wa(phone, response, session_name)
     except Exception as e:
         print(f"WhatsApp webhook error: {e}")
     return {"ok": True}
