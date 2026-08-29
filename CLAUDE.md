@@ -14797,3 +14797,127 @@ the reload race) are fully, deterministically covered by real headless-
 browser interaction in the permanent suite. Broader regression sweep
 (S1/S13/S43/S67/S68, 36 tests) passed clean. Zero-token audit:
 `CONFIRMED CLEAN` (418 files, 0 external API refs).
+
+
+## Candidates table: sort-dependent column shift + a "misaligned"-looking runaway row height, both traced to the same table-layout:auto root cause, 2026-08-30
+User reported, from 2 live screenshots: (1) clicking "Exp" to sort left the
+Actions column's icons partially clipped at the right edge with no scroll
+affordance ("last details are hidding and overlapped"), and (2) clicking
+"Activity" to sort produced a visibly broken row ("Rashmi H Hiremath")
+where the name/avatar looked disconnected from its own row's other cells
+("visible and allignment is not correct"). Investigated both with a real
+headless-browser script (measuring real column x/width at every state,
+pulling and visually inspecting real screenshots) before touching any
+code — both traced to the same root cause.
+
+**Root cause**: the table used `table-layout:auto` with zero explicit
+column widths, so every column's width was determined purely by whichever
+candidates happened to be rendered. Measured directly at a real 1600px
+viewport: default view needed 64px of scroll to reach Actions; after
+sorting by Activity, that grew to 127px (the Source column alone jumped
+70px -> 147px) — same browser, same viewport, only the sort changed,
+confirming column widths were genuinely unstable across sorts, not a
+one-off. Separately, the Skills cell had no per-item width cap and no
+cell max-height — a resume-parsed "skill" value that's actually a long,
+sentence-like fragment (a real, pre-existing extraction-quality issue,
+not fixed here) wrapped across many lines and inflated the WHOLE ROW to
+match (measured: 264px vs a normal ~74-84px). Every other cell in that
+row is `vertical-align:middle` by default, so short content (name,
+phone, company) ended up vertically centered in the middle of a huge
+empty row instead of sitting near its neighbors — reading as
+"misaligned" exactly as reported, even though each cell was individually
+CSS-correct.
+
+**Fix** (`frontend/app/(dashboard)/candidates/page.tsx`) — switched the
+table to `table-layout:fixed` with an explicit width on every column
+(240-148px, summing to a real, measured-safe 1268px total that fits with
+zero overflow at a normal 1600px desktop width), and added real content
+truncation everywhere a value was previously unbounded: Name's email/
+designation (maxWidth + ellipsis), Company + location, Pipeline's job
+title, Owner's recruiter name — all now truncate on their own instead of
+forcing the column wider. The Skills cell got the real, structural fix
+for issue #2: each skill span truncates independently (`maxWidth:110px`
++ ellipsis) and the whole cell is capped to `maxHeight:42px` +
+`overflow:hidden` — a candidate with a long or malformed skill value can
+no longer inflate its row's height at all; the full value is still
+reachable via the row's Quick View drawer (`title` attributes added
+throughout for the same reason).
+
+Verified for real, not code review, before AND after: real column-width/
+overflow measurements confirmed 64px -> 127px overflow pre-fix (both
+sort states), 0px overflow post-fix across all 3 states (default/Exp-
+sort/Activity-sort) with byte-identical column widths; a real pulled
+screenshot pre-fix showed "ACTIO" truncated with the delete icon clipped
+at the edge, post-fix shows the full "ACTIONS" header and all 4 icon
+buttons cleanly visible with zero scroll needed; Rashmi H Hiremath's row
+(264px pre-fix, a clear visual outlier) is now 70px post-fix — identical
+to every neighboring row, with her name/avatar/email properly aligned
+next to her now cleanly-truncated skill badges.
+
+**A real, multi-round test-writing lesson, not an app bug** — the new
+permanent "S69" regression suite hit 4 distinct, genuine timing/
+methodology issues before landing reliably, each root-caused with a real
+diagnostic script rather than guessed at:
+1. A flat `waitForTimeout(1200)` after `networkidle` wasn't a reliable
+   signal for the initial page load — the page can still be showing its
+   loading-skeleton ("0 candidates") at that exact moment, so the real
+   `<table>` genuinely doesn't exist yet. Fixed by waiting for the table
+   and a real row to actually become visible instead of guessing a delay.
+2. Clicking a sort header triggers a fresh `/candidates` fetch that can
+   genuinely take 600-900ms+ to even START (traced directly via a
+   t=0/300/600/900ms instrumented click) — neither a flat
+   `waitForTimeout` nor `networkidle` (which only tracks requests
+   already in flight, not ones about to start) reliably catches this.
+   Fixed with `page.waitForResponse()`, registered BEFORE each click, so
+   the wait is keyed to the actual sort-specific API call that click
+   triggers, immune to how long the backend takes to start or finish it.
+3. Reading column widths via N sequential
+   `page.locator(...).nth(i).boundingBox()` round-trips (~0.5-1s for 12
+   columns) raced a DOM that was actively being replaced mid-loop by the
+   sort-triggered re-render — some columns read from the OLD render,
+   some from the NEW one, sometimes the whole set read as empty between
+   renders. Fixed by replacing it with a single atomic
+   `page.evaluate()` snapshot (one round-trip, reads the live DOM
+   synchronously in the browser) — structurally immune to a mid-read
+   DOM swap.
+4. The suite's own overflow-threshold assertion (`<= 20px`) was correct
+   for the 1600px viewport used to visually verify the fix, but Playwright's
+   own default test viewport (1280x720) is narrower than that — at that
+   width, some horizontal scroll is genuinely expected, matching this
+   project's own long-established, already-accepted precedent (see the
+   2026-08-23 Candidates-page and Resume-Inbox entries: "some horizontal
+   scroll remains necessary at narrow widths — not a bug to chase away").
+   Fixed by pinning the suite to an explicit, realistic 1600x900 desktop
+   viewport via `test.use(...)`, so the "zero scroll needed" assertion
+   tests the case it's actually meant to guard.
+Each fix was verified by re-running S69 in true isolation (`--workers=1`,
+`-g 'S69'` alone) — the final version passed cleanly twice in a row
+before being trusted.
+
+**Two more real, pre-existing, unrelated findings surfaced while
+regression-sweeping — investigated to confirm they're genuinely
+unrelated to this fix, then left for a future, separate pass rather than
+chased down**, matching this project's established "flag honestly, don't
+silently expand scope" discipline:
+- `POST /candidates/rank` (the JD Match — AI Ranking feature, built
+  2026-08-23) now genuinely exceeds a 60-second test timeout at this
+  tenant's current real scale (1,561+ candidates) — confirmed via a real
+  `Request context disposed` timeout, not a flaky assertion. This is a
+  backend-performance characteristic of real data growth over time, not
+  something touched by today's frontend CSS/layout work — flagged for a
+  future look at whether that endpoint needs a real optimization (e.g. a
+  tighter DB-side LIMIT before the Python-side skill-matching pass) now
+  that the tenant has grown well past its size when that feature was
+  built.
+- One S58 (Add Candidate) UI test hit a real duplicate-phone rejection
+  from its own reused fixture data colliding with an earlier test in the
+  same `.serial()` block (a test-data-hygiene issue in that suite, not
+  an app bug) — confirmed by reading the actual duplicate-check logic
+  the earlier test in the same file deliberately exercises against the
+  same phone number.
+
+Regression sweep across suites adjacent to the Candidates page (S1/S2/
+S8/S13/S30/S48/S53/S58/S60/S69) confirmed the fix introduces no
+regressions of its own; the only 2 real failures found (both detailed
+above) are pre-existing and unrelated to this change. Zero-token audit:
+`CONFIRMED CLEAN` (418 files, 0 external API refs).

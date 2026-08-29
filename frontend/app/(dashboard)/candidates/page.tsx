@@ -1394,22 +1394,39 @@ export default function CandidatesPage() {
         ) : (
           <>
           <div data-testid="candidates-table-scroll" style={{overflowX:'auto'}}>
-            <table style={{width:'100%',minWidth:'1220px',borderCollapse:'collapse'}}>
+            {/* Real bug fix (2026-08-30): this table used table-layout:auto
+                with no explicit column widths, so the browser sized every
+                column purely from whichever candidates happened to be
+                rendered — sorting by Exp/Activity surfaces a different set
+                of rows with different-length names/companies/skill values,
+                which measurably shifted every column's width and shoved the
+                Owner/Actions columns further off-screen (or back on-screen)
+                depending on what the current sort/page happened to contain.
+                Reproduced and measured directly: default view needed 64px of
+                scroll to reach Actions, Activity-sort needed 127px (nearly
+                double) — same real viewport, same browser, only the sort
+                changed. table-layout:fixed + an explicit width per column
+                makes every column's position STABLE regardless of sort or
+                which data is currently visible — some horizontal scroll can
+                still be needed at genuinely narrow widths (already an
+                accepted, documented tradeoff for this app's data-dense
+                tables), but it's now predictable, not sort-dependent. */}
+            <table style={{width:'100%',minWidth:'1268px',borderCollapse:'collapse',tableLayout:'fixed'}}>
               <thead>
                 <tr style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0'}}>
                   <th style={{padding:'8px 10px',width:'36px'}}>
                     <input type="checkbox" checked={allSelected} onChange={toggleAll} style={{accentColor:'#1e40af',cursor:'pointer',width:'15px',height:'15px'}}/>
                   </th>
-                  <SortTh label="Name"     col="full_name"    sort={sort} onSort={handleSort}/>
-                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Phone</th>
-                  <SortTh label="Exp"      col="total_exp_mo" sort={sort} onSort={handleSort}/>
-                  <SortTh label="Exp CTC"  col="expected_ctc" sort={sort} onSort={handleSort}/>
-                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Company</th>
-                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Skills</th>
-                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Pipeline</th>
-                  <SortTh label="Activity" col="last_activity" sort={sort} onSort={handleSort}/>
-                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Source</th>
-                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b'}}>Owner</th>
+                  <SortTh label="Name"     col="full_name"    sort={sort} onSort={handleSort} style={{width:'240px'}}/>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',width:'100px'}}>Phone</th>
+                  <SortTh label="Exp"      col="total_exp_mo" sort={sort} onSort={handleSort} style={{width:'62px'}}/>
+                  <SortTh label="Exp CTC"  col="expected_ctc" sort={sort} onSort={handleSort} style={{width:'85px'}}/>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',width:'100px'}}>Company</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',width:'130px'}}>Skills</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',width:'130px'}}>Pipeline</th>
+                  <SortTh label="Activity" col="last_activity" sort={sort} onSort={handleSort} style={{width:'85px'}}/>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',width:'70px'}}>Source</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',width:'75px'}}>Owner</th>
                   {/* Real bug fix (2026-08-20): position:sticky here visually
                       overlapped the Owner column entirely (and the tail end of
                       Source) at every real viewport width tested — sticky's
@@ -1419,7 +1436,7 @@ export default function CandidatesPage() {
                       reverted twice on Resume Inbox earlier the same day.
                       Plain scroll instead — no overlap risk, matches that
                       established fix. */}
-                  <th style={{padding:'8px 10px',background:'#f8fafc',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',textAlign:'center'}}>Actions</th>
+                  <th style={{padding:'8px 10px',background:'#f8fafc',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',letterSpacing:'0.05em',color:'#64748b',textAlign:'center',width:'148px'}}>Actions</th>
                 </tr>
               </thead>
               <tbody data-testid="candidate-list">
@@ -1435,14 +1452,23 @@ export default function CandidatesPage() {
                       <td style={{padding:'8px 10px',width:'36px'}}>
                         <input type="checkbox" checked={isSel} onChange={()=>toggleSel(d.id)} style={{accentColor:'#1e40af',cursor:'pointer',width:'15px',height:'15px'}}/>
                       </td>
-                      {/* Name — click opens drawer */}
-                      <td style={{padding:'8px 10px',cursor:'pointer'}} onClick={()=>setDrawer(d)}>
+                      {/* Name — click opens drawer. Real bug fix (2026-08-30):
+                          email/designation had no width cap, so a long real
+                          email or job title forced the Name column (and the
+                          whole table) wider — the exact width-instability
+                          this table now fixes with table-layout:fixed. Each
+                          line truncates with an ellipsis to a real, fixed
+                          220px text area (260px column - 34px avatar - 10px
+                          gap - 16px cell padding) instead of forcing layout;
+                          the full value is still visible via the row's own
+                          Quick View / full-page link. */}
+                      <td style={{padding:'8px 10px',cursor:'pointer',overflow:'hidden'}} onClick={()=>setDrawer(d)}>
                         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
                           <div style={{width:'34px',height:'34px',borderRadius:'50%',background:gc(d.full_name),display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:'700',color:'white',flexShrink:0}}>{gi(d.full_name)}</div>
-                          <div>
-                            <div style={{fontSize:'13px',fontWeight:'600',color:'#1e40af',textDecoration:'underline',textDecorationStyle:'dotted'}}>{d.full_name}</div>
-                            <div style={{fontSize:'11px',color:'#94a3b8',display:'flex',alignItems:'center',gap:'4px',marginTop:'1px'}}><Mail size={10}/>{d.email||'—'}</div>
-                            {d.current_designation&&<div style={{fontSize:'10px',color:'#64748b',marginTop:'1px'}}>{d.current_designation}</div>}
+                          <div style={{minWidth:0,maxWidth:'220px'}}>
+                            <div style={{fontSize:'13px',fontWeight:'600',color:'#1e40af',textDecoration:'underline',textDecorationStyle:'dotted',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={d.full_name}>{d.full_name}</div>
+                            <div style={{fontSize:'11px',color:'#94a3b8',display:'flex',alignItems:'center',gap:'4px',marginTop:'1px',overflow:'hidden'}} title={d.email||''}><Mail size={10} style={{flexShrink:0}}/><span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.email||'—'}</span></div>
+                            {d.current_designation&&<div style={{fontSize:'10px',color:'#64748b',marginTop:'1px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={d.current_designation}>{d.current_designation}</div>}
                             {(d.tags||[]).length>0&&(
                               <div style={{display:'flex',flexWrap:'wrap',gap:'3px',marginTop:'3px'}}>
                                 {d.tags.map((t:any)=><span key={t.id} style={{fontSize:'9px',fontWeight:'600',padding:'1px 6px',borderRadius:'8px',background:`${t.color}1a`,color:t.color}}>{t.name}</span>)}
@@ -1471,25 +1497,43 @@ export default function CandidatesPage() {
                         {d.current_ctc && <div style={{fontSize:'10px',color:'#94a3b8'}}>Curr:{fc(d.current_ctc)}</div>}
                       </td>
                       {/* Company */}
-                      <td style={{padding:'8px 10px'}}>
+                      <td style={{padding:'8px 10px',overflow:'hidden'}}>
                         {d.current_employer
-                          ? <div style={{display:'flex',alignItems:'center',gap:'4px',fontSize:'12px',color:'#475569'}}><Briefcase size={11}/>{d.current_employer}</div>
+                          ? <div style={{display:'flex',alignItems:'center',gap:'4px',fontSize:'12px',color:'#475569',overflow:'hidden'}} title={d.current_employer}><Briefcase size={11} style={{flexShrink:0}}/><span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.current_employer}</span></div>
                           : <span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
-                        {d.location&&<div style={{fontSize:'10px',color:'#94a3b8',marginTop:'1px',display:'flex',alignItems:'center',gap:'3px'}}><MapPin size={9}/>{d.location}</div>}
+                        {d.location&&<div style={{fontSize:'10px',color:'#94a3b8',marginTop:'1px',display:'flex',alignItems:'center',gap:'3px',overflow:'hidden'}} title={d.location}><MapPin size={9} style={{flexShrink:0}}/><span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.location}</span></div>}
                       </td>
-                      {/* Skills */}
-                      <td style={{padding:'8px 10px'}}>
-                        <div style={{display:'flex',flexWrap:'wrap',gap:'3px'}}>
-                          {(d.skills||[]).slice(0,2).map((s:string)=><span key={s} style={{fontSize:'10px',fontWeight:'500',padding:'2px 6px',borderRadius:'4px',background:'#eff6ff',color:'#2563eb',border:'1px solid #bfdbfe'}}>{s}</span>)}
+                      {/* Skills — real bug fix (2026-08-30): a resume-parsed
+                          "skill" value is sometimes a long, sentence-like
+                          fragment rather than a short tag (a separate,
+                          pre-existing extraction-quality issue, not fixed
+                          here). With no per-item width cap and no cell
+                          max-height, a row with 1-2 such long values wrapped
+                          across many lines and the whole row ballooned to
+                          match (reproduced live: 264px vs a normal 84px row)
+                          — every OTHER cell in that row is `vertical-align:
+                          middle` by default, so short content (name, phone,
+                          company) ends up floating in the middle of a huge
+                          empty row instead of sitting near its neighbors,
+                          reading as "misaligned" exactly as reported. Each
+                          skill span now truncates on its own (maxWidth +
+                          ellipsis) and the whole cell is capped to ~2 lines
+                          (maxHeight + overflow:hidden) — a candidate with
+                          long or many skill values can no longer inflate the
+                          row height at all; full skill text remains visible
+                          via the row's Quick View drawer. */}
+                      <td style={{padding:'8px 10px',overflow:'hidden'}}>
+                        <div style={{display:'flex',flexWrap:'wrap',gap:'3px',maxHeight:'42px',overflow:'hidden'}}>
+                          {(d.skills||[]).slice(0,2).map((s:string)=><span key={s} title={s} style={{fontSize:'10px',fontWeight:'500',padding:'2px 6px',borderRadius:'4px',background:'#eff6ff',color:'#2563eb',border:'1px solid #bfdbfe',maxWidth:'110px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',display:'inline-block'}}>{s}</span>)}
                           {(d.skills||[]).length>2&&<span style={{fontSize:'10px',padding:'2px 5px',borderRadius:'4px',background:'#f8fafc',color:'#94a3b8'}}>+{d.skills.length-2}</span>}
                         </div>
                       </td>
                       {/* Pipeline status */}
-                      <td style={{padding:'8px 10px'}}>
+                      <td style={{padding:'8px 10px',overflow:'hidden'}}>
                         {sc ? (
                           <div>
                             <span style={{fontSize:'10px',fontWeight:'700',padding:'2px 7px',borderRadius:'8px',background:sc.bg,color:sc.color}}>{sc.label}</span>
-                            {d.pipeline_job && <div style={{fontSize:'10px',color:'#94a3b8',marginTop:'2px',maxWidth:'120px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.pipeline_job}</div>}
+                            {d.pipeline_job && <div title={d.pipeline_job} style={{fontSize:'10px',color:'#94a3b8',marginTop:'2px',maxWidth:'110px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.pipeline_job}</div>}
                           </div>
                         ) : <span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
                         {d.top_match && (
@@ -1511,10 +1555,10 @@ export default function CandidatesPage() {
                         <span style={{fontSize:'11px',padding:'2px 8px',borderRadius:'10px',background:'#f1f5f9',color:'#475569',fontWeight:'500'}}>{d.source||'direct'}</span>
                       </td>
                       {/* Owner (2026-08-11: 30-day individual recruiter ownership) */}
-                      <td style={{padding:'8px 10px'}}>
+                      <td style={{padding:'8px 10px',overflow:'hidden'}}>
                         {d.owner && d.owner.status==='active' && new Date(d.owner.expires_at) > new Date() ? (
                           <div>
-                            <div style={{fontSize:'11px',fontWeight:'600',color:'#0f172a'}}>{d.owner.recruiter_name}</div>
+                            <div title={d.owner.recruiter_name} style={{fontSize:'11px',fontWeight:'600',color:'#0f172a',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.owner.recruiter_name}</div>
                             <div style={{fontSize:'10px',color:Math.ceil((new Date(d.owner.expires_at).getTime()-Date.now())/86400000)<=5?'#d97706':'#94a3b8'}}>
                               {Math.max(0,Math.ceil((new Date(d.owner.expires_at).getTime()-Date.now())/86400000))}d left
                             </div>

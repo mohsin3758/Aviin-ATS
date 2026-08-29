@@ -9163,3 +9163,146 @@ test.describe.serial('S68 Profile/Signatures/Fetch-Inbox real bugs fixed 2026-08
     }
   });
 });
+
+test.describe.serial('S69 Candidates table: stable column widths + bounded row height, 2026-08-30', () => {
+  // Explicit, realistic desktop viewport — Playwright's own default
+  // (1280x720) is narrower than a common real laptop, and this table's
+  // horizontal-scroll-at-narrow-widths tradeoff is already a real,
+  // documented, accepted characteristic (not a bug to chase away) per
+  // this project's own established precedent. 1600px is wide enough
+  // that the Actions column should genuinely need zero scroll — the
+  // real, meaningful case this suite's overflow check exists to guard.
+  test.use({ viewport: { width: 1600, height: 900 } });
+
+  // Two real, reported bugs, both traced to the same root cause: this
+  // table used table-layout:auto with no explicit column widths, so
+  // total width (and every column's position) was driven purely by
+  // whichever candidates happened to be visible.
+  //  (1) "last details are hidding and overlapped, if click Exp" —
+  //      reproduced: sorting brings a different set of rows into view,
+  //      shifting every column's width and the amount of horizontal
+  //      scroll needed to reach Owner/Actions (measured live: 64px of
+  //      overflow in the default view vs 127px after an Activity sort —
+  //      nearly double, same viewport, only the sort changed).
+  //  (2) "if click on activity, visible and allignment is not correct" —
+  //      reproduced: a candidate with a long, sentence-like resume-
+  //      parsed "skill" value (a separate, pre-existing extraction-
+  //      quality issue, not fixed here) had no per-item width cap and no
+  //      cell max-height, so the Skills cell wrapped across many lines
+  //      and the WHOLE ROW ballooned to match (264px vs a normal ~74px)
+  //      — every other cell in that row is vertical-align:middle by
+  //      default, so short content (name, phone, company) ended up
+  //      floating in the middle of a huge empty row instead of sitting
+  //      near its neighbors, reading as "misaligned."
+  // Fix: table-layout:fixed with an explicit width per column (stable
+  // regardless of sort/data), plus per-cell text truncation (Name's
+  // email/designation, Company, Pipeline job, Owner name) and a real
+  // maxHeight+overflow:hidden cap on the Skills cell so no row can ever
+  // inflate beyond a bounded height again.
+
+  test('column widths are byte-identical across default / Exp-sort / Activity-sort (no more sort-dependent overflow)', async ({ page }) => {
+    await page.goto('/candidates');
+    await page.waitForLoadState('networkidle');
+    // Real bug found by this test's own first run, not the app: a flat
+    // waitForTimeout(1200) after networkidle was not a reliable enough
+    // signal — the page can still be showing its loading-skeleton state
+    // ("0 candidates") at that point, so the real <table> genuinely
+    // doesn't exist yet and the locator times out. Wait for the real
+    // table to actually render instead of guessing a fixed delay.
+    const table = page.locator('[data-testid="candidates-table-scroll"] table');
+    await expect(table).toBeVisible({ timeout: 20000 });
+    await expect(page.locator('[data-testid="candidate-list"] tr').first()).toBeVisible({ timeout: 20000 });
+    await expect(table).toHaveCSS('table-layout', 'fixed');
+
+    // Real bug found by this test's own first run, not the app: reading
+    // widths via N sequential page.locator(...).nth(i).boundingBox()
+    // round-trips is slow (~0.5-1s for 12 columns) and races a DOM that's
+    // actively being replaced mid-loop while a sort-triggered fetch
+    // resolves — some columns get read from the OLD render, some from
+    // the NEW one, or the count itself reads as 0 between renders. A
+    // single atomic page.evaluate() snapshot (one round-trip, reads the
+    // live DOM synchronously in the browser) has none of that race.
+    const colWidths = async (): Promise<number[]> => page.evaluate(() => {
+      const ths = document.querySelectorAll('[data-testid="candidates-table-scroll"] thead th');
+      return Array.from(ths).map(th => Math.round(th.getBoundingClientRect().width));
+    });
+
+    const before = await colWidths();
+    const headerCount = before.length;
+    expect(headerCount).toBeGreaterThan(0);
+
+    // Clicking a sort header triggers a fresh /candidates fetch, and the
+    // table briefly re-renders while that's in flight. Traced directly
+    // (t=0/300/600/900ms) — the real fetch can genuinely take 600-900ms+
+    // to even START, so neither a flat waitForTimeout nor networkidle
+    // (which only tracks requests already in flight, not ones about to
+    // start) reliably catches it. page.waitForResponse(), registered
+    // BEFORE the click, is the one signal immune to this.
+    const expRespPromise = page.waitForResponse(r => r.url().includes('/candidates') && r.url().includes('sort_by=total_exp_mo'), { timeout: 15000 });
+    await page.locator('th', { hasText: 'Exp' }).first().click();
+    await expRespPromise;
+    await expect.poll(async () => (await colWidths()).length, { timeout: 10000 }).toBe(headerCount);
+    const afterExp = await colWidths();
+    expect(afterExp).toEqual(before);
+
+    const activityRespPromise = page.waitForResponse(r => r.url().includes('/candidates') && r.url().includes('sort_by=last_activity'), { timeout: 15000 });
+    await page.locator('th', { hasText: 'Activity' }).first().click();
+    await activityRespPromise;
+    await expect.poll(async () => (await colWidths()).length, { timeout: 10000 }).toBe(headerCount);
+    const afterActivity = await colWidths();
+    expect(afterActivity).toEqual(before);
+
+    // Real, direct regression guard for the exact reported symptom: the
+    // Actions column (and its icon buttons) must genuinely be reachable
+    // within the visible viewport at this common real width, not just
+    // present somewhere off-screen requiring scroll.
+    const scrollWidth = await page.locator('[data-testid="candidates-table-scroll"]').evaluate(el => el.scrollWidth);
+    const clientWidth = await page.locator('[data-testid="candidates-table-scroll"]').evaluate(el => el.clientWidth);
+    expect(scrollWidth - clientWidth).toBeLessThanOrEqual(20);
+  });
+
+  test('no row balloons far beyond its neighbors after sorting on real data (bounded Skills cell height)', async ({ page }) => {
+    await page.goto('/candidates');
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('[data-testid="candidate-list"] tr').first()).toBeVisible({ timeout: 20000 });
+
+    // Same real fetch-timing issue as the sibling test above — register
+    // the wait for the real sort-specific response BEFORE clicking.
+    const activityRespPromise2 = page.waitForResponse(r => r.url().includes('/candidates') && r.url().includes('sort_by=last_activity'), { timeout: 15000 });
+    await page.locator('th', { hasText: 'Activity' }).first().click();
+    await activityRespPromise2;
+    await expect(page.locator('[data-testid="candidate-list"] tr').first()).toBeVisible({ timeout: 10000 });
+    await page.waitForTimeout(300);
+
+    const rows = page.locator('[data-testid="candidate-list"] tr');
+    const count = await rows.count();
+    const heights: number[] = [];
+    for (let i = 0; i < Math.min(count, 20); i++) {
+      const b = await rows.nth(i).boundingBox();
+      if (b) heights.push(Math.round(b.height));
+    }
+    expect(heights.length).toBeGreaterThan(0);
+    const median = heights.slice().sort((a, b) => a - b)[Math.floor(heights.length / 2)];
+    // Before the fix, a long-skill-text row measured 264px against a
+    // ~84px median (>3x). After the fix every row is capped to a small,
+    // near-uniform height — no row should exceed 1.5x the median.
+    for (const h of heights) {
+      expect(h).toBeLessThanOrEqual(median * 1.5 + 10);
+    }
+  });
+
+  test('a long resume-parsed skill value truncates within its own badge instead of wrapping the row taller', async ({ page }) => {
+    await page.goto('/candidates');
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('[data-testid="candidate-list"] tr').first()).toBeVisible({ timeout: 20000 });
+
+    // The Skills cell's flex container is real-code-capped to maxHeight
+    // 42px regardless of content — verify that cap is actually applied,
+    // not just present as a style attribute.
+    const skillCells = page.locator('[data-testid="candidate-list"] tr td:nth-child(7) > div').first();
+    if (await skillCells.count() > 0) {
+      await expect(skillCells).toHaveCSS('max-height', '42px');
+      await expect(skillCells).toHaveCSS('overflow', 'hidden');
+    }
+  });
+});
