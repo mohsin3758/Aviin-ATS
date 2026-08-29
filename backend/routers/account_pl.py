@@ -3,8 +3,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role_or_trusted_internal
 from permissions import require_permission
+
+_MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 
 router = APIRouter(prefix="/account-pl", tags=["account-pl"])
 
@@ -59,7 +61,7 @@ class BuEligibilityIn(BaseModel):
 
 @router.get("")
 async def list_account_pl(month: Optional[int]=None, year: Optional[int]=None,
-                           actor: Actor=Depends(require_permission("account_pl", "read"))):
+                           actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT * FROM v_account_pl
@@ -70,7 +72,7 @@ async def list_account_pl(month: Optional[int]=None, year: Optional[int]=None,
     return [dict(r) for r in rows]
 
 @router.post("")
-async def upsert_account_pl(body: AccountPlIn, actor: Actor=Depends(get_actor)):
+async def upsert_account_pl(body: AccountPlIn, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO account_pl
@@ -101,7 +103,7 @@ async def upsert_account_pl(body: AccountPlIn, actor: Actor=Depends(get_actor)):
 
 @router.get("/summary")
 async def account_pl_summary(month: Optional[int]=None, year: Optional[int]=None,
-                              actor: Actor=Depends(get_actor)):
+                              actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT COUNT(*) AS account_count,
@@ -118,7 +120,7 @@ async def account_pl_summary(month: Optional[int]=None, year: Optional[int]=None
     return dict(row)
 
 @router.get("/{account_id}")
-async def get_account_pl(account_id: str, actor: Actor=Depends(get_actor)):
+async def get_account_pl(account_id: str, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("SELECT * FROM v_account_pl WHERE id=$1", account_id)
         if not row:
@@ -129,7 +131,7 @@ async def get_account_pl(account_id: str, actor: Actor=Depends(get_actor)):
     return {**dict(row), "allocations": [dict(a) for a in allocs]}
 
 @router.patch("/{account_id}/finalize")
-async def finalize_account_pl(account_id: str, actor: Actor=Depends(get_actor)):
+async def finalize_account_pl(account_id: str, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE account_pl SET is_finalized=true,finalized_by=$1,finalized_at=now()
@@ -165,7 +167,7 @@ coll_router = APIRouter(prefix="/collections", tags=["collections"])
 
 @coll_router.get("")
 async def list_collections(status: Optional[str]=None, client_id: Optional[str]=None,
-                            actor: Actor=Depends(require_permission("collections", "read"))):
+                            actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT * FROM v_collection_aging
@@ -176,7 +178,7 @@ async def list_collections(status: Optional[str]=None, client_id: Optional[str]=
     return [dict(r) for r in rows]
 
 @coll_router.post("")
-async def create_collection(body: CollectionIn, actor: Actor=Depends(get_actor)):
+async def create_collection(body: CollectionIn, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     from datetime import date as _d, datetime as _dt
     def _date(v):
         if v is None or v == "": return None
@@ -203,7 +205,7 @@ async def create_collection(body: CollectionIn, actor: Actor=Depends(get_actor))
     return dict(row)
 
 @coll_router.patch("/{coll_id}")
-async def update_collection(coll_id: str, body: CollectionIn, actor: Actor=Depends(get_actor)):
+async def update_collection(coll_id: str, body: CollectionIn, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE collection_records SET
@@ -217,7 +219,7 @@ async def update_collection(coll_id: str, body: CollectionIn, actor: Actor=Depen
     return dict(row)
 
 @coll_router.get("/summary")
-async def collections_summary(actor: Actor=Depends(get_actor)):
+async def collections_summary(actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         # REAL BUG FIX (2026-08-17): queried collection_records directly
         # with no clients.is_active check -- ~9 fake QA/test collection
@@ -243,7 +245,7 @@ async def collections_summary(actor: Actor=Depends(get_actor)):
 bu_router = APIRouter(prefix="/bu-tracker", tags=["bu-tracker"])
 
 @bu_router.get("")
-async def list_bu(actor: Actor=Depends(require_permission("bu_tracker", "read"))):
+async def list_bu(actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT be.*, u.full_name AS bu_head_name
@@ -254,7 +256,7 @@ async def list_bu(actor: Actor=Depends(require_permission("bu_tracker", "read"))
     return [dict(r) for r in rows]
 
 @bu_router.post("")
-async def upsert_bu(body: BuEligibilityIn, actor: Actor=Depends(get_actor)):
+async def upsert_bu(body: BuEligibilityIn, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO bu_eligibility
@@ -280,7 +282,7 @@ async def upsert_bu(body: BuEligibilityIn, actor: Actor=Depends(get_actor)):
     return dict(row)
 
 @bu_router.patch("/{bu_id}/create-bu")
-async def mark_bu_created(bu_id: str, actor: Actor=Depends(get_actor)):
+async def mark_bu_created(bu_id: str, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE bu_eligibility SET bu_created=true,bu_created_at=now()
@@ -297,7 +299,7 @@ ceo_router = APIRouter(prefix="/ceo-dashboard", tags=["ceo-dashboard"])
 
 @ceo_router.get("")
 async def ceo_dashboard(month: Optional[int]=None, year: Optional[int]=None,
-                         actor: Actor=Depends(get_actor)):
+                         actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     """Aggregated CEO view: revenue, CM, collections, BU status, top accounts."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         pl = await conn.fetchrow("""

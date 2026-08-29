@@ -6,8 +6,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
 from pydantic import BaseModel
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role_or_trusted_internal
 from permissions import require_permission
+
+_MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 
 # ── P36: Advanced Reports ─────────────────────────────────────
 reports_router = APIRouter(prefix="/reports", tags=["reports"])
@@ -25,7 +27,7 @@ async def monthly_billing(year: Optional[int]=None, actor: Actor=Depends(require
     return [dict(r) for r in rows]
 
 @reports_router.get("/pipeline-velocity")
-async def pipeline_velocity(actor: Actor=Depends(require_permission("pipeline", "read"))):
+async def pipeline_velocity(actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT stage, count, avg_days_in_stage, stale_count
@@ -36,7 +38,7 @@ async def pipeline_velocity(actor: Actor=Depends(require_permission("pipeline", 
 
 @reports_router.get("/recruiter-performance")
 async def recruiter_performance(month: Optional[int]=None, year: Optional[int]=None,
-                                  actor: Actor=Depends(require_permission("analytics", "read"))):
+                                  actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT
@@ -175,7 +177,7 @@ async def calculate_compliance(gross_salary: float, basic_pct: float=0.4,
     return compute_compliance(gross_salary, basic_pct)
 
 @compliance_router.post("/bulk-compute")
-async def bulk_compute(month: int, year: int, actor: Actor=Depends(get_actor)):
+async def bulk_compute(month: int, year: int, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     """Compute compliance for all active placements in a month."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         placements = await conn.fetch("""
@@ -210,7 +212,7 @@ async def bulk_compute(month: int, year: int, actor: Actor=Depends(get_actor)):
 
 @compliance_router.get("")
 async def list_compliance(month: Optional[int]=None, year: Optional[int]=None,
-                           actor: Actor=Depends(get_actor)):
+                           actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT cr.*, c.full_name AS candidate_name
@@ -225,7 +227,7 @@ async def list_compliance(month: Optional[int]=None, year: Optional[int]=None,
 
 @compliance_router.get("/summary")
 async def compliance_summary(month: Optional[int]=None, year: Optional[int]=None,
-                              actor: Actor=Depends(get_actor)):
+                              actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT
@@ -250,7 +252,7 @@ import_router = None  # placeholder
 health_router = APIRouter(prefix="/client-health", tags=["client-health"])
 
 @health_router.post("/compute")
-async def compute_health_scores(actor: Actor=Depends(get_actor)):
+async def compute_health_scores(actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     """Compute health scores for all clients — zero-token rule engine."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         clients = await conn.fetch("""
@@ -316,7 +318,7 @@ async def compute_health_scores(actor: Actor=Depends(get_actor)):
     return {"computed": len(results), "clients": sorted(results, key=lambda x:-x['health_score'])}
 
 @health_router.get("")
-async def list_health_scores(actor: Actor=Depends(get_actor)):
+async def list_health_scores(actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT DISTINCT ON (client_name) *
@@ -335,7 +337,7 @@ async def list_health_scores(actor: Actor=Depends(get_actor)):
 forecast_router = APIRouter(prefix="/revenue-forecast", tags=["forecast"])
 
 @forecast_router.get("")
-async def revenue_forecast(months_ahead: int=6, actor: Actor=Depends(get_actor)):
+async def revenue_forecast(months_ahead: int=6, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     """Linear trend revenue forecast — zero-token, local computation."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         historical = await conn.fetch("""

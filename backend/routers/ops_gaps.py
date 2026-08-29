@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from pathlib import Path
 
 import db
-from deps import Actor, get_actor, require_role
+from deps import Actor, get_actor, require_role, require_role_or_trusted_internal
 
 alerts_router = APIRouter(prefix="/alerts", tags=["alerts"])
 config_router = APIRouter(prefix="/ops-config", tags=["ops-config"])
@@ -29,8 +29,16 @@ UPLOAD_DIR = Path("/app/uploads/candidate-portal")
 
 
 # ═══════════════════════════════════════════════════ Operational Alerts ═══
+# 2026-08-28: found live, via genuine screenshot verification (not code
+# review) of the War Room page under a throwaway recruiter login - real,
+# specific requisition-level SLA-breach detail was fully visible with no
+# role gate at all, the same class of gap fixed the same day in
+# analytics.py for the rest of this exact page's data sources.
+_MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
+
+
 @alerts_router.get("")
-async def list_alerts(stalled_hours: int = 48, actor: Actor = Depends(get_actor)):
+async def list_alerts(stalled_hours: int = 48, actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         stalled = await conn.fetch("SELECT * FROM find_stalled_assignments($1)", stalled_hours)
         breaches = await conn.fetch("SELECT * FROM find_sla_breaches()")
@@ -64,7 +72,7 @@ class AckIn(BaseModel):
 
 
 @alerts_router.post("/acknowledge")
-async def acknowledge_alert(body: AckIn, actor: Actor = Depends(get_actor)):
+async def acknowledge_alert(body: AckIn, actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             """INSERT INTO alert_acknowledgments (tenant_id, alert_id, acknowledged_by, note)

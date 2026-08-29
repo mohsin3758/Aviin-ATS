@@ -18,7 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role_or_trusted_internal
+
+_MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 from routers.nda import _send_email_with_pdf
 
 TENANT_ID = os.environ.get("DEFAULT_TENANT_ID", "a92d7fd7-fb72-47d8-881e-2493c61717ce")
@@ -484,7 +486,7 @@ class SavedReportIn(BaseModel):
 
 
 @reportbuilder_router.get("/")
-async def report_list(actor: Actor = Depends(get_actor)):
+async def report_list(actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT * FROM saved_reports WHERE tenant_id=$1 ORDER BY created_at DESC",
@@ -494,7 +496,7 @@ async def report_list(actor: Actor = Depends(get_actor)):
 
 
 @reportbuilder_router.post("/")
-async def report_create(body: SavedReportIn, actor: Actor = Depends(get_actor)):
+async def report_create(body: SavedReportIn, actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     if body.entity not in ALLOWED_ENTITIES:
         raise HTTPException(400, f"entity must be one of {list(ALLOWED_ENTITIES)}")
     import json as _json
@@ -509,7 +511,7 @@ async def report_create(body: SavedReportIn, actor: Actor = Depends(get_actor)):
 
 
 @reportbuilder_router.post("/{report_id}/run")
-async def report_run(report_id: str, actor: Actor = Depends(get_actor)):
+async def report_run(report_id: str, actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rep = await conn.fetchrow("SELECT * FROM saved_reports WHERE id=$1 AND tenant_id=$2",
                                    report_id, actor.tenant_id)
@@ -535,7 +537,7 @@ async def report_run(report_id: str, actor: Actor = Depends(get_actor)):
 
 
 @reportbuilder_router.delete("/{report_id}")
-async def report_delete(report_id: str, actor: Actor = Depends(get_actor)):
+async def report_delete(report_id: str, actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         result = await conn.execute("DELETE FROM saved_reports WHERE id=$1 AND tenant_id=$2",
                                      report_id, actor.tenant_id)

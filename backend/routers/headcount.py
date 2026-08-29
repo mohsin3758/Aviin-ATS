@@ -3,7 +3,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role_or_trusted_internal
+
+_MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 
 router = APIRouter(prefix="/headcount", tags=["headcount"])
 
@@ -19,7 +21,7 @@ class HcIn(BaseModel):
     notes: Optional[str] = None
 
 @router.get("")
-async def list_plans(fiscal_year: Optional[str]=None, actor: Actor=Depends(get_actor)):
+async def list_plans(fiscal_year: Optional[str]=None, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT hp.*,
@@ -32,7 +34,7 @@ async def list_plans(fiscal_year: Optional[str]=None, actor: Actor=Depends(get_a
     return [dict(r) for r in rows]
 
 @router.get("/summary")
-async def summary(fiscal_year: Optional[str]=None, actor: Actor=Depends(get_actor)):
+async def summary(fiscal_year: Optional[str]=None, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT COUNT(*) plans,
@@ -48,7 +50,7 @@ async def summary(fiscal_year: Optional[str]=None, actor: Actor=Depends(get_acto
     return dict(row)
 
 @router.post("")
-async def create_plan(body: HcIn, actor: Actor=Depends(get_actor)):
+async def create_plan(body: HcIn, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO headcount_plans
@@ -66,7 +68,7 @@ async def create_plan(body: HcIn, actor: Actor=Depends(get_actor)):
 
 @router.patch("/{plan_id}/actuals")
 async def update_actuals(plan_id: str, actual_hires: int=0, actual_spend: float=0,
-                          actor: Actor=Depends(get_actor)):
+                          actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE headcount_plans SET actual_hires=$1, actual_spend=$2,
@@ -77,7 +79,7 @@ async def update_actuals(plan_id: str, actual_hires: int=0, actual_spend: float=
     return dict(row)
 
 @router.patch("/{plan_id}/approve")
-async def approve_plan(plan_id: str, actor: Actor=Depends(get_actor)):
+async def approve_plan(plan_id: str, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE headcount_plans SET status='approved', approved_by=$1

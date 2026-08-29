@@ -729,15 +729,16 @@ function CandidatePreviewPanel({ candidateId, isSelected, onToggle, onBack }: {
 function ShareButton({ reqId, size = 'normal' }: { reqId: string; size?: 'normal' | 'icon' }) {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
   // SECURITY FIX (2026-08-10 audit): the token used to be constructed
   // client-side as base64(tenantId:reqId) — unsigned and trivially
   // forgeable by anyone, since both halves are derivable from public
   // data. The backend now mints a real random token and remembers it
   // (client_portal_tokens); this just asks for one instead of building
   // it locally. Same URL shape, so no dashboard-side migration needed.
-  async function handleShare(e: React.MouseEvent) {
+  async function copyClientLink(e: React.MouseEvent) {
     e.stopPropagation(); e.preventDefault();
-    setBusy(true);
+    setOpen(false); setBusy(true);
     try {
       const res = await apiFetch(`/client-portal/generate-link?requisition_id=${reqId}`, { method: 'POST' });
       const url = window.location.origin + '/client-portal/' + res.token;
@@ -747,29 +748,69 @@ function ShareButton({ reqId, size = 'normal' }: { reqId: string; size?: 'normal
       alert('Could not generate a share link: ' + (err as Error).message);
     } finally { setBusy(false); }
   }
+  // 2026-08-28: a second, real option next to the existing client-facing
+  // link — a candidate-facing "send me your resume for this role" link
+  // (recruiter_job_links), attributed to whoever generated it. Same
+  // clean standard form as the personal "My Sourcing Link" (built
+  // 2026-08-25 for the job-less version) but scoped to this exact
+  // requisition, and creates a real application on submit.
+  async function copyCandidateLink(e: React.MouseEvent) {
+    e.stopPropagation(); e.preventDefault();
+    setOpen(false); setBusy(true);
+    try {
+      const res = await apiFetch(`/personal-links/job/${reqId}`);
+      await navigator.clipboard.writeText(res.share_url);
+      setCopied(true); setTimeout(() => setCopied(false), 2500);
+    } catch (err) {
+      alert('Could not generate a candidate application link: ' + (err as Error).message);
+    } finally { setBusy(false); }
+  }
+  const menu = open && (
+    <div onClick={e => e.stopPropagation()} style={{
+      position: 'absolute', top: '100%', right: 0, marginTop: '4px', zIndex: 50,
+      background: 'white', border: '1px solid #e2e8f0', borderRadius: '8px',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.12)', minWidth: '220px', overflow: 'hidden',
+    }}>
+      <button onClick={copyClientLink} style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600, color: '#334155', display: 'block' }}>
+        Client Portal Link
+        <div style={{ fontSize: '11px', fontWeight: 400, color: '#94a3b8', marginTop: '2px' }}>Client views the real-time shortlist</div>
+      </button>
+      <div style={{ borderTop: '1px solid #f1f5f9' }} />
+      <button onClick={copyCandidateLink} style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600, color: '#334155', display: 'block' }}>
+        Candidate Application Link
+        <div style={{ fontSize: '11px', fontWeight: 400, color: '#94a3b8', marginTop: '2px' }}>Candidate submits a resume for this role</div>
+      </button>
+    </div>
+  );
   if (size === 'icon') {
     return (
-      <button onClick={handleShare} disabled={busy} title="Copy client shortlist link" style={{
-        width: '26px', height: '26px', borderRadius: '6px', cursor: busy ? 'default' : 'pointer',
-        background: copied ? '#f0fdf4' : '#faf5ff',
-        border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        {copied ? <Copy size={12} style={{ color: '#15803d' }} /> : <Link2 size={12} style={{ color: '#7c3aed' }} />}
-      </button>
+      <div style={{ position: 'relative' }}>
+        <button onClick={e => { e.stopPropagation(); e.preventDefault(); setOpen(o => !o); }} disabled={busy} title="Share this job" style={{
+          width: '26px', height: '26px', borderRadius: '6px', cursor: busy ? 'default' : 'pointer',
+          background: copied ? '#f0fdf4' : '#faf5ff',
+          border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          {copied ? <Copy size={12} style={{ color: '#15803d' }} /> : <Link2 size={12} style={{ color: '#7c3aed' }} />}
+        </button>
+        {menu}
+      </div>
     );
   }
   return (
-    <button onClick={handleShare} disabled={busy} title="Copy client shortlist link" style={{
-      display: 'flex', alignItems: 'center', gap: '4px',
-      fontSize: '12px', fontWeight: '600',
-      color: copied ? '#15803d' : '#7c3aed',
-      background: copied ? '#f0fdf4' : '#faf5ff',
-      border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
-      padding: '5px 10px', borderRadius: '6px', cursor: busy ? 'default' : 'pointer',
-    }}>
-      {copied ? <><Copy size={11}/> Copied!</> : <><Link2 size={11}/> Share</>}
-    </button>
+    <div style={{ position: 'relative' }}>
+      <button onClick={e => { e.stopPropagation(); e.preventDefault(); setOpen(o => !o); }} disabled={busy} title="Share this job" style={{
+        display: 'flex', alignItems: 'center', gap: '4px',
+        fontSize: '12px', fontWeight: '600',
+        color: copied ? '#15803d' : '#7c3aed',
+        background: copied ? '#f0fdf4' : '#faf5ff',
+        border: copied ? '1px solid #bbf7d0' : '1px solid #ddd6fe',
+        padding: '5px 10px', borderRadius: '6px', cursor: busy ? 'default' : 'pointer',
+      }}>
+        {copied ? <><Copy size={11}/> Copied!</> : <><Link2 size={11}/> Share</>}
+      </button>
+      {menu}
+    </div>
   );
 }
 

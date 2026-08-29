@@ -352,6 +352,8 @@ app.include_router(call_letters.router)
 app.include_router(assignment_dashboard.router)
 app.include_router(personal_links.router)
 app.include_router(personal_links.public_router)
+app.include_router(personal_links.job_router)
+app.include_router(personal_links.public_job_router)
 app.include_router(rediscovery.router)
 app.include_router(user_whatsapp.router)
 

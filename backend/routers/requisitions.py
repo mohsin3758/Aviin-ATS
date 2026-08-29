@@ -131,10 +131,26 @@ async def list_requisitions(
         # covers all three surfaces named in the request).
         scope = await get_job_visibility_scope(conn, actor.tenant_id, actor.role)
         if scope == "assigned_only" and actor.user_id:
+            # 2026-08-28: widened from "assignments only" to also include
+            # requisitions belonging to a client the actor genuinely owns
+            # (client_owners) - a real, previously-invisible gap found while
+            # fixing the Ashwini/recruiter over-visibility report: this
+            # tenant's one real KAE (assigned_only since before this fix)
+            # has zero recruiter-assignment rows at all, so the old,
+            # assignments-only filter would have shown her literally zero
+            # requisitions even for her own real clients. A recruiter with
+            # no client_owners rows sees exactly the same result as before
+            # (the OR adds nothing for them); a KAE/KAM now correctly sees
+            # requisitions for clients they own even with zero direct
+            # assignments, which is what "my jobs" actually means for
+            # those roles.
             params.append(actor.user_id)
+            p = len(params)
             conditions.append(
-                f"id IN (SELECT requisition_id FROM assignments "
-                f"WHERE recruiter_id = ${len(params)} AND status = 'active')"
+                f"(id IN (SELECT requisition_id FROM assignments "
+                f"WHERE recruiter_id = ${p} AND status = 'active') "
+                f"OR client_id IN (SELECT client_id FROM client_owners "
+                f"WHERE user_id = ${p} AND is_active))"
             )
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""

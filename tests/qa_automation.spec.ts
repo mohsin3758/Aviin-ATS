@@ -2324,12 +2324,12 @@ test('S22 Requisitions view switcher: card/compact/list/table all render real da
   await expect(page.getByTestId('req-view-content')).toBeVisible();
   expect(await page.locator('[data-testid="req-view-content"] > div').count()).toBe(cardCount);
   // Compact view now carries a Share action too (previously Card-only)
-  expect(await page.locator('[title="Copy client shortlist link"]').count()).toBeGreaterThan(0);
+  expect(await page.locator('[title="Share this job"]').count()).toBeGreaterThan(0);
 
   await page.getByTestId('req-view-list').click();
   await expect(page.getByTestId('req-view-content')).toBeVisible();
   expect(await page.locator('[data-testid="req-view-content"] > div').count()).toBe(cardCount);
-  expect(await page.locator('[title="Copy client shortlist link"]').count()).toBeGreaterThan(0);
+  expect(await page.locator('[title="Share this job"]').count()).toBeGreaterThan(0);
 
   await page.getByTestId('req-view-table').click();
   await expect(page.locator('table')).toBeVisible({ timeout: 10000 });
@@ -2339,7 +2339,7 @@ test('S22 Requisitions view switcher: card/compact/list/table all render real da
   const headers = await page.locator('table thead th').allTextContents();
   expect(headers).toContain('Inbox');
   expect(headers).toContain('Pipeline');
-  expect(await page.locator('table [title="Copy client shortlist link"]').count()).toBeGreaterThan(0);
+  expect(await page.locator('table [title="Share this job"]').count()).toBeGreaterThan(0);
 
   // "Opened" column (2026-08-17): shows each requisition's real created_at
   // date, between Status and Inbox — the field was already in the API

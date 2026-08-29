@@ -7,21 +7,40 @@ the calling role (app_user) exactly as for ordinary table queries.
 from fastapi import APIRouter, Depends
 
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role_or_trusted_internal
 from permissions import require_permission
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
+# 2026-08-28: these 5 endpoints back the sidebar's ANALYTICS/FINANCE groups
+# and the Dashboard's team-wide widgets - tenant-wide business intelligence
+# (which contractors end soon, agency-wide funnel numbers, every recruiter's
+# individual workload, company skill-gap, every active placement's bill/pay
+# rate) that had no role gate at all despite the sidebar having an
+# established roles:[...] convention already used elsewhere. Confirmed via
+# a real report that a plain recruiter/KAE could see this - both through
+# the Dashboard's "Recruiter Capacity" widget (individually-identifying
+# workload data for every OTHER staff member, not just their own) and, more
+# seriously, by simply navigating to /command-center or /finance directly
+# (sidebar links with no roles: restriction, backed by these exact
+# endpoints with no role check either - an IDOR-class gap, not just a UI
+# oversight). Gated to the same management tier used consistently elsewhere
+# in this codebase (require_role_or_trusted_internal("admin","manager") etc.) - recruiter_capacity
+# is self-scoped rather than blocked outright, since a recruiter's own
+# capacity is legitimately theirs to see (surfaced as "My Capacity" on the
+# Dashboard for non-management roles).
+_MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
+
 
 @router.get("/redeployment-queue")
-async def redeployment_queue(actor: Actor = Depends(get_actor)):
+async def redeployment_queue(actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT * FROM v_redeployment_queue ORDER BY end_date")
     return [dict(r) for r in rows]
 
 
 @router.get("/agency-funnel")
-async def agency_funnel(actor: Actor = Depends(get_actor)):
+async def agency_funnel(actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT * FROM v_agency_funnel ORDER BY client_name")
     return [dict(r) for r in rows]
@@ -30,19 +49,23 @@ async def agency_funnel(actor: Actor = Depends(get_actor)):
 @router.get("/recruiter-capacity")
 async def recruiter_capacity(actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("SELECT * FROM v_recruiter_capacity ORDER BY full_name")
+        if actor.role in _MGMT_ROLES or actor.role is None:
+            rows = await conn.fetch("SELECT * FROM v_recruiter_capacity ORDER BY full_name")
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM v_recruiter_capacity WHERE recruiter_id = $1", actor.user_id)
     return [dict(r) for r in rows]
 
 
 @router.get("/skill-gap")
-async def skill_gap(actor: Actor = Depends(get_actor)):
+async def skill_gap(actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("SELECT * FROM v_skill_gap")
     return [dict(r) for r in rows]
 
 
 @router.get("/active-placements")
-async def active_placements(actor: Actor = Depends(get_actor)):
+async def active_placements(actor: Actor = Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT p.id, p.candidate_id, p.client_id,

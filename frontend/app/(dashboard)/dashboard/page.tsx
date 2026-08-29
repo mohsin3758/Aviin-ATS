@@ -49,7 +49,7 @@ function StatCard({ icon, label, value, color, bg, trend, href }: any) {
 export default function DashboardPage() {
   const [_userName, set_UserName] = useState('Admin');
   const [_userRole, set_UserRole] = useState('admin');
-  const isAdminOrLead = ['admin','super_admin','lead_recruiter','kae','kae_manager'].includes(_userRole);
+  const isAdminOrLead = ['admin','super_admin','manager','lead_recruiter'].includes(_userRole);
   useEffect(() => { const t = getTokenPayload(); if(t?.full_name) set_UserName(t.full_name.split(' ')[0]); if(t?.role) set_UserRole(t.role); }, []);
   const [reportsVisited, setReportsVisited] = useState(false);
   useEffect(() => { setReportsVisited(localStorage.getItem('aviin_visited_reports') === '1'); }, []);
@@ -152,12 +152,12 @@ export default function DashboardPage() {
       )}
 
       <div data-testid="capacity-bars" style={{animation:"none",marginTop:"24px",padding:"20px",background:"white",borderRadius:"12px",border:"1px solid #e2e8f0",display:"block",minHeight:"80px"}}>
-        <h3 style={{fontSize:"15px",fontWeight:"700",color:"#0f172a",marginBottom:"12px"}}>Recruiter Capacity</h3>
+        <h3 style={{fontSize:"15px",fontWeight:"700",color:"#0f172a",marginBottom:"12px"}}>{isAdminOrLead ? "Recruiter Capacity" : "My Capacity"}</h3>
         {(recruiterCapacity && recruiterCapacity.length > 0) ? (
           <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
             {recruiterCapacity.slice(0,6).map((r:any) => (
               <div key={r.recruiter_id} style={{display:'flex',alignItems:'center',gap:'12px'}}>
-                <div style={{width:'120px',fontSize:'12px',color:'#475569',fontWeight:'500',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.full_name}</div>
+                {isAdminOrLead && <div style={{width:'120px',fontSize:'12px',color:'#475569',fontWeight:'500',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.full_name}</div>}
                 <div style={{flex:1,background:'#f1f5f9',borderRadius:'6px',height:'10px',overflow:'hidden'}}>
                   <div style={{height:'100%',borderRadius:'6px',background: r.utilization_pct > 80 ? '#ef4444' : r.utilization_pct > 50 ? '#f59e0b' : '#10b981',width:`${Math.min(r.utilization_pct,100)}%`}} />
                 </div>
@@ -166,7 +166,7 @@ export default function DashboardPage() {
             ))}
           </div>
         ) : (
-          <p style={{color:"#94a3b8",fontSize:"13px"}}>No recruiter data</p>
+          <p style={{color:"#94a3b8",fontSize:"13px"}}>{isAdminOrLead ? "No recruiter data" : "No capacity data on file for your account yet"}</p>
         )}
       </div>
 
@@ -313,6 +313,7 @@ export default function DashboardPage() {
           </div>
         </div>
       </div>
+      {isAdminOrLead && (
       <div style={{marginTop:"24px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"12px"}}>
           <h3 style={{fontSize:"15px",fontWeight:"700",color:"#0f172a"}}>Redeployment Queue</h3>
@@ -345,6 +346,7 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+      )}
 
     </div>
   );

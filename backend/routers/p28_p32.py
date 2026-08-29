@@ -5,7 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Response, HTTPException, Form, File, UploadFile
 from pydantic import BaseModel
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role_or_trusted_internal
+
+_MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 
 # ── P28: Audit Log ────────────────────────────────────────────
 audit_router = APIRouter(prefix="/audit", tags=["audit"])
@@ -194,7 +196,7 @@ salary_router = APIRouter(prefix="/salary-benchmark", tags=["salary-benchmark"])
 
 @salary_router.get("")
 async def get_benchmarks(role: Optional[str]=None, location: Optional[str]=None,
-                          exp_years: Optional[float]=None, actor: Actor=Depends(get_actor)):
+                          exp_years: Optional[float]=None, actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT * FROM salary_benchmarks
@@ -208,7 +210,7 @@ async def get_benchmarks(role: Optional[str]=None, location: Optional[str]=None,
 
 @salary_router.get("/suggest")
 async def salary_suggestion(role: str, exp_years: float,
-                              location: str='Bengaluru', actor: Actor=Depends(get_actor)):
+                              location: str='Bengaluru', actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     """Instant salary suggestion — zero-token rule engine."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
@@ -238,7 +240,7 @@ async def salary_suggestion(role: str, exp_years: float,
     return dict(row)
 
 @salary_router.get("/market-demand")
-async def market_demand(actor: Actor=Depends(get_actor)):
+async def market_demand(actor: Actor=Depends(require_role_or_trusted_internal(*_MGMT_ROLES))):
     """Skills demand from open requisitions — zero-token market intelligence."""
     # BUG FIX (2026-08-10 audit): missing the is_active filter every other
     # endpoint adopted when soft-delete shipped - this was counting

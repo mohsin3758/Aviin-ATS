@@ -14515,3 +14515,190 @@ after a CRLF-restoration fix on `Sidebar.tsx`, the same "Python-script
 edits silently flip a CRLF file to LF" bug class documented the day
 before - caught and fixed before commit this time, not after). Zero-
 token audit: `CONFIRMED CLEAN` (416 files, 0 external API refs).
+
+
+## 4 real reports resolved: Dashboard personal-only view, a systemic Analytics/Finance backend gap found via genuine testing, job_visibility_scope fixed for recruiter/kam + widened for KAE/KAM client ownership, and a new job-specific candidate resume link, 2026-08-28/29
+User sent 4 real, evidenced reports off live screenshots: (1) Dashboard's
+"Recruiter Capacity" widget showed every OTHER staff member's individual
+workload to a plain recruiter (Ashwini); (2) a screenshot of the existing
+personal resume-drop form as reference; (3) Jobs & Requisitions showed ALL
+open jobs to Ashwini, not just her assigned ones; (4) asked for a way to
+share a job-specific candidate resume link, not just the generic personal
+one. All 4 investigated and fixed with real data, not assumptions.
+
+**Item 3 (job visibility) - real root cause, not a display bug.**
+`role_definitions.job_visibility_scope` (built 2026-08-09) already existed
+and worked correctly, but this tenant's real `recruiter`/`kam` roles were
+still `'all'` (never flipped after their own original verification, which
+deliberately restored the test role back to `'all'` afterward). Flipped
+both to `'assigned_only'` via the real `PUT /roles/{id}/visibility` API.
+**A real, deeper gap found while fixing it**: `assigned_only`'s filter was
+`assignments`-table-only (`recruiter_id = actor.user_id`) - checked this
+tenant's one real KAE (Shahana, already `assigned_only` from an earlier
+admin action) and found she has **zero** direct assignments, meaning she
+would see literally 0 requisitions even for her own real clients. Widened
+the filter to `assignments OR client_id IN (client_owners for this user)`
+- a recruiter with no client_owners rows is unaffected (the OR adds
+nothing); a KAE/KAM now correctly sees every open role for a client they
+own, not just ones they personally hold a recruiter assignment on. Real
+end-to-end verification: a throwaway recruiter assigned to only 1 of 2
+throwaway reqs saw exactly that 1; a throwaway KAE with zero assignments
+but real ownership of the client saw BOTH of that client's reqs.
+
+**Item 1 (Dashboard) - fixed the reported widget, then found the real gap
+was much bigger.** `isAdminOrLead`'s role list was wrong two ways ('kae'/
+'kae_manager' wrongly treated as management despite the report explicitly
+naming kae as needing individual-only treatment; 'manager' - a real,
+distinct role used throughout this codebase - was missing entirely).
+Fixed to `['admin','super_admin','manager','lead_recruiter']`.
+`GET /analytics/recruiter-capacity` now self-scopes to the caller's own
+row for non-management roles (Dashboard relabels to "My Capacity"); the
+"Redeployment Queue" widget (backed by `/analytics/redeployment-queue`,
+no per-recruiter attribution possible) is now management-only, backend
+AND frontend both.
+
+**The real, much bigger finding**: sidebar-gating the Dashboard widget
+alone would have been a false sense of security - checking, the ENTIRE
+"ANALYTICS" and "FINANCE" nav groups (War Room, Revenue Forecast, Client
+Health, Headcount, Report Builder, ERP/Finance, Account P&L, Collections,
+BU Tracker, CEO Dashboard, PF/ESI/TDS, Salary Benchmark) had **zero**
+`roles:` restriction in Sidebar.tsx despite the same file already using
+that exact convention elsewhere - and confirmed live, navigating a
+throwaway recruiter directly to `/command-center` showed the real,
+tenant-wide "Operational Alerts" panel (real requisition names, real SLA-
+breach hours, an Acknowledge button) with zero blocking. A systematic
+sweep of 22 real backend endpoints behind these pages found **20 wide
+open** to any authenticated user (confirmed via direct API calls with a
+real throwaway recruiter token, not assumed) - only `/erp/timesheets`/
+`/erp/invoices` (fixed in an earlier P12 pass) were already gated.
+Fixed all of it: added `roles:['admin','super_admin','manager',
+'lead_recruiter']` to both sidebar groups (SLA Dashboard and Clients &
+Packs deliberately left open - not identity-revealing, more operationally
+general); gated the 20 backend endpoints across `analytics.py`,
+`ops_gaps.py` (`/alerts`), `p36_p42.py` (pipeline-velocity, recruiter-
+performance, compliance, client-health, revenue-forecast), `gap_features.py`
+(report-builder's 4 routes), `p28_p32.py` (salary-benchmark's 3 routes),
+`account_pl.py` (all 13 account-pl/collections/bu-tracker/ceo-dashboard
+routes), `headcount.py` (all 5 routes) - deliberately left
+`/reports/dashboard-summary` (shared with Dashboard's own headline stats),
+`/analytics/hiring-funnel` (aggregate-only, already soft-launch-gated),
+and `/incentives/summary` (shared with recruiters' own legitimate
+Incentives page) untouched, confirmed via a real frontend-caller sweep
+before deciding, not guessed.
+
+**A real regression this same pass caused, caught by the project's own
+regression suite, not missed**: a blanket `require_role(*_MGMT_ROLES)`
+correctly blocks a real JWT'd non-management user, but ALSO unconditionally
+rejects the trusted-internal `x-tenant-id`-only access pattern (role=None)
+this project's own test suite - and any real internal/n8n automation -
+relies on for non-HITL reads. The exact same regression class already
+documented once for the Auto-Assign role gate (2026-08-20). Added a new
+`require_role_or_trusted_internal()` dependency factory in `deps.py`
+(exempts `actor.role is None`, matching the established inline pattern
+already used in `intelligence.py`) and swapped every endpoint touched in
+this pass to use it instead of the plain `require_role`. Verified both
+directions with real calls: a real recruiter JWT still 403s on all 20
+endpoints; the real `x-tenant-id` trusted-internal path now correctly
+200s on all 20.
+
+**A second real mistake caught before it shipped, not after**: the first
+attempt did a blind "replace every `require_role` occurrence" across each
+touched file - fine for the 5 files that had zero pre-existing
+`require_role` usage before this pass, but `ops_gaps.py` already had 9
+OTHER, unrelated, pre-existing human-only gates (scoring weights, SLA
+tiers, shift timings, recruiter-client blocks, agency users) that got
+silently weakened to also accept the trusted-internal exemption - a real
+security regression on features never touched by this report. Caught by
+re-reading the file's full `require_role` usage before moving on (not
+after), reverted those 9 back to plain `require_role`, kept only the 2
+genuinely-new `/alerts` endpoints on the trusted-internal-exempt version.
+
+**A recurring, unrelated deploy-process gotcha, hit and fixed multiple
+times this same session**: several Python file-edit scripts silently
+failed to persist their changes despite printing success and passing
+their own in-script re-read assertion (e.g. `p28_p32.py`'s import,
+`gap_features.py`'s import and its 4 endpoint signatures) - only
+discovered by re-checking via a genuinely fresh, separate SSH connection
+afterward, not trusting the same script's own report. Root cause not
+fully pinned down; the fix going forward is procedural - always
+re-verify file edits via a fresh connection, never trust an in-script
+self-check alone, and add `f.flush()` + `os.fsync()` before any
+in-script verification read.
+
+**Item 4 (job-specific resume link) - built as a genuine second option,
+not a replacement.** New `recruiter_job_links` table (`sql/90`, mirrors
+the existing job-less `recruiter_personal_links` from 2026-08-25/27
+exactly, scoped to one requisition) + `GET /personal-links/job/
+{requisition_id}` (get-or-create, authenticated) + public
+`GET/POST /public/job-links/{token}[/apply]` - the SAME clean "Send your
+resume" form design as the personal link (a new `/apply/{token}` public
+page, near-identical to `/link/{token}`), but on submit creates a real
+`applications` row on the target requisition (tenant's configured
+default add-stage) and claims ownership tagged `job_share_link` -
+reusing the exact source label the 2026-08-25 per-job referral-link
+feature already established for this purpose. The Requisitions page's
+existing single-purpose "Share" button (client-portal link only) became
+a real 2-option dropdown: "Client Portal Link" (unchanged) and
+"Candidate Application Link" (new). A closed/non-open requisition's link
+correctly 404s rather than silently accepting stale applications.
+
+**A real RLS bug found and fixed live during verification, not code
+review**: the public `GET /public/job-links/{token}` call crashed with
+`invalid input syntax for type uuid: ""` - the new SECURITY DEFINER
+resolver function joins `requisitions` (FORCE ROW LEVEL SECURITY), and
+the migration had been run as `app_user` (this project's default for
+most schema work) rather than `postgres` - `CREATE OR REPLACE FUNCTION`
+does NOT change an existing function's owner, so even after re-running
+the CREATE as postgres, the function stayed `app_user`-owned until an
+explicit `ALTER FUNCTION ... OWNER TO postgres`. The sibling function
+this one was modeled on (`get_personal_link_by_token`, sql/81) never hit
+this because it only touches `users`/`tenants`, not a FORCE RLS table -
+the exact same "SECURITY DEFINER function on a FORCE RLS table needs
+real postgres ownership, not just the CREATE statement running under
+that role" bug class documented repeatedly elsewhere in this project,
+just newly triggered by this function being the first personal-link-
+style resolver to touch `requisitions`. Fixed with a real `ALTER
+FUNCTION ... OWNER TO postgres` (plus re-granting EXECUTE to app_user,
+since ownership changes don't preserve prior grants) - documented
+directly in the committed migration file so a fresh-environment deploy
+gets it right the first time.
+
+Verified for real end-to-end, not code review, at every layer: direct
+API cycles for both item 3 (recruiter sees only their 1 assigned req;
+KAE with zero assignments sees both of her owned client's reqs) and
+item 4 (get-or-create idempotent, consent required, real candidate +
+real application + real ownership row with correct source/expiry,
+idempotent resubmission increments count without duplicating the
+application, closed requisition 404s); a full 24-endpoint sweep proving
+every intentionally-open endpoint stayed open and every newly-gated one
+correctly blocked a real recruiter JWT while staying open to admin and
+the trusted-internal path; real headless-browser passes for the
+Dashboard ("My Capacity" heading, Redeployment Queue genuinely absent,
+War Room's Operational Alerts panel genuinely gone - screenshot-
+confirmed, not just checked via a regex that couldn't tell static UI
+chrome from real leaked numbers) and for the new Share dropdown +
+public `/apply/{token}` form (a real click-through: Share -> Candidate
+Application Link -> clipboard -> the real public page -> a genuine
+submission -> the correct "Thank you!" confirmation naming both the
+recruiter and the role).
+
+**A real, previously-undiscovered test-suite bug found by the S22
+regression, fixed rather than worked around**: S22's own assertion
+checked `[title="Copy client shortlist link"]` - the ShareButton's old,
+single-purpose title, now genuinely `"Share this job"` since it opens a
+menu instead of copying directly. Updated the 3 stale selectors to match
+the real, intentional UI change.
+
+Full regression sweep (S1/S2/S8/S13/S16/S20/S22/S30/S43/S48/S53/S60/S67,
+91 tests) passed clean after all fixes, run twice - once catching the
+trusted-internal regression (9 real failures, all on endpoints touched
+this pass), once clean after the fix (only the S22 stale-selector issue
+remained, itself fixed and re-confirmed), and a final isolated re-run of
+the 3 suites that later showed rate-limit-cascade symptoms (this
+session's own extremely heavy verification volume today - dozens of
+throwaway users/logins across many scripts - confirmed via direct
+backend-log timestamp correlation, not assumed) came back clean once the
+window genuinely cleared. Zero-token audit: `CONFIRMED CLEAN` (418
+files, 0 external API refs). All throwaway test data (clients,
+requisitions, candidates, recruiters/KAEs) cleaned up via real APIs
+after every check.
