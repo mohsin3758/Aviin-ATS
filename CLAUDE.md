@@ -14464,3 +14464,54 @@ API (confirmed live by creating and deleting a real probe session), but
 running this at real commercial scale beyond a handful of sessions may
 be outside what the free tier is licensed for - fine for the 2 real
 users needing this today, worth knowing before scaling further.
+
+
+## "Company WhatsApp Number" page (formerly "WhatsApp Setup") clarified — a real, confusing gap left over from the individual-numbers feature, 2026-08-28
+User reported, from a live screenshot: Shahana Tahreen (a real KAE) never
+configured her own WhatsApp number, yet her `/whatsapp-setup` page showed
+"WhatsApp Connected!" / "WhatsApp is Live!" as if she had. Confirmed the
+underlying data was correct, not the bug: this page has always shown the
+SHARED company WAHA session's status (`/waha/status`, `/waha/start`,
+`/waha/qr`), the same one used for automated stage-change messages -
+never a per-user session. That session genuinely IS connected, so the
+page was technically accurate. The real bug was the page's own copy and
+framing: "WhatsApp Setup," "Connect WhatsApp to auto-send stage
+notifications," "WhatsApp Connected!" all read as a personal setup
+action for whoever's looking at it - with zero indication this is the
+one shared number everyone sees the same status for, and zero pointer to
+the real personal-number feature (`/settings/whatsapp-account`, "My
+WhatsApp Account," built 2026-08-26/27) that actually answers what she
+was looking for.
+
+Fixed by clarifying, not by changing any behavior: page title changed to
+"Company WhatsApp Number," subtitle now states plainly "This is not tied
+to your own personal account - it shows the same status to everyone,"
+and a permanent banner links straight to "Connect My WhatsApp Account."
+For a non-admin/non-manager viewer specifically, when the shared session
+is NOT connected, the old "Start Session + Get QR" button (whose real
+backend endpoints, `/waha/start`/`/waha/qr`, have been admin/manager-
+gated since the 2026-08-10 security audit) is replaced with an honest
+"ask your admin, or connect your own personal number instead" message -
+previously a plain recruiter/KAE would have seen a working-looking
+button that silently 403'd with a generic "Connection error" toast.
+Sidebar label updated to match ("Company WhatsApp Number," was
+"WhatsApp Setup").
+
+Verified for real against Shahana's own actual account, not a synthetic
+test: a genuine headless-browser login (her real credentials, corrected
+after an initial wrong-domain guess - her real address is
+`shahana.t@aviintech.com`, confirmed via a direct DB lookup rather than
+guessed a second time) confirmed the exact live page now shows the new
+title, the clarifying subtitle, and a working "Connect My WhatsApp
+Account" link pointing to `/settings/whatsapp-account` - screenshot-
+confirmed, not just a passing locator. The not-connected/non-admin
+message path was verified by direct code review rather than by actually
+disconnecting the real, live, in-use shared session - deliberately not
+risking disruption to real production candidate notifications for the
+sake of exercising one UI branch, a judgment call disclosed here rather
+than silently skipped. Regression: S11 (WhatsApp Outreach) + S67
+(Individual WhatsApp numbers), 15/15 passing, run twice (before and
+after a CRLF-restoration fix on `Sidebar.tsx`, the same "Python-script
+edits silently flip a CRLF file to LF" bug class documented the day
+before - caught and fixed before commit this time, not after). Zero-
+token audit: `CONFIRMED CLEAN` (416 files, 0 external API refs).

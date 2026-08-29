@@ -91,7 +91,7 @@ const NAV_GROUPS = [
     { icon:Mail,            href:'/conversations', label:'Email / Conversations' },
     { icon:MessageCircle,   href:'/whatsapp',      label:'WhatsApp Bot' },
     { icon:Send,            href:'/whatsapp?tab=stage-notifications', label:'WhatsApp Stage Notifications' },
-    { icon:Globe,            href:'/whatsapp-setup', label:'WhatsApp Setup' },
+    { icon:Globe,            href:'/whatsapp-setup', label:'Company WhatsApp Number' },
     { icon:MessageSquare,   href:'/sms',           label:'SMS Notifications' },
     { icon:Zap,             href:'/automations',   label:'Automations' },
     { icon:Workflow,        href:'/nurture',       label:'Nurture Sequences' },

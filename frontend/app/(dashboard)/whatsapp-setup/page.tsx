@@ -2,6 +2,8 @@
 import { useState, useEffect } from 'react';
 import { RefreshCw, CheckCircle, AlertCircle, Smartphone, ExternalLink } from 'lucide-react';
 import { apiFetch } from '@/lib/useFetch';
+import { getTokenPayload } from '@/lib/auth';
+import Link from 'next/link';
 
 // SECURITY FIX (2026-08-10 audit): these two helpers used a raw, unauthenticated
 // fetch() with no Authorization header at all - the /waha/* backend routes had
@@ -27,6 +29,17 @@ const STAGE_MSGS = [
 
 export default function WhatsAppSetupPage() {
   const [status, setStatus]   = useState<any>(null);
+  // This page shows the SHARED company WhatsApp number's connection state
+  // (used for automated stage-change messages) — not any individual user's
+  // own number. getTokenPayload() reads localStorage, which doesn't exist
+  // during SSR, so the read is deferred to an effect (the established
+  // SSR-safe pattern used elsewhere in this app) rather than done
+  // synchronously during render.
+  const [canManage, setCanManage] = useState(false);
+  useEffect(() => {
+    const role = getTokenPayload()?.role || '';
+    setCanManage(['admin', 'super_admin', 'manager'].includes(role));
+  }, []);
   const [qrData, setQrData]   = useState('');
   const [loading, setLoading] = useState(false);
   const [toast, setToast]     = useState('');
@@ -82,8 +95,17 @@ export default function WhatsAppSetupPage() {
       )}
 
       <div>
-        <h1 style={{fontSize:'20px',fontWeight:'800',color:'#0f172a',marginBottom:'4px'}}>WhatsApp Setup</h1>
-        <p style={{fontSize:'13px',color:'#64748b'}}>Connect WhatsApp to auto-send stage notifications to candidates</p>
+        <h1 style={{fontSize:'20px',fontWeight:'800',color:'#0f172a',marginBottom:'4px'}}>Company WhatsApp Number</h1>
+        <p style={{fontSize:'13px',color:'#64748b'}}>The one SHARED company number used to auto-send stage notifications to every candidate. This is not tied to your own personal account — it shows the same status to everyone.</p>
+      </div>
+
+      <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'10px',padding:'14px 16px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:'12px',flexWrap:'wrap'}}>
+        <div style={{fontSize:'13px',color:'#1e3a8a'}}>
+          Want to message candidates from <strong>your own</strong> WhatsApp number instead of the shared one?
+        </div>
+        <Link href="/settings/whatsapp-account" style={{fontSize:'13px',fontWeight:'700',color:'#2563eb',whiteSpace:'nowrap'}}>
+          Connect My WhatsApp Account &rarr;
+        </Link>
       </div>
 
       <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'14px',padding:'24px'}}>
@@ -109,6 +131,12 @@ export default function WhatsAppSetupPage() {
             <CheckCircle size={40} color="#22c55e" style={{marginBottom:'10px'}}/>
             <div style={{fontWeight:'800',color:'#16a34a',fontSize:'16px',marginBottom:'6px'}}>WhatsApp is Live!</div>
             <div style={{color:'#64748b',fontSize:'13px'}}>Notifications sent automatically on every stage change.</div>
+          </div>
+        ) : !canManage ? (
+          <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:'10px',padding:'20px',fontSize:'13px',color:'#92400e'}}>
+            <div style={{fontWeight:'700',marginBottom:'8px'}}>The shared company number isn't connected right now.</div>
+            <div style={{marginBottom:'10px'}}>Only an admin or manager can connect or reconnect it — ask one of them, or connect your own personal number instead:</div>
+            <Link href="/settings/whatsapp-account" style={{fontSize:'13px',fontWeight:'700',color:'#2563eb'}}>Connect My WhatsApp Account &rarr;</Link>
           </div>
         ) : (
           <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
