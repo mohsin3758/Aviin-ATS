@@ -115,9 +115,9 @@ export default function ProfilePage() {
         padding:'28px 32px',marginBottom:'20px',display:'flex',alignItems:'center',gap:'20px',
         position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',top:'-20px',right:'-20px',width:'150px',height:'150px',
-          borderRadius:'50%',background:'rgba(255,255,255,0.04)'}}/>
+          borderRadius:'50%',background:'rgba(255,255,255,0.04)',pointerEvents:'none'}}/>
         <div style={{position:'absolute',bottom:'-30px',right:'80px',width:'100px',height:'100px',
-          borderRadius:'50%',background:'rgba(255,255,255,0.03)'}}/>
+          borderRadius:'50%',background:'rgba(255,255,255,0.03)',pointerEvents:'none'}}/>
 
         {/* Avatar */}
         <div style={{position:'relative',flexShrink:0}}>

@@ -185,7 +185,7 @@ export default function SignaturesPage() {
   const logoRef = useRef<HTMLInputElement>(null);
 
   const { data: sigs, refetch: refetchSigs } = useFetch<Sig[]>('/signatures');
-  const { data: accounts } = useFetch<Account[]>('/user-mail/accounts');
+  const { data: accounts, refetch: refetchAccounts } = useFetch<Account[]>('/user-mail/accounts');
 
   const set = (key: keyof SigFields, val: any) => setFields(prev => ({ ...prev, [key]: val }));
 
@@ -283,7 +283,7 @@ export default function SignaturesPage() {
         })
       });
       showToast('Default updated! Signature will auto-appear in new emails.');
-      setTimeout(() => window.location.reload(), 1000);
+      refetchAccounts();
     } catch (e: any) { showToast('Failed: ' + e.message, false); }
     finally { setDefSaving(null); }
   };

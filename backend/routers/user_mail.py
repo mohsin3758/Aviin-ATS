@@ -616,19 +616,20 @@ async def fetch_imap_inbox(
             for r in batch:
                 try:
                     cand_id = email_to_cand.get((r['from_email'] or '').lower())
-                    await conn.execute("""
-                        INSERT INTO imap_messages
-                          (account_id, tenant_id, imap_uid, folder, from_email, from_name,
-                           to_email, cc, subject, body, html_body, received_at, candidate_id)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-                        ON CONFLICT (account_id, imap_uid) DO NOTHING
-                    """, acc_id, actor.tenant_id, r['uid'], folder_name,
-                        r['from_email'], r['from_name'], r['to_email'],
-                        r['cc'], r['subject'], r['body'], r['html_body'],
-                        r['received_at'], cand_id)
+                    async with conn.transaction():
+                        await conn.execute("""
+                            INSERT INTO imap_messages
+                              (account_id, tenant_id, imap_uid, folder, from_email, from_name,
+                               to_email, cc, subject, body, html_body, received_at, candidate_id)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                            ON CONFLICT (account_id, imap_uid) DO NOTHING
+                        """, acc_id, actor.tenant_id, r['uid'], folder_name,
+                            r['from_email'], r['from_name'], r['to_email'],
+                            r['cc'], r['subject'], r['body'], r['html_body'],
+                            r['received_at'], cand_id)
                     saved += 1
                 except Exception as ex:
-                    pass
+                    results.setdefault('insert_errors', []).append(f"{folder_name} uid={r.get('uid')}: {str(ex)[:150]}")
             results['fetched'] += saved
 
         # Update sync state
@@ -643,7 +644,8 @@ async def fetch_imap_inbox(
         "total_stored": results.get('fetched', 0),
         "folders_synced": results['folders_synced'],
         "folder_counts": results['total_in_folders'],
-        "errors": results['errors'][:5]
+        "errors": results['errors'][:5],
+        "insert_errors": results.get('insert_errors', [])[:5],
     }
 
 

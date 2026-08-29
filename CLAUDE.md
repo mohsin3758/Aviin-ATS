@@ -14702,3 +14702,98 @@ window genuinely cleared. Zero-token audit: `CONFIRMED CLEAN` (418
 files, 0 external API refs). All throwaway test data (clients,
 requisitions, candidates, recruiters/KAEs) cleaned up via real APIs
 after every check.
+
+
+## 3 more real Shahana reports resolved: Fetch Inbox hang + a hidden transaction-poisoning bug, a decorative overlay blocking real clicks, and a signature-save reload race, 2026-08-30
+Same real user, 3 more reports off live screenshots. All 3 reproduced
+for real before fixing, not assumed from the screenshots alone.
+
+**1. "Fetch Inbox" fail - a genuine, confirmed 15+ minute hang, not a
+quick error.** The plain button click called `POST /user-mail/accounts/
+{id}/fetch-inbox` with zero query params, defaulting to `limit=0`
+(unlimited) across every auto-discovered folder, fetching the full
+RFC822 body of every message. Reproduced directly against Shahana's
+real, actively-used Hostinger mailbox (7,134 real messages in INBOX
+alone) - a direct backend call was still running after 15+ minutes with
+no sign of finishing. Since nginx's `proxy_read_timeout` is 120s, any
+real browser click on a non-trivial mailbox was structurally guaranteed
+to fail - this was never a one-off glitch. Bounded the frontend's
+default click to `?folder=INBOX&limit=200` - fast and reliable for the
+common "see my recent mail" case regardless of mailbox size. A true
+full/all-folder sync would need to become a real background job (not a
+synchronous request) to stay reliable for a large mailbox - flagged as
+a real, disclosed follow-up, not attempted here.
+
+**A second, deeper, previously-invisible bug surfaced the moment the
+first fix let the request actually complete within a testable window.**
+Re-ran the bounded call against the same real mailbox: it now finished
+in ~85s (comfortably under nginx's timeout) but returned a raw 500. Root
+cause: the per-message `INSERT INTO imap_messages` loop caught its own
+exceptions with a bare `except Exception: pass` - but a genuine INSERT
+failure (not just the already-handled `ON CONFLICT` case) leaves the
+whole *shared* Postgres transaction aborted, and every later statement
+on that same connection - the rest of the batch, and the final
+`SELECT COUNT(*)`/`UPDATE` used to report `total_emails_synced` - then
+fails with `InFailedSQLTransactionError`. The exact "one bad row poisons
+the whole batch" bug class already documented and fixed repeatedly
+elsewhere in this project (`resume_intake_service.py`, the SLA-
+escalation tier-2 handler, the assignment-uniqueness fix), just never
+caught here before because the request had never survived long enough
+to reach this code path. Fixed with a real SAVEPOINT (asyncpg's nested
+`async with conn.transaction():`) around each individual message
+INSERT, so one bad row rolls back only itself. Also found, while fixing
+this, that the function already tracked per-message failures into an
+`insert_errors` list but never included it in the JSON response -
+fixed, so a future real insert failure is visible to whoever's
+debugging instead of silently dropped. Verified for real: the exact
+same bounded call against the same real 7,134-message mailbox now
+returns a clean 200 (`fetched: 0` - honestly correct, since a live
+background IMAP-IDLE listener had already synced those exact 200 most
+recent messages before this manual fetch ran, all correctly hitting
+`ON CONFLICT DO NOTHING`).
+
+**2. Profile page's "Open Mailbox"/"Email Accounts" links did nothing
+when clicked - a real, confirmed CSS bug, not a broken route.** A
+genuine headless-browser click reproduced it immediately:
+`<div></div> intercepts pointer events`. Root cause: the hero banner's
+2 purely decorative background circles (`position:absolute`, no
+`z-index`) sit in the same top-right area as the two buttons - and per
+CSS stacking rules, a positioned element (even with `z-index:auto`)
+always paints AFTER non-positioned in-flow siblings, REGARDLESS of DOM
+order. Since the circles come first in the JSX but are `position:
+absolute` while the buttons' container is a plain in-flow flex child,
+the circles silently painted on top and ate every click. Fixed with
+`pointerEvents:'none'` on both circles - the semantically correct fix
+for a decorative-only element, and one that doesn't require reasoning
+about z-index stacking further. Verified with a real click-through:
+both links now genuinely navigate.
+
+**3. Signature "Set as Default" dropdown showing "Failed: Request
+failed" - a real race condition, not a backend bug.** Direct API
+reproduction of the exact PATCH call succeeded cleanly every time -
+the bug was never in the endpoint itself. Root cause found by reading
+the code: `setAccountDefault()`'s success path called
+`setTimeout(() => window.location.reload(), 1000)` - a full page reload
+1 second after every successful save. If a user picked a 2nd dropdown
+(e.g. Replies & Forwards right after New Mail) within that window, the
+in-flight 2nd request could be aborted mid-flight by the reload,
+surfacing as a genuine "Request failed" toast - reproduced directly by
+scripting exactly that back-to-back interaction. Fixed by extracting a
+real `refetch` from the existing `accounts` `useFetch` call (matching
+the `refetchSigs` pattern already used two lines above it) and calling
+that instead of reloading the whole page - no navigation, no race, no
+jarring full-page reload for what should be a small state update.
+
+New permanent "S68" suite (4 tests) added to `qa_automation.spec.ts`.
+The Fetch Inbox scalability fix and the SAVEPOINT fix were both verified
+directly against Shahana's real, live mailbox during development (not
+something a throwaway CI account can reproduce - there's no real IMAP
+server to fetch from, and forcing one specific message to fail its
+INSERT in a repeatable way isn't practical) - the permanent test instead
+confirms the bounded query params are accepted cleanly for an account
+with no IMAP configured, a real but narrower regression guard, disclosed
+here rather than glossed over. The other 2 fixes (the overlay click,
+the reload race) are fully, deterministically covered by real headless-
+browser interaction in the permanent suite. Broader regression sweep
+(S1/S13/S43/S67/S68, 36 tests) passed clean. Zero-token audit:
+`CONFIRMED CLEAN` (418 files, 0 external API refs).

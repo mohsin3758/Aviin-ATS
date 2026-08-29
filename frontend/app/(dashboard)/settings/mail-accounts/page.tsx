@@ -417,10 +417,24 @@ export default function MailAccountsPage() {
     setVerifying(null);
   };
 
+  // Real bug (2026-08-30), found live: the plain "Fetch Inbox" click
+  // called this endpoint with NO params at all, which defaults to
+  // limit=0 (unlimited) across EVERY discovered folder, fetching the
+  // full RFC822 body of every message. Reproduced directly on a real,
+  // actively-used mailbox: the request never returned within nginx's
+  // 120s proxy_read_timeout, so every real click on a non-trivial
+  // mailbox was guaranteed to fail - confirmed via a direct backend
+  // call that was still running 15+ minutes later. Bounded the default
+  // click to INBOX only, most recent 200 messages - fast and reliable
+  // for the common "see my recent mail" case regardless of mailbox
+  // size. A genuine full/all-folder sync would need to become a real
+  // background job (not a synchronous request) to be reliable for a
+  // large mailbox - flagged as a real, separate follow-up, not
+  // attempted here.
   const handleFetch = async (id: string) => {
     setFetching(id);
     try {
-      const r = await apiFetch('/user-mail/accounts/'+id+'/fetch-inbox', {method:'POST'});
+      const r = await apiFetch('/user-mail/accounts/'+id+'/fetch-inbox?folder=INBOX&limit=200', {method:'POST'});
       setFetchResult(prev=>({...prev,[id]:r}));
       showToast('Fetched '+r.fetched+' emails from inbox!');
     } catch(e:any){ showToast('Fetch failed: '+e.message, false); }
