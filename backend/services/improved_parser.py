@@ -43,6 +43,12 @@ SECTION_HEADERS = frozenset([
     'enhancements frameworks', 'sybase high availability implementation',
     'requirements gathering', 'project details', 'career overview',
     'total experience', 'additional information', 'tools and technologies',
+    # REAL BUG FOUND 2026-08-31: bare single/short-line section headers
+    # (no "professional"/"personal" prefix) weren't in this list at all,
+    # so a resume laid out with a standalone "Profile" or "About Me"
+    # header line got that header returned as the candidate's own name -
+    # confirmed on 7 and 3 real candidates respectively.
+    'profile', 'about me',
 ])
 
 # ─── Technology & Skill Keyword Dictionary ────────────────────────────────────
@@ -285,12 +291,20 @@ def extract_name_v2(text: str, from_name: str = '') -> Optional[str]:
                 break
         if not looks_like_name:
             continue
-        # Reject lines that are clearly designations
+        # Reject lines that are clearly designations. REAL BUG FOUND
+        # 2026-08-31: this only ever fired for a 2+ word line
+        # (`len(words) > 1`) - a bare single-word designation on its own
+        # line ("Manager", "Consultant") sailed straight through and got
+        # wrongly returned as the candidate's name; confirmed live on 3
+        # real candidates. None of these designation words are plausible
+        # substrings of a real single-word person name, so dropping the
+        # length restriction closes this with no real risk of rejecting
+        # a genuine name.
         designation_signals = ['senior', 'junior', 'lead', 'manager', 'engineer',
                                'consultant', 'developer', 'analyst', 'architect',
                                'specialist', 'associate', 'executive', 'director',
                                'officer', 'head', 'vp', 'cto', 'ceo', 'sap']
-        if any(ds in line_lower for ds in designation_signals) and len(words) > 1:
+        if any(ds in line_lower for ds in designation_signals):
             continue
         # Looks like a name: 1-4 words, properly capitalized
         if 1 <= len(words) <= 4:

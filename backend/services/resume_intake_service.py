@@ -372,6 +372,38 @@ def regex_parse_resume(text: str, from_name: str = '', from_email: str = '') -> 
     }
 
 
+# REAL BUG FOUND 2026-08-31: a small local LLM prompted with a JSON-schema
+# example (below) will, on a sparse/blank/corrupted document it has little
+# real signal to work with, sometimes echo the example's own placeholder
+# text back verbatim instead of a real extracted value - confirmed live:
+# candidates with full_name genuinely stamped "person full name only"
+# (the literal name-field example) and current_employer genuinely stamped
+# the literal string "null" (the model emitting a quoted JSON STRING
+# "null" instead of the bare JSON null keyword the prompt actually asked
+# for - a real, separate small-model formatting inconsistency, not the
+# same failure). merge_parsed()'s own `if v` check only filters an
+# empty/falsy value - a non-empty string like "null" or the placeholder
+# text passes straight through as if it were real data. Built as one
+# reusable set covering every field's own example value, checked against
+# every string field the model returns, not just name.
+_OLLAMA_PLACEHOLDER_ECHOES = frozenset([
+    'person full name only', 'personal email', 'phone number',
+    'city or city state', 'most recent employer', 'most recent job title',
+    'highest degree', 'notice period', 'linkedin url', 'linkedin url or null',
+    'null', 'none', 'n/a', 'na', 'not mentioned', 'not specified',
+])
+
+
+def _sanitize_llm_fields(data: dict) -> dict:
+    """Strip any field whose value is just the prompt's own placeholder
+    text echoed back, or the literal string "null"/"n/a" - never real
+    extracted data. Applies to every string field the model can return."""
+    for k, v in list(data.items()):
+        if isinstance(v, str) and v.strip().lower() in _OLLAMA_PLACEHOLDER_ECHOES:
+            data[k] = None
+    return data
+
+
 async def parse_with_ollama(text: str, ollama_url: str, model: str) -> dict:
     prompt = (
         'You are a resume parser. Extract the following fields from the resume text below. '
@@ -396,7 +428,7 @@ async def parse_with_ollama(text: str, ollama_url: str, model: str) -> dict:
                 m = re.search(r'\{[\s\S]*?\}', raw)
                 if m:
                     try:
-                        return json.loads(m.group(0))
+                        return _sanitize_llm_fields(json.loads(m.group(0)))
                     except json.JSONDecodeError:
                         pass
     except Exception as _e:

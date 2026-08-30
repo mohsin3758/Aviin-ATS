@@ -274,9 +274,39 @@ async def reparse_resume(resume_file_id: str, actor: Actor = Depends(get_actor))
         if not abs_path.exists():
             raise HTTPException(400, 'File not on disk')
 
+        # REAL BUG FOUND 2026-08-31: regex_parse_resume() falls back to
+        # synthesizing a "name" from from_email's local-part
+        # (source_email.split('@')[0].title()) whenever no real name is
+        # found in the resume text - a reasonable last resort ONLY when
+        # source_email genuinely is the candidate's own address. But
+        # resume_files.source_email is stamped with the RAW original
+        # sender/mailbox regardless of whether that sender was one of our
+        # own staff - the is_internal_sender guard at original email
+        # intake (process_email_for_resume) only ever blanked the NAME
+        # HINT used for that one parse, never the value written to
+        # source_email itself, and this Reparse action re-derives a name
+        # from that stored value with no awareness the guard should still
+        # apply. Confirmed live: 35 real, distinct candidates whose
+        # resumes arrived via one real recruiter's mailbox and whose text
+        # didn't yield an easy name match all got silently renamed to
+        # that recruiter's own name ("Faisal K") on reparse. Fixed by
+        # checking whether source_email is a real, currently-configured
+        # internal account for this tenant before ever using it as a
+        # name-derivation source - if so, treat it the same as "no email
+        # hint available" (matches the exact protection the original
+        # intake path already gives this same value).
+        source_email = rf['source_email'] or ''
+        name_fallback_email = source_email
+        if source_email:
+            is_internal = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE tenant_id=$1 AND lower(email)=lower($2) "
+                "UNION SELECT 1 FROM user_email_accounts WHERE tenant_id=$1 AND lower(email)=lower($2))",
+                actor.tenant_id, source_email)
+            if is_internal:
+                name_fallback_email = ''
         data = abs_path.read_bytes()
         text = extract_text_from_attachment(data, rf['mime_type'] or '', rf['file_name'] or '')
-        parsed = regex_parse_resume(text, '', rf['source_email'] or '')
+        parsed = regex_parse_resume(text, '', name_fallback_email)
         llm = await parse_with_ollama(text, OLLAMA_URL, OLLAMA_MODEL)
         if llm:
             parsed = merge_parsed(parsed, llm)

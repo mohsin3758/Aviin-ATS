@@ -15677,3 +15677,140 @@ in the resume-parsing pipeline, affecting real candidate records beyond
 just today's duplicate-detection work) was found but not investigated
 or fixed — flagged to the user as a distinct, real finding worth its
 own dedicated look.
+
+## The "garbage placeholder name" bug, root-caused fully — 3 separate,
+## real bugs found and fixed across 66 real candidate records, 2026-08-31
+Direct follow-up to the duplicate-detection work above — user asked to
+look into the underlying name-extraction bug flagged there. Confirmed
+via a real data query first: 66 real candidates affected across 6
+distinct garbage `full_name` patterns ("Faisal K" x35, "person full
+name only" x12, "Profile" x7, "null" x6, "About Me" x3, "Manager" x3).
+Root-caused each pattern individually against real stored data rather
+than guessing a single fix for all of them — they turned out to be 3
+completely independent bugs.
+
+**1 — "Faisal K" (35 records), the most serious: a real recruiter's own
+mailbox address leaking in as a fake candidate name.** Traced via
+`resume_files.source_email` — all 35 shared the identical value,
+`faisal.k@aviintech.com`, a real staff account (confirmed: not in
+`users`, but a real, currently-connected `user_email_accounts` row).
+`regex_parse_resume()` (`resume_intake_service.py`, a SEPARATE,
+independent name-extraction implementation from the main
+`extract_name_v2()`/`parse_resume_v2()` used by original email intake)
+has its own last-resort fallback: `from_email.split('@')[0].replace
+('.',' ').title()` when no real name pattern is found in the resume
+text — turning `faisal.k@aviintech.com` into `"Faisal K"`. The ORIGINAL
+intake path already has a real `is_internal_sender` guard (domain-
+comparison, blanks the name/email hint before parsing) — but that
+protection only ever applied to the FIRST parse, at intake time. The
+Resume Inbox's "Reparse" button (`POST /resume-intake/{id}/reparse`)
+independently re-derives a name from the STORED `resume_files.
+source_email` with zero awareness that guard should still apply -
+`source_email` itself is stamped with the raw sender regardless of
+whether that sender was internal, so by the time Reparse runs, the
+protective context is already gone. Confirmed live: 6 sampled "Faisal
+K" records were 6 completely different real people (different
+designations, different resumes) - the resumes just happened to arrive
+via his mailbox and lack an easily-parsed name line.
+
+Fixed at the Reparse call site (`resume_intake.py`): before calling
+`regex_parse_resume`, checks whether `source_email` matches a real,
+currently-configured account (`users.email` OR `user_email_accounts.
+email` for this tenant) - if so, treats it exactly like "no email hint
+available" (blank), matching the protection the original intake path
+already gives this same value. Verified live against a real affected
+record: Reparse no longer produces "Faisal K".
+
+**A second, real, more serious risk surfaced by that same live
+verification, not fixed in this pass — disclosed, not glossed over**:
+the same document's EMAIL extraction (a separate field, found via a
+literal regex text-search independent of the fallback I fixed) ALSO
+resolved to `faisal.k@aviintech.com` - and `upsert_candidate()`'s
+email-based candidate matching then attributed the reparsed resume data
+to a DIFFERENT, unrelated, pre-existing candidate that happened to
+already share that same (also wrongly extracted) email - "Mohsinkhan"
+(the tenant admin's own name, itself another victim of this same bug
+class). Confirmed via `upsert_candidate()`'s own established gap-fill-
+only/COALESCE convention that this could only ever ADD a previously-
+missing field, never destructively overwrite real existing data - but
+it's a real, live candidate-identity-collision risk: any two resumes
+whose extraction both land on the same wrongly-derived staff email
+would keep merging into one contaminated record. **Deliberately not
+bulk-remediated via Reparse given this finding** - re-running Reparse
+across the remaining 65 affected records could keep hitting this same
+collision path. Flagged to the user as a real, separate, still-open
+item needing its own careful (likely one-by-one, not bulk-automated)
+remediation decision, not swept into this pass.
+
+**2 — "person full name only" (12) and the literal string "null" (6,
+confirmed on BOTH full_name and current_employer, not name-specific):
+the local LLM enhancement step echoing its own prompt back as if it
+were extracted data.** `parse_with_ollama()`'s prompt shows the model a
+JSON-schema example (`{"name": "person full name only", "email":
+"personal email", ...}`) to illustrate the expected shape - on a
+sparse/blank/corrupted document with little real signal (confirmed on
+both sampled records: one mostly blank leading lines, one raw OLE-
+binary extraction-failure garbage), the small model (Qwen2.5-1.5B, this
+project's real zero-token Tier-2 engine) sometimes copies the
+placeholder text back verbatim instead of returning JSON `null` as
+instructed - or, separately, emits `"null"` as a quoted JSON STRING
+instead of the bare `null` keyword the prompt actually asked for, a
+distinct small-model formatting inconsistency. `merge_parsed()`'s own
+`if v` check only filters an empty/falsy value - a non-empty string
+like `"null"` or the placeholder text sails straight through as if it
+were real data, for ANY field, not just name.
+
+Fixed at the one real choke point every LLM-returned field passes
+through: new `_sanitize_llm_fields()` (`resume_intake_service.py`),
+called right after `json.loads()` in `parse_with_ollama()` - a real set
+of every prompt-example placeholder value plus the literal "null"/
+"none"/"n/a" family, checked against every string field the model
+returns (not just `name`), nulling any exact echo before it can reach
+`merge_parsed()`. Verified directly: sanitizing `{"name":"person full
+name only","current_company":"null","current_designation":"Real Title
+Here"}` correctly nulls the first two and leaves the real value intact.
+
+**3 — bare "Profile"/"About Me"/"Manager" (13 combined): 2 real,
+independent gaps in the deterministic regex path's own blacklists.**
+`extract_name_v2()`'s `SECTION_HEADERS` set (`improved_parser.py`) only
+ever had multi-word variants ("professional profile", "profile
+summary", "personal profile") - a resume laid out with a bare,
+standalone "Profile" or "About Me" header line matched none of them and
+sailed through the line-scanning heuristic as if it were a name.
+Separately, the designation-word rejection check (`designation_
+signals`, catches lines like "Senior Engineer") only ever fired when a
+line had 2+ words (`and len(words) > 1`) - a bare single-word
+designation on its own line ("Manager", "Consultant") skipped that
+check entirely and got wrongly returned as the candidate's name,
+confirmed on 3 real records. Fixed both: added bare `'profile'`/`'about
+me'` to `SECTION_HEADERS` (safe as a substring check - neither is a
+plausible fragment of a real person's name); dropped the `len(words) >
+1` restriction on the designation check (none of those designation
+words are plausible substrings of a genuine single-word name either).
+Verified directly against all 3 real patterns plus a real name, to
+confirm the fix rejects the garbage without rejecting genuine names:
+`extract_name_v2('Profile\n...')` -> falls through correctly (was
+returning "Profile"); same for "About Me" and "Manager"; `extract_name_v2
+('Rahul Sharma\n...')` -> still correctly returns "Rahul Sharma",
+unaffected.
+
+**Scope, stated plainly**: all 3 fixes protect every future resume
+processed through these paths - verified via direct unit tests inside
+the container plus one real, live end-to-end Reparse call against an
+actually-affected record. The 66 already-affected HISTORICAL candidate
+records (this fix's own trigger) were deliberately NOT bulk-remediated
+in this pass - the live verification itself surfaced a real candidate-
+identity-collision risk in re-running Reparse at scale (finding #1's
+second half, above), and this project's own established discipline
+("never guess-fix a name field... explicit decision required, not
+bundled into a cleanup pass", 2026-07-28) argues against inventing
+replacement names for records where genuine extraction still can't find
+one. Left as a real, disclosed, open decision for the user: whether/how
+to remediate the 66 (most likely a careful, reviewed pass - possibly
+combined with a real email-contamination guard mirroring the name fix -
+rather than a blind bulk re-run).
+
+Regression check (S1/S13 general health + every suite touching resume-
+intake/parsing: S32/S39/S41/S45/S46/S56/S71/S72, 55 tests) passed clean:
+53 passed, 2 pre-existing skips, 0 failed - no regressions from any of
+the 3 fixes.
