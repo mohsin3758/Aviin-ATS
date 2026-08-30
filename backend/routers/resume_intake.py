@@ -93,12 +93,16 @@ async def intake_queue(
                    r.title as requisition_title,
                    mr.title as matched_jd_title,
                    pl.stage as pipeline_stage, pl.pipeline_job,
-                   sc.readiness_index AS live_match_score
+                   sc.readiness_index AS live_match_score,
+                   recv_u.full_name AS received_by_name,
+                   own.recruiter_name AS owner_recruiter_name
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
             LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
             LEFT JOIN requisitions r ON r.id=rf.requisition_id
             LEFT JOIN requisitions mr ON mr.id=c.matched_requisition_id
+            LEFT JOIN user_email_accounts recv_ua ON recv_ua.id = im.account_id
+            LEFT JOIN users recv_u ON recv_u.id = recv_ua.user_id
             LEFT JOIN LATERAL (
                 SELECT a.stage, ar.title AS pipeline_job
                 FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
@@ -111,6 +115,12 @@ async def intake_queue(
                   AND (c.matched_requisition_id IS NULL OR cs.requisition_id=c.matched_requisition_id)
                 ORDER BY cs.scored_at DESC LIMIT 1
             ) sc ON c.id IS NOT NULL
+            LEFT JOIN LATERAL (
+                SELECT u.full_name AS recruiter_name
+                FROM candidate_ownership co
+                JOIN users u ON u.id = co.recruiter_id
+                WHERE co.tenant_id=$1 AND co.candidate_id=c.id
+            ) own ON c.id IS NOT NULL
             WHERE {where}
             ORDER BY rf.created_at DESC
             LIMIT ${p} OFFSET ${p+1}""",

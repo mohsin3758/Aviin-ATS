@@ -384,13 +384,38 @@ async def send_message(phone: str, message: str, actor: Actor = Depends(require_
 
 @router.get("/status")
 async def bot_status(actor: Actor = Depends(get_actor)):
+    """Real bug fix (2026-08-30): this always reported the SHARED
+    "default" WAHA session's status regardless of who was looking at it -
+    misleading for any real user with their OWN personal WhatsApp account
+    (built 2026-08-27), who'd see "WAHA Connected" even with zero personal
+    connection of their own, no indication this wasn't about them at all.
+    Now checks the actor's own personal session first (if they have one,
+    connected or not) and reports which one is actually being shown -
+    falling back to the shared session only when they have no personal
+    account at all, still clearly labeled as such."""
+    own_session = None
+    own_connected = False
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        own = await conn.fetchrow(
+            "SELECT waha_session_name, status FROM user_whatsapp_accounts WHERE tenant_id=$1 AND user_id=$2",
+            actor.tenant_id, actor.user_id)
+    session_to_check = SESSION
+    is_personal = False
+    if own:
+        session_to_check = own["waha_session_name"]
+        is_personal = True
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{WAHA_URL}/api/sessions/default", headers={"X-Api-Key": WAHA_KEY})
+            r = await client.get(f"{WAHA_URL}/api/sessions/{session_to_check}", headers={"X-Api-Key": WAHA_KEY})
             if r.status_code == 200:
-                waha_ok = r.json().get("status") == "WORKING"
+                waha_ok = r.json().get("status") in ("WORKING", "CONNECTED")
             else:
                 waha_ok = False
     except Exception:
         waha_ok = False
-    return {"waha_connected": waha_ok, "commands": ["HELP","STATUS","INTERVIEW","CALLBACK","ACCEPT","DECLINE"]}
+    return {
+        "waha_connected": waha_ok,
+        "commands": ["HELP","STATUS","INTERVIEW","CALLBACK","ACCEPT","DECLINE"],
+        "is_personal_number": is_personal,
+        "session_label": "your own WhatsApp number" if is_personal else "the shared company number",
+    }

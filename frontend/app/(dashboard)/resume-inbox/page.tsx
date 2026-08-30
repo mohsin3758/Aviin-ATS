@@ -49,6 +49,17 @@ interface ResumeItem {
   // readiness_index from candidate_scores (auto-scored on intake against
   // the matched requisition) — used as the real fallback below.
   live_match_score?: number;
+  // Real gap fix (2026-08-30): the queue never surfaced WHO the resume
+  // came via — a recruiter could see "Direct Email" but not which real
+  // recruiter's mailbox actually received it. received_by_name is the
+  // precise, per-email signal (whichever user_email_accounts owner's
+  // IMAP inbox captured this exact message); owner_recruiter_name is the
+  // broader fallback (the candidate's current claimed owner, covering
+  // every intake channel — bulk upload, personal link, job-share link —
+  // not just personal mailboxes). Neither is fabricated — both blank
+  // when genuinely unknown (e.g. a public job-board apply with no
+  // recruiter involved at all).
+  received_by_name?: string; owner_recruiter_name?: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -365,6 +376,16 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
           <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#059669', fontSize: 12, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}><Download size={12} /> Download</button></div></div>}
 
         {item.email_subject && <div style={{ marginBottom: 16 }}><div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>ORIGINAL EMAIL</div><div style={{ fontSize: 13, color: '#374151', fontStyle: 'italic' }}>{item.email_subject}</div><div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>From: {item.source_email} · {fdt(item.email_received_at || item.created_at)}</div></div>}
+        {(item.received_by_name || item.owner_recruiter_name) && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>RECRUITER</div>
+            <div style={{ fontSize: 13, color: '#374151' }}>
+              👤 {item.received_by_name || item.owner_recruiter_name}
+              {item.received_by_name && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · received in their mailbox</span>}
+              {!item.received_by_name && item.owner_recruiter_name && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · current owner</span>}
+            </div>
+          </div>
+        )}
 
         {/* Move to Pipeline */}
         {item.candidate_id && (
@@ -960,7 +981,15 @@ function ResumeInboxPageInner() {
                           </div>
                         )}
                       </td>
-                      <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}><SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} /></td>
+                      <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}>
+                        <SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} />
+                        {(r.received_by_name || r.owner_recruiter_name) && (
+                          <div title={r.received_by_name ? `Received in ${r.received_by_name}'s mailbox` : `Owned by ${r.owner_recruiter_name}`}
+                            style={{ fontSize: 10, color: '#64748b', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
+                            👤 {r.received_by_name || r.owner_recruiter_name}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ padding: '10px 8px', maxWidth: 120 }} onClick={() => setSelected(r)}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#374151' }}><FileText size={12} color="#6366f1" style={{ flexShrink: 0 }} /><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 95 }}>{r.file_name || r.email_subject || '—'}</span></div>
                         {r.file_size > 0 && <div style={{ fontSize: 10, color: '#94a3b8' }}>{fsize(r.file_size)}</div>}

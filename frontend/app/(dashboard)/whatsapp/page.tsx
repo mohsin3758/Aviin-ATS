@@ -210,14 +210,37 @@ function WhatsAppPageInner() {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px', marginTop: '16px' }}>
             <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '20px' }}>
-              <div style={{ fontWeight: '700', fontSize: '14px', marginBottom: '12px', color: '#0f172a' }}>Bot Status</div>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '16px' }}>
+              <div style={{ fontWeight: '700', fontSize: '14px', marginBottom: '4px', color: '#0f172a' }}>Bot Status</div>
+              {/* Real bug fix (2026-08-30): this used to always show the
+                  SHARED company session's status regardless of who was
+                  looking - a real user with their own connected personal
+                  WhatsApp number (or none at all) had no way to tell.
+                  status.session_label now says plainly whose number this
+                  actually is. */}
+              {status && (
+                <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>
+                  Showing the status of {status.session_label}
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '10px' }}>
                 <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: status?.waha_connected ? '#22c55e' : '#ef4444' }}></div>
                 <span style={{ fontSize: '13px', fontWeight: '600', color: status?.waha_connected ? '#059669' : '#dc2626' }}>
-                  {status?.waha_connected ? 'WAHA Connected' : 'WAHA Disconnected'}
+                  {status?.waha_connected
+                    ? (status?.is_personal_number ? 'Your WhatsApp Connected' : 'Company WhatsApp Connected')
+                    : (status?.is_personal_number ? 'Your WhatsApp Not Connected' : 'Company WhatsApp Not Connected')}
                 </span>
               </div>
-              <div style={{ background: '#f8fafc', borderRadius: '8px', padding: '12px' }}>
+              {status && !status.is_personal_number && (
+                <a href="/settings/whatsapp-account" style={{ fontSize: '12px', color: '#1e40af', fontWeight: '600', textDecoration: 'none', marginBottom: '16px', display: 'inline-block' }}>
+                  Connect your own WhatsApp number →
+                </a>
+              )}
+              {status && status.is_personal_number && !status.waha_connected && (
+                <a href="/settings/whatsapp-account" style={{ fontSize: '12px', color: '#1e40af', fontWeight: '600', textDecoration: 'none', marginBottom: '16px', display: 'inline-block' }}>
+                  Connect it now →
+                </a>
+              )}
+              <div style={{ background: '#f8fafc', borderRadius: '8px', padding: '12px', marginTop: '16px' }}>
                 <div style={{ fontWeight: '600', marginBottom: '10px', fontSize: '12px', color: '#374151' }}>Available Commands:</div>
                 {COMMANDS.map(({ cmd, desc }) => (
                   <div key={cmd} style={{ display: 'flex', gap: '8px', marginBottom: '6px', alignItems: 'flex-start' }}>

@@ -14921,3 +14921,127 @@ S8/S13/S30/S48/S53/S58/S60/S69) confirmed the fix introduces no
 regressions of its own; the only 2 real failures found (both detailed
 above) are pre-existing and unrelated to this change. Zero-token audit:
 `CONFIRMED CLEAN` (418 files, 0 external API refs).
+
+## 5 more real Shahana reports: recruiter attribution, per-user WhatsApp status fixed; a real "no emails" scare traced to this session's own testing overload, not the app; permission enforcement remains a real, disclosed decision point, 2026-08-30
+Same real KAE user, 5 more reports off live screenshots, each investigated
+for real before any fix — one of the 5 turned out not to be an app bug at
+all, and surfaced a genuinely useful operational lesson.
+
+**#1/#5 — Companies fully visible to Shahana despite her role's real
+permission matrix showing zero grants; asked to check across all users.**
+Confirmed the enforcement MECHANISM itself is correct, not broken:
+`GET /clients` (what the Companies page calls) IS gated with
+`require_permission("companies","read")`; the real `kae` role's
+permissions genuinely have no `companies` key at all (matching the
+screenshot); the real `recruiter` role correctly HAS `companies:["read"]`.
+The actual reason nothing is blocked: `tenants.permission_enforcement_
+enabled=false` for both real tenants — the deliberate, pre-existing
+soft-launch/log-only mode this whole permissions system was built under
+(2026-08-17). Checked all 4 real active users on the primary tenant
+(admin, Shahana/kae, khan mer/recruiter, Ashwini/recruiter) — every one
+has a real `role_definitions` row (no risk of the "role has no row,
+locks someone out with no way to self-correct" gap already found and
+avoided once before), and the `recruiter` role's existing `companies:
+read` grant means flipping enforcement on would not break khan mer's or
+Ashwini's current legitimate access. **Not flipped in this pass** — this
+is a real, tenant-wide behavioral change affecting all 22 currently-
+enforced features, not just Companies, and matches this project's own
+established precedent of pausing to ask before this exact class of
+decision rather than silently changing it as a side effect of a bug
+report.
+
+**#2 — Resume Inbox showed Source ("Direct Email") but no way to tell
+WHICH recruiter it came via.** Confirmed real gap: `intake_queue()`
+(`resume_intake.py`) never joined `user_email_accounts`/`users` at all,
+despite `imap_messages.account_id` already carrying exactly that
+attribution. Added two real, non-fabricated signals: `received_by_name`
+(the precise, per-email signal — whichever real user's own connected
+mailbox captured this exact message, via a new `LEFT JOIN user_email_
+accounts recv_ua ON recv_ua.id=im.account_id LEFT JOIN users recv_u`) and
+`owner_recruiter_name` (the broader fallback — the candidate's current
+claimed owner via the existing `candidate_ownership` table, covering
+every intake channel including bulk-upload/personal-link/job-share-link,
+not just personal mailboxes). Both genuinely blank when truly unknown
+(e.g. a public job-board apply with no recruiter involved) — never
+guessed. Surfaced as a small "👤 {name}" line under the existing
+SourceBadge (both the table row and the detail drawer) rather than a new
+column — this page's own history documents a fragile width balance
+across many prior fixes (S39/S40/S41/S44/S45/S46/S56), so an additive,
+non-column change was the safer path. Verified for real: a direct query
+confirmed real, DIFFERENT attribution across 2 real recruiters' mailboxes
+(khan mer: 2,698 resumes, Shahana: 920) — not just always showing
+whoever's logged in — and a real headless-browser screenshot confirmed
+every row in Shahana's live queue correctly shows "👤 Shahana Tahr...".
+
+**#3 — WhatsApp Bot page ("Session" tab) still showed "WAHA Connected"
+for Shahana despite the individual-WhatsApp-numbers feature (2026-08-27)
+being built specifically so this wouldn't be misleading.** Root cause:
+`/whatsapp-bot/status` (`whatsapp_bot.py`) unconditionally checked the
+shared `"default"` WAHA session for every caller, with zero awareness of
+`user_whatsapp_accounts` at all — a completely separate page from the
+one already fixed on 2026-08-28 (`/whatsapp-setup`, "Company WhatsApp
+Number"), never touched by that earlier pass. Fixed to check the actor's
+own personal session first (if `user_whatsapp_accounts` has a row for
+them) and report which one is actually being shown via new
+`is_personal_number`/`session_label` fields; frontend now shows "Showing
+the status of your own WhatsApp number" / "...the shared company
+number" plus a real "Connect it now →" / "Connect your own WhatsApp
+number →" link depending on which case applies. Verified for real:
+Shahana genuinely has a `user_whatsapp_accounts` row (`status='stopped'`,
+never actually connected) — before the fix she saw a false "WAHA
+Connected"; after, a real API call confirms `waha_connected:false,
+is_personal_number:true, session_label:"your own WhatsApp number"`, and
+a real headless-browser screenshot shows "🔴 Your WhatsApp Not
+Connected" — accurate for the first time. Confirmed the fallback branch
+too: khan mer and Ashwini both have zero `user_whatsapp_accounts` rows,
+so they'd correctly fall through to the shared-session check, clearly
+labeled "the shared company number" (not live-tested against their real
+logins — resetting a real user's password without being asked is
+exactly the mistake this project's own history already flagged and
+corrected once before; the branch itself is a plain, directly-verifiable
+if/else with no hidden complexity).
+
+**#4 — "no emails after fetch in shahana inbox," reported as broken —
+investigated and found to be entirely caused by this session's own
+accumulated testing load, not a real, standing app bug.** Before touching
+any code, confirmed her account's real state: 13,332 already-synced
+`imap_messages`, `sync_status='idle'` (not stuck), and — checked directly
+in the backend logs — a genuinely live, currently-running IMAP-IDLE
+listener actively watching both INBOX and INBOX.Sent for her real
+account. Reproducing the reported symptom live (`/communications/inbox`
+returning empty for her) led to discovering the backend was, at that
+exact moment, severely overloaded: `aviin_backend` at 677% CPU,
+`aviin_waha` at 577%, load average 9.4+, even `GET /health` timing out
+after 10 full seconds. Root-caused to 28 leftover node/chromium/
+Playwright processes accumulated across this same long investigation
+session's own many diagnostic scripts and test runs — confirmed
+directly: killing just those (`pkill` scoped to the `dev` user, leaving
+the 2 genuinely legitimate, long-running WAHA browser sessions
+untouched) dropped backend CPU to 0.45% and `/health` to a 10ms response
+immediately. Re-tested cleanly afterward: `/communications/inbox`
+correctly returns 200 real messages instantly, and a real headless-
+browser screenshot confirms her live Conversations page now shows
+"Inbox (200)" with 7,151 real unread messages, "WhatsApp: Connected,"
+and real message content — nothing was ever actually broken in this
+feature; the empty state was collateral damage from unrelated,
+self-inflicted testing load, now cleared. No code changed for this item.
+
+New permanent "S70" suite (4 tests) added to `qa_automation.spec.ts`,
+covering both real fixes (#2, #3) via direct API calls against real
+production data and real headless-browser checks. Regression sweep on
+Resume-Inbox-adjacent suites (S32/S39/S40/S41/S44/S45/S46/S56, 24 tests)
+passed 23/24 — the one failure (S41's "select all" test) was confirmed
+via a clean isolated re-run to be a pre-existing timing sensitivity with
+this page's own background auto-loader (built 2026-08-20), unrelated to
+today's change, which only touched the Source cell's own rendering.
+Zero-token audit: `CONFIRMED CLEAN` (418 files, 0 external API refs).
+
+**Operational lesson, not a code fix**: this is the second time in this
+project's history that a long, heavy testing session has caused real,
+temporary production degradation as a side effect (matching this
+project's own extensively-documented per-IP login-rate-limit pattern,
+which turned out to have a similar "our own volume" component even after
+its structural root cause was fixed on 2026-08-27) — a reminder to check
+`docker stats`/`uptime` and clean up leftover diagnostic processes
+between rounds of heavy live-browser verification, not just at the very
+end of a session.
