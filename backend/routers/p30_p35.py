@@ -270,7 +270,8 @@ dup_router = APIRouter(prefix="/duplicates", tags=["duplicates"])
 @dup_router.post("/scan")
 async def scan_duplicates(background_tasks: BackgroundTasks,
                            actor: Actor=Depends(get_actor)):
-    """Scan all candidates for duplicates by email and phone."""
+    """Scan all candidates for duplicates by email, phone, and (only when
+    NEITHER record has any phone or email at all) exact full name."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Email duplicates
         email_dups = await conn.fetch("""
@@ -290,9 +291,43 @@ async def scan_duplicates(background_tasks: BackgroundTasks,
             WHERE c1.tenant_id=$1 AND c1.phone IS NOT NULL AND c1.phone != ''
               AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
         """, actor.tenant_id)
+        # Name duplicates (real gap found 2026-08-31: multiple submissions
+        # of the same resume with no extractable phone/email — e.g. a
+        # scanned/redacted resume, or a source that strips contact info —
+        # were structurally unmatchable by either rule above, no matter
+        # how many times the scan ran, since there was nothing to compare.
+        # First version of this rule (name + no phone/email) shipped and
+        # was immediately proven unsafe by its own first real scan: 362
+        # pairs, the overwhelming majority false positives — "Faisal K"
+        # alone matched 100+ genuinely different real candidates, because
+        # a pre-existing, separate name-extraction bug stamps that (and
+        # "Profile"/"Manager"/"person full name only"/even a street
+        # address) onto unrelated resumes as a placeholder full_name.
+        # Exact name match on its own is not a reliable signal here.
+        # Fixed by requiring BOTH the name match AND the two candidates'
+        # actual resume text being genuinely identical — the one signal
+        # that correctly separated the real case (Venkatesh.C, 5 byte-
+        # identical resubmissions of the same resume) from every false
+        # positive above (confirmed: the sampled "Faisal K" records all
+        # had completely different resume content). Still requires no
+        # phone/email on either side, so this can never fire between two
+        # real, distinct people who each have their own contact info.
+        name_dups = await conn.fetch("""
+            SELECT c1.id AS id1, c2.id AS id2, 'name' AS field
+            FROM candidates c1
+            JOIN candidates c2 ON c1.full_name=c2.full_name
+              AND c1.id < c2.id AND c2.tenant_id=c1.tenant_id
+              AND trim(c1.resume_text)=trim(c2.resume_text)
+            WHERE c1.tenant_id=$1
+              AND c1.full_name IS NOT NULL AND length(trim(c1.full_name)) > 3
+              AND c1.resume_text IS NOT NULL AND length(trim(c1.resume_text)) > 200
+              AND (c1.phone IS NULL OR c1.phone='') AND (c1.email IS NULL OR c1.email='')
+              AND (c2.phone IS NULL OR c2.phone='') AND (c2.email IS NULL OR c2.email='')
+              AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
+        """, actor.tenant_id)
         # Insert into log
         count = 0
-        for row in list(email_dups) + list(phone_dups):
+        for row in list(email_dups) + list(phone_dups) + list(name_dups):
             try:
                 await conn.execute("""
                     INSERT INTO duplicate_candidates

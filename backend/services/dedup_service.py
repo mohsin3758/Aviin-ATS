@@ -325,9 +325,19 @@ async def merge_duplicate_candidates(conn, tenant_id: str, keep_id: str, merge_i
         "AND NOT EXISTS (SELECT 1 FROM applications WHERE candidate_id=$1 AND requisition_id=applications.requisition_id)",
         keep_id, merge_id)
 
-    # Re-link candidate_parsed_data
+    # Re-link candidate_parsed_data. Real bug found 2026-08-31: this
+    # table has a UNIQUE(tenant_id, candidate_id) constraint (at most one
+    # parsed-data row per candidate) — a plain UPDATE genuinely crashed
+    # (UniqueViolationError) the moment BOTH the keep and merge candidate
+    # already had their own row, which is the normal case for two real
+    # intake-processed candidates, not an edge case. keep_id's own row is
+    # already correct and shouldn't be overwritten; merge_id's row is
+    # harmless left orphaned on the now-inactive candidate if keep_id
+    # already has one — same "only re-link if keep doesn't already have
+    # one" guard shape as the applications re-link two lines up.
     await conn.execute(
-        "UPDATE candidate_parsed_data SET candidate_id=$1 WHERE candidate_id=$2",
+        "UPDATE candidate_parsed_data SET candidate_id=$1 WHERE candidate_id=$2 "
+        "AND NOT EXISTS (SELECT 1 FROM candidate_parsed_data WHERE candidate_id=$1)",
         keep_id, merge_id)
 
     # Soft-delete the merged candidate

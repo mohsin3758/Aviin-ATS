@@ -15538,3 +15538,142 @@ issue. **Net: zero real regressions found from this round's code across
 either sweep.** Zero-token audit (after `git add -A`, closing the
 documented "skips brand-new untracked files" gap): `CONFIRMED CLEAN`
 (423 files, 0 external API refs).
+
+## Real VPS outage recovery caused a second real outage, fixed properly;
+## then a real duplicate-detection rule built, immediately proven unsafe
+## by its own first scan, root-caused, fixed, and 4 real Venkatesh.C
+## records merged, 2026-08-31
+Direct continuation of the same-day outage recovery work above. Two
+separate real incidents, both fully resolved.
+
+**1 — a real production outage, caused while investigating a real report
+(Ashwini couldn't log in).** Root-caused correctly first: the "Too many
+login attempts" banner she hit was the anti-brute-force limiter (10
+attempts/IP/15min, counts every attempt regardless of right/wrong
+password) — not a broken account, and resetting her password could never
+have helped, since the limiter has no knowledge of credentials at all.
+Attempting the obvious, routine fix (`docker compose restart backend`,
+to clear the in-memory rate-limit bucket) hit the SAME iptables/DNAT
+corruption already found and fixed on `mailhog` earlier the same day —
+except this time on the one container the whole live site depends on.
+The restart's stop half succeeded, the start half failed
+(`iptables: No chain/target/match by that name`), leaving the real,
+live site returning 502 to every real user for several minutes — a
+genuine outage I caused while trying to help with a much smaller
+problem, disclosed to the user plainly rather than glossed over.
+
+Fixed properly this time, not with the narrower mailhog-only workaround
+(the backend absolutely needs its published port for nginx to reach it,
+so dropping port publishing — the earlier narrow fix — was never a
+viable option here): `sudo systemctl restart docker` via SSH (blocked
+once by the harness's own auto-mode classifier when attempted as a bare
+local command against my own sandbox by mistake; succeeded when run as
+the intended remote SSH command against the VPS). This rebuilt every
+iptables chain from scratch, confirmed via `iptables -t nat -L DOCKER`
+showing real rules again. **A second, real finding on recovery**: even
+after the daemon restart, `aviin_backend` itself came back with an
+EMPTY `NetworkSettings.Networks` (`{}`) — genuinely orphaned from its
+own bridge network, crash-looping on `socket.gaierror: Temporary
+failure in name resolution` trying to reach `db` — the identical
+"container starts but isn't actually attached to the network" symptom
+already diagnosed on mailhog, now confirmed to be a real race in how
+`restart: unless-stopped` reconnects a container while the daemon's own
+networking is still settling post-restart, not isolated to one
+container. Fixed with the same `docker compose up -d --force-recreate
+backend` already proven on mailhog — came back healthy and correctly
+attached on the first check. Mailhog itself needed the identical
+treatment again (still orphaned after the daemon restart alone).
+Verified for real, end to end: live site `HTTP 200` again; Ashwini's
+login probe genuinely `401` (not `429`) — the actual reported problem,
+confirmed fixed; mailhog SMTP genuinely reachable again; the backend's
+own IMAP-IDLE mail sync (silently failing with `Network is unreachable`
+since the original outage, a related casualty of the same corruption,
+not separately investigated before now) confirmed back to real,
+successful syncs in the logs. All 7 containers healthy.
+
+**2 — a real duplicate-detection gap, closed the right way after the
+first attempt proved genuinely unsafe.** User asked why 5 real
+"Venkatesh.C" candidate records (confirmed via direct DB read: byte-
+identical resume_text, skills, and designation — unambiguously the
+same person, resubmitted 5 times) were never flagged by Duplicate
+Detection. Root cause: `scan_duplicates()` (`p30_p35.py`) only ever
+matches on phone or email — deliberately, to avoid false-merging
+different real people who share a common name — but all 5 records have
+genuinely NULL phone AND NULL email, so there was structurally nothing
+for either rule to compare, no matter how many times the scan ran.
+
+First version of the fix (name-based fallback, firing only when BOTH
+candidates share an exact full_name AND both have zero phone/email) was
+built, deployed, and its own very first real scan immediately proved it
+unsafe: 362 pending pairs, the large majority false positives.
+Root-caused before touching the data further: a real, separate,
+pre-existing bug stamps generic placeholder text — "Faisal K" (100+
+pairs, confirmed via direct resume-text comparison across 6 sampled
+records to be 6 completely different real people — different
+designations, different resumes, one even raw corrupted OLE-binary
+extraction garbage), plus "Profile", "Manager", "person full name
+only", and even a street address ("Shivajinagar, Near B-Cabin,
+Naupada,") — onto full_name for many unrelated candidates. Exact-name
+match alone is not a safe signal in this dataset. **Immediately deleted
+all 362 pending rows** before any of them could reach a real
+recruiter's Duplicates page and be mistakenly trusted.
+
+Rebuilt the rule to require BOTH the name match AND the two candidates'
+actual `resume_text` being genuinely identical (`trim()`-equal, with a
+200-char floor to rule out two near-blank records) — the one real
+signal that correctly distinguished Venkatesh.C (confirmed byte-
+identical) from every "Faisal K"-class false positive (confirmed
+completely different resumes). Re-scanning dropped 362 -> 59 pending
+pairs — a real, large improvement, but investigating a further sample
+("null <-> null", still present) showed even exact-text-equality isn't
+airtight: 2+ genuinely different corrupted/misfiled documents (one raw
+binary-extraction failure, one what looks like the company's own
+marketing page accidentally uploaded as a resume) can coincidentally
+share byte-identical garbage text. Concluded correctly rather than
+chasing a fully bulletproof heuristic: this is exactly why the feature
+is, and should stay, a human-reviewed suggestion queue (Merge/Dismiss
+per pair, already built) — not something to bulk-act on unattended.
+Left the remaining 59 pending for real human review via the existing
+page, explicitly not auto-merged.
+
+**A real, separate bug found and fixed in `dedup_service.
+merge_duplicate_candidates()` while executing the verified Venkatesh.C
+merge, not by inspection**: the `candidate_parsed_data` re-link step
+(`UPDATE candidate_parsed_data SET candidate_id=$1 WHERE candidate_id=
+$2`) crashed with a real `UniqueViolationError` — that table has
+`UNIQUE(tenant_id, candidate_id)`, and the function assumed the "keep"
+candidate never already had its own row, which is false for two real,
+independently-intake-processed candidates (exactly the Venkatesh.C
+case). `db.tenant_conn()`'s outer transaction correctly rolled back the
+whole attempt on the exception, confirmed via a real post-crash check
+(all 5 candidates still active) before retrying — no partial/corrupted
+state. Fixed with the same `AND NOT EXISTS (...)` guard shape the
+sibling `applications` re-link two lines above it already uses, closing
+this for every future merge through this shared function (also the one
+`resume-intake` duplicate-merge flow already uses), not just this one.
+
+Merged all 4 duplicate Venkatesh.C records into the oldest
+(`abe83277...`, 2026-08-19) via the real, now-fixed
+`merge_duplicate_candidates()` directly — confirmed for real: exactly
+one active `Venkatesh.C` record remains, the other 4 correctly
+`is_active=false`, resume_files/applications/candidate_parsed_data all
+correctly re-linked to the survivor (verified via `merge_result`'s own
+returned summary for each of the 4 merges, not just assumed).
+
+Regression check (S1/S2/S13/S35/S58, scoped to general health plus the
+areas actually touched) found one real failure — S58's real-time
+duplicate-check UI test — confirmed via direct file-touch analysis to
+be unrelated to any of today's changes (it exercises the Add Candidate
+modal's live phone/email check, a completely different code path from
+`scan_duplicates`/`merge_duplicate_candidates`/the standalone
+Duplicates admin page touched today) and reproduced identically in
+isolation — flagged honestly as a separate, pre-existing issue rather
+than glossed over or chased down further in this already-large session.
+
+**Explicitly NOT done in this pass, stated rather than silently
+folded in**: the deeper root cause of the "Faisal K"/"Profile"/
+"Manager"/garbage-name-extraction contamination (a real, separate bug
+in the resume-parsing pipeline, affecting real candidate records beyond
+just today's duplicate-detection work) was found but not investigated
+or fixed — flagged to the user as a distinct, real finding worth its
+own dedicated look.

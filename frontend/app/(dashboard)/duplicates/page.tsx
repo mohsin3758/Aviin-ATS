@@ -1,7 +1,19 @@
 'use client';
 import { useState } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
-import { GitMerge, ScanSearch, X, Mail, Phone, Check } from 'lucide-react';
+import { GitMerge, ScanSearch, X, Mail, Phone, Check, UserCheck } from 'lucide-react';
+
+// (2026-08-31) 'name' added alongside the original 'email'/'phone' — fires
+// only when neither candidate has any phone or email on file at all, so an
+// exact-name match becomes the only usable signal. Kept as its own visual
+// treatment rather than silently falling into the phone/email look, since a
+// name-only match carries a different (still narrow, but real) confidence
+// level than a shared phone or email.
+const MATCH_BADGE: Record<string, { bg: string; color: string; icon: any }> = {
+  email: { bg: '#eff6ff', color: '#1e40af', icon: Mail },
+  phone: { bg: '#f0fdf4', color: '#166534', icon: Phone },
+  name:  { bg: '#fef3c7', color: '#92400e', icon: UserCheck },
+};
 
 const TABS = [
   { key: 'pending',   label: 'Pending' },
@@ -111,9 +123,15 @@ export default function DuplicatesPage() {
                     {r.phone2 && <div style={{ fontSize: '11px', color: r.match_field === 'phone' ? '#166534' : '#94a3b8', fontWeight: r.match_field === 'phone' ? 700 : 400 }}>{r.phone2}</div>}
                   </td>
                   <td style={{ padding: '12px 14px' }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: '600', padding: '3px 8px', borderRadius: '6px', background: r.match_field === 'email' ? '#eff6ff' : '#f0fdf4', color: r.match_field === 'email' ? '#1e40af' : '#166534' }}>
-                      {r.match_field === 'email' ? <Mail size={11} /> : <Phone size={11} />}{r.match_field}
-                    </span>
+                    {(() => {
+                      const badge = MATCH_BADGE[r.match_field] || MATCH_BADGE.phone;
+                      const Icon = badge.icon;
+                      return (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: '600', padding: '3px 8px', borderRadius: '6px', background: badge.bg, color: badge.color }}>
+                          <Icon size={11} />{r.match_field}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td style={{ padding: '12px 14px', fontSize: '11px', color: '#94a3b8' }}>
                     {r.detected_at ? new Date(r.detected_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
