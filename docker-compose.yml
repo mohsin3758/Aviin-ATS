@@ -57,7 +57,7 @@ services:
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       EMBED_URL: http://embed:8081
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen2.5:3b
+      OLLAMA_MODEL: qwen2.5:1.5b-instruct-q4_K_M
       WAHA_URL: http://waha:3000
       WAHA_API_KEY: ${WAHA_API_KEY:-}
       ERP_ENCRYPT_KEY: ${ERP_ENCRYPT_KEY:-erp_demo_key_change_in_prod}

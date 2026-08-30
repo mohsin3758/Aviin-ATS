@@ -15045,3 +15045,91 @@ its structural root cause was fixed on 2026-08-27) — a reminder to check
 `docker stats`/`uptime` and clean up leftover diagnostic processes
 between rounds of heavy live-browser verification, not just at the very
 end of a session.
+
+## Real infra bug found via the Hostinger VPS panel: the wrong Ollama model has been running since it was built, plus 22GB of safe-to-reclaim disk, 2026-08-30
+User pointed at the live Hostinger VPS overview panel (CPU 53%, RAM 66%,
+disk 75/100GB, live graphs showing a recent step-up) and asked whether
+this indicated a real problem. Investigated directly on the VPS rather
+than guessing from the panel alone — found 2 real, distinct, both-now-
+fixed issues, one of them a significant one.
+
+**The real finding: `OLLAMA_MODEL` has been set to `qwen2.5:3b` in both
+`.env` and `docker-compose.yml`, silently overriding every one of this
+codebase's own documented defaults.** Every real AI-generation call site
+(`ai_router.py`, `resume_intake.py`, `pipeline_p2.py`, `final_features.py`,
+`scheduler.py`, `imap_bg.py`) independently falls back to
+`qwen2.5:1.5b-instruct-q4_K_M` in code — CLAUDE.md itself has documented
+"Qwen2.5-1.5B" as the intended generation model since this project's very
+first version, sized deliberately for this exact 7.8GB VPS. Confirmed
+live via `docker exec aviin_ollama ollama ps`: the model genuinely
+loaded and actively generating was `qwen2.5:3b` (2.2GB), not the
+documented 1.5B model. `docker stats` at the moment of investigation
+showed `aviin_ollama` alone consuming **181% CPU and 4.6GB (59% of the
+entire server's RAM)** — by a wide margin the single largest resource
+consumer on the box, more than every other container combined. The
+system was under genuine memory pressure as a direct result: 188MB free
+RAM, 2.6GB of swap in active use (swap I/O is orders of magnitude slower
+than RAM, meaning this was very likely also contributing to real,
+felt slowness across the whole app, not just a dashboard number).
+`OLLAMA_MODEL: qwen2.5:3b` was hardcoded directly in `docker-compose.yml`
+(not merely a stale `.env` default), so no amount of `.env` editing alone
+would have fixed it. No history in this file documents anyone
+deliberately choosing the 3B model — this reads as either a manual
+one-off edit made directly on the VPS at some point, or a copy-paste
+mistake, never caught since the app "worked," just slower and hungrier
+than it should have been the whole time.
+
+**Fixed both places** (`.env` line 21, `docker-compose.yml` line 60) to
+the documented `qwen2.5:1.5b-instruct-q4_K_M`, pulled that exact tag
+fresh (`ollama pull` — 986MB, confirmed byte-identical underlying layer
+to the already-present plain `qwen2.5:1.5b` tag, so this cost no extra
+disk in practice), recreated the backend container to pick up the
+corrected env var, and restarted the `ollama` container directly to
+force-unload the wrong model immediately rather than wait for its
+keep-alive timeout — also removed `qwen2.5:3b` from Ollama's local
+model store entirely (`ollama rm`) so it can never be accidentally
+requested again. **Verified for real, not just "services report
+healthy"**: total system RAM used dropped from 7.2GB to 2.5GB
+immediately (`aviin_ollama` 4.6GB→117MB at idle); a genuine end-to-end
+JD-generation call through the real `POST /jd/generate` HTTP endpoint
+(the same `ai_router.generate()` code path every real Tier-2 AI feature
+in this app uses) completed successfully in 16.4s producing coherent
+real output, confirmed running the corrected model
+(`qwen2.5:1.5b-instruct-q4_K_M`) via `ollama ps`, using 1.2-1.8GB while
+actively generating — roughly half of what the wrong 3B model needed for
+the equivalent call.
+
+**Disk: 75GB/96GB (78%) used, found and fixed the real cause rather than
+just noting the number.** `docker system df -v` broke it down precisely
+before touching anything: `aviin_resume_uploads` (17GB, real candidate
+resume files — genuine business data, left completely untouched) and
+`aviin_ollama_data`/`aviin_waha_data` (3.3GB/2.7GB, real model/session
+data, also left alone) were never the problem. The actual, 100%-safe-to-
+reclaim consumer was **Docker's own build cache: 22.2GB** — leftover
+intermediate image layers accumulated from the very large number of
+`docker compose up -d --build` cycles across this project's history
+(this session alone rebuilt the backend/frontend images more than a
+dozen times). Build cache is deliberately kept only to speed up *future*
+builds and has zero relationship to what's actually running - pruning it
+(`docker builder prune -af`) cannot affect any live container. Confirmed
+zero additional dangling/untagged images existed separately (`docker
+image prune -f` reclaimed 0B, meaning the build cache accounted for
+essentially the entire gap). Verified for real: disk usage dropped from
+75GB/78% to 54GB/56% (43GB now free, previously 22GB) — a real, durable
+improvement, not a one-time report artifact, and every currently-running
+container's own image was left completely untouched throughout (checked
+`docker system df -v`'s per-container breakdown before pruning, not
+just trusted the prune command's own claims).
+
+**Not touched, and why**: `/var/www/talentforge-ats` (1.7GB) and the
+`payrollpro-app-1` container/image (3.18GB, confirmed already documented
+elsewhere in this file as a separate, unrelated project sharing this
+same VPS) — real, unrelated data belonging to a different deployment,
+correctly left alone rather than assumed to be cleanup candidates just
+because they showed up in the same `du`/`docker system df` scan.
+
+No code files changed in this pass — purely a live infrastructure/config
+fix (`.env`, `docker-compose.yml`) plus Docker-level cleanup. `.env` is
+correctly gitignored (never committed, matching standard practice for
+environment-specific secrets/config); `docker-compose.yml`'s fix is a
+real, trackable, one-line change.
