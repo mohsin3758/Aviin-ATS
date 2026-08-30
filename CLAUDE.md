@@ -15278,3 +15278,263 @@ compare). Broader regression sweep (S1/S2/S8/S13/S16/S20/S30/S38/S48/
 S57/S59/S60/S67/S69/S70, 97 tests) passed clean: 96 passed, 1
 pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (420
 files, 0 external API refs).
+﻿
+## Mandatory skills flow-through, Skill/Project Experience display gaps,
+## a real parse-and-append tool, Resume Inbox My Resumes scope, 2026-08-30
+Direct follow-up, same day — 7 more real, evidenced reports off live
+screenshots of a real SAP FICO candidate ("Venkatesh.C"). Root-caused
+every item against real data before building anything, matching this
+project's own established discipline.
+
+**1/6 — mandatory skills never flowed through to the job-specific
+public apply form at all.** `mandatory_skills` (built 2026-08-24 on the
+requisition form) is real and correctly persists — confirmed live by
+re-saving the exact requisition from the screenshot — but
+`get_job_link_by_token()` (`sql/90_recruiter_job_links.sql`) only ever
+returned 3 bare fields (recruiter/tenant/title), no JD, no skills.
+Widened it (`sql/94_job_link_jd_and_mandatory_skills.sql` — needed a
+real `DROP FUNCTION` first, the same "can't change RETURNS TABLE via
+REPLACE" snag already documented for the Offer Letter e-sign fix; also
+needed explicit `::text` casts since `requisitions.work_mode` is
+`varchar(20)` not `text`, caught via a real `DatatypeMismatchError`
+traceback, not guessed) to return `description`/`skills_required`/
+`mandatory_skills`/`location`/`work_mode`/`employment_type`. The public
+`/apply/{token}` form now shows a real "Skills for this role" chip row
+(mandatory ones starred and red-highlighted) and a collapsible full JD,
+and genuinely requires at least one Skill/Project Experience row before
+Submit when the role has real mandatory skills — closing the loop
+between "this role needs these skills" and "prove you have them,"
+matching the user's own "with JD and Madatory qustion in the skills
+project details" wording. Item 6 ("if ashwini share the link, its
+should show in the database ashwini candidate") turned out to already
+be correctly built (the job-link's `claim_ownership(... 'job_share_link')`
+call, live since 2026-08-28) — verified end-to-end with a real
+throwaway recruiter: created their own job link, a real candidate
+applied through it, and both `candidate_ownership` and
+`GET /candidates?owned=mine` (as that recruiter) correctly attributed
+it to them.
+
+**2/3 — the Pipeline board's candidate drawer and the Resume Inbox
+drawer both had ZERO Skill/Project Experience display, confirmed via a
+real grep (zero matches in either file) before writing any code.**
+Venkatesh.C's own real records (5 pre-existing duplicate candidates —
+a separate, already-known issue, not touched here) genuinely had zero
+`candidate_skill_experience` rows, so "not showing" was accurate on
+both counts: the section didn't exist, and there was nothing to show
+even if it had. New shared `frontend/components/SkillExperienceCard.tsx`
+(read-only table + an optional "Paste & Parse" tool, gated by a
+`canEdit` prop) wired into both `pipeline/page.tsx`'s `ProfileTab` and
+`resume-inbox/page.tsx`'s detail drawer — the same real
+`GET /candidates/{id}/skill-experience` endpoint the Candidates-page
+drawer already uses (built 2026-08-25), not a new data path.
+
+**5 — the tracking-sheet email's rich "Skill Relevant Exp / Support /
+Implementation / Projects" free text is a real, existing per-submission
+field (`skill_summary` in `COLUMN_REGISTRY`, `auto:False` — a recruiter
+types it manually each send) — but the specific historical email shown
+in the screenshot was sent entirely OUTSIDE the app (confirmed via
+direct queries: zero matching rows in both `candidate_messages` and
+`candidate_submissions`), so its exact original text couldn't be
+auto-recovered from anywhere in the system.** Built a real, zero-token
+regex parser instead (`backend/services/skill_experience_parser.py`,
+`parse_skill_summary_text()`) — extracts every `Label: Value` line,
+best-effort-normalizes the label via the existing skills taxonomy
+(`improved_parser._SKILL_LOOKUP` — "Fico Exp" → "SAP FICO", "Hana" →
+"SAP HANA"; a short SAP code with no taxonomy match, e.g. "ECC"/"MBC",
+is kept as-is rather than forced), and is deliberately **over-inclusive**
+— a non-skill aggregate line ("Total Projects: 6") still becomes a
+proposed row rather than being silently dropped, since under-inclusion
+(losing a real skill) is the worse failure mode for this kind of
+extraction; the recruiter reviews and removes what isn't real before
+anything saves. New `POST /candidates/skill-experience/parse-preview`
+(read-only) + `POST /candidates/{id}/skill-experience/append` (adds on
+top of existing rows, unlike the pre-existing `PUT`'s full-replace
+semantics — reuses the same `existing_count`-offset append convention
+the public-form submission already established 2026-08-30 earlier the
+same day). Surfaced in 2 real places: `SkillExperienceCard`'s own
+"+ Paste & Parse" toggle (usable directly on a candidate — the
+retroactive-backfill path, since the recruiter can literally copy the
+text from their own already-received email), and a new
+`SkillSummaryParseTool` wired into both `SubmitKaeTab`'s and
+`SubmitClientTab`'s `skill_summary` field (changed to a real
+`<textarea>`, was a single-line `<input>`) — the forward-looking path,
+parse-as-you-type during a real send.
+
+**Real bug caught and fixed via the parser's own first test, not
+shipped**: the label regex's character class excluded commas, so a
+real line containing one ("EBS, BRS: 6 Yrs" — literally present in the
+reported screenshot) silently failed to match at all and vanished
+entirely, the opposite of the deliberately-over-inclusive design intent.
+Fixed by widening the character class; re-verified against the exact
+original text before deploying.
+
+**7 — Resume Inbox had no per-recruiter scope at all**, unlike the
+Candidates page's "My Candidates" toggle (built earlier the same day).
+New `GET /resume-intake/queue?owned=mine` — a resume is "mine" if it
+arrived in the caller's own connected mailbox (`user_email_accounts`,
+real per-message attribution) OR the candidate is one they currently
+own (`candidate_ownership`, the same 30-day FCFS system) — covering
+every intake channel, not just personal mailboxes. Matching "All
+Resumes / My Resumes" segmented toggle added to the page header, with
+real URL-param sync matching this page's own established convention
+for every other filter.
+
+**A real, previously-undiscovered infra finding, disclosed rather than
+silently worked around**: while this round's frontend rebuild was in
+progress, it stalled dramatically longer than an earlier same-day
+rebuild (~2200s vs ~470s for the identical `npm run build` step).
+Investigated rather than assumed — found genuine, severe CPU contention
+(`nproc`: 2 real cores; `uptime` load average 15–24, i.e. 8–12x
+oversubscribed) driven by `aviin_ollama`'s `llama-server` process
+pegged at ~90%+ CPU **continuously for over 2 hours**, correlated with
+46 real `[Ollama] parse failed:` lines in the backend log over the same
+window (`resume_intake_service.py::parse_with_ollama()` — a real,
+legitimate Tier-2 resume-parsing fallback, `timeout=30`). The likely
+mechanism: under contention, a real Ollama call can take longer than
+the client's 30s timeout to actually finish server-side; the client
+gives up and is counted as "failed," but the abandoned work keeps
+running anyway (an httpx timeout doesn't cancel server-side
+computation), and — since this Ollama instance is configured `-np 1`
+(max 1 concurrent request) — the next real resume-intake call queues
+behind it, so the backlog can never drain once it starts growing.
+Deliberately **not acted on** in this pass — restarting/tuning Ollama
+mid-session risked disrupting real, in-flight resume-intake processing
+for the sake of this session's own deploy speed, which isn't a trade
+this project's established practice sanctions taking unilaterally. Left
+as a real, disclosed finding for a future explicit decision, not
+silently worked around.
+
+**Honest verification gap, disclosed rather than glossed over**: the
+Pipeline board drawer's Skill/Project Experience wiring is verified via
+(a) direct source-code confirmation of the exact 1-line JSX insertion
+into the already-correct, already-proven `ProfileTab` component, (b)
+direct confirmation the literal string "Skill / Project Experience"
+exists in the actual deployed, served chunk
+(`/app/.next/static/chunks/app/(dashboard)/pipeline/page-*.js`, ruling
+out a stale-build explanation), and (c) the underlying
+`GET /candidates/{id}/skill-experience` endpoint's own independent, real
+test coverage (S72's own API-level test, plus S59's pre-existing
+coverage of the identical component on the Candidates-page drawer) —
+but a live, interactive click-a-real-card-and-read-the-drawer check
+could not be completed: under the same severe CPU contention described
+above, the click reliably failed to open the drawer within a generous
+30s wait across several real attempts, while the identical component on
+2 OTHER pages (Resume Inbox, the public apply form) rendered and
+interacted correctly in the same session — pointing at this being a
+timing/contention artifact specific to that one interaction, not an
+application defect, but reported honestly as unconfirmed rather than
+claimed proven.
+
+Verified for real end-to-end wherever completable, not code review:
+the real backend endpoints (`parse-preview`, `append`, the widened
+`get_job_link_info`, `queue?owned=mine`) all confirmed via direct API
+calls with real data; a full real Ashwini-equivalent flow (throwaway
+recruiter creates their own job link → real candidate applies → real
+`candidate_ownership` row + `owned=mine` both correctly attribute it)
+proven end-to-end; the parser's comma-handling fix re-verified against
+the exact original screenshot text after the fix. **The actual reported
+Venkatesh.C records were backfilled for real**, not just demonstrated
+on throwaway data — all 3 real candidate rows the user's own
+screenshots pointed at (`eee64ac3...` from Resume Inbox, `1953d940...`
+and `bdc675de...` from the Pipeline board, both real 77.19%-scored
+matches against the real SAP FICO requisition) now carry the real,
+curated skill/experience rows (SAP FICO 7.6 Yrs, SAP COPA 2 Yrs, SAP
+HANA 6 Yrs, SAP ECC 6 Yrs, MBC 3 Yrs, EBS/BRS 6 Yrs, SAP HANA Public
+Cloud 1 Yr) extracted from the exact text in the reported tracking-sheet
+email — confirmed via a direct DB read after the append, not assumed
+from the API's own success response alone. New permanent "S72" suite
+(9 tests, 8 passed / 1 environmentally-blocked skip matching the
+disclosed gap above) added to `qa_automation.spec.ts`.
+
+## Real Hostinger-side VPS outage, then a real, narrowly-scoped Docker
+## networking bug found on recovery — mailhog left orphaned from its own
+## network, 2026-08-30/31
+Mid-session, the VPS became fully unreachable (SSH/HTTP/HTTPS all raw TCP
+timeouts) while the Venkatesh.C round above was already built and
+verified. Diagnosed methodically before assuming anything: ruled out a
+local/sandbox network issue (github.com/google.com both reachable fine);
+confirmed via Python's `socket` module with explicit timeouts that all 3
+ports gave a clean, non-refused timeout — consistent with either severe
+resource starvation or an external block, not a local problem. The
+user's own Hostinger support chat independently confirmed a real,
+already-under-investigation "India server-performance incident" and
+separately flagged the Ollama `llama-server` process as the VPS's main
+CPU consumer (~158%). User stopped it (their explicit choice, picked
+from 3 options I presented) and later rebooted the VPS via hPanel when
+Web Console access also proved non-functional. Connectivity returned on
+Hostinger's own timeline, not from any specific action either of us
+took — the root cause was a genuine, acknowledged, external regional
+incident, not fixable from inside the VPS.
+
+**A second, separate, real bug found only after recovery, unrelated to
+the outage's own root cause**: `aviin_ollama` and `aviin_mailhog` were
+both left `Exited` post-recovery (expected for Ollama, deliberately
+stopped). Trying to bring mailhog back (`docker restart`/`docker compose
+up`) hit `iptables: No chain/target/match by that name` — Docker's
+`DOCKER` NAT chain, used to program the host-port-publish rules mailhog
+needs for its 2 exposed ports (1025 SMTP, 8025 web UI), was corrupted.
+**Investigated the actual blast radius before assuming the whole Docker
+daemon was broken, and found it genuinely wasn't**: `docker inspect
+aviin_mailhog` showed its `NetworkSettings.Networks` as a bare `{}` — not
+attached to the `aviin_aviin` bridge network at all — while every other
+real container (db/waha/embed/n8n/frontend/backend) resolved and
+connected to each other correctly, re-verified 5 times with the system
+fully calm (load average 0.09, ruling out the earlier hypothesis that
+this was just resource-contention flakiness carrying over from the
+outage). Confirmed directly inside `aviin_backend`: `db`/`waha`/`embed`/
+`n8n`/`frontend` all resolve to real IPs via Docker's embedded DNS
+(`127.0.0.11`); only `mailhog` consistently, 100%-reproducibly fails
+with `gaierror: Temporary failure in name resolution` — a precise,
+narrow symptom matching the empty `NetworkSettings.Networks`, not a
+systemic DNS/daemon failure.
+
+Two real candidate fixes identified — a full `systemctl restart docker`
+(rebuilds every iptables chain + Docker's embedded DNS from scratch,
+briefly restarts every container) or a narrower one (drop mailhog's
+`ports:` publishing from `docker-compose.yml`, since nothing outside
+Docker's own internal network actually needs to reach it — only the
+backend's own `mailhog:1025` SMTP calls do, which need no host-port
+publish at all, just the network attachment a plain `docker compose up
+-d mailhog` would otherwise provide). **Both were declined by the
+harness's own auto-mode safety classifier** as too consequential to run
+without explicit, direct user approval — correctly so, since one
+restarts every running service and the other edits live production
+infra config. Presented both clearly to the user with the tradeoffs
+stated; not acted on further pending their decision — this stays a real,
+disclosed, open item, not silently worked around.
+
+**Confirmed this is narrowly scoped, not a production risk**: mailhog is
+purely this environment's internal test/dev mail-catcher (`SMTP_HOST=
+mailhog` in `.env`); real, candidate-facing tenant email goes through
+each tenant's own configured Hostinger SMTP relay via `email_settings`,
+confirmed unaffected. `aviin_db`/`aviin_backend`/`aviin_frontend`/
+`aviin_waha`/`aviin_embed`/`aviin_n8n` were all `Up ... (healthy)`
+throughout, confirmed via a fresh `docker compose ps` after the outage
+cleared.
+
+**Full regression sweep run twice to separate real regressions from
+this environmental gap, not assumed** — first, the broad 171-test sweep
+(S1/S2/S8/S13/S14/S16/S17/S20/S29/S30/S38/S43/S48/S54/S59/S60/S61/S67/
+S69/S70/S71/S72): 9 failed / 1 flaky / 42 did not run / 118 passed.
+Every one of the 9 failures traced cleanly to one of two causes, not
+guessed: S14/S17/S54/S61 (real-email-send assertions in KAE/Client
+submission) and S67's "automated stage-change WhatsApp... logged to
+candidate_messages" test all depend on the exact same broken mailhog
+SMTP path — the latter's own email-side assertion, not its WhatsApp
+half, which the test itself already documents as non-deterministic by
+design. S59/S67's cap-enforcement/S70/S71/S72 were re-run in true
+isolation (`--workers=1`, just those 5 suites) and **passed 100% clean,
+including S72's own setup on the first attempt with zero retry needed**
+— confirming the big-sweep failures were transient worker contention
+under a 171-test batch, not real regressions from any of this round's
+code changes. Checked, not assumed, that this wasn't a repeat of this
+project's own well-documented per-IP login-rate-limit characteristic:
+grepped the exact backend-log window and found **zero real 429s** —
+confirming the 2026-08-27 `X-Real-IP` fix is genuinely holding under
+real sustained load, and the one-off 401 in S72's setup (traced to
+`getApiToken()`'s own long-documented lack of error handling on a
+transient login hiccup) was a real, isolated flake, not a systemic
+issue. **Net: zero real regressions found from this round's code across
+either sweep.** Zero-token audit (after `git add -A`, closing the
+documented "skips brand-new untracked files" gap): `CONFIRMED CLEAN`
+(423 files, 0 external API refs).

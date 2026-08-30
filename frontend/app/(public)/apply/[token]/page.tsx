@@ -10,6 +10,12 @@ interface LinkInfo {
   recruiter_name: string;
   tenant_name: string;
   requisition_title: string;
+  description?: string;
+  skills_required?: string[];
+  mandatory_skills?: string[];
+  location?: string;
+  work_mode?: string;
+  employment_type?: string;
 }
 
 export default function RecruiterJobLinkPage({ params }: { params: { token: string } }) {
@@ -32,6 +38,7 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
 
   // Expert / Intermediate skills — same chip-add UX as the internal Add
   // Candidate form's Skills section.
+  const [showJd, setShowJd] = useState(false);
   const [expertSkills, setExpertSkills] = useState<string[]>([]);
   const [expertIn, setExpertIn] = useState('');
   const [intermediateSkills, setIntermediateSkills] = useState<string[]>([]);
@@ -130,9 +137,57 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
           <Briefcase size={18} color="#1e40af" />
           <h2 style={{ margin: 0, fontSize: 18 }}>Apply for {info?.requisition_title}</h2>
         </div>
-        <p style={{ fontSize: 13, color: '#64748b', margin: '0 0 20px' }}>
+        <p style={{ fontSize: 13, color: '#64748b', margin: '0 0 12px' }}>
           Send your resume to {info?.recruiter_name} &middot; {info?.tenant_name}
         </p>
+
+        {/* Real gap fix (2026-08-30): a candidate applying through a
+            job-specific link had no way to see what the role actually
+            needed — reported live. mandatory_skills (built 2026-08-24 on
+            the requisition form) is shown highlighted here so it's clear
+            which skills matter most, not just a flat list. */}
+        {((info?.skills_required?.length ?? 0) > 0 || info?.description) && (
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, marginBottom: 16 }}>
+            {[info?.location, info?.work_mode, info?.employment_type].filter(Boolean).length > 0 && (
+              <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
+                {[info?.location, info?.work_mode, info?.employment_type].filter(Boolean).join(' · ')}
+              </div>
+            )}
+            {(info?.skills_required?.length ?? 0) > 0 && (
+              <>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 6 }}>Skills for this role</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: info?.description ? 10 : 0 }}>
+                  {info!.skills_required!.map(s => {
+                    const isMandatory = (info?.mandatory_skills || []).includes(s);
+                    return (
+                      <span key={s} style={{
+                        padding: '4px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700,
+                        background: isMandatory ? '#fef2f2' : '#eff6ff',
+                        color: isMandatory ? '#b91c1c' : '#1e40af',
+                        border: isMandatory ? '1px solid #fecaca' : '1px solid #bfdbfe',
+                      }}>
+                        {isMandatory && '★ '}{s}
+                      </span>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+            {info?.description && (
+              <>
+                <button type="button" onClick={() => setShowJd(s => !s)}
+                  style={{ background: 'none', border: 'none', color: '#1e40af', fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: 0 }}>
+                  {showJd ? 'Hide job description ▲' : 'View full job description ▼'}
+                </button>
+                {showJd && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#374151', whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto' }}>
+                    {info.description}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         <label style={label}>Full Name *</label>
         <input style={input} value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} />
@@ -215,7 +270,14 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
           ))}
         </div>
 
-        <div style={sectionLabel}>Skill / Project Experience (optional)</div>
+        <div style={sectionLabel}>
+          Skill / Project Experience {(info?.mandatory_skills?.length ?? 0) === 0 && '(optional)'}
+        </div>
+        {(info?.mandatory_skills?.length ?? 0) > 0 && (
+          <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 8 }}>
+            Please add at least one row below documenting your experience with a required skill (★): {info!.mandatory_skills!.join(', ')}
+          </div>
+        )}
         <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, marginBottom: 12, background: '#f8fafc' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
             <input style={{ ...input, marginBottom: 0 }} placeholder="Skill / Technology (e.g. SAP FICO)" value={skillExpForm.skill_name} onChange={e => setSkillExpForm(f => ({ ...f, skill_name: e.target.value }))} />
@@ -284,17 +346,30 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
 
         {error && <div style={{ color: '#dc2626', fontSize: 12, marginBottom: 12 }}>{error}</div>}
 
-        <button
-          onClick={submit}
-          disabled={saving || !consent}
-          style={{
-            width: '100%', padding: '12px', background: (saving || !consent) ? '#94a3b8' : '#1e40af',
-            color: 'white', border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 700,
-            cursor: (saving || !consent) ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {saving ? 'Submitting…' : 'Submit Resume'}
-        </button>
+        {(() => {
+          const needsSkillExp = (info?.mandatory_skills?.length ?? 0) > 0 && skillExpRows.length === 0;
+          const disabled = saving || !consent || needsSkillExp;
+          return (
+            <>
+              {needsSkillExp && (
+                <div style={{ color: '#b91c1c', fontSize: 12, marginBottom: 8 }}>
+                  This role has required skills — please add at least one Skill / Project Experience row above before submitting.
+                </div>
+              )}
+              <button
+                onClick={submit}
+                disabled={disabled}
+                style={{
+                  width: '100%', padding: '12px', background: disabled ? '#94a3b8' : '#1e40af',
+                  color: 'white', border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 700,
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {saving ? 'Submitting…' : 'Submit Resume'}
+              </button>
+            </>
+          );
+        })()}
       </div>
     </div>
   );

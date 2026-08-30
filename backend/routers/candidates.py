@@ -993,6 +993,58 @@ async def replace_skill_experience(
     return {"ok": True, "count": len(body)}
 
 
+class SkillSummaryParseIn(BaseModel):
+    text: str
+
+
+@router.post("/skill-experience/parse-preview")
+async def parse_skill_summary_preview(body: SkillSummaryParseIn, actor: Actor = Depends(get_actor)):
+    """Real feature (2026-08-30): a recruiter often has real, rich
+    skill/experience detail already typed as free text somewhere (the
+    KAE-submission tracking sheet's own manual "skill_summary" field, or
+    literally pasted from an email they already have) - this parses it
+    into proposed Skill/Project Experience rows for review, never a
+    silent write. Read-only, no candidate_id needed."""
+    from services.skill_experience_parser import parse_skill_summary_text
+    return {"rows": parse_skill_summary_text(body.text)}
+
+
+@router.post("/{candidate_id}/skill-experience/append")
+async def append_skill_experience(
+    candidate_id: str, body: list[SkillExperienceRow],
+    actor: Actor = Depends(require_permission("candidates", "update")),
+):
+    """A real, genuine append - unlike the PUT above (full replace, for
+    the Add/Edit modal's own build-the-whole-table flow), this adds rows
+    on top of whatever already exists - the right semantics for
+    'I parsed some new detail, add it without touching what's already
+    there', matching the same append-with-sort_order-offset convention
+    already used by the public resume-drop forms' skill_experience
+    submission (personal_links.py)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow(
+            "SELECT id FROM candidates WHERE id=$1 AND is_active IS NOT FALSE", candidate_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        existing_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM candidate_skill_experience WHERE candidate_id=$1 AND tenant_id=$2",
+            candidate_id, actor.tenant_id)
+        added = 0
+        for i, row in enumerate(body):
+            if not row.skill_name.strip():
+                continue
+            await conn.execute(
+                """INSERT INTO candidate_skill_experience
+                    (tenant_id, candidate_id, skill_name, project_name, duration_from, duration_to,
+                     role_types, relevant_experience, last_used, sort_order)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                actor.tenant_id, candidate_id, row.skill_name.strip(), row.project_name,
+                row.duration_from, row.duration_to, row.role_types, row.relevant_experience,
+                row.last_used, existing_count + i)
+            added += 1
+    return {"ok": True, "added": added}
+
+
 @router.get("/{candidate_id}")
 async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:

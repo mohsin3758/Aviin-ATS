@@ -783,6 +783,7 @@ async def submission_preview(application_id: str, actor: Actor = Depends(get_act
         screening = await conn.fetchrow(
             "SELECT to_emails, is_enabled FROM screening_notification_settings WHERE tenant_id=$1", actor.tenant_id)
     return {
+        "candidate_id": str(row["candidate_id"]),
         "client_id": str(row["client_id"]) if row["client_id"] else None,
         "kae": dict(kaes[0]) if kaes else None,
         # Real fix (2026-08-19): a client can have more than one active KAE
@@ -1318,6 +1319,7 @@ async def submit_to_client_preview(
             "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
             row["requisition_id"])
     return {
+        "candidate_id": str(row["candidate_id"]),
         "client_id": str(row["client_id"]) if row["client_id"] else None,
         "primary_contact": dict(contacts[0]) if contacts and contacts[0]["is_primary"] else None,
         "contacts": [dict(c) for c in contacts],

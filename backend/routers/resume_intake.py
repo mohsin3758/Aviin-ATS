@@ -76,6 +76,7 @@ async def intake_queue(
     status: str = Query('all'),
     source: str = Query(None),
     req_id: str = Query(None),
+    owned: str = Query(None),  # 'mine' — 2026-08-30, matching candidates.py's owned=mine
     limit: int = Query(100, le=500),
     offset: int = Query(0),
     actor: Actor = Depends(get_actor)
@@ -98,6 +99,22 @@ async def intake_queue(
         if req_id:
             conditions.append(f'(rf.requisition_id=${p}::uuid OR rf.candidate_id IN (SELECT id FROM candidates WHERE matched_requisition_id=${p}::uuid AND tenant_id=$1))')
             params.append(req_id); p += 1
+        if owned == 'mine':
+            # Real feature (2026-08-30): "each recruiter should have their
+            # own resume box, not everyone's" — reported live. A resume is
+            # "mine" if it arrived in MY connected mailbox (real, per-
+            # message attribution via user_email_accounts), OR the
+            # candidate is currently one I own (candidate_ownership, the
+            # same 30-day FCFS system the Candidates page's own
+            # owned=mine filter already uses) — covers every intake
+            # channel, not just personal mailboxes.
+            conditions.append(
+                f"(EXISTS (SELECT 1 FROM imap_messages im2 JOIN user_email_accounts ua2 ON ua2.id=im2.account_id "
+                f"WHERE im2.id=rf.imap_msg_id AND ua2.user_id=${p}) "
+                f"OR EXISTS (SELECT 1 FROM candidate_ownership co2 WHERE co2.tenant_id=$1 AND co2.candidate_id=rf.candidate_id "
+                f"AND co2.status='active' AND co2.ownership_expires_at > now() AND co2.recruiter_id=${p}))"
+            )
+            params.append(actor.user_id); p += 1
         where = ' AND '.join(conditions)
 
         rows = await conn.fetch(f"""

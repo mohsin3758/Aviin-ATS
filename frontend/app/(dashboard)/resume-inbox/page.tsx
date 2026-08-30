@@ -3,6 +3,7 @@ import { useState, useCallback, useMemo, useEffect, useRef, Suspense } from 'rea
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import WhatsAppChatButton from '@/components/WhatsAppChatButton';
+import SkillExperienceCard from '@/components/SkillExperienceCard';
 import { authHeaders } from '@/lib/auth';
 import {
   Inbox, RefreshCw, Play, FileText, User, Mail, Phone, MapPin,
@@ -365,7 +366,13 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
 
         {(pd.expected_ctc || pd.notice_period) && <div style={{ background: '#fafafa', borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12 }}>{pd.expected_ctc && <div><b>Expected CTC:</b> {pd.expected_ctc}</div>}{pd.notice_period && <div style={{ marginTop: 4 }}><b>Notice Period:</b> {pd.notice_period}</div>}</div>}
 
-        {item.file_name && <div style={{ marginBottom: 16, padding: 12, background: '#f0fdf4', borderRadius: 10, border: '1px solid #bbf7d0' }}><div style={{ fontSize: 11, fontWeight: 700, color: '#059669', marginBottom: 6 }}>RESUME FILE</div><div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}><FileText size={13} color="#059669" /><span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.file_name}</span><span style={{ color: '#94a3b8', flexShrink: 0 }}>{fsize(item.file_size)}</span></div>
+        {item.candidate_id && (
+          <div style={{ marginBottom: 16 }}>
+            <SkillExperienceCard candidateId={item.candidate_id} canEdit />
+          </div>
+        )}
+
+        {item.file_name &&<div style={{ marginBottom: 16, padding: 12, background: '#f0fdf4', borderRadius: 10, border: '1px solid #bbf7d0' }}><div style={{ fontSize: 11, fontWeight: 700, color: '#059669', marginBottom: 6 }}>RESUME FILE</div><div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}><FileText size={13} color="#059669" /><span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.file_name}</span><span style={{ color: '#94a3b8', flexShrink: 0 }}>{fsize(item.file_size)}</span></div>
           {/* Real bug fix (2026-08-24): this was a raw <a href={API_URL+file_path}>
               pointing straight at a storage path nothing serves directly —
               the same "raw file_path link, not the auth-gated download
@@ -571,6 +578,10 @@ function ResumeInboxPageInner() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('');
   const [jobFilter, setJobFilter] = useState('');
+  // Real feature (2026-08-30): "each recruiter should have their own
+  // resume box, not everyone's" — reported live, matching the same
+  // owned=mine scope just built for the Candidates page.
+  const [ownedFilter, setOwnedFilter] = useState('');
 
   // Sync jobFilter with ?req= URL param
   useEffect(() => { const r = _sp?.get('req') || ''; if (r !== jobFilter) setJobFilter(r); }, [_sp]);
@@ -597,11 +608,13 @@ function ResumeInboxPageInner() {
   useEffect(() => {
     const st = _sp?.get('status'); if (st) setStatusFilter(st);
     const sr = _sp?.get('source'); if (sr) setSourceFilter(sr);
+    const ow = _sp?.get('owned'); if (ow) setOwnedFilter(ow);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [restoreItemId] = useState<string>(() => _sp?.get('item') || '');
   const updateStatusFilter = (v: string) => { setStatusFilter(v); setUrlParam('status', v === 'all' ? '' : v); };
   const updateSourceFilter = (v: string) => { setSourceFilter(v); setUrlParam('source', v); };
+  const updateOwnedFilter = (v: string) => { setOwnedFilter(v); setUrlParam('owned', v); };
 
   const [search, setSearch] = useState('');
   const [processing, setProcessing] = useState(false);
@@ -632,7 +645,7 @@ function ResumeInboxPageInner() {
   // just the first page; loadMore() below fetches subsequent pages by
   // offset and appends, which has no upper bound.
   const PAGE_SIZE = 100;
-  const queueUrl = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}&limit=${PAGE_SIZE}&offset=0`;
+  const queueUrl = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}${ownedFilter ? `&owned=${ownedFilter}` : ''}&limit=${PAGE_SIZE}&offset=0`;
   const { data: queueData, refetch: reloadQueue, loading: isLoading } = useFetch<any>(queueUrl);
   const [accumItems, setAccumItems] = useState<ResumeItem[]>([]);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -641,7 +654,7 @@ function ResumeInboxPageInner() {
   const loadMore = async () => {
     setLoadingMore(true);
     try {
-      const url = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}&limit=${PAGE_SIZE}&offset=${accumItems.length}`;
+      const url = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}${ownedFilter ? `&owned=${ownedFilter}` : ''}&limit=${PAGE_SIZE}&offset=${accumItems.length}`;
       const more = await apiFetch(url);
       setAccumItems(prev => [...prev, ...((more?.items || []) as ResumeItem[])]);
       setAutoLoadFails(0);
@@ -790,7 +803,20 @@ function ResumeInboxPageInner() {
           <h1 style={{ fontSize: 21, fontWeight: 800, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}><Inbox size={21} color="#1e40af" /> Resume Inbox</h1>
           <p style={{ margin: '3px 0 0', fontSize: 12, color: '#64748b' }}>Auto-capture from 30+ Indian job boards · AI parsing · JD match scoring · ATS sync</p>
         </div>
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          {/* Real feature (2026-08-30): "each recruiter should have their
+              own resume box, not everyone's" — reported live, matching the
+              same owned=mine scope built for the Candidates page. */}
+          <div style={{ display: 'inline-flex', background: '#f1f5f9', borderRadius: 8, padding: 3, gap: 2 }}>
+            <button data-testid="resume-inbox-scope-all" onClick={() => updateOwnedFilter('')}
+              style={{ padding: '7px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, background: ownedFilter !== 'mine' ? 'white' : 'transparent', color: ownedFilter !== 'mine' ? '#1e40af' : '#64748b', boxShadow: ownedFilter !== 'mine' ? '0 1px 2px rgba(0,0,0,0.08)' : 'none' }}>
+              All Resumes
+            </button>
+            <button data-testid="resume-inbox-scope-mine" onClick={() => updateOwnedFilter('mine')}
+              style={{ padding: '7px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, background: ownedFilter === 'mine' ? 'white' : 'transparent', color: ownedFilter === 'mine' ? '#1e40af' : '#64748b', boxShadow: ownedFilter === 'mine' ? '0 1px 2px rgba(0,0,0,0.08)' : 'none' }}>
+              My Resumes
+            </button>
+          </div>
           <button onClick={() => { reloadQueue(); reloadStats(); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', color: '#475569' }}><RefreshCw size={13} /> Refresh</button>
           <button onClick={runProcessing} disabled={processing} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px', background: processing ? '#94a3b8' : '#1e40af', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: processing ? 'not-allowed' : 'pointer' }}><Play size={13} /> {processing ? 'Processing…' : 'Process Pending'}</button>
         </div>

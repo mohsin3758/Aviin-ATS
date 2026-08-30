@@ -318,10 +318,21 @@ async def get_job_link_info(token: str):
         row = await conn.fetchrow("SELECT * FROM get_job_link_by_token($1)", token)
     if not row or row["req_is_active"] is False or row["req_status"] != "open":
         raise HTTPException(status_code=404, detail="This link is invalid, expired, or the role is no longer open")
+    # Real gap fix (2026-08-30): this form previously showed nothing about
+    # the actual role — no JD, no required/mandatory skills — reported
+    # live. mandatory_skills is a real subset of skills_required (built
+    # 2026-08-24 on the requisition form) — surfaced here so a candidate
+    # applying via a job-specific link sees exactly what the role needs.
     return {
         "recruiter_name": row["recruiter_name"],
         "tenant_name": row["tenant_name"],
         "requisition_title": row["requisition_title"],
+        "description": row["description"],
+        "skills_required": row["skills_required"] or [],
+        "mandatory_skills": row["mandatory_skills"] or [],
+        "location": row["location"],
+        "work_mode": row["work_mode"],
+        "employment_type": row["employment_type"],
     }
 
 

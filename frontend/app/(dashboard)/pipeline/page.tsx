@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'rea
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import WhatsAppChatButton from '@/components/WhatsAppChatButton';
+import SkillExperienceCard from '@/components/SkillExperienceCard';
 import { ResumeGeneratorModal } from '@/components/ResumeGeneratorModal';
 import { authHeaders, API, getTokenPayload } from '@/lib/auth';
 import {
@@ -1066,6 +1067,7 @@ function ProfileTab({ app, apiUrl }: any) {
           ))}
         </InfoCard>
       )}
+      <SkillExperienceCard candidateId={app.candidate_id} canEdit />
       {app.resume_file_id && (
         <button onClick={() => downloadResume(app.resume_file_id, app.resume_file_name)}
           style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 14px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 10, cursor: 'pointer', color: '#15803D', fontSize: 12, fontWeight: 700 }}>
@@ -1404,6 +1406,76 @@ function ResumeGenTab({ candidateId, candidateName, requisitionId, clientName }:
   );
 }
 
+// Real feature (2026-08-30): the "Skill Relevant Exp / Support /
+// Implementation / Projects" tracking-sheet field (skill_summary) is
+// exactly where a recruiter types the rich per-skill experience detail
+// that reportedly never made it into the candidate's own structured
+// Skill/Project Experience record ("its should auto extract to input in
+// skills project Experience"). Zero-token regex parse (backend), review-
+// before-save here — never a silent write.
+function SkillSummaryParseTool({ candidateId, text, showToast }: any) {
+  const [open, setOpen] = useState(false);
+  const [proposed, setProposed] = useState<any[] | null>(null);
+  const [parsing, setParsing] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  async function parseNow() {
+    if (!text?.trim()) return;
+    setParsing(true);
+    try {
+      const res = await apiFetch('/candidates/skill-experience/parse-preview', {
+        method: 'POST', body: JSON.stringify({ text }),
+      });
+      setProposed((res.rows || []).map((r: any) => ({ ...r })));
+      setOpen(true);
+    } catch (e: any) { showToast?.(String(e?.message || 'Parse failed'), false); }
+    setParsing(false);
+  }
+
+  async function saveNow() {
+    if (!proposed || proposed.length === 0 || !candidateId) return;
+    setSaving(true);
+    try {
+      const body = proposed.map(r => ({ skill_name: r.skill_name, relevant_experience: r.relevant_experience || null }));
+      await apiFetch(`/candidates/${candidateId}/skill-experience/append`, { method: 'POST', body: JSON.stringify(body) });
+      showToast?.(`✓ Added ${body.length} row(s) to Skill/Project Experience`, true);
+      setProposed(null); setOpen(false);
+    } catch (e: any) { showToast?.(String(e?.message || 'Save failed'), false); }
+    setSaving(false);
+  }
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <button type="button" onClick={parseNow} disabled={parsing || !text?.trim()}
+        style={{ fontSize: 10, fontWeight: 700, color: text?.trim() ? '#1E40AF' : '#CBD5E1', background: 'none', border: 'none', cursor: text?.trim() ? 'pointer' : 'not-allowed', padding: '4px 0' }}>
+        {parsing ? 'Parsing…' : '→ Parse into Skill / Project Experience'}
+      </button>
+      {open && proposed && (
+        <div style={{ marginTop: 6, padding: 8, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8 }}>
+          {proposed.length === 0 ? (
+            <div style={{ fontSize: 10, color: '#94A3B8' }}>No "Label: Value" lines found.</div>
+          ) : (
+            <>
+              {proposed.map((r, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', fontSize: 10 }}>
+                  <span style={{ flex: 1, fontWeight: 700 }}>{r.skill_name}</span>
+                  <span style={{ color: '#64748B' }}>{r.relevant_experience}</span>
+                  <button type="button" onClick={() => setProposed(p => (p || []).filter((_, idx) => idx !== i))}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', fontWeight: 700 }}>×</button>
+                </div>
+              ))}
+              <button type="button" onClick={saveNow} disabled={saving}
+                style={{ marginTop: 4, fontSize: 10, fontWeight: 700, padding: '4px 10px', borderRadius: 6, border: 'none', background: '#16A34A', color: '#fff', cursor: 'pointer' }}>
+                {saving ? 'Saving…' : `Add ${proposed.length} row(s) to candidate`}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
   const { data: preview, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-kae/preview`);
   const { data: templates } = useFetch<any[]>('/submission-templates');
@@ -1592,8 +1664,16 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
           {(selectedTemplate?.columns || []).filter((c: any) => c.key !== 'sl_no').map((c: any) => (
             <div key={c.key} style={{ gridColumn: c.key === 'skill_summary' ? '1 / -1' : undefined }}>
               <label style={{ fontSize: 9, fontWeight: 700, color: '#94A3B8' }}>{c.label.toUpperCase()}</label>
-              <input value={fields[c.key] || ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
-                style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2 }} />
+              {c.key === 'skill_summary' ? (
+                <>
+                  <textarea rows={4} value={fields[c.key] || ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                    style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2, fontFamily: 'inherit', resize: 'vertical' }} />
+                  <SkillSummaryParseTool candidateId={preview.candidate_id} text={fields[c.key]} showToast={showToast} />
+                </>
+              ) : (
+                <input value={fields[c.key] || ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                  style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2 }} />
+              )}
             </div>
           ))}
         </div>
@@ -1845,8 +1925,16 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                     {hidden ? <EyeOff size={12} /> : <Eye size={12} />}
                   </button>
                 </div>
-                <input value={fields[c.key] || ''} disabled={hidden} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
-                  style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2, background: hidden ? '#F8FAFC' : '#fff' }} />
+                {c.key === 'skill_summary' ? (
+                  <>
+                    <textarea rows={4} value={fields[c.key] || ''} disabled={hidden} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                      style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2, fontFamily: 'inherit', resize: 'vertical', background: hidden ? '#F8FAFC' : '#fff' }} />
+                    {!hidden && <SkillSummaryParseTool candidateId={preview.candidate_id} text={fields[c.key]} showToast={showToast} />}
+                  </>
+                ) : (
+                  <input value={fields[c.key] || ''} disabled={hidden} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                    style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 11, marginTop: 2, background: hidden ? '#F8FAFC' : '#fff' }} />
+                )}
               </div>
             );
           })}
