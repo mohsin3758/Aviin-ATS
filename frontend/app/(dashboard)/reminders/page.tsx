@@ -64,8 +64,26 @@ function FollowUpForm({ onClose, onSaved }: { onClose: () => void; onSaved: () =
     priority: 'medium', due_at: '', reminder_at: '',
     client_id: '', requisition_id: '', recurrence_rule: '',
   });
+  // Real feature (2026-08-30): "Need to add candidate name also to
+  // select base on client for followup received" - reported live off a
+  // screenshot of this exact form showing no candidate field at all.
+  // 1,865+ real candidates in this tenant rules out a plain <select> -
+  // same real search-as-you-type pattern already established on
+  // onboarding/page.tsx and bgv/page.tsx (debounced /candidates?search=).
+  const [candQuery, setCandQuery] = useState('');
+  const [candResults, setCandResults] = useState<any[]>([]);
+  const [candidate, setCandidate] = useState<any>(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+
+  async function searchCandidates(q: string) {
+    setCandQuery(q); setCandidate(null);
+    if (q.trim().length < 2) { setCandResults([]); return; }
+    try {
+      const rows = await apiFetch(`/candidates?search=${encodeURIComponent(q)}&limit=8`);
+      setCandResults(Array.isArray(rows) ? rows : rows?.items || []);
+    } catch { setCandResults([]); }
+  }
 
   const save = async () => {
     if (!form.title.trim()) { setErr('Title is required'); return; }
@@ -81,6 +99,7 @@ function FollowUpForm({ onClose, onSaved }: { onClose: () => void; onSaved: () =
           recruiter_id: form.recruiter_id || undefined,
           client_id: form.client_id || undefined,
           requisition_id: form.requisition_id || undefined,
+          candidate_id: candidate?.id || undefined,
           recurrence_rule: form.recurrence_rule || undefined,
         }),
       });
@@ -104,6 +123,26 @@ function FollowUpForm({ onClose, onSaved }: { onClose: () => void; onSaved: () =
         <input style={input} value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="e.g. Call client for feedback" />
         <label style={label}>DESCRIPTION</label>
         <textarea style={{ ...input, minHeight: 60 }} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
+        <label style={label}>CANDIDATE</label>
+        <input data-testid="followup-candidate-search" value={candidate ? candidate.full_name : candQuery} onChange={e => searchCandidates(e.target.value)}
+          placeholder="Search by name or email…" style={input} />
+        {candResults.length > 0 && !candidate && (
+          <div style={{ border: '1px solid #E2E8F0', borderRadius: 8, marginTop: -6, marginBottom: 8, maxHeight: 160, overflowY: 'auto' }}>
+            {candResults.map((c: any) => (
+              <div key={c.id} data-testid={`followup-candidate-option-${c.id}`} onClick={() => { setCandidate(c); setCandResults([]); }}
+                style={{ padding: '8px 10px', fontSize: 12, cursor: 'pointer', borderBottom: '1px solid #F1F5F9' }}>
+                <div style={{ fontWeight: 600 }}>{c.full_name}</div>
+                <div style={{ color: '#94A3B8', fontSize: 11 }}>{c.email}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {candidate && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: -4, marginBottom: 8, fontSize: 11, color: '#059669' }}>
+            ✓ Linked to {candidate.full_name}
+            <button onClick={() => { setCandidate(null); setCandQuery(''); }} style={{ border: 'none', background: 'none', color: '#94A3B8', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+          </div>
+        )}
         <label style={label}>FOLLOW-UP REASON</label>
         <input style={input} value={form.follow_up_reason} onChange={e => setForm({ ...form, follow_up_reason: e.target.value })} placeholder="Why this follow-up is needed" />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>

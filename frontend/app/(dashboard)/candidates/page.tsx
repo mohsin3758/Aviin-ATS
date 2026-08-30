@@ -1315,6 +1315,27 @@ export default function CandidatesPage() {
         </div>
       </div>
 
+      {/* Real feature (2026-08-30): "candidate database should be 2
+          options — one is full database all resume show and one is only
+          individual recruiter candidates database show" (reported live).
+          The underlying "owned" filter already existed (built 2026-08-11)
+          but only ever answered "owned by ANYONE" via a dropdown buried
+          inside Filters — never "owned by ME" specifically, and never a
+          clearly visible, one-click switch. This reuses the exact same
+          real ownedFilter state/query param the dropdown option (added
+          alongside this) also sets — a prominent toggle, not a second
+          data source. */}
+      <div style={{display:'inline-flex',background:'#f1f5f9',borderRadius:'8px',padding:'3px',marginBottom:'16px',gap:'2px'}}>
+        <button data-testid="candidates-scope-all" onClick={()=>setOwnedFilter('')}
+          style={{padding:'7px 16px',borderRadius:'6px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:ownedFilter!=='mine'?'white':'transparent',color:ownedFilter!=='mine'?'#1e40af':'#64748b',boxShadow:ownedFilter!=='mine'?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>
+          All Candidates
+        </button>
+        <button data-testid="candidates-scope-mine" onClick={()=>setOwnedFilter('mine')}
+          style={{padding:'7px 16px',borderRadius:'6px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:ownedFilter==='mine'?'white':'transparent',color:ownedFilter==='mine'?'#1e40af':'#64748b',boxShadow:ownedFilter==='mine'?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>
+          My Candidates
+        </button>
+      </div>
+
       {importResult && (
         <div style={{marginBottom:'12px',padding:'10px 16px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:'8px',fontSize:'13px',color:'#166534',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <span>✅ Import done: <strong>{importResult.created}</strong> added, <strong>{importResult.errors}</strong> errors{importResult.skippedOwned > 0 && <> , <strong>{importResult.skippedOwned}</strong> skipped (owned by another recruiter)</>}</span>
@@ -1372,8 +1393,9 @@ export default function CandidatesPage() {
             <div><label style={{fontSize:'11px',fontWeight:'600',color:'#64748b',display:'block',marginBottom:'4px'}}>OWNERSHIP</label>
               <select data-testid="owned-filter" value={ownedFilter} onChange={e=>setOwnedFilter(e.target.value)} style={{width:'100%',padding:'7px 10px',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}>
                 <option value="">All candidates</option>
+                <option value="mine">My Candidates (owned by me)</option>
                 <option value="unowned">Unowned</option>
-                <option value="active">Actively owned</option>
+                <option value="active">Actively owned (by anyone)</option>
               </select></div>
           </div>
         )}

@@ -24,6 +24,91 @@ public_router = APIRouter(prefix="/public/personal-links", tags=["public"])
 job_router = APIRouter(prefix="/personal-links/job", tags=["personal-links"])
 public_job_router = APIRouter(prefix="/public/job-links", tags=["public"])
 
+
+async def _apply_extra_public_fields(
+    conn, tenant_id: str, candidate_id: str, is_new_candidate: bool, *,
+    role_position: Optional[str], current_ctc: Optional[float], expected_ctc: Optional[float],
+    notice_period_days: Optional[int], preferred_location: Optional[str], linkedin_url: Optional[str],
+    expert_skills_csv: Optional[str], intermediate_skills_csv: Optional[str], skill_experience_json: Optional[str],
+):
+    """Real feature (2026-08-30): the numbered field list reported live
+    ("Role Position / Current CTC / Expected CTC / Notice Period /
+    Current Location / Preferred Location / Expert Skills / Intermediate
+    Skills / Skill Project Experience Optional / LinkedIn Profile"),
+    shared by both public apply endpoints below (job-specific and
+    personal-link) since they collect the identical extra fields.
+    On a genuine new candidate, writes plainly. On an existing candidate
+    re-submitting, uses the same gap-fill-only convention every other
+    intake path in this codebase already follows (never overwrites a
+    value already on file) - matching upsert_candidate()'s own rule.
+    """
+    expert = [s.strip() for s in (expert_skills_csv or "").split(",") if s.strip()]
+    intermediate = [s.strip() for s in (intermediate_skills_csv or "").split(",") if s.strip()]
+    combined = list(dict.fromkeys(expert + intermediate))  # dedupe, keep order
+
+    if is_new_candidate:
+        await conn.execute(
+            """UPDATE candidates SET
+                 interested_role=$2, current_ctc=$3, expected_ctc=$4, notice_period_days=$5,
+                 desired_location=$6, linkedin_url=$7, expert_skills=$8, intermediate_skills=$9,
+                 skills = CASE WHEN $10::text[] <> '{}' THEN
+                   (SELECT array_agg(DISTINCT s) FROM unnest(skills || $10) s) ELSE skills END
+               WHERE id=$1 AND tenant_id=$11""",
+            candidate_id, role_position, current_ctc, expected_ctc, notice_period_days,
+            preferred_location, linkedin_url, expert, intermediate, combined, tenant_id,
+        )
+    else:
+        await conn.execute(
+            """UPDATE candidates SET
+                 interested_role = COALESCE(interested_role, $2),
+                 current_ctc = COALESCE(current_ctc, $3),
+                 expected_ctc = COALESCE(expected_ctc, $4),
+                 notice_period_days = COALESCE(notice_period_days, $5),
+                 desired_location = COALESCE(desired_location, $6),
+                 linkedin_url = COALESCE(linkedin_url, $7),
+                 expert_skills = CASE WHEN expert_skills='{}' AND $8::text[]<>'{}' THEN $8 ELSE expert_skills END,
+                 intermediate_skills = CASE WHEN intermediate_skills='{}' AND $9::text[]<>'{}' THEN $9 ELSE intermediate_skills END,
+                 skills = CASE WHEN $10::text[] <> '{}' THEN
+                   (SELECT array_agg(DISTINCT s) FROM unnest(skills || $10) s) ELSE skills END
+               WHERE id=$1 AND tenant_id=$11""",
+            candidate_id, role_position, current_ctc, expected_ctc, notice_period_days,
+            preferred_location, linkedin_url, expert, intermediate, combined, tenant_id,
+        )
+
+    # Skill / Project Experience (optional) - same real table/shape the
+    # internal Add Candidate form already uses (candidates.py's own
+    # PUT /{id}/skill-experience) - reused here as a genuine append, not
+    # a second, parallel storage concept. Best-effort only: a malformed
+    # or missing payload must never block a real public submission.
+    if skill_experience_json:
+        try:
+            import json as _j
+            rows = _j.loads(skill_experience_json)
+            if isinstance(rows, list):
+                existing_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM candidate_skill_experience WHERE candidate_id=$1 AND tenant_id=$2",
+                    candidate_id, tenant_id)
+                for i, r in enumerate(rows):
+                    if not isinstance(r, dict):
+                        continue
+                    skill_name = str(r.get("skill_name") or r.get("skill") or "").strip()
+                    if not skill_name:
+                        continue
+                    role_types = r.get("role_types")
+                    if not isinstance(role_types, list):
+                        role_types = []
+                    await conn.execute(
+                        """INSERT INTO candidate_skill_experience
+                             (tenant_id, candidate_id, skill_name, project_name, duration_from, duration_to,
+                              role_types, relevant_experience, last_used, sort_order)
+                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                        tenant_id, candidate_id, skill_name, r.get("project_name"),
+                        r.get("duration_from"), r.get("duration_to"), role_types,
+                        r.get("relevant_experience"), r.get("last_used"), existing_count + i,
+                    )
+        except Exception:
+            pass
+
 APP_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
 
 
@@ -77,6 +162,16 @@ async def submit_resume(
     experience_months: int = Form(0),
     consent_given: bool = Form(False),
     resume: Optional[UploadFile] = File(None),
+    # 2026-08-30 — reported live, see _apply_extra_public_fields() above
+    role_position: Optional[str] = Form(None),
+    current_ctc: Optional[float] = Form(None),
+    expected_ctc: Optional[float] = Form(None),
+    notice_period_days: Optional[int] = Form(None),
+    preferred_location: Optional[str] = Form(None),
+    linkedin_url: Optional[str] = Form(None),
+    expert_skills: Optional[str] = Form(None),
+    intermediate_skills: Optional[str] = Form(None),
+    skill_experience: Optional[str] = Form(None),
 ):
     """No-auth public resume submission — same intake shape as
     public_apply() (p28_p32.py) minus the job/application half, since
@@ -162,6 +257,14 @@ async def submit_resume(
                 round(float(parsed.get("_confidence", 0.7) or 0.7), 3) if parsed else 0.0,
                 'auto_accepted' if parsed else 'rejected')
 
+        await _apply_extra_public_fields(
+            conn, tenant_id, str(cand['id']), is_new_candidate,
+            role_position=role_position, current_ctc=current_ctc, expected_ctc=expected_ctc,
+            notice_period_days=notice_period_days, preferred_location=preferred_location,
+            linkedin_url=linkedin_url, expert_skills_csv=expert_skills,
+            intermediate_skills_csv=intermediate_skills, skill_experience_json=skill_experience,
+        )
+
         # On genuine creation only — never claim ownership on an update to
         # an existing candidate, matching every other intake path's rule.
         if is_new_candidate:
@@ -233,6 +336,16 @@ async def submit_job_resume(
     experience_months: int = Form(0),
     consent_given: bool = Form(False),
     resume: Optional[UploadFile] = File(None),
+    # 2026-08-30 — same real fields as submit_resume() above
+    role_position: Optional[str] = Form(None),
+    current_ctc: Optional[float] = Form(None),
+    expected_ctc: Optional[float] = Form(None),
+    notice_period_days: Optional[int] = Form(None),
+    preferred_location: Optional[str] = Form(None),
+    linkedin_url: Optional[str] = Form(None),
+    expert_skills: Optional[str] = Form(None),
+    intermediate_skills: Optional[str] = Form(None),
+    skill_experience: Optional[str] = Form(None),
 ):
     """No-auth public resume submission, scoped to one job — same intake
     shape as submit_resume() above, plus a real application on the target
@@ -316,6 +429,14 @@ async def submit_job_resume(
                 _json.dumps(parsed) if parsed else '{}',
                 round(float(parsed.get("_confidence", 0.7) or 0.7), 3) if parsed else 0.0,
                 'auto_accepted' if parsed else 'rejected')
+
+        await _apply_extra_public_fields(
+            conn, tenant_id, str(cand['id']), is_new_candidate,
+            role_position=role_position, current_ctc=current_ctc, expected_ctc=expected_ctc,
+            notice_period_days=notice_period_days, preferred_location=preferred_location,
+            linkedin_url=linkedin_url, expert_skills_csv=expert_skills,
+            intermediate_skills_csv=intermediate_skills, skill_experience_json=skill_experience,
+        )
 
         if is_new_candidate:
             recruiter_email = await conn.fetchval("SELECT email FROM users WHERE id=$1", recruiter_id)

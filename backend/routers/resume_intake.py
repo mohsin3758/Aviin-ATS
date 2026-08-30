@@ -16,23 +16,43 @@ OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'qwen2.5:1.5b-instruct-q4_K_M')
 @router.get('/stats')
 async def intake_stats(actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Same is_active gap as by_source below — "Resumes Today"/
+        # "Candidates Created" were counting resumes whose candidate has
+        # since been soft-deleted.
         today = await conn.fetchrow("""
             SELECT
               COUNT(*) as total_today,
               COUNT(candidate_id) as candidates_today,
               COUNT(DISTINCT job_board) as sources_today
-            FROM resume_files WHERE tenant_id=$1 AND created_at::date=CURRENT_DATE""",
+            FROM resume_files rf
+            LEFT JOIN candidates c ON c.id = rf.candidate_id
+            WHERE rf.tenant_id=$1 AND rf.created_at::date=CURRENT_DATE
+              AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE)""",
             actor.tenant_id)
+        # Real bug fix (2026-08-30): had no is_active filter on the linked
+        # candidate — a resume whose candidate has since been soft-deleted
+        # still counted toward this badge's total, even though the actual
+        # queue list (intake_queue() below) already correctly excludes it
+        # via `(rf.candidate_id IS NULL OR c.is_active IS NOT FALSE)`.
+        # Confirmed live: this tenant's real "Manual Add Candidate" badge
+        # read 101 while filtering to that source showed only 2 real rows
+        # — the other 99 were all soft-deleted test-suite candidates whose
+        # resume_files row was never cleaned up. Same is_active-on-a-
+        # joined-table gap class documented repeatedly elsewhere in this
+        # project, just never checked in this specific summary query.
         by_source = await conn.fetch("""
             SELECT job_board_label as source, job_board,
                    COUNT(*) as total,
                    COUNT(candidate_id) as with_candidate,
                    COUNT(CASE WHEN parse_status='done' THEN 1 END) as parsed
-            FROM resume_files WHERE tenant_id=$1 AND created_at > NOW()-INTERVAL '7 days'
+            FROM resume_files rf
+            LEFT JOIN candidates c ON c.id = rf.candidate_id
+            WHERE rf.tenant_id=$1 AND rf.created_at > NOW()-INTERVAL '7 days'
+              AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE)
             GROUP BY job_board_label, job_board ORDER BY total DESC""",
             actor.tenant_id)
         total_auto = await conn.fetchval(
-            "SELECT COUNT(*) FROM candidates WHERE tenant_id=$1 AND auto_created=TRUE",
+            "SELECT COUNT(*) FROM candidates WHERE tenant_id=$1 AND auto_created=TRUE AND is_active IS NOT FALSE",
             actor.tenant_id)
         pending = await conn.fetchval("""
             SELECT COUNT(*) FROM imap_messages im
@@ -206,6 +226,16 @@ async def download_resume_file(resume_file_id: str, actor: Actor = Depends(get_a
         raise HTTPException(404, 'File missing from disk')
     mime = row['mime_type'] or 'application/octet-stream'
     fn = row['file_name'] or abs_path.name
+    # Real bug fix (2026-08-30): a stored file_name can genuinely contain
+    # embedded control characters (confirmed live — a real filename had a
+    # literal \r\n in it, presumably carried over from an email subject/
+    # attachment name with a line break). Embedding that raw into an HTTP
+    # header value is invalid HTTP (a header can't contain a bare CR/LF)
+    # — uvicorn correctly refuses to send it, which surfaced to the
+    # browser as a bare "Download failed: 502" with no useful detail.
+    # Strip any control character (C0 range) before it ever reaches a
+    # header, for every filename, not just this one already-broken row.
+    fn = ''.join(ch for ch in fn if ord(ch) >= 32)
     return FileResponse(str(abs_path), media_type=mime, filename=fn,
         headers={'Content-Disposition': 'attachment; filename="' + fn + '"'})
 

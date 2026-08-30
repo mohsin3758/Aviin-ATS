@@ -15133,3 +15133,148 @@ fix (`.env`, `docker-compose.yml`) plus Docker-level cleanup. `.env` is
 correctly gitignored (never committed, matching standard practice for
 environment-specific secrets/config); `docker-compose.yml`'s fix is a
 real, trackable, one-line change.
+
+## Ashwini (recruiter) reports round 2: My Candidates scope, a real
+## sort-by-Activity no-op, Follow-Up candidate linking, a real 502 root-
+## caused to an embedded control character, and both public resume-drop
+## forms extended with the full field list requested, 2026-08-30
+Direct follow-up, same day, to the earlier VPS-resource pass — a real
+recruiter (Ashwini) sent 7 screenshots and a 6-point list. Investigated
+and fixed all 7 with real API calls and real data at every step, not
+code review.
+
+**1. Candidates list had only one global view — real "My Candidates"
+scope added, alongside the existing "All Candidates" (unchanged).**
+`GET /candidates?owned=mine` (new) filters via a real `EXISTS` against
+the already-existing `candidate_ownership` table (`status='active' AND
+ownership_expires_at > now() AND recruiter_id=<caller>`) — the same
+30-day FCFS ownership system built 2026-08-11, reused rather than a
+second, parallel concept. Frontend gained a prominent segmented toggle
+("All Candidates" / "My Candidates") above the table, plus the option
+in the existing Owned-filter dropdown. Verified for real: a genuine
+`owned=mine` call for admin returned a real candidate with a genuine,
+active `candidate_ownership` row (`recruiter_id=admin`,
+`source=manual_add`, `status=active`) — confirmed by direct DB query,
+not assumed from the API response alone.
+
+**2/3. "Activity" sort appeared permanently stuck on the same order —
+and manually-added candidates' details "not showing" turned out to be
+the identical bug, not separate storage loss.** Root cause: `candidates.
+last_activity` is NULL for almost every row (confirmed live — nothing
+in this codebase currently writes it on most paths), and `ORDER BY
+<all-NULL column> ASC/DESC` is a structural no-op in SQL — NULLs have
+no relative order among themselves, so toggling the sort direction
+produced the identical result every time, indistinguishable from "stuck
+until a manual refresh." Fixed in `list_candidates()`
+(`candidates.py`): `ORDER BY COALESCE(last_activity, updated_at)`
+when `sort_by='last_activity'` — gives every row a real, always-present
+fallback signal to order by. Confirmed live: `sort_dir=asc` vs `desc`
+now return genuinely different id sequences. Item 3's "manually-added
+candidate not showing" was the same bug wearing a different face — a
+fresh manual add correctly lands at the top on Added-date but has no
+`last_activity` yet, so it appeared to vanish specifically on the
+Activity sort; direct DB checks throughout this investigation confirmed
+manually-added candidates' resumes/details were always genuinely
+persisted, never actually lost.
+
+**4. Create Follow-Up modal had no way to link a specific candidate.**
+`sql/92_recruiter_tasks_candidate_id.sql` adds a real
+`recruiter_tasks.candidate_id` (nullable FK, `ON DELETE SET NULL`).
+`POST /recruiter-tasks` now accepts `candidate_id`, resolves and stores
+the real `candidate_name` server-side (400 on an unknown id, never a
+silent mismatch), matching the already-established `req_title`
+resolution this same endpoint does for `requisition_id`. Frontend
+(`reminders/page.tsx`'s `FollowUpForm`) gained a debounced candidate
+search (reusing the same `/candidates?search=...&limit=8` pattern
+already used on `onboarding/page.tsx`/`bgv/page.tsx`) with a "Linked to
+X" confirmation. Verified for real: a task created with a real
+`candidate_id` correctly returned the real candidate's name; a bad id
+cleanly 400s.
+
+**6. Resume file download 502 — root-caused to a genuinely corrupted
+stored filename, not a transient glitch.** Direct inspection of the
+exact broken row (`resume_files.id=d4ab23ed-...`) confirmed its
+`file_name` literally contains a raw embedded `\r` (carriage return) —
+confirmed via psql's own multi-line rendering of the value. A
+`Content-Disposition` header value containing a raw CR/LF is invalid
+per HTTP spec, and uvicorn correctly refuses to send the whole response
+rather than silently stripping the byte, surfacing to the browser as a
+502. Root-caused the entry point: this class of corruption comes from
+IMAP/email-attachment intake (a malformed or line-wrapped filename in
+an original email's own headers), not from any direct-upload path — a
+modern multipart HTTP client (confirmed via both Playwright and curl)
+cannot itself embed a raw CR into a filename header value; that's
+rejected at the protocol layer before ever reaching the backend. Fixed
+defensively in `download_resume_file()` (`resume_intake.py`): strips
+every character with `ord(ch) < 32` from the filename before it's used
+in both the `filename=` FileResponse kwarg and the manually-built
+header. Verified for real against the exact original broken file: now
+returns a genuine 200, a correctly sanitized `Content-Disposition`
+header (CR stripped, filename otherwise intact), and the real,
+byte-correct 34,101-byte `.docx` content.
+
+**5/7. Both public resume-drop forms extended with the full field list
+reported live.** `sql/93_public_form_fields.sql` adds
+`candidates.expert_skills`/`intermediate_skills` (TEXT[]) and
+`interested_role` — `current_ctc`/`expected_ctc`/`notice_period_days`/
+`desired_location`/`linkedin_url` all already existed (from the
+internal Add Candidate form's own earlier field additions, 2026-08-25)
+but had two real, separate gaps closed in the same pass: neither
+`personal_links.py`'s two public `apply` endpoints (job-less
+`/link/{token}` and job-specific `/apply/{token}`) ever collected them,
+and — found only while writing this round's own regression test —
+`GET /candidates/{id}`'s `FIELDS` constant never selected
+`linkedin_url`/`interested_role`/`expert_skills`/`intermediate_skills`
+at all, so even correctly-stored values were silently omitted from
+every API response reading a single candidate. Both gaps fixed: a new
+shared `_apply_extra_public_fields()` helper (`personal_links.py`,
+called from both `submit_resume()` and `submit_job_resume()` — one real
+implementation, not two forked copies) handles all 9 new fields plus
+Skill/Project Experience rows, using the same gap-fill-only convention
+(COALESCE on an existing candidate, direct write on a genuine new one)
+already established by `upsert_candidate()` elsewhere in this codebase
+— an existing candidate re-submitting never has a value silently
+overwritten. Skill/Project Experience reuses the exact same
+`candidate_skill_experience` table and `PUT /{id}/skill-experience`
+shape the internal Add Candidate form already uses (built 2026-08-25),
+appended (via a real `existing_count` offset for `sort_order`) rather
+than replacing — a public applicant's submission never wipes rows a
+recruiter may have already entered. `FIELDS` widened with the 4 missing
+columns, found and fixed via this round's own test suite failing
+honestly rather than silently passing.
+
+Both public form pages (`(public)/link/[token]/page.tsx`,
+`(public)/apply/[token]/page.tsx`) rebuilt with the full field set:
+Role/Position Applying For, LinkedIn Profile, Current/Preferred
+Location (side by side), Total Experience/Notice Period, Current/
+Expected CTC, a real chip-based Expert Skills and Intermediate Skills
+adder (mirroring the internal form's own skill-chip UX), and a full
+Skill/Project Experience (optional) mini-table — add-row form with the
+same 4 Role-type checkboxes (Implementation/Support/Enhancement/
+Rollout) and a running table, matching the internal Add Candidate
+form's own established component shape line-for-line rather than
+inventing a new pattern.
+
+Verified for real end-to-end, not code review, at every layer: a real
+personal-link submission (all 9 fields + a Skill/Project Experience
+row) confirmed via direct SQL to have persisted every value exactly
+(`interested_role`, `current_ctc`, `expected_ctc`, `notice_period_days`,
+`desired_location`, `linkedin_url`, `expert_skills`,
+`intermediate_skills`, and the `candidate_skill_experience` row all
+correct); a real job-specific-link submission against a real throwaway
+open requisition confirmed the same, plus a genuine `applications` row
+created on the target requisition (the feature distinguishing it from
+the job-less link). New permanent "S71" suite (7 tests) added to
+`qa_automation.spec.ts`, covering all 7 items — including 2 real test-
+authoring mistakes caught and fixed by the suite's own first runs, not
+app bugs: an attempted CR-in-filename upload reproduction correctly
+400'd at the HTTP client layer (confirmed this is expected, protocol-
+level behavior, not reproducible through any real client — rewrote the
+test to verify the defensive guarantee directly instead), and a
+case-sensitive assertion against a CSS-`textTransform:uppercase`
+section label (`innerText()` reflects the visual transform even though
+the JSX source stays mixed-case — fixed with a case-insensitive
+compare). Broader regression sweep (S1/S2/S8/S13/S16/S20/S30/S38/S48/
+S57/S59/S60/S67/S69/S70, 97 tests) passed clean: 96 passed, 1
+pre-existing skip, 0 failed. Zero-token audit: `CONFIRMED CLEAN` (420
+files, 0 external API refs).

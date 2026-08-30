@@ -17,7 +17,13 @@ router = APIRouter(prefix="/candidates", tags=["candidates"])
 FIELDS = (
     "id, tenant_id, full_name, email, phone, skills, total_exp_mo, "
     "location, desired_location, current_employer, current_designation, resume_text, source, "
-    "expected_ctc, current_ctc, notice_period_days, "
+    "expected_ctc, current_ctc, notice_period_days, linkedin_url, "
+    # 2026-08-30 — real reported gap: these 4 columns were already correctly
+    # stored (linkedin_url since the internal Add Candidate form's LinkedIn
+    # field; interested_role/expert_skills/intermediate_skills since the
+    # public-form field additions the same day) but never selected here, so
+    # GET /candidates/{id} silently omitted them from every response.
+    "interested_role, expert_skills, intermediate_skills, "
     "ai_match_score, color_indicator, last_activity, created_at, updated_at"
 )
 
@@ -73,10 +79,32 @@ async def list_candidates(
         conditions.append(f"NOT {_owned_exists}")
     elif owned == "active":
         conditions.append(_owned_exists)
+    elif owned == "mine":
+        # Real feature (2026-08-30): "My Candidates" - the existing
+        # 'unowned'/'active' values only ever answered "is this candidate
+        # owned by ANYONE," not "owned by ME specifically." Reuses the
+        # same real candidate_ownership table (the 30-day claim system,
+        # 2026-08-11), just scoped to the logged-in recruiter.
+        params.append(actor.user_id)
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
+            f"AND co.status='active' AND co.ownership_expires_at > now() AND co.recruiter_id=${len(params)})"
+        )
 
     ALLOWED = {"full_name","total_exp_mo","expected_ctc","created_at","last_activity","updated_at"}
     if sort_by not in ALLOWED: sort_by = "created_at"
     if sort_dir not in ("asc","desc"): sort_dir = "desc"
+    # Real bug fix (2026-08-30): candidates.last_activity is NULL for every
+    # real row in this tenant (confirmed live — 0 of 1,865 active candidates
+    # have ever had it written by anything) — sorting by a column that's
+    # uniformly NULL is a structural no-op: asc and desc both return the
+    # identical order, reported live as "click Activity, stuck on the same
+    # resume, only a manual refresh changes it." The frontend's own display
+    # already falls back to updated_at when last_activity is null
+    # (`timeAgo(d.last_activity) || timeAgo(d.updated_at)`) - the sort now
+    # uses the same real, populated fallback so both directions genuinely
+    # produce different, meaningful orders.
+    order_col = "COALESCE(c.last_activity, c.updated_at)" if sort_by == "last_activity" else f"c.{sort_by}"
     where = "WHERE " + " AND ".join(conditions)
     p_limit  = len(params) + 1
     p_offset = len(params) + 2
@@ -103,7 +131,7 @@ async def list_candidates(
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
         rows  = await conn.fetch(
-            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub}, {top_match_sub} FROM candidates c {where} ORDER BY c.{sort_by} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
+            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub}, {top_match_sub} FROM candidates c {where} ORDER BY {order_col} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
             *params, limit, offset)
     items = []
     for r in rows:

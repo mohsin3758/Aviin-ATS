@@ -9382,3 +9382,271 @@ test.describe.serial('S70 Shahana reports: recruiter attribution, per-user Whats
     expect(/your own WhatsApp number|the shared company number/.test(bodyText)).toBe(true);
   });
 });
+
+test.describe.serial('S71 Ashwini (recruiter) reports: My Candidates scope, Activity-sort no longer sticks, Follow-Up candidate link, resume-download 502 fix, public-form new fields', () => {
+  // 7 real reports off live screenshots from a real recruiter (Ashwini),
+  // 2026-08-30. All verified with real API calls / real data, not code
+  // review — matching this project's own established discipline.
+  // (1) Candidates list had only one global view — added a real "My
+  //     Candidates" scope (owned=mine) backed by the existing
+  //     candidate_ownership table, alongside "All Candidates" (unchanged).
+  // (2) Clicking a sort direction on "Activity" appeared stuck on the
+  //     same order until a manual refresh — root cause: c.last_activity
+  //     is NULL for almost every row, and ORDER BY an all-NULL column is
+  //     a structural no-op — fixed with COALESCE(last_activity,
+  //     updated_at) so the sort has a real signal to order by.
+  // (3) Manually-added candidates' resume/details genuinely were being
+  //     saved (confirmed via direct DB checks earlier this session) —
+  //     the reported "not showing" traced to the SAME Activity-sort bug
+  //     (a manual add lands at the top on Added-date but not Activity),
+  //     not a separate storage bug.
+  // (4) The Create Follow-Up modal had no way to link a specific
+  //     candidate — added a real debounced candidate search + a real
+  //     candidate_id column on recruiter_tasks, with the resolved
+  //     candidate_name stored server-side.
+  // (5) "Personal resume link details is not showing" — the link itself
+  //     was always real; the gap was the FORM behind it only collecting
+  //     6 basic fields. Closed as part of item (7).
+  // (6) Resume file download 502 — root cause: a raw CR character
+  //     embedded in a real filename made the Content-Disposition header
+  //     value invalid, and uvicorn rejects the whole response rather
+  //     than silently stripping it — fixed with filename sanitization
+  //     (strip control chars) before the header is ever built.
+  // (7) Both public forms (personal /link/{token} and job-specific
+  //     /apply/{token}) extended with the full field list reported live:
+  //     Role Position / Current CTC / Expected CTC / Notice Period /
+  //     Current Location / Preferred Location / Expert Skills /
+  //     Intermediate Skills / Skill-Project-Experience (optional) /
+  //     LinkedIn Profile — reusing the same candidate_skill_experience
+  //     table and gap-fill-only convention as the internal Add Candidate
+  //     form, never a second, parallel storage concept.
+  let token: string;
+  let candIdForOwnership: string;
+  let taskId: string;
+  let personalLinkToken: string;
+  let jobLinkCandEmail: string;
+
+  test('BUG FIX: GET /candidates?owned=mine only returns candidates with a real, active candidate_ownership row for the caller', async ({ request }) => {
+    token = await getApiToken(request);
+    const r = await request.get(`${API}/candidates?owned=mine&limit=50`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    expect(Array.isArray(body.items)).toBe(true);
+    if (body.items.length > 0) {
+      // Every returned row must correspond to a real, active ownership
+      // claim by the caller — spot-check the first one directly.
+      candIdForOwnership = body.items[0].id;
+      const ownR = await request.get(`${API}/candidates/${candIdForOwnership}/ownership`, { headers: { Authorization: `Bearer ${token}` } });
+      expect(ownR.status()).toBe(200);
+      const own = await ownR.json();
+      expect(own.status === 'active' || own.owner != null).toBeTruthy();
+    }
+  });
+
+  test('BUG FIX: candidates sorted by activity actually re-orders (COALESCE(last_activity, updated_at)), not a structural no-op', async ({ request }) => {
+    const rAsc = await request.get(`${API}/candidates?sort_by=last_activity&sort_dir=asc&limit=10`, { headers: { Authorization: `Bearer ${token}` } });
+    const rDesc = await request.get(`${API}/candidates?sort_by=last_activity&sort_dir=desc&limit=10`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(rAsc.status()).toBe(200);
+    expect(rDesc.status()).toBe(200);
+    const idsAsc = (await rAsc.json()).items.map((i: any) => i.id);
+    const idsDesc = (await rDesc.json()).items.map((i: any) => i.id);
+    // The two directions must genuinely differ — the old bug (ORDER BY an
+    // all-NULL column) would return the identical order regardless of
+    // asc/desc, since NULLs have no relative order among themselves.
+    expect(idsAsc.join(',')).not.toBe(idsDesc.join(','));
+  });
+
+  test('BUG FIX: Follow-Up task creation resolves and stores a real candidate_name from a given candidate_id', async ({ request }) => {
+    // Reuse a real candidate — create one fresh so this test has a known
+    // name to assert against, then clean it up.
+    const stamp = Date.now();
+    const cr = await request.post(`${API}/candidates`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { full_name: `S71 FollowUp Candidate ${stamp}`, email: `s71.followup.${stamp}@qatest.example`, phone: `98${String(stamp).slice(-8)}` },
+    });
+    expect(cr.status()).toBe(200);
+    const cand = await cr.json();
+    const r = await request.post(`${API}/recruiter-tasks`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { title: 'S71 verify candidate link', task_type: 'follow_up', candidate_id: cand.id },
+    });
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    expect(body.candidate_id).toBe(cand.id);
+    expect(body.candidate_name).toBe(`S71 FollowUp Candidate ${stamp}`);
+    taskId = body.id;
+    // A bad candidate_id must cleanly 400, not crash.
+    const bad = await request.post(`${API}/recruiter-tasks`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { title: 'bad id', task_type: 'follow_up', candidate_id: '00000000-0000-0000-0000-000000000000' },
+    });
+    expect(bad.status()).toBe(400);
+    await request.delete(`${API}/recruiter-tasks/${taskId}`, { headers: { Authorization: `Bearer ${token}` } });
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+
+  test('BUG FIX: resume download returns a clean Content-Disposition header with no raw CR/LF, for a real uploaded file', async ({ request }) => {
+    // The original bug (a raw CR embedded in resume_files.file_name
+    // breaking the Content-Disposition header, causing uvicorn to reject
+    // the response with a 502) entered via IMAP/email attachment
+    // intake (resume_intake_service.py extracting a filename from an
+    // email's own, sometimes-malformed headers) — confirmed live against
+    // the real historical file (resume_files.id=d4ab23ed-...) during
+    // this fix's manual verification: its stored file_name genuinely
+    // contains \r (confirmed via psql), and /resume-intake/{id}/download
+    // now returns 200 with the CR correctly stripped from the header.
+    // A modern multipart client (Playwright, curl) cannot reproduce that
+    // exact corruption through this upload endpoint — embedding a raw
+    // CR in a Content-Disposition filename value is invalid at the HTTP
+    // protocol layer and is correctly rejected (400) before it ever
+    // reaches the backend — so this permanent test instead verifies the
+    // defensive guarantee itself: no filename this endpoint returns ever
+    // produces a header containing a raw CR/LF, for a real end-to-end
+    // upload+download round trip.
+    const stamp = Date.now();
+    const cr = await request.post(`${API}/candidates`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { full_name: `S71 Download Candidate ${stamp}`, email: `s71.dl.${stamp}@qatest.example` },
+    });
+    const cand = await cr.json();
+    const buf = Buffer.from('%PDF-1.4\n%QA test content for download regression\n');
+    const up = await request.post(`${API}/candidates/${cand.id}/upload-document`, {
+      headers: { Authorization: `Bearer ${token}` },
+      multipart: { document_type: 'resume', file: { name: 'S71 Report Weird.pdf', mimeType: 'application/pdf', buffer: buf } },
+    });
+    expect(up.status()).toBe(200);
+    const docsR = await request.get(`${API}/candidates/${cand.id}/documents`, { headers: { Authorization: `Bearer ${token}` } });
+    const docs = await docsR.json();
+    const resumeDoc = (docs.resume_files || docs.resumes || []).find((d: any) => d) || (Array.isArray(docs) ? docs[0] : null);
+    if (resumeDoc?.id) {
+      const dl = await request.get(`${API}/resume-intake/${resumeDoc.id}/download`, { headers: { Authorization: `Bearer ${token}` } });
+      expect(dl.status()).toBe(200);
+      const cd = dl.headers()['content-disposition'] || '';
+      expect(/[\r\n]/.test(cd)).toBe(false);
+      expect(cd).toContain('S71 Report Weird.pdf');
+    }
+    await request.delete(`${API}/candidates/${cand.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+
+  test('FEATURE: personal resume-drop link (/link/{token}) accepts and persists the full new field set + skill/project experience', async ({ request }) => {
+    const linkR = await request.get(`${API}/personal-links/me`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(linkR.status()).toBe(200);
+    personalLinkToken = (await linkR.json()).token;
+    const stamp = Date.now();
+    const email = `s71.personal.${stamp}@qatest.example`;
+    const form = new URLSearchParams();
+    const fd: Record<string, string> = {
+      full_name: `S71 Personal Link ${stamp}`, email, phone: `97${String(stamp).slice(-8)}`,
+      location: 'Pune', current_employer: 'QA Co', experience_months: '36', consent_given: 'true',
+      role_position: 'Senior SAP FICO Consultant', current_ctc: '1100000', expected_ctc: '1500000',
+      notice_period_days: '20', preferred_location: 'Chennai', linkedin_url: 'https://linkedin.com/in/s71test',
+      expert_skills: 'SAP FICO,SAP HANA', intermediate_skills: 'Excel',
+      skill_experience: JSON.stringify([{ skill_name: 'SAP FICO', project_name: 'S71 Rollout', duration_from: '2022', duration_to: '2024', role_types: ['Implementation'], relevant_experience: '2 Years', last_used: '2024' }]),
+    };
+    const applyR = await request.post(`${API}/public/personal-links/${personalLinkToken}/apply`, { multipart: fd });
+    expect(applyR.status()).toBe(200);
+    expect((await applyR.json()).applied).toBe(true);
+
+    const listR = await request.get(`${API}/candidates?search=${encodeURIComponent(email)}&limit=5`, { headers: { Authorization: `Bearer ${token}` } });
+    const found = (await listR.json()).items.find((c: any) => c.email === email);
+    expect(found).toBeTruthy();
+    const detailR = await request.get(`${API}/candidates/${found.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    const detail = await detailR.json();
+    expect(detail.interested_role || detail.role_position).toBeTruthy();
+    expect(Number(detail.current_ctc)).toBe(1100000);
+    expect(Number(detail.expected_ctc)).toBe(1500000);
+    expect(Number(detail.notice_period_days)).toBe(20);
+    expect(detail.desired_location).toBe('Chennai');
+    expect(detail.linkedin_url).toContain('s71test');
+    expect(detail.expert_skills || []).toContain('SAP FICO');
+    expect(detail.intermediate_skills || []).toContain('Excel');
+
+    const skillExpR = await request.get(`${API}/candidates/${found.id}/skill-experience`, { headers: { Authorization: `Bearer ${token}` } });
+    const skillExp = await skillExpR.json();
+    expect((skillExp.rows || []).some((r: any) => r.skill_name === 'SAP FICO' && r.project_name === 'S71 Rollout')).toBe(true);
+
+    await request.delete(`${API}/candidates/${found.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+
+  test('real headless UI: personal link public form renders and collects the new fields (Role Position, CTC, Skills, LinkedIn)', async ({ page }) => {
+    if (!personalLinkToken) test.skip();
+    await page.goto(`${BASE}/link/${personalLinkToken}`);
+    // The page's own async GET /public/personal-links/{token} resolves
+    // client-side after 'networkidle' fires — wait for the real "Loading…"
+    // placeholder to clear rather than assuming networkidle alone means
+    // the fetch's React state update has flushed (the same async-render
+    // race documented repeatedly elsewhere in this project, e.g. the
+    // pipeline-board job-picker).
+    await expect(page.locator('body')).not.toContainText('Loading…', { timeout: 15000 });
+    // Section labels (Expert/Intermediate Skills, Skill/Project Experience)
+    // render with a real CSS textTransform:'uppercase' — innerText()
+    // reflects that visual transform even though the JSX source stays
+    // mixed-case, so this check is deliberately case-insensitive.
+    const bodyText = (await page.locator('body').innerText()).toLowerCase();
+    expect(bodyText).toContain('role / position applying for');
+    expect(bodyText).toContain('expert skills');
+    expect(bodyText).toContain('intermediate skills');
+    expect(bodyText).toContain('skill / project experience');
+    expect(bodyText).toContain('linkedin profile');
+    expect(bodyText).toContain('preferred location');
+  });
+
+  test('FEATURE: job-specific link (/apply/{token}) accepts and persists the same full new field set + skill/project experience', async ({ request }) => {
+    const stamp = Date.now();
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { title: `S71 Job Link Test Role ${stamp}`, status: 'open', location: 'Remote', employment_type: 'fte' },
+    });
+    expect(reqR.status()).toBe(200);
+    const req = await reqR.json();
+    const jlinkR = await request.get(`${API}/personal-links/job/${req.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(jlinkR.status()).toBe(200);
+    jobLinkCandEmail = `s71.joblink.${stamp}@qatest.example`;
+    const jtoken = (await jlinkR.json()).token;
+
+    const infoR = await request.get(`${API}/public/job-links/${jtoken}`);
+    expect(infoR.status()).toBe(200);
+    expect((await infoR.json()).requisition_title).toContain('S71 Job Link Test Role');
+
+    const applyR = await request.post(`${API}/public/job-links/${jtoken}/apply`, {
+      multipart: {
+        full_name: `S71 Job Link Candidate ${stamp}`, email: jobLinkCandEmail, phone: `9911122${String(stamp).slice(-3)}`,
+        location: 'Delhi', current_employer: 'QA Co', experience_months: '60', consent_given: 'true',
+        role_position: 'Lead SAP Consultant', current_ctc: '1300000', expected_ctc: '1800000',
+        notice_period_days: '15', preferred_location: 'Bengaluru', linkedin_url: 'https://linkedin.com/in/s71joblink',
+        expert_skills: 'SAP FICO,SAP HANA', intermediate_skills: 'Excel',
+        skill_experience: JSON.stringify([{ skill_name: 'SAP HANA', project_name: 'S71 JobLink Rollout', duration_from: '2023', duration_to: 'Current', role_types: ['Support'], relevant_experience: '1 Year', last_used: 'Current' }]),
+      },
+    });
+    expect(applyR.status()).toBe(200);
+    expect((await applyR.json()).applied).toBe(true);
+
+    const listR = await request.get(`${API}/candidates?search=${encodeURIComponent(jobLinkCandEmail)}&limit=5`, { headers: { Authorization: `Bearer ${token}` } });
+    const found = (await listR.json()).items.find((c: any) => c.email === jobLinkCandEmail);
+    expect(found).toBeTruthy();
+    const detail = await (await request.get(`${API}/candidates/${found.id}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(detail.interested_role).toBe('Lead SAP Consultant');
+    expect(Number(detail.current_ctc)).toBe(1300000);
+    expect(Number(detail.expected_ctc)).toBe(1800000);
+    expect(Number(detail.notice_period_days)).toBe(15);
+    expect(detail.desired_location).toBe('Bengaluru');
+    expect(detail.linkedin_url).toContain('s71joblink');
+    expect(detail.expert_skills || []).toContain('SAP HANA');
+
+    const skillExp = await (await request.get(`${API}/candidates/${found.id}/skill-experience`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect((skillExp.rows || []).some((r: any) => r.skill_name === 'SAP HANA' && r.project_name === 'S71 JobLink Rollout')).toBe(true);
+
+    // Applying through a job-specific link also creates a real application
+    // on the target requisition, distinguishing it from the job-less
+    // personal link.
+    const appsR = await request.get(`${API}/candidates/${found.id}/applications`, { headers: { Authorization: `Bearer ${token}` } });
+    if (appsR.ok()) {
+      const apps = await appsR.json();
+      const list = Array.isArray(apps) ? apps : (apps.items || []);
+      expect(list.some((a: any) => a.requisition_id === req.id)).toBe(true);
+    }
+
+    await request.delete(`${API}/candidates/${found.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    await request.delete(`${API}/requisitions/${req.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  });
+});

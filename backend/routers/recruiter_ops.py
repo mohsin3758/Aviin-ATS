@@ -127,6 +127,7 @@ class TaskIn(BaseModel):
     requisition_id: Optional[str] = None
     application_id: Optional[str] = None
     client_id: Optional[str] = None
+    candidate_id: Optional[str] = None  # 2026-08-30 — real FK, see sql/92
     follow_up_reason: Optional[str] = None
     recurrence_rule: Optional[str] = None
 
@@ -199,15 +200,31 @@ async def create_task(body: TaskIn, actor: Actor = Depends(get_actor),
                 raise HTTPException(400, "No active recruiter available to auto-assign")
             recruiter_id = str(picked)
 
+        # Real feature (2026-08-30): resolve the real candidate's name once
+        # here so it's stored redundantly into the existing free-text
+        # candidate_name column too — every existing reader of that column
+        # (task lists, notifications) keeps working unchanged, with no
+        # extra join needed just to display a name.
+        candidate_name = None
+        if body.candidate_id:
+            candidate_name = await conn.fetchval(
+                "SELECT full_name FROM candidates WHERE id=$1 AND tenant_id=$2",
+                body.candidate_id, actor.tenant_id,
+            )
+            if candidate_name is None:
+                raise HTTPException(400, "candidate_id not found")
+
         row = await conn.fetchrow(
             """INSERT INTO recruiter_tasks
                  (tenant_id, recruiter_id, requisition_id, application_id, client_id,
+                  candidate_id, candidate_name,
                   task_type, title, description, follow_up_reason, priority, due_at,
                   reminder_at, recurrence_rule, created_by, status)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'pending')
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'pending')
                RETURNING *""",
             actor.tenant_id, recruiter_id, body.requisition_id, body.application_id,
-            body.client_id, body.task_type, body.title, body.description,
+            body.client_id, body.candidate_id, candidate_name,
+            body.task_type, body.title, body.description,
             body.follow_up_reason, body.priority, body.due_at, body.reminder_at,
             body.recurrence_rule, actor.user_id,
         )
