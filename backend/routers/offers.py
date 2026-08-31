@@ -32,12 +32,22 @@ async def _get_offer(conn, offer_id: str):
 
 
 @router.get("")
-async def list_offers(application_id: str | None = None, actor: Actor = Depends(get_actor)):
+async def list_offers(application_id: str | None = None, mine: bool | None = None, actor: Actor = Depends(get_actor)):
+    # REAL BUG FIX (2026-08-31): this list had zero recruiter-scoping —
+    # the Recruiter Overview dashboard's "Offers Released" KPI counts only
+    # offers whose application is assigned to the caller, but its "/offers"
+    # link showed the WHOLE tenant's offers (0 vs the real count on the
+    # linked page). New optional mine=true param matches the KPI exactly.
     conditions: list[str] = []
     params: list = []
     if application_id:
         params.append(application_id)
         conditions.append(f"application_id = ${len(params)}")
+    if mine:
+        params.append(actor.user_id)
+        conditions.append(
+            f"application_id IN (SELECT id FROM applications WHERE assigned_recruiter_id=${len(params)})"
+        )
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     async with db.tenant_conn(actor.tenant_id) as conn:

@@ -43,22 +43,43 @@ export default function RecruiterOverview() {
     <>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" data-testid="recruiter-overview-cards">
         <OverviewKpiCard icon="📄" label="Total Resumes Owned" value={loading ? '…' : d.resumes_owned ?? 0} color="#1e40af" bg="#eff6ff" href="/candidates?owned=mine" />
-        <OverviewKpiCard icon="👤" label="Active Candidates" value={loading ? '…' : d.active_candidates ?? 0} color="#059669" bg="#d1fae5" href="/candidates?owned=mine" />
+        {/* REAL BUG FIX (2026-08-31): reported live as "dashboard information
+            is wrong and miss match... and link also" — this card and 4
+            others below linked to /candidates?owned=mine, but the KPI's own
+            real definition ("owned OR has an active application assigned to
+            me") is broader than that page's plain ownership-only filter, so
+            clicking it showed far fewer candidates than the number on the
+            card (e.g. 12 shown here, 1 on the linked page). Backend now has
+            a real owned=mine_or_assigned value matching each KPI exactly
+            (candidates.py). */}
+        <OverviewKpiCard icon="👤" label="Active Candidates" value={loading ? '…' : d.active_candidates ?? 0} color="#059669" bg="#d1fae5" href="/candidates?owned=mine_or_assigned" />
         <OverviewKpiCard icon="💼" label="Active Requirements" value={loading ? '…' : d.active_requirements ?? 0} color="#7c3aed" bg="#ede9fe" href="/requisitions" />
-        <OverviewKpiCard icon="📋" label="Candidates in Pipeline" value={loading ? '…' : d.candidates_in_pipeline ?? 0} color="#0369a1" bg="#e0f2fe" href="/pipeline" />
-        <OverviewKpiCard icon="📤" label="Total Submissions" value={loading ? '…' : d.total_submissions ?? 0} color="#9a3412" bg="#ffedd5" href="/pipeline" />
-        <OverviewKpiCard icon="🗓️" label="Interviews Scheduled" value={loading ? '…' : d.interviews_scheduled ?? 0} color="#0f766e" bg="#ccfbf1" href="/interviews" />
-        <OverviewKpiCard icon="📝" label="Offers Released" value={loading ? '…' : d.offers_released ?? 0} color="#b45309" bg="#fef3c7" href="/offers" />
+        {/* Candidates in Pipeline / Total Submissions are real APPLICATION-
+            level counts (per-stage, cumulative-ever respectively) with no
+            exact-matching cross-job candidate view to link to — /pipeline
+            is a per-job Kanban picker, not a cross-job list, so it never
+            matched either number. Links to the same broader candidate
+            cohort as Active Candidates — an honest "these are your working
+            candidates" destination, not a byte-exact row-count match. */}
+        <OverviewKpiCard icon="📋" label="Candidates in Pipeline" value={loading ? '…' : d.candidates_in_pipeline ?? 0} color="#0369a1" bg="#e0f2fe" href="/candidates?owned=mine_or_assigned" />
+        <OverviewKpiCard icon="📤" label="Total Submissions" value={loading ? '…' : d.total_submissions ?? 0} color="#9a3412" bg="#ffedd5" href="/candidates?owned=mine_or_assigned" />
+        {/* /interviews and /offers had zero recruiter-scoping at all — every
+            user saw the whole tenant's list regardless of the KPI's own
+            "assigned to me" definition. Both pages now support a real
+            ?mine=1 param (phase3.py's /auto-interview/list, offers.py's
+            /offers) and default their own toggle/tab to the matching view. */}
+        <OverviewKpiCard icon="🗓️" label="Interviews Scheduled" value={loading ? '…' : d.interviews_scheduled ?? 0} color="#0f766e" bg="#ccfbf1" href="/interviews?mine=1" />
+        <OverviewKpiCard icon="📝" label="Offers Released" value={loading ? '…' : d.offers_released ?? 0} color="#b45309" bg="#fef3c7" href="/offers?mine=1" />
         {/* REAL BUG FIX (2026-08-31): this card never had an href at all -
             it visually looked clickable (OverviewKpiCard always applies
             cursor-pointer regardless of href) but did nothing, reported
-            live as "Placements is not working." Links to the recruiter's
-            own candidates, same destination "On Notice Period" already
-            uses, since there's no dedicated placements-only view yet. */}
-        <OverviewKpiCard icon="🎉" label="Placements / Joinings" value={loading ? '…' : d.placements ?? 0} color="#065f46" bg="#d1fae5" href="/candidates?owned=mine" />
+            live as "Placements is not working." No dedicated placements-
+            only view exists yet — links to the same broader "my candidates"
+            cohort as Active Candidates, an honest approximate destination. */}
+        <OverviewKpiCard icon="🎉" label="Placements / Joinings" value={loading ? '…' : d.placements ?? 0} color="#065f46" bg="#d1fae5" href="/candidates?owned=mine_or_assigned" />
         <OverviewKpiCard icon="💰" label="Revenue Generated" value={loading ? '…' : fmtRupee(d.revenue_generated || 0)} color="#1e3a5f" bg="#dbeafe" href="/incentives" sub="This month, best-effort attribution" />
         <OverviewKpiCard icon="⏰" label="Pending Follow-ups" value={loading ? '…' : d.pending_followups ?? 0} color="#dc2626" bg="#fee2e2" href="/reminders" />
-        <OverviewKpiCard icon="🔔" label="On Notice Period" value={loading ? '…' : d.candidates_on_notice ?? 0} color="#92400e" bg="#fef3c7" href="/candidates?owned=mine" />
+        <OverviewKpiCard icon="🔔" label="On Notice Period" value={loading ? '…' : d.candidates_on_notice ?? 0} color="#92400e" bg="#fef3c7" href="/candidates?owned=mine_or_assigned" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4" style={{ marginTop: 20 }} data-testid="recruiter-overview-today">

@@ -233,7 +233,7 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
         }
 
 @auto_interview_router.get("/list")
-async def list_interviews(actor: Actor = Depends(get_actor)):
+async def list_interviews(mine: bool | None = None, actor: Actor = Depends(get_actor)):
     """List all scheduled interviews with candidate details.
 
     REAL BUG FIX (2026-08-17): no is_active filter — this is the
@@ -242,6 +242,13 @@ async def list_interviews(actor: Actor = Depends(get_actor)):
     was fixed first but has no real frontend caller). Soft-deleted
     candidates' interview rows, some with future scheduled dates, kept
     showing here indefinitely.
+
+    REAL BUG FIX (2026-08-31): also had zero recruiter-scoping — the
+    Recruiter Overview dashboard's "Interviews Scheduled" KPI counts only
+    interviews where the caller is the interviewer OR the candidate's
+    assigned recruiter, but its "/interviews" link showed the WHOLE
+    tenant's interviews. New optional mine=true param matches the KPI's
+    own real definition exactly.
     """
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
@@ -255,9 +262,11 @@ async def list_interviews(actor: Actor = Depends(get_actor)):
             JOIN candidates c ON c.id=s.candidate_id
             LEFT JOIN requisitions r ON r.id=s.requisition_id
             LEFT JOIN calendar_events ce ON ce.interview_id=s.id AND ce.tenant_id=s.tenant_id
+            LEFT JOIN applications a ON a.id=s.application_id
             WHERE s.tenant_id=$1 AND c.is_active IS NOT FALSE
+              AND ($2::boolean IS NOT TRUE OR s.interviewer_id=$3 OR a.assigned_recruiter_id=$3)
             ORDER BY s.scheduled_at DESC LIMIT 100
-        """, actor.tenant_id)
+        """, actor.tenant_id, mine, actor.user_id)
         return [{
             "id": str(r["id"]), "candidate": r["candidate_name"],
             "email": r["email"], "phone": r["phone"],

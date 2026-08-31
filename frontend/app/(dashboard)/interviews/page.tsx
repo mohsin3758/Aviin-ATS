@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Calendar, Video, Phone, MapPin, Clock, Mail, MessageCircle, Bell, Plus, CheckCircle } from 'lucide-react';
 
@@ -114,7 +114,18 @@ function ScheduleModal({ onClose, onScheduled }:any) {
 }
 
 export default function InterviewsPage() {
-  const { data: interviews, loading, refetch } = useFetch<any[]>('/auto-interview/list');
+  // Real bug fix (2026-08-31): the Recruiter Overview dashboard's
+  // "Interviews Scheduled" card links here with ?mine=1 — that KPI only
+  // counts interviews where the caller is the interviewer or the
+  // candidate's assigned recruiter, but this page always showed the whole
+  // tenant's interviews regardless. Read via window.location, matching
+  // this codebase's established client-only URL-param pattern
+  // (candidates/page.tsx) rather than useSearchParams (Suspense boundary).
+  const [mineOnly, setMineOnly] = useState(false);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('mine') === '1') setMineOnly(true);
+  }, []);
+  const { data: interviews, loading, refetch } = useFetch<any[]>(mineOnly ? '/auto-interview/list?mine=true' : '/auto-interview/list');
   const [showModal, setShowModal] = useState(false);
   const [reminding, setReminding] = useState<string|null>(null);
   const [toast, setToast] = useState('');
@@ -151,14 +162,20 @@ export default function InterviewsPage() {
       {toast&&<div style={{position:'fixed',top:'80px',right:'24px',zIndex:1000,background:'#0f172a',color:'white',padding:'10px 18px',borderRadius:'8px',fontSize:'13px',fontWeight:'600'}}>✓ {toast}</div>}
       {showModal&&<ScheduleModal onClose={()=>setShowModal(false)} onScheduled={()=>{refetch();setShowModal(false);}}/>}
 
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10}}>
         <div>
           <h1 style={{fontSize:'20px',fontWeight:'800',color:'#0f172a',marginBottom:'2px'}}>Interview Engine</h1>
           <p style={{fontSize:'13px',color:'#64748b'}}>{upcoming.length} upcoming · {past.length} completed · Auto WhatsApp + ICS calendar</p>
         </div>
-        <button onClick={()=>setShowModal(true)} style={{display:'flex',alignItems:'center',gap:'6px',padding:'9px 18px',background:'#0f172a',color:'white',border:'none',borderRadius:'9px',cursor:'pointer',fontSize:'13px',fontWeight:'700'}}>
-          <Plus size={14}/> Schedule Interview
-        </button>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div data-testid="interviews-mine-toggle" style={{display:'inline-flex',background:'#f1f5f9',borderRadius:8,padding:2,gap:2}}>
+            <button onClick={()=>setMineOnly(false)} style={{padding:'7px 14px',borderRadius:6,border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:!mineOnly?'white':'transparent',color:!mineOnly?'#1e40af':'#64748b',boxShadow:!mineOnly?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>All Interviews</button>
+            <button onClick={()=>setMineOnly(true)} style={{padding:'7px 14px',borderRadius:6,border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:mineOnly?'white':'transparent',color:mineOnly?'#1e40af':'#64748b',boxShadow:mineOnly?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>My Interviews</button>
+          </div>
+          <button onClick={()=>setShowModal(true)} style={{display:'flex',alignItems:'center',gap:'6px',padding:'9px 18px',background:'#0f172a',color:'white',border:'none',borderRadius:'9px',cursor:'pointer',fontSize:'13px',fontWeight:'700'}}>
+            <Plus size={14}/> Schedule Interview
+          </button>
+        </div>
       </div>
 
       {/* Stats */}

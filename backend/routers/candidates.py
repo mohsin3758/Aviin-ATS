@@ -90,6 +90,24 @@ async def list_candidates(
             f"EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
             f"AND co.status='active' AND co.ownership_expires_at > now() AND co.recruiter_id=${len(params)})"
         )
+    elif owned == "mine_or_assigned":
+        # Real bug fix (2026-08-31): the Recruiter Overview dashboard's
+        # "Active Candidates"/"On Notice Period"/"Placements" cards are all
+        # defined as "owned OR has an active application assigned to me" —
+        # a broader real cohort than the plain 'mine' ownership-only value
+        # above. Clicking those cards previously landed here with
+        # owned=mine, showing far fewer candidates than the KPI counted
+        # (reported live: "11 Active Candidates" vs 1 candidate on the
+        # filtered list) — this value matches each KPI's own real
+        # definition instead of silently reusing the narrower one.
+        params.append(actor.user_id)
+        n = len(params)
+        conditions.append(
+            f"(EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
+            f"AND co.status='active' AND co.ownership_expires_at > now() AND co.recruiter_id=${n}) "
+            f"OR EXISTS (SELECT 1 FROM applications a2 WHERE a2.candidate_id=c.id "
+            f"AND a2.is_active IS NOT FALSE AND a2.assigned_recruiter_id=${n}))"
+        )
 
     ALLOWED = {"full_name","total_exp_mo","expected_ctc","created_at","last_activity","updated_at"}
     if sort_by not in ALLOWED: sort_by = "created_at"

@@ -229,10 +229,18 @@ class InterviewIn(BaseModel):
 @interview_router.get("")
 async def list_interviews(candidate_id: Optional[str]=None,
                            status: Optional[str]=None,
+                           mine: Optional[bool]=None,
                            actor: Actor=Depends(get_actor)):
     # REAL BUG FIX (2026-08-17): no is_active filter — soft-deleted
     # candidates' old (and sometimes still-future-dated) interview rows
     # kept appearing on this real, recruiter-facing list forever.
+    # REAL BUG FIX (2026-08-31): this list had zero recruiter-scoping at
+    # all — the Recruiter Overview dashboard's "Interviews Scheduled" card
+    # counts only interviews where the caller is the interviewer OR the
+    # candidate's assigned recruiter, but its "/interviews" link showed the
+    # WHOLE tenant's interviews (0 shown as the KPI, dozens on the linked
+    # page). New optional mine=true param matches the KPI's own definition
+    # exactly, via the same application-join it already uses.
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT i.*, c.full_name AS candidate_name, c.email AS candidate_email,
@@ -242,11 +250,13 @@ async def list_interviews(candidate_id: Optional[str]=None,
             JOIN candidates c ON c.id=i.candidate_id
             LEFT JOIN users u ON u.id=i.interviewer_id AND u.is_active IS NOT FALSE
             LEFT JOIN requisitions r ON r.id=i.requisition_id
+            LEFT JOIN applications a ON a.id=i.application_id
             WHERE i.tenant_id=$1 AND c.is_active IS NOT FALSE
               AND ($2::text IS NULL OR i.candidate_id::text=$2)
               AND ($3::text IS NULL OR i.status=$3)
+              AND ($4::boolean IS NOT TRUE OR i.interviewer_id=$5 OR a.assigned_recruiter_id=$5)
             ORDER BY i.scheduled_at DESC
-        """, actor.tenant_id, candidate_id, status)
+        """, actor.tenant_id, candidate_id, status, mine, actor.user_id)
     return [dict(r) for r in rows]
 
 # Gap-audit item 10: interviewer load-balancing. No dedicated "interviewer"

@@ -1354,12 +1354,18 @@ export default function CandidatesPage() {
           alongside this) also sets — a prominent toggle, not a second
           data source. */}
       <div style={{display:'inline-flex',background:'#f1f5f9',borderRadius:'8px',padding:'3px',marginBottom:'16px',gap:'2px'}}>
+        {/* REAL BUG FIX (2026-08-31): mine_or_assigned (the broader scope
+            RecruiterOverview's KPI links use) previously matched NEITHER
+            toggle's active-highlight check, so a card click landed on the
+            correct, filtered candidate list but the toggle misleadingly
+            showed "All Candidates" as selected. Both checks now treat it
+            as a "mine"-family scope, matching the real applied filter. */}
         <button data-testid="candidates-scope-all" onClick={()=>setOwnedFilter('')}
-          style={{padding:'7px 16px',borderRadius:'6px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:ownedFilter!=='mine'?'white':'transparent',color:ownedFilter!=='mine'?'#1e40af':'#64748b',boxShadow:ownedFilter!=='mine'?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>
+          style={{padding:'7px 16px',borderRadius:'6px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:!ownedFilter.startsWith('mine')?'white':'transparent',color:!ownedFilter.startsWith('mine')?'#1e40af':'#64748b',boxShadow:!ownedFilter.startsWith('mine')?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>
           All Candidates
         </button>
         <button data-testid="candidates-scope-mine" onClick={()=>setOwnedFilter('mine')}
-          style={{padding:'7px 16px',borderRadius:'6px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:ownedFilter==='mine'?'white':'transparent',color:ownedFilter==='mine'?'#1e40af':'#64748b',boxShadow:ownedFilter==='mine'?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>
+          style={{padding:'7px 16px',borderRadius:'6px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'700',background:ownedFilter.startsWith('mine')?'white':'transparent',color:ownedFilter.startsWith('mine')?'#1e40af':'#64748b',boxShadow:ownedFilter.startsWith('mine')?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>
           My Candidates
         </button>
       </div>
@@ -1422,6 +1428,7 @@ export default function CandidatesPage() {
               <select data-testid="owned-filter" value={ownedFilter} onChange={e=>setOwnedFilter(e.target.value)} style={{width:'100%',padding:'7px 10px',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}>
                 <option value="">All candidates</option>
                 <option value="mine">My Candidates (owned by me)</option>
+                <option value="mine_or_assigned">My Candidates (owned or assigned to me)</option>
                 <option value="unowned">Unowned</option>
                 <option value="active">Actively owned (by anyone)</option>
               </select></div>

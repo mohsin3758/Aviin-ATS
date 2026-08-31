@@ -304,9 +304,22 @@ function ApprovalAction({ offer, canApprove, onDone }: { offer: any; canApprove:
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function OffersPage() {
-  const { data: aiOffers, loading: aiLoading, refetch: aiMutate } = useFetch<any[]>('/auto-offer/list');
-  const { data: formalOffers, loading: formalLoading, refetch: formalMutate } = useFetch<any[]>('/offers');
+  // Real bug fix (2026-08-31): the Recruiter Overview dashboard's "Offers
+  // Released" card links here with ?mine=1 — that KPI counts real `offers`
+  // table rows (the "formal" tab, backed by the now-scoped GET /offers),
+  // not the separate AI-drafted /auto-offer/list. Read via window.location,
+  // matching this codebase's established client-only URL-param pattern
+  // (candidates/page.tsx) rather than useSearchParams (Suspense boundary).
+  const [mine, setMine] = useState(false);
   const [tab, setTab] = useState<'ai'|'formal'>('ai');
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('mine') === '1') {
+      setMine(true);
+      setTab('formal');
+    }
+  }, []);
+  const { data: aiOffers, loading: aiLoading, refetch: aiMutate } = useFetch<any[]>('/auto-offer/list');
+  const { data: formalOffers, loading: formalLoading, refetch: formalMutate } = useFetch<any[]>(mine ? '/offers?mine=1' : '/offers');
   const [showModal, setShowModal] = useState(false);
   const [letterOffer, setLetterOffer] = useState<any>(null);
   const [genLink, setGenLink] = useState<Record<string,string>>({});
@@ -376,13 +389,21 @@ export default function OffersPage() {
       </div>
 
       {/* Tabs */}
-      <div style={{display:'flex',gap:'4px',padding:'4px',background:'#f1f5f9',borderRadius:'10px',width:'fit-content'}}>
-        <button style={tabStyle('ai')} onClick={()=>setTab('ai')}>
-          <Sparkles size={12} style={{marginRight:'5px',verticalAlign:'middle'}}/>AI Generated
-        </button>
-        <button style={tabStyle('formal')} onClick={()=>setTab('formal')}>
-          <FileText size={12} style={{marginRight:'5px',verticalAlign:'middle'}}/>Formal Offers + Letters
-        </button>
+      <div style={{display:'flex',alignItems:'center',flexWrap:'wrap',gap:10}}>
+        <div style={{display:'flex',gap:'4px',padding:'4px',background:'#f1f5f9',borderRadius:'10px',width:'fit-content'}}>
+          <button style={tabStyle('ai')} onClick={()=>setTab('ai')}>
+            <Sparkles size={12} style={{marginRight:'5px',verticalAlign:'middle'}}/>AI Generated
+          </button>
+          <button style={tabStyle('formal')} onClick={()=>setTab('formal')}>
+            <FileText size={12} style={{marginRight:'5px',verticalAlign:'middle'}}/>Formal Offers + Letters
+          </button>
+        </div>
+        {tab==='formal' && (
+          <div data-testid="offers-mine-toggle" style={{display:'inline-flex',background:'#f1f5f9',borderRadius:8,padding:2,gap:2}}>
+            <button onClick={()=>setMine(false)} style={{padding:'6px 12px',borderRadius:6,border:'none',cursor:'pointer',fontSize:'11px',fontWeight:'700',background:!mine?'white':'transparent',color:!mine?'#1e40af':'#64748b',boxShadow:!mine?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>All Offers</button>
+            <button onClick={()=>setMine(true)} style={{padding:'6px 12px',borderRadius:6,border:'none',cursor:'pointer',fontSize:'11px',fontWeight:'700',background:mine?'white':'transparent',color:mine?'#1e40af':'#64748b',boxShadow:mine?'0 1px 2px rgba(0,0,0,0.08)':'none'}}>My Offers</button>
+          </div>
+        )}
       </div>
 
       {/* AI Offers Table */}

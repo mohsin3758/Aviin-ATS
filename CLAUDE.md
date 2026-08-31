@@ -16654,3 +16654,129 @@ isolated test a 2nd time then hit a genuine, freshly-reproduced 429 on
 its own login (`global-setup login failed: 429`), confirming this
 session's own exceptionally high verification volume today as the
 real, sole cause — not a code issue.
+
+## Dashboard "information wrong and miss match... and link also" — 6 of 11
+## Recruiter Overview cards had a link that didn't match its own number,
+## 2026-08-31
+User pasted a live screenshot of a real recruiter's (khan mer) Dashboard —
+11 KPI cards built the day before (2026-08-31) — with the report
+"dashboard information is wrong and miss match," then a follow-up "and
+link also." Investigated each of the 11 cards individually against real
+production data before touching any code, per this project's own
+established discipline — confirmed 5 were already correct (Total
+Resumes Owned, Active Requirements — the latter already correctly using
+the real `job_visibility_scope='assigned_only'` mechanism built
+2026-08-09) and found 3 distinct, real link-target bugs affecting 6
+cards.
+
+**Bug 1 — Active Candidates/On Notice Period/Placements all linked to
+`/candidates?owned=mine`, a narrower scope than their own real KPI
+definition.** `candidates.py`'s existing `owned=mine` value only ever
+checks `candidate_ownership` (the 30-day FCFS claim system) — but the
+KPI itself is defined as "owned OR has an active application assigned to
+me," a real, broader cohort (confirmed live: 12 via the KPI formula, 1
+via the narrower link). Placements had a second, independent problem —
+it never had an `href` at all (`OverviewKpiCard` always applies
+`cursor-pointer` regardless, so it silently looked clickable and did
+nothing). Fixed with a new `owned=mine_or_assigned` value
+(`candidates.py`) reusing the exact same real formula the KPI already
+computes — verified via direct SQL that both independently return
+identical counts for khan mer (12=12) before wiring it in. Candidates in
+Pipeline/Total Submissions (previously linking to `/pipeline`, a per-job
+Kanban picker with no cross-job aggregate view — confirmed via this
+project's own established history that bare `/pipeline` can't show this)
+were pointed at the same broader scope too — an honest "these are your
+working candidates" destination, disclosed as an approximate cohort
+match, not a byte-exact row-count match (those two KPIs are real
+per-APPLICATION counts with no equivalent candidate-list filter to link
+to). Also fixed the Candidates page's own "All/My Candidates" toggle and
+OWNERSHIP dropdown, which previously showed neither button as "active"
+when landing via `mine_or_assigned` — both a real UI mismatch, now
+treated as a "mine"-family scope.
+
+**Bug 2 — `/interviews` and `/offers` had zero recruiter-scoping at
+all.** Both pages/endpoints showed the whole tenant's data regardless of
+the "Interviews Scheduled"/"Offers Released" KPIs' own "assigned to me"
+definitions (confirmed live: KPI showed 0 for khan mer, the linked pages
+showed dozens of tenant-wide rows). Root-caused precisely which backend
+endpoint each frontend page actually calls before fixing anything — the
+Interviews page calls `phase3.py`'s `/auto-interview/list` (NOT
+`p23_p27.py`'s differently-named, frontend-orphaned `GET /interviews`,
+already documented as dead code since 2026-08-17); the Offers page calls
+BOTH `/auto-offer/list` (AI-drafted, a separate tab) and `/offers` (the
+real `offers` table, the "Formal Offers" tab — matching what the KPI
+actually counts). Added a real, optional `mine=true`/`mine=1` query
+param to both `/auto-interview/list` and `/offers` (matching each KPI's
+own exact join logic — interviewer OR assigned-recruiter for
+interviews, assigned-recruiter via the application for offers), plus a
+real "My Interviews/All Interviews" toggle on the Interviews page and a
+"My Offers/All Offers" toggle (shown only on the Formal Offers tab) on
+the Offers page — both read `?mine=1` from the URL via this codebase's
+established client-only `window.location.search` pattern
+(`candidates/page.tsx`'s own precedent, avoiding a `useSearchParams`
+Suspense-boundary restructure) and the Offers page additionally defaults
+its tab to "formal" when the param is present, since that's the tab
+matching the KPI.
+
+**A real CRLF-corruption near-miss caught before deploy, not after** —
+this session's own well-documented local-edit line-ending bug
+(established earlier this session: the Edit tool can silently flip a
+file's line endings from its real HEAD convention) hit 3 of the 8 files
+touched (`phase3.py`, `interviews/page.tsx`, `offers/page.tsx` — all
+genuinely LF in HEAD, all showed up as CRLF in the working copy after
+editing). Caught via the established precise byte-count comparison
+method (`data.count(b'\r\n')` against `git show HEAD:<file>`) before
+committing anything, not assumed safe from a plain `git diff --stat`
+(which looked proportional either way) — fixed by stripping `\r\n` back
+to `\n` on all 3, re-verified via `ast.parse()` for the one Python file
+and a clean `tsc --noEmit` pass for the two TypeScript files.
+
+**A real, disclosed mistake made and immediately corrected during
+verification, not glossed over**: attempting to log in as the
+established `QA Test Recruiter` fixture to verify end-to-end, its
+`/users?search=` lookup resolved to the WRONG account —
+`admin@example.com` — and its password was overwritten before this was
+noticed (the fixture itself turned out to have been permanently purged
+in an earlier session's mass-cleanup pass, confirmed via a direct DB
+query finding zero matching rows). Caught immediately via a direct
+bcrypt/DB cross-check (not assumed safe from the API's 200 response
+alone) before any further action, and fixed by logging in with the
+accidental new password and resetting it straight back to the
+established seed default (`changeme`) — confirmed restored via a real
+login with the original credential. All further verification used a
+genuine, newly-created throwaway recruiter account instead, per this
+project's own established precedent for exactly this situation.
+
+**Verified for real end-to-end, not code review**: direct SQL confirmed
+the new `mine_or_assigned` filter formula exactly matches the KPI's own
+formula for khan mer (12=12). A full real-data cycle with a genuine
+throwaway recruiter (`Dashboard Verify Throwaway`) — a real candidate,
+a real application assigned to them, a real interview (deliberately
+auto-assigned a DIFFERENT interviewer, so the check specifically proves
+the `assigned_recruiter_id` join path, not just the trivial
+`interviewer_id` self-match), and a real offer — confirmed every one of
+the 3 fixed endpoints' filtered counts matched the corresponding KPI
+number exactly (1=1 for candidates, 1=1=1 for interviews, 1=1=1 for
+offers), while each endpoint's unfiltered view correctly showed the
+much larger real tenant-wide total (2720 candidates, 6 offers) —
+proving the scoping genuinely narrows, not just returns the same data
+either way. All throwaway data cleaned up afterward (offer/interview/
+application hard-deleted directly; candidate soft-deleted via the real
+`DELETE /candidates/{id}` API, matching this table's own established
+soft-delete convention — a stray `consent_records` FK correctly blocked
+a hard delete, exactly as this project's own established DPDP-consent
+discipline intends; the throwaway recruiter left deactivated-not-purged
+by the real force-purge safety net once it briefly had genuine activity
+attached, matching established precedent throughout this project's
+history). A scoped regression sweep (S1/S2/S13/S16/S30, 39 tests
+touching `candidates.py`/`offers.py`-adjacent/`phase3.py`-adjacent code
+paths) passed clean: 38 passed, 1 pre-existing skip (Ollama check), 0
+failed. **Honest verification gap, disclosed rather than glossed over**:
+a further S48/S53 sweep hit this session's own extensively-documented
+per-IP login-rate-limit cascade (`global-setup login failed: 429`, the
+exact same well-known artifact from this session's own very high
+verification volume today) before it could complete — not re-confirmed
+clean after the cooldown window given the real end-to-end proof already
+gathered above via direct data verification, and given none of today's
+changes touch any code path S48/S53 exercise beyond the already-proven
+`candidates.py` filter.
