@@ -11045,3 +11045,215 @@ test.describe.serial('S81 Requisition creation restricted to admin/manager/KAE/K
     expect(consoleErrors).toEqual([]);
   });
 });
+
+test.describe.serial('S82 Pipeline drawer Follow-up tab: real Reminders system, recruiter/KAE/KAM all connected', () => {
+  // 2026-09-01 — explicit ask, from a live pipeline-drawer screenshot: "i
+  // want followup button on next to notes so recruiter or KAE, and KAM
+  // can keep the followup message and features and connect with all
+  // followup features and reports". Wired directly to the real, already-
+  // built Reminders & Follow-Ups system (recruiter_tasks table, same
+  // POST/PATCH endpoints the full /reminders page's own form uses) — not
+  // a second, disconnected concept. A real, previously-existing
+  // permission-key mismatch was found and fixed in the same pass: the 4
+  // task endpoints in recruiter_ops.py were gated on the "recruiter_ops"
+  // feature, but kae/kam only ever held "reminders" (the correct,
+  // semantically-matching feature — recruiter happened to hold both, so
+  // this never surfaced for that role). create/update/reschedule now
+  // check "reminders" instead; delete deliberately stays on
+  // "recruiter_ops" (recruiter's own existing grant, unaffected — moving
+  // it wouldn't have helped kae/kam either, since neither holds
+  // reminders:delete, and deleting a follow-up wasn't part of the ask).
+  let token = '';
+  let reqId = '';
+  let candId = '';
+  let appId = '';
+  const stamp = Date.now();
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const taskIds: string[] = [];
+
+  test.afterAll(async ({ request }) => {
+    for (const id of taskIds) await request.delete(`${API}/recruiter-tasks/${id}`, { headers: auth() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway requisition + candidate + application', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `S82 Followup Test Role ${stamp}`, status: 'open', employment_type: 'contract' },
+    });
+    reqId = (await reqR.json()).id;
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `S82 Followup Candidate ${stamp}`, phone: '9876500002', skills: ['Python'] },
+    });
+    candId = (await candR.json()).id;
+    const bulkR = await request.post(`${API}/candidates/bulk-assign`, {
+      headers: auth(), data: { candidate_ids: [candId], requisition_id: reqId, stage: 'interested' },
+    });
+    expect(bulkR.ok()).toBeTruthy();
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    appId = (Object.values(board).flat() as any[]).find((a: any) => a.candidate_id === candId).id;
+    expect(reqId && candId && appId).toBeTruthy();
+  });
+
+  test('BUG FIX: recruiter, KAE, and KAM can all create + update + reschedule a follow-up linked to this candidate', async ({ request }) => {
+    for (const role of ['recruiter', 'kae', 'kam']) {
+      const email = `qa.s82.${role}.${stamp}@test.com`;
+      const u = await request.post(`${API}/users`, { headers: auth(), data: { email, full_name: `QA S82 ${role} ${stamp}`, role, password: 'TestPass123!' } });
+      expect(u.ok()).toBeTruthy();
+      const uid = (await u.json()).id;
+      const login = await (await request.post(`${API}/auth/login`, { data: { email, password: 'TestPass123!' } })).json();
+      const roleAuth = { Authorization: `Bearer ${login.access_token}` };
+
+      const created = await request.post(`${API}/recruiter-tasks`, {
+        headers: roleAuth,
+        data: { title: `S82 ${role} followup ${stamp}`, candidate_id: candId, application_id: appId, requisition_id: reqId, priority: 'medium', due_at: '2026-12-31T10:00:00Z' },
+      });
+      expect(created.status(), `${role} should be able to create a follow-up`).toBe(200);
+      const task = await created.json();
+      taskIds.push(task.id);
+      expect(task.candidate_id).toBe(candId);
+      expect(task.application_id).toBe(appId);
+
+      const updated = await request.patch(`${API}/recruiter-tasks/${task.id}?status=in_progress`, { headers: roleAuth });
+      expect(updated.status(), `${role} should be able to update status`).toBe(200);
+
+      const rescheduled = await request.patch(`${API}/recruiter-tasks/${task.id}/reschedule`, {
+        headers: roleAuth, data: { due_at: '2027-01-15T10:00:00Z', reason: 'S82 test reschedule' },
+      });
+      expect(rescheduled.status(), `${role} should be able to reschedule`).toBe(200);
+
+      await request.patch(`${API}/users/${uid}/deactivate`, { headers: auth() });
+      await request.delete(`${API}/users/${uid}/purge`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('GET /recruiter-tasks?candidate_id= returns real, candidate-scoped follow-ups', async ({ request }) => {
+    const list = await request.get(`${API}/recruiter-tasks?candidate_id=${candId}`, { headers: auth() });
+    expect(list.ok()).toBeTruthy();
+    const rows = await list.json();
+    expect(rows.length).toBe(taskIds.length);
+    for (const r of rows) expect(r.candidate_id).toBe(candId);
+  });
+
+  test('real headless UI: the "Follow-up" tab renders next to Notes; creating a real follow-up through the drawer form works and is genuinely linked; the "Reminders & Reports" deep link opens a filtered view showing the same task', async ({ page, request }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    const consoleErrors: string[] = [];
+    page.on('pageerror', (e) => consoleErrors.push(e.message));
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S82 Followup Candidate ${stamp}`, { timeout: 15000 });
+    await page.click(`text=S82 Followup Candidate ${stamp}`);
+    await page.waitForTimeout(600);
+
+    const followupTab = page.locator('[data-tab="followup"]');
+    await expect(followupTab).toBeVisible();
+    await followupTab.click();
+    await page.waitForTimeout(400);
+
+    await page.click('text=New Follow-up');
+    await page.waitForTimeout(300);
+    await page.fill('input[placeholder="e.g. Call candidate re: offer"]', `S82 UI Followup ${stamp}`);
+    await page.fill('input[placeholder="Why this follow-up is needed"]', 'S82 real UI test');
+    await page.locator('input[type="datetime-local"]').first().fill('2026-12-31T10:00');
+    await page.click('text=Create Follow-up');
+    await page.waitForTimeout(1200);
+    await expect(page.locator('text=Follow-up created')).toBeVisible();
+
+    const tasksResp = await (await request.get(`${API}/recruiter-tasks?candidate_id=${candId}`, { headers: auth() })).json();
+    const uiCreated = tasksResp.find((t: any) => t.title === `S82 UI Followup ${stamp}`);
+    expect(uiCreated).toBeTruthy();
+    expect(uiCreated.candidate_id).toBe(candId);
+    expect(uiCreated.application_id).toBe(appId);
+    expect(uiCreated.requisition_id).toBe(reqId);
+    taskIds.push(uiCreated.id);
+
+    const [newPage] = await Promise.all([
+      page.context().waitForEvent('page'),
+      page.click('text=Reminders & Reports'),
+    ]);
+    await newPage.waitForLoadState('networkidle');
+    await expect(newPage.locator('text=Filtered to')).toBeVisible({ timeout: 10000 });
+    await expect(newPage.locator(`text=S82 UI Followup ${stamp}`)).toBeVisible();
+    await newPage.close();
+
+    expect(consoleErrors).toEqual([]);
+  });
+});
+
+test.describe.serial('S83 Candidates drawer: JD Match Score, Missing Skills, Owner, WhatsApp — matching Resume Inbox', () => {
+  // 2026-09-01 — explicit ask: "i want same features like resume inbox
+  // right candidate display details to into the candidates right side
+  // candidate details features". Resume Inbox's own DetailDrawer already
+  // showed a JD Match Score card, a Missing Skills card, a "RECRUITER"
+  // owner line, and a WhatsApp click-to-chat button — the Candidates
+  // page's own quick-view drawer had none of these, despite the exact
+  // same real data (candidate_scores' ai_scores array, candidate_
+  // ownership's owner object) already being fetched by this drawer for
+  // an unrelated purpose (latest_resume_file_id/name) and simply never
+  // rendered. No new backend endpoint needed for any of it.
+  let token = '';
+  let candId = '';
+  let reqId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway requisition requiring skills the candidate does not have + a throwaway candidate + a real triggered score', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `S83 Drawer Match Role ${stamp}`, status: 'open', employment_type: 'contract', skills_required: ['Kubernetes', 'Terraform', 'AWS'] },
+    });
+    reqId = (await reqR.json()).id;
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `S83 Drawer Match Candidate ${stamp}`, phone: '9876500003', skills: ['Python', 'Django'], resume_text: 'Experienced Python Django backend developer.' },
+    });
+    candId = (await candR.json()).id;
+    const scoreR = await request.post(`${API}/intelligence/score`, {
+      headers: auth(), data: { candidate_id: candId, requisition_id: reqId },
+    });
+    expect(scoreR.ok()).toBeTruthy();
+    expect(reqId && candId).toBeTruthy();
+  });
+
+  test('BUG FIX: GET /candidates/{id} already returns real ai_scores with matched/missing skills — the drawer just never rendered them', async ({ request }) => {
+    const full = await (await request.get(`${API}/candidates/${candId}`, { headers: auth() })).json();
+    expect(full.ai_scores.length).toBeGreaterThan(0);
+    expect(full.ai_scores[0].missing_skills).toEqual(expect.arrayContaining(['Kubernetes', 'Terraform', 'AWS']));
+    expect(full.ai_scores[0].matched_skills).toEqual([]);
+  });
+
+  test('real headless UI: the quick-view drawer shows a real JD Match Score card, a real Missing Skills card, a real "OWNED BY" card, and a WhatsApp button', async ({ page }) => {
+    await page.goto(`/candidates?search=S83 Drawer Match Candidate ${stamp}`);
+    const row = page.locator('table tbody tr', { hasText: `S83 Drawer Match Candidate ${stamp}` }).first();
+    await row.locator('button[title="Quick view"]').click({ timeout: 15000 });
+
+    await expect(page.locator('text=JD Match Score')).toBeVisible({ timeout: 10000 });
+    // Scoped to <strong> specifically — the plain title text also appears
+    // as an <option> in the Move-to-Pipeline requisition dropdown further
+    // down this same drawer (a real, separate, pre-existing feature), a
+    // genuine locator ambiguity caught by this test's own first run, not
+    // an app bug.
+    await expect(page.locator('strong', { hasText: `S83 Drawer Match Role ${stamp}` })).toBeVisible();
+
+    await expect(page.locator('text=/MISSING SKILLS \\(3 gaps\\)/')).toBeVisible();
+    await expect(page.locator('text=Kubernetes')).toBeVisible();
+    await expect(page.locator('text=Terraform')).toBeVisible();
+
+    await expect(page.locator('text=OWNED BY')).toBeVisible();
+    // "Admin User" alone is ambiguous — it also appears in the top-right
+    // nav user menu and elsewhere on the page. "claim expires" is unique
+    // to this drawer's own Owned By card content.
+    await expect(page.locator('text=/Admin User.*claim expires/')).toBeVisible();
+
+    await expect(page.locator('text=Message on WhatsApp')).toBeVisible();
+  });
+});

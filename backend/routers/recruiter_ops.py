@@ -155,7 +155,7 @@ class TaskRescheduleIn(BaseModel):
 @tasks_router.get("")
 async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] = None,
                       priority: Optional[str] = None, client_id: Optional[str] = None,
-                      overdue_only: bool = False,
+                      candidate_id: Optional[str] = None, overdue_only: bool = False,
                       actor: Actor = Depends(get_actor)):
     # REAL BUG FIX (2026-08-31): every column reference here was
     # unqualified (bare "tenant_id"/"status"/etc.) while the query below
@@ -181,6 +181,14 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
     if client_id:
         params.append(client_id)
         conditions.append(f"rt.client_id = ${len(params)}")
+    if candidate_id:
+        # Real feature (2026-09-01): the pipeline drawer's own new
+        # "Follow-up" tab needs to show every follow-up tied to THIS
+        # candidate specifically, across any recruiter/KAE/KAM — not just
+        # the caller's own tasks (the recruiter_id filter above already
+        # covers "mine"; this is a separate, additive filter).
+        params.append(candidate_id)
+        conditions.append(f"rt.candidate_id = ${len(params)}")
     if overdue_only:
         conditions.append("rt.status IN ('pending','in_progress') AND rt.due_at < now()")
 
@@ -199,7 +207,21 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
 
 @tasks_router.post("")
 async def create_task(body: TaskIn, actor: Actor = Depends(get_actor),
-                       _perm: Actor = Depends(require_permission("recruiter_ops", "create"))):
+                       # Real fix (2026-09-01): these 4 task endpoints live
+                       # in this file (recruiter_ops.py) but their actual
+                       # feature identity is "Reminders & Follow-Ups" — a
+                       # separate, later-added permissions key. Found live
+                       # while verifying "recruiter or KAE, and KAM can
+                       # keep the followup message": recruiter already had
+                       # BOTH recruiter_ops and reminders granted (so this
+                       # gate never surfaced the mismatch for them), but
+                       # kae/kam only ever got reminders — the exact
+                       # feature this endpoint should have checked all
+                       # along. Targets/hotlist/leave in this same file
+                       # correctly stay gated on recruiter_ops — only the
+                       # follow-up/task actions move to the feature that
+                       # actually names them.
+                       _perm: Actor = Depends(require_permission("reminders", "create"))):
     if body.priority not in VALID_PRIORITIES:
         raise HTTPException(400, f"Invalid priority — must be one of {VALID_PRIORITIES}")
     if not _valid_recurrence(body.recurrence_rule):
@@ -257,7 +279,9 @@ async def create_task(body: TaskIn, actor: Actor = Depends(get_actor),
 
 @tasks_router.patch("/{task_id}")
 async def update_task_status(task_id: str, status: str, actor: Actor = Depends(get_actor),
-                              _perm: Actor = Depends(require_permission("recruiter_ops", "update"))):
+                              # See create_task's own comment above — same
+                              # feature-key fix (2026-09-01).
+                              _perm: Actor = Depends(require_permission("reminders", "update"))):
     if status not in VALID_TASK_STATUSES:
         raise HTTPException(400, "Invalid status")
     completed_at_clause = "completed_at = now()" if status == "completed" else "completed_at = NULL"
@@ -295,7 +319,9 @@ async def update_task_status(task_id: str, status: str, actor: Actor = Depends(g
 
 @tasks_router.patch("/{task_id}/reschedule")
 async def reschedule_task(task_id: str, body: TaskRescheduleIn, actor: Actor = Depends(get_actor),
-                           _perm: Actor = Depends(require_permission("recruiter_ops", "update"))):
+                           # See create_task's own comment above — same
+                           # feature-key fix (2026-09-01).
+                           _perm: Actor = Depends(require_permission("reminders", "update"))):
     """Real, distinct 'Rescheduled' status the original task list never
     had — before this, moving a due date meant silently overwriting
     due_at with no trace it had ever been anything else. Keeps

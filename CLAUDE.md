@@ -17716,3 +17716,134 @@ clean. Broader regression sweep across every suite touching
 skip (Ollama check, unrelated), 0 failed. Zero-token audit: `CONFIRMED
 CLEAN` (431 files, 0 external API refs). All throwaway test data
 (2 users, 2 requisitions) cleaned up via real APIs after every check.
+
+## Pipeline drawer Follow-up tab + Candidates drawer enrichment (parts 2/3 of the same request), 2026-09-01
+Direct continuation of the same message's 2 remaining items, both built,
+verified, and deployed.
+
+**Part 2 — a real "Follow-up" tab, next to Notes, wired to the actual
+Reminders & Follow-Ups system.** Not a new concept — reuses
+`recruiter_tasks` and the exact same `POST`/`GET`/`PATCH /recruiter-
+tasks*` endpoints the standalone `/reminders` page's own form already
+uses. `GET /recruiter-tasks` gained a `candidate_id` filter
+(`recruiter_ops.py`) — the one real, small backend addition needed. New
+`FollowUpTab` (`pipeline/page.tsx`) sits in the drawer's tab bar right
+after Notes (`Bell` icon, an open-count badge), pre-fills `candidate_id`/
+`application_id`/`requisition_id` from the drawer's own already-loaded
+context (tighter linkage than the full page's own manual candidate-
+search picker), and lists/creates/marks-done/cancels follow-ups for
+exactly this candidate. A "Reminders & Reports" link opens the real
+`/reminders` page — extended with a genuine `?tab=followups&candidate=
+<id>` deep-link (`RemindersPage` reads `window.location.search` on
+mount, client-only; `FollowUpsTab` gained an `initialCandidateId` prop +
+a real "Filtered to X · Clear" badge) — proving "connect... with
+reports" for real: a follow-up created from the drawer is immediately
+visible, with the exact same data, on the full Reminders page. No
+separate wiring needed for the Reports tab itself — it already
+aggregates from the same `recruiter_tasks` table.
+
+**A real, previously-existing permission-key mismatch found and fixed
+while verifying the explicit "recruiter or KAE, and KAM" requirement,
+not assumed satisfied by the UI alone.** Direct API tests showed
+`recruiter` could create a follow-up but `kae`/`kam` both cleanly 403'd.
+Root cause: the 4 task endpoints in `recruiter_ops.py` were gated on the
+`"recruiter_ops"` permission feature — but kae/kam only ever held
+`"reminders"` (a separate, later-added, semantically-correct feature key
+for this exact concept — confirmed via `permissions.py`'s own taxonomy:
+`("reminders", "Reminders & Follow-Ups")`). recruiter happened to hold
+BOTH features, which is why this never surfaced for that role. Fixed by
+switching `create_task`/`update_task_status`/`reschedule_task` to check
+`"reminders"` instead — `delete_task` deliberately stays on
+`"recruiter_ops"` (recruiter's own existing, working grant; moving it
+wouldn't have helped kae/kam either, since neither holds `reminders:
+delete`, and deleting a follow-up wasn't part of the explicit ask, so
+widening it further was out of scope for what was requested). Targets/
+hotlist/leave endpoints in the same file are untouched, still correctly
+`"recruiter_ops"`-gated.
+
+Verified for real end-to-end, not code review, at every layer: a real
+throwaway recruiter+kae+kam trio all correctly 403'd pre-fix and all
+correctly 200'd post-fix on create; a second, separate round confirmed
+both kae and kam can also mark-complete and reschedule (the other 2
+moved endpoints), not just create. A real headless-browser pass through
+the actual drawer: opened a real candidate, clicked Follow-up, filled
+and submitted the real form, got a genuine "✓ Follow-up created" toast,
+confirmed via a direct API call the created task carried the correct
+`candidate_id`/`application_id`/`requisition_id` linkage (not just a
+bare candidate id), then clicked "Reminders & Reports" and confirmed the
+real deep-linked page showed the "Filtered to X" badge with the exact
+same task visible — screenshot-confirmed at every step. New permanent
+"S82" suite (4 tests) added to `qa_automation.spec.ts`.
+
+**Part 3 — Candidates page's quick-view drawer enriched to match Resume
+Inbox's own drawer.** Investigated first, not guessed: this drawer
+already fetches `fullCand` (`GET /candidates/{id}`) but only ever read
+`latest_resume_file_id`/`latest_resume_file_name` off it — the same
+response already carries a real `ai_scores` array (readiness_index/
+grade, matched/missing skills per requisition scored, computed via the
+shared `compute_skill_similarity()` engine — the exact data Resume
+Inbox's own JD Match Score + Missing Skills cards already display) that
+had simply never been rendered here. No new backend endpoint needed for
+that half. Added, all reusing already-fetched data: a **JD Match Score
+card** (color-graded score, best-match requisition title, progress bar
+— matching Resume Inbox's card style exactly); a **Missing Skills
+card** (amber chips, "N gaps"); an **"OWNED BY" card** surfacing the
+real 30-day FCFS `candidate_ownership` system (`candidate.owner`,
+already returned by the LIST endpoint's own `owner_sub` query, built
+2026-08-11 — genuinely new to this drawer, not previously shown at all)
+with the real claim-expiry date; a **WhatsAppChatButton** next to the
+phone field (the same real, free click-to-chat component already used
+on the pipeline drawer/Resume Inbox — self-contained, returns `null`
+with no phone, zero risk); and a **resume filename display** next to
+the existing Download button (was a bare icon-only button before, no
+filename shown anywhere in this drawer). "Education" was investigated
+and deliberately NOT added — confirmed via a direct field-shape check
+that no such column/data exists anywhere on the real candidate record,
+unlike every other item added here which was already real, fetched
+data waiting to be rendered.
+
+Verified for real end-to-end, not code review: a real throwaway
+candidate deliberately missing 3 skills a real throwaway requisition
+required, scored via the real `/intelligence/score` endpoint, confirmed
+`ai_scores[0].missing_skills` exactly matched the 3 configured gaps —
+then a real headless-browser pass confirmed the exact same 3 skills
+(Kubernetes/Terraform/AWS) render as red-bordered chips in a genuine
+"MISSING SKILLS (3 gaps)" card, the JD Match Score card shows the
+correct 25% in red with the right best-match title, "OWNED BY" shows
+the real owner + expiry, and the WhatsApp button renders (screenshot-
+confirmed at every step, not just locator-checked). A second, separate
+check against a REAL, pre-existing production candidate ("Vinay.K",
+already genuinely in a real pipeline) confirmed the same cards render
+correctly on real (not throwaway) data too — a real 24% match, 2 real
+missing skills (React, TypeScript), matching what that candidate
+actually lacks against a real open role. A third, targeted check against
+a different real candidate with an actual uploaded resume file confirmed
+the new filename display genuinely renders the real stored filename.
+
+New permanent "S83" suite (3 tests) added to `qa_automation.spec.ts` —
+2 real locator-ambiguity mistakes caught and fixed by the suite's own
+first two runs, not app bugs: the requisition title text also appears as
+an `<option>` in this same drawer's own Move-to-Pipeline dropdown
+(scoped to the `<strong>` tag specifically instead), and "Admin User"
+alone matches 4 places on the page including the top-right nav menu
+(scoped to a regex containing "claim expires," unique to the Owned By
+card).
+
+Full regression sweep across every suite touching the 4 modified files
+(S1/S43/S58/S59/S60/S80/S81/S82/S83, 60 tests) — S82 (4/4) and S83
+(3/3) both passed cleanly within the same broader sweep, not just in
+isolation. The only 2 failures (S43's pre-existing, untouched-by-this-
+work KAE-reads-still-work test, and S81's own setup) were confirmed via
+direct backend-log correlation to be this session's own extensive
+cumulative login volume across today's many verification rounds — 2
+real `429 Too Many Requests` responses landed in the exact same window
+as the 2 failures, and a final isolated re-check of S81 alone hit the
+identical 429 even on `global-setup`'s own single required login, with
+the server's own response explicitly stating a 15-minute cooldown —
+conclusive, not assumed. Both suites were independently, thoroughly
+proven correct beforehand through other means: S81 via 2 earlier clean
+isolated 3/3 Playwright runs plus direct Python API verification before
+any test existed; S43 is untouched by any change in this session. Zero-
+token audit: `CONFIRMED CLEAN` (430 files, 0 external API refs). All
+throwaway test data (candidates, requisitions, applications, users)
+cleaned up via real APIs after every check, confirmed zero residue.

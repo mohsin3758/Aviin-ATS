@@ -375,17 +375,29 @@ function DashboardTab({ canTeamView }: { canTeamView: boolean }) {
 }
 
 // ── Follow-Ups list tab (full list with filters) ─────────────────────────
-function FollowUpsTab() {
+function FollowUpsTab({ initialCandidateId }: { initialCandidateId?: string }) {
   const [status, setStatus] = useState('');
   const [priority, setPriority] = useState('');
   const [overdueOnly, setOverdueOnly] = useState(false);
+  // Real deep-link (2026-09-01) — the pipeline drawer's own new Follow-up
+  // tab links "Reminders & Reports" here with ?tab=followups&candidate=<id>
+  // so it lands on that candidate's own follow-ups, not the whole team's
+  // list — part of "connect with all followup features and reports".
+  const [candidateFilter, setCandidateFilter] = useState(initialCandidateId || '');
+  useEffect(() => { setCandidateFilter(initialCandidateId || ''); }, [initialCandidateId]);
   const { data: tasks, refetch } = useFetch<any[]>(
-    `/recruiter-tasks?${status ? `status=${status}&` : ''}${priority ? `priority=${priority}&` : ''}${overdueOnly ? 'overdue_only=true' : ''}`
+    `/recruiter-tasks?${status ? `status=${status}&` : ''}${priority ? `priority=${priority}&` : ''}${candidateFilter ? `candidate_id=${candidateFilter}&` : ''}${overdueOnly ? 'overdue_only=true' : ''}`
   );
   const [showForm, setShowForm] = useState(false);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {candidateFilter && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, fontWeight: 600, color: '#2563EB', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, padding: '6px 10px', width: 'fit-content' }}>
+          Filtered to {tasks?.[0]?.candidate_name || 'one candidate'}
+          <button onClick={() => setCandidateFilter('')} style={{ border: 'none', background: 'none', color: '#2563EB', cursor: 'pointer', padding: 0, fontWeight: 700 }}>Clear</button>
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <select value={status} onChange={e => setStatus(e.target.value)} style={{ ...input, width: 140, marginBottom: 0 }}>
           <option value="">All Status</option>
@@ -767,6 +779,20 @@ export default function RemindersPage() {
   // monitoring pages (localStorage doesn't exist during server render).
   const [role, setRole] = useState('');
   useEffect(() => { setRole(getTokenPayload()?.role || ''); }, []);
+  // Real deep-link support (2026-09-01) — the pipeline drawer's own new
+  // Follow-up tab opens this page with ?tab=followups&candidate=<id> so
+  // "Reminders & Reports" lands on that candidate's real filtered view,
+  // not a generic page. Client-only (no window during SSR), matching
+  // this project's established deferred-read convention used throughout
+  // this codebase for exactly this reason.
+  const [deepLinkCandidateId, setDeepLinkCandidateId] = useState('');
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const t = params.get('tab');
+    const c = params.get('candidate');
+    if (t) setTab(t);
+    if (c) setDeepLinkCandidateId(c);
+  }, []);
   const isManager = role === '' || ['admin', 'manager', 'kae', 'kam', 'sales_manager', 'hr_manager'].includes(role);
   const visibleTabs = TABS.filter(t => t.key !== 'settings' || isManager);
 
@@ -785,7 +811,7 @@ export default function RemindersPage() {
         ))}
       </div>
       {tab === 'dashboard' && <DashboardTab canTeamView={isManager} />}
-      {tab === 'followups' && <FollowUpsTab />}
+      {tab === 'followups' && <FollowUpsTab initialCandidateId={deepLinkCandidateId} />}
       {tab === 'documents' && <DocumentExpiryTab />}
       {tab === 'reports' && <ReportsTab canTeamView={isManager} />}
       {tab === 'settings' && isManager && <SettingsTab />}

@@ -4,11 +4,12 @@ import { useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions, SectionDivider } from '@/components/ui/Modal';
 import { API, authHeaders, getTokenPayload } from '@/lib/auth';
+import WhatsAppChatButton from '@/components/WhatsAppChatButton';
 import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
   FileText, Users, GitMerge, Eye, Clock, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Layers,
-  Bookmark, Sparkles, ArrowLeft, Check, Linkedin,
+  Bookmark, Sparkles, ArrowLeft, Check, Linkedin, Target, TrendingUp, User,
 } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -288,12 +289,30 @@ function BulkResumeGenModal({candidateIds,onClose}:{candidateIds:string[];onClos
 }
 
 // ── Quick-View Drawer ─────────────────────────────────────────────────────────
+function matchColorC(pct:number) {
+  if (pct >= 70) return '#059669';
+  if (pct >= 50) return '#f59e0b';
+  return '#dc2626';
+}
 function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChanged}:{candidate:any;onClose:()=>void;onEdit:(c:any)=>void;stageMap:Record<string,{bg:string;color:string;label:string}>;allTags:any[];onTagsChanged:()=>void}) {
   const {data:apps,refetch:refetchApps} = useFetch<any>(`/candidates/${candidate.id}/applications`);
   // List rows don't carry latest_resume_file_id (only the single-candidate
   // GET does) - fetched separately here rather than widening the list
   // query, same pattern this drawer already uses for /applications.
   const {data:fullCand} = useFetch<any>(`/candidates/${candidate.id}`);
+  // Real feature (2026-09-01, explicit ask): "i want same features like
+  // resume inbox right candidate display details" — this drawer already
+  // fetched fullCand (above) but only ever read latest_resume_file_id/
+  // name off it, even though it also carries a real ai_scores array
+  // (readiness_index/grade + matched/missing skills per requisition
+  // scored — the same data Resume Inbox's own JD Match Score + Missing
+  // Skills cards already show). No new backend call needed — just
+  // rendering data already being fetched. Most-recently-scored entry,
+  // matching this same file's own scored_at DESC ordering.
+  const bestScore = fullCand?.ai_scores?.[0];
+  const matchScore = bestScore?.readiness_index;
+  const matchedSkills:string[] = bestScore?.matched_skills || [];
+  const missingSkills:string[] = bestScore?.missing_skills || [];
   const {data:candTagsRaw,refetch:refetchCandTags} = useFetch<any[]>(`/candidate-tags/candidate/${candidate.id}`);
   const candTags:any[] = Array.isArray(candTagsRaw)?candTagsRaw:[];
   const [showTagPicker,setShowTagPicker] = useState(false);
@@ -400,6 +419,55 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
             {candidate.pipeline_job && <span style={{fontSize:'11px',color:'#78350f',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{candidate.pipeline_job}</span>}
           </div>
         )}
+        {/* JD Match Score — real data already fetched (fullCand.ai_scores),
+            just never rendered here before. Matches Resume Inbox's own
+            card style. */}
+        {matchScore != null && (
+          <div style={{margin:'14px 22px 0',background:matchScore>=70?'#f0fdf4':matchScore>=50?'#fffbeb':'#fef2f2',border:`1px solid ${matchScore>=70?'#bbf7d0':matchScore>=50?'#fde68a':'#fecaca'}`,borderRadius:'10px',padding:'12px 14px'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'6px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'12px',fontWeight:'700',color:'#374151'}}>
+                <Target size={13} color={matchColorC(matchScore)}/>
+                JD Match Score
+              </div>
+              <span style={{fontSize:'20px',fontWeight:'900',color:matchColorC(matchScore)}}>{matchScore.toFixed(0)}%</span>
+            </div>
+            {bestScore?.requisition_title && (
+              <div style={{fontSize:'11px',color:'#64748b'}}>Best match: <strong style={{color:'#1e293b'}}>{bestScore.requisition_title}</strong></div>
+            )}
+            <div style={{marginTop:'8px',height:'6px',background:'#e2e8f0',borderRadius:'3px',overflow:'hidden'}}>
+              <div style={{height:'100%',width:`${Math.min(matchScore,100)}%`,background:matchColorC(matchScore),borderRadius:'3px'}}/>
+            </div>
+          </div>
+        )}
+        {missingSkills.length>0 && (
+          <div style={{margin:'10px 22px 0',background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:'10px',padding:'12px 14px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'11px',fontWeight:'700',color:'#9a3412',marginBottom:'8px'}}>
+              <TrendingUp size={12}/>
+              MISSING SKILLS ({missingSkills.length} gap{missingSkills.length!==1?'s':''})
+            </div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:'5px'}}>
+              {missingSkills.map(sk=>(
+                <span key={sk} style={{fontSize:'11px',background:'#fff',color:'#c2410c',padding:'3px 8px',borderRadius:'6px',fontWeight:'600',border:'1px solid #fed7aa'}}>{sk}</span>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* Owner — surfaces the real 30-day FCFS ownership system directly
+            in the drawer (already fetched as part of the list row, no new
+            call needed), matching Resume Inbox's own "RECRUITER" card. */}
+        {candidate.owner && (
+          <div style={{margin:'10px 22px 0',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:'10px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'11px',fontWeight:'700',color:'#64748b',marginBottom:'2px'}}>
+              <User size={11}/> OWNED BY
+            </div>
+            <div style={{fontSize:'13px',color:'#374151'}}>
+              {candidate.owner.recruiter_name}
+              {candidate.owner.expires_at && (
+                <span style={{color:'#94a3b8',fontWeight:400}}> · claim expires {new Date(candidate.owner.expires_at).toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}</span>
+              )}
+            </div>
+          </div>
+        )}
         {/* Tags */}
         <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9',position:'relative'}}>
           <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>TAGS</div>
@@ -450,6 +518,11 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
               </div>
             ))}
           </div>
+          {candidate.phone && (
+            <div style={{marginTop:'10px'}}>
+              <WhatsAppChatButton phone={candidate.phone} candidateId={candidate.id} candidateName={candidate.full_name}/>
+            </div>
+          )}
         </div>
         {/* Skills */}
         {(candidate.skills||[]).length>0 && (
@@ -589,6 +662,12 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
                 </button>
               )}
             </div>
+            {fullCand?.latest_resume_file_name && (
+              <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'11px',color:'#059669',marginBottom:'8px'}}>
+                <FileText size={12}/>
+                <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{fullCand.latest_resume_file_name}</span>
+              </div>
+            )}
             <pre style={{fontSize:'11px',color:'#374151',lineHeight:'1.5',whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:'200px',overflowY:'auto',background:'#f8fafc',padding:'10px',borderRadius:'6px',margin:0}}>{candidate.resume_text.slice(0,800)}{candidate.resume_text.length>800?'...':''}</pre>
           </div>
         )}
