@@ -10801,3 +10801,155 @@ test.describe.serial('S79 Pipeline board "Add Candidate" modal: View Profile + m
   // a real, deliberate scope decision left for later rather than
   // risked again here.
 });
+
+test.describe.serial('S80 Recruiter stage-move limit: Interested/NDA/Screened only, past Screened requires KAE/KAM', () => {
+  // 2026-09-01 — explicit ask, from a real live board screenshot: "recruiter
+  // only move the pipeline stages from Interested, NDA, screend after
+  // screend move part for KAE or KAM only and keep limit and stop to move
+  // after screened for recruiter". Real, server-side enforcement (never
+  // just a hidden button) added to every real write path a candidate's
+  // stage can change through: applications.py's PATCH .../stage (drag-
+  // drop + drawer stage pills), pipeline_p2.py's bulk-action move_stage,
+  // and candidates.py's bulk-assign (the Add Candidate modal's own stage
+  // picker — a recruiter could otherwise bypass the move-restriction by
+  // adding a brand-new candidate directly into a post-Screened stage).
+  // The shared rule (routers/pipeline_stages.py::recruiter_can_move_to_
+  // stage) reads THIS tenant's own real display_order, not a hardcoded
+  // stage-key list — 'hold' is deliberately exempt (a pause, not forward
+  // progress); 'rejected' needs no special-casing here at all since it's
+  // already restricted to admin/manager by an existing, separate HITL
+  // rule this project has had since P1/P3.
+  let token = '';
+  let reqId = '';
+  let recruiterUserId = '';
+  let recruiterToken = '';
+  let candOwnedId = '';
+  let candBulkId = '';
+  const stamp = Date.now();
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const recAuth = () => ({ Authorization: `Bearer ${recruiterToken}` });
+
+  test.afterAll(async ({ request }) => {
+    if (candOwnedId) await request.delete(`${API}/candidates/${candOwnedId}`, { headers: auth() }).catch(() => {});
+    if (candBulkId) await request.delete(`${API}/candidates/${candBulkId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (recruiterUserId) {
+      await request.patch(`${API}/users/${recruiterUserId}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${recruiterUserId}/purge?force=true`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('setup: real admin token + a throwaway requisition + a throwaway recruiter login', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(),
+      data: { title: `S80 Stage Limit Test Role ${stamp}`, status: 'open', employment_type: 'contract' },
+    });
+    expect(reqR.ok()).toBeTruthy();
+    reqId = (await reqR.json()).id;
+
+    const u = await request.post(`${API}/users`, {
+      headers: auth(),
+      data: { email: `qa.s80.rec.${stamp}@test.com`, full_name: `QA S80 Recruiter ${stamp}`, role: 'recruiter', password: 'TestPass123!' },
+    });
+    recruiterUserId = (await u.json()).id;
+    const login = await (await request.post(`${API}/auth/login`, { data: { email: `qa.s80.rec.${stamp}@test.com`, password: 'TestPass123!' } })).json();
+    recruiterToken = login.access_token;
+    expect(reqId && recruiterUserId && recruiterToken).toBeTruthy();
+  });
+
+  test('BUG FIX: bulk-assign lets a recruiter add into Interested/NDA/Screened, but blocks adding a brand-new candidate directly into a post-Screened stage', async ({ request }) => {
+    // Own candidate (created by the recruiter themselves) to avoid the
+    // separate, pre-existing candidate_ownership system interfering with
+    // this specific check — a real, unrelated gate this test must not
+    // accidentally exercise instead of the one being tested.
+    const c1 = await request.post(`${API}/candidates`, { headers: recAuth(), data: { full_name: `QA S80 Owned ${stamp}`, skills: ['Python'] } });
+    expect(c1.ok()).toBeTruthy();
+    candOwnedId = (await c1.json()).id;
+
+    const okAdd = await request.post(`${API}/candidates/bulk-assign`, {
+      headers: recAuth(), data: { candidate_ids: [candOwnedId], requisition_id: reqId, stage: 'interested' },
+    });
+    expect(okAdd.status()).toBe(200);
+
+    const c2 = await request.post(`${API}/candidates`, { headers: recAuth(), data: { full_name: `QA S80 BulkBlocked ${stamp}`, skills: ['Java'] } });
+    candBulkId = (await c2.json()).id;
+    const blockedAdd = await request.post(`${API}/candidates/bulk-assign`, {
+      headers: recAuth(), data: { candidate_ids: [candBulkId], requisition_id: reqId, stage: 'l1_interview' },
+    });
+    expect(blockedAdd.status()).toBe(403);
+    expect((await blockedAdd.json()).detail).toContain('KAE or KAM');
+  });
+
+  test('BUG FIX: PATCH .../stage lets a recruiter move Interested -> NDA -> Screened, blocks Screened -> Submit to Client, and exempts Hold', async ({ request }) => {
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const appId = (Object.values(board).flat() as any[]).find((a: any) => a.candidate_id === candOwnedId).id;
+
+    const toNda = await request.patch(`${API}/applications/${appId}/stage`, { headers: recAuth(), data: { stage: 'nda' } });
+    expect(toNda.status()).toBe(200);
+    const toScreened = await request.patch(`${API}/applications/${appId}/stage`, { headers: recAuth(), data: { stage: 'screened' } });
+    expect(toScreened.status()).toBe(200); // the boundary stage itself is always allowed
+
+    const toClientSub = await request.patch(`${API}/applications/${appId}/stage`, { headers: recAuth(), data: { stage: 'client_submission' } });
+    expect(toClientSub.status()).toBe(403);
+    expect((await toClientSub.json()).detail).toContain('KAE or KAM');
+
+    const toHold = await request.patch(`${API}/applications/${appId}/stage`, { headers: recAuth(), data: { stage: 'hold' } });
+    expect(toHold.status()).toBe(200); // deliberately exempt — a pause, not forward progress
+
+    // Confirm the earlier blocked client_submission attempt genuinely
+    // never wrote through — real state check, not just trusting the 403
+    // status code above. Reads the SAME application by real board query
+    // right after the blocked call (before the later toHold move runs)
+    // is implicit in the 403 above, so this instead confirms the
+    // application's stage is exactly 'hold' now (the last call that
+    // actually succeeded) — not 'client_submission', which would be the
+    // real, concrete signature of the block having silently failed open.
+    const boardAfter = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const appAfter = (Object.values(boardAfter).flat() as any[]).find((a: any) => a.id === appId);
+    expect(appAfter.stage).toBe('hold');
+  });
+
+  test('admin is never restricted by this rule — the same client_submission move that 403s a recruiter succeeds for admin', async ({ request }) => {
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const appId = (Object.values(board).flat() as any[]).find((a: any) => a.candidate_id === candOwnedId).id;
+    const asAdmin = await request.patch(`${API}/applications/${appId}/stage`, { headers: auth(), data: { stage: 'client_submission' } });
+    expect(asAdmin.status()).toBe(200);
+  });
+
+  test('real headless UI: blocked columns show a lock icon + dimmed header; allowed columns (Interested/NDA/Screened) do not; a blocked click leaves the stage genuinely unchanged', async ({ page, request }) => {
+    // Reset the shared candidate back to a real allowed stage first, so
+    // this UI check starts from a known, real pre-Screened state.
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const appId = (Object.values(board).flat() as any[]).find((a: any) => a.candidate_id === candOwnedId).id;
+    await request.patch(`${API}/applications/${appId}/stage`, { headers: auth(), data: { stage: 'nda' } });
+
+    await page.goto('/login');
+    await page.fill('input[type="email"]', `qa.s80.rec.${stamp}@test.com`);
+    await page.fill('input[type="password"]', 'TestPass123!');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector('text=NDA', { timeout: 15000 });
+    await page.waitForTimeout(800);
+
+    const interestedHeader = page.locator('span', { hasText: 'Interested' }).first().locator('xpath=..');
+    expect(await interestedHeader.locator('svg').count()).toBe(0);
+    const submitHeader = page.locator('span', { hasText: 'Submit to Client' }).first().locator('xpath=..');
+    expect(await submitHeader.locator('svg').count()).toBeGreaterThan(0);
+    expect(await submitHeader.evaluate((el: any) => getComputedStyle(el).opacity)).toBe('0.65');
+
+    // Open the drawer and confirm the same lock shows on the stage pill,
+    // and clicking it genuinely leaves the stage unchanged.
+    await page.click(`text=QA S80 Owned ${stamp}`);
+    await page.waitForSelector('[data-testid="stage-pill-client_submission"]', { timeout: 10000 });
+    const pill = page.locator('[data-testid="stage-pill-client_submission"]');
+    expect(await pill.locator('svg').count()).toBeGreaterThan(0);
+    const stageBefore = await page.locator('text=Current Stage:').first().innerText();
+    await pill.click();
+    await page.waitForTimeout(1000);
+    const stageAfter = await page.locator('text=Current Stage:').first().innerText();
+    expect(stageAfter).toBe(stageBefore);
+  });
+});

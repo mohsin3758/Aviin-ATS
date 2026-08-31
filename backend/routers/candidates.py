@@ -7,7 +7,7 @@ import re
 import db, events
 from deps import Actor, get_actor, require_role
 from schemas import CandidateCreate, CandidateUpdate
-from routers.pipeline_stages import is_valid_stage
+from routers.pipeline_stages import is_valid_stage, recruiter_can_move_to_stage
 from permissions import require_permission
 from services import candidate_ownership as ownership
 from services import activity_events
@@ -650,6 +650,16 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
         if not await is_valid_stage(conn, actor.tenant_id, stage):
             from fastapi import HTTPException
             raise HTTPException(400, f"Unknown stage '{stage}' — add it under Settings > Pipeline Stages first")
+
+        # Same real workflow rule as applications.py's PATCH .../stage
+        # (2026-09-01) — this is the OTHER real way a candidate can land
+        # directly in a stage (the Add Candidate modal's own stage picker),
+        # not just a later move, so a recruiter could otherwise bypass the
+        # move-restriction entirely by adding a brand-new candidate
+        # straight into e.g. "Submit to Client".
+        if actor.role == "recruiter" and not await recruiter_can_move_to_stage(conn, actor.tenant_id, stage):
+            from fastapi import HTTPException
+            raise HTTPException(403, "Adding a candidate past Screened requires a KAE or KAM — hand off to your account team")
 
         # Job-specific fit_score (same formula as match_candidates()/the Add
         # Candidate modal) so the score a recruiter picked from persists onto

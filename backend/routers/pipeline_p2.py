@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor
-from routers.pipeline_stages import is_valid_stage
+from routers.pipeline_stages import is_valid_stage, recruiter_can_move_to_stage
 from services import candidate_ownership as ownership
 from permissions import require_permission
 
@@ -369,6 +369,15 @@ async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = De
                     if not await is_valid_stage(conn, actor.tenant_id, action.target_stage):
                         results["failed"] += 1
                         results["details"].append({"name": app["full_name"], "status": f"unknown stage '{action.target_stage}'"})
+                        continue
+                    # Same real workflow rule as applications.py's own
+                    # single-move PATCH .../stage (2026-09-01) — a bulk
+                    # move must not be a back door around it. Same
+                    # skip-and-report pattern as the ownership check above,
+                    # not a fail-the-whole-batch.
+                    if actor.role == "recruiter" and not await recruiter_can_move_to_stage(conn, actor.tenant_id, action.target_stage):
+                        results["failed"] += 1
+                        results["details"].append({"name": app["full_name"], "status": "past Screened — requires a KAE or KAM"})
                         continue
                     old_stage = app["stage"]
                     # board_rank is per-column position (drag-reorder) — a

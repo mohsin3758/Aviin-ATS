@@ -9,7 +9,7 @@ import events, asyncio
 from deps import Actor, get_actor
 from schemas import ApplicationCreate, StageUpdate
 from permissions import require_permission
-from routers.pipeline_stages import is_valid_stage, resolve_default_add_stage
+from routers.pipeline_stages import is_valid_stage, resolve_default_add_stage, recruiter_can_move_to_stage
 from routers.p30_p35 import fire_webhook
 from services import candidate_ownership as ownership
 from services import activity_events
@@ -801,6 +801,17 @@ async def update_stage(
                 "SELECT 1 FROM pipeline_stage_config WHERE tenant_id=$1 LIMIT 1", actor.tenant_id)
             if has_any_config or body.stage not in _DEFAULT_STAGE_KEYS:
                 raise HTTPException(status_code=400, detail=f"Unknown stage '{body.stage}' — add it under Settings > Pipeline Stages first")
+
+        # Real workflow rule (2026-09-01, explicit ask): a plain recruiter
+        # owns sourcing through screening only — anything genuinely
+        # client-facing or interview/offer-stage past that is a KAE/KAM
+        # hand-off. See recruiter_can_move_to_stage()'s own docstring for
+        # why this reads real display_order, not a hardcoded stage list,
+        # and why 'hold'/'rejected' need no special-casing here.
+        if actor.role == "recruiter" and not await recruiter_can_move_to_stage(conn, actor.tenant_id, body.stage):
+            raise HTTPException(
+                status_code=403,
+                detail="Moving a candidate past Screened requires a KAE or KAM — hand off to your account team")
 
         # board_rank is a per-column drag-reorder position — moving to a
         # different stage always lands at the top of that column (matches

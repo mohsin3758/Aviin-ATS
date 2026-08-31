@@ -17566,3 +17566,92 @@ opposed to a fully throwaway pair) needs a specific, deliberate
 justification for why a throwaway equivalent can't cover the same
 ground, not just "the throwaway data doesn't rank high enough" as
 sufficient reason on its own.
+
+## New workflow rule: recruiter stage-move limit — Interested/NDA/
+## Screened only, past Screened requires KAE/KAM, 2026-09-01
+User asked, from a live Kanban board screenshot: a plain recruiter
+should only move a candidate through Interested → NDA → Screened;
+anything past Screened (Submit to Client, Submitted, L1/L2/L3 Interview,
+Offer, Offer Accepted, Placed) should require a KAE or KAM. Real,
+server-side enforcement — never just a hidden button — added to every
+real write path a candidate's stage can change through.
+
+**Shared rule** (`routers/pipeline_stages.py::recruiter_can_move_to_
+stage()`) — reads THIS tenant's own real `pipeline_stage_config.
+display_order`, not a hardcoded stage-key list, matching this file's own
+long-established discipline against exactly that bug class. Confirmed
+the real tenant order first: Interested(3) → NDA(4) → Screened(5) →
+Submit to Client(6) → Submitted(7) → L1(8)/L2(9)/L3(10) Interview →
+Offer(11) → Offer Accepted(12) → Placed(13) → Hold(14) → Rejected(15).
+`hold` is deliberately exempt regardless of its own position — a pause a
+recruiter needs to set on a candidate they're actively working at any
+point, not forward pipeline progress. `rejected` needed no special-
+casing at all — it's already restricted to admin/manager by a real,
+separate HITL rule this project has had since P1/P3, so a recruiter can
+never reach it through this code path regardless.
+
+**Wired into all 3 real write paths a candidate's stage can change
+through** — a genuinely new gap check for each, not just one: (1)
+`applications.py::update_stage()` — the PATCH `.../stage` endpoint every
+drag-and-drop move and drawer stage-pill click already funnels through;
+(2) `pipeline_p2.py::bulk_action()`'s `move_stage` action, same real
+skip-and-report-per-item pattern the existing ownership check right
+above it already uses; (3) `candidates.py::bulk_assign()` — the OTHER
+real way a candidate lands directly in a stage (the Add Candidate
+modal's own stage picker) — without this, a recruiter could bypass the
+whole restriction by adding a brand-new candidate straight into e.g.
+"Submit to Client" instead of moving an existing one there.
+
+**Frontend** (`pipeline/page.tsx`) — real, matching client-side UX on
+top of the (non-bypassable) backend enforcement: a `Lock` icon + dimmed
+(opacity 0.65) header on every Kanban column past Screened for a
+recruiter, and the identical lock treatment on the drawer's own stage-
+pill buttons. `moveStage()` (the ONE shared function every drag-drop
+move and drawer pill click already calls) checks the rule up front and
+shows a clear toast immediately, before even attempting the optimistic
+board update — avoiding the "card jumps to the column, then snaps back"
+flicker a raw backend-error-driven revert would otherwise produce.
+
+**A real TypeScript build error caught the deploy tooling's own "verify
+before rebuilding" step, not a live bug** — the first version placed the
+new `recruiterCanMoveToStage` callback (which reads `stageConfig`)
+before `stageConfig`'s own `useFetch()` declaration in the component,
+a genuine "used before declaration" error the Next.js build correctly
+refused to ship. Fixed by moving the callback to right after
+`stageConfig`/`STAGES`/`ALL_STAGES` are declared.
+
+Verified for real end-to-end, not code review, at every layer: a full
+real API cycle (throwaway requisition + a throwaway recruiter who
+creates and therefore owns their own candidate, avoiding the separate,
+pre-existing `candidate_ownership` system from interfering with this
+specific check) confirmed bulk-assign correctly allows adding into
+Interested and correctly 403s adding directly into L1 Interview;
+`PATCH .../stage` correctly allows Interested→NDA→Screened (including
+the boundary stage itself), correctly 403s Screened→Submit to Client,
+and correctly allows the Hold exemption; a real admin call on the exact
+same blocked transition succeeded, confirming the restriction is
+recruiter-specific, not global. **The KAE/KAM exemption itself was
+confirmed by direct code inspection** (`if actor.role == "recruiter"`
+is a plain equality check — any other role value, including kae/kam,
+unconditionally short-circuits past the whole check) rather than a live
+KAE-specific proof — attempting one hit 2 genuinely separate, pre-
+existing, unrelated permission walls (the `kae` role has no
+`candidates:create` grant, and the ownership-transfer endpoint only
+targets `role='recruiter'` users), making a clean live KAE proof
+disproportionately effortful for a single-line, directly-readable
+condition; disclosed here rather than glossed over. Real headless-
+browser pass confirmed the actual live UI: Interested/NDA/Screened
+columns render with no lock icon and full opacity, Submit to Client
+(and every stage past it) renders with a real lock icon and 0.65
+opacity; the drawer's own stage pill shows the identical lock; clicking
+a locked pill produces the real toast and leaves "Current Stage:" text
+provably byte-identical before and after the click.
+
+New permanent "S80 Recruiter stage-move limit" suite (5 tests) added to
+`qa_automation.spec.ts`, passed 5/5 clean twice in isolation. Broader
+regression sweep across every suite touching the 4 modified backend
+files (S1/S2/S8/S13/S16/S20/S30/S42/S48/S54/S59/S60/S61/S65/S79, 94
+tests) passed 94/94 — zero regressions. Zero-token audit: `CONFIRMED
+CLEAN` (430 files, 0 external API refs). All throwaway test data
+(candidates, requisitions, users) cleaned up via real APIs after every
+check, confirmed zero residue.

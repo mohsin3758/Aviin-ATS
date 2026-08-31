@@ -108,6 +108,38 @@ async def resolve_default_add_stage(conn, tenant_id: str) -> str:
         tenant_id) or 'sourced'
 
 
+async def recruiter_can_move_to_stage(conn, tenant_id: str, target_stage: str) -> bool:
+    """Real workflow rule (2026-09-01, explicit ask): a plain `recruiter`
+    owns sourcing through screening — anything genuinely client-facing or
+    interview/offer-stage from there on is a KAE/KAM (account-team)
+    hand-off, not a recruiter action. Reads THIS tenant's own real
+    display_order rather than a hardcoded stage-key list, matching this
+    whole file's own established discipline (see module docstring) — a
+    tenant that relabels or reorders their board doesn't silently break
+    this rule. 'hold' is deliberately exempt regardless of its own
+    display_order (14, after 'rejected' even) — it's a pause a recruiter
+    needs to be able to set on a candidate they're actively working at
+    any point, not forward pipeline progress. 'rejected' needs no
+    exemption here — applications.py's own pre-existing HITL check
+    already restricts it to admin/manager before this function is ever
+    reached, so a recruiter can never get this far with that target
+    stage regardless.
+    Fails CLOSED (blocks) if either stage's position can't be resolved
+    at all — is_valid_stage() already rejects a genuinely unknown key
+    before this is reached in real use, so this is only a defensive
+    fallback, never the normal path."""
+    if target_stage == "hold":
+        return True
+    rows = await conn.fetch(
+        "SELECT stage_key, display_order FROM pipeline_stage_config WHERE tenant_id=$1", tenant_id)
+    order_by_key = {r["stage_key"]: r["display_order"] for r in rows} if rows else {d[0]: d[3] for d in DEFAULTS}
+    screened_order = order_by_key.get("screened")
+    target_order = order_by_key.get(target_stage)
+    if screened_order is None or target_order is None:
+        return False
+    return target_order <= screened_order
+
+
 def _out(rows) -> list[dict]:
     """Attach `deletable` so the frontend never has to duplicate the
     protected-key rule — same source of truth as the DELETE endpoint."""

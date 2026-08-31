@@ -12,7 +12,7 @@ import {
   Activity, Download, ExternalLink, ArrowRight, Inbox, LayoutGrid,
   KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
   FileSignature, Upload, ShieldCheck, Copy, CheckSquare, Printer,
-  Columns3, GripVertical, Trash2, Building2, Eye, EyeOff, ArrowLeft,
+  Columns3, GripVertical, Trash2, Building2, Eye, EyeOff, ArrowLeft, Lock,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -148,6 +148,18 @@ function PipelineInner() {
   useEffect(() => {
     setCanManage(['admin', 'super_admin', 'manager'].includes(getTokenPayload()?.role || ''));
   }, []);
+  // Real workflow rule (2026-09-01, explicit ask): a plain recruiter owns
+  // sourcing through screening only — anything past Screened is a
+  // KAE/KAM hand-off. Real, server-side enforcement already lives in
+  // applications.py's PATCH .../stage and candidates.py's bulk-assign
+  // (this can never be bypassed by disabling JS) — this is purely the
+  // matching client-side UX: catch the blocked move before the optimistic
+  // board update even flickers, instead of the card briefly jumping to
+  // the target column and snapping back on a 403.
+  const [isRecruiter, setIsRecruiter] = useState(false);
+  useEffect(() => {
+    setIsRecruiter(getTokenPayload()?.role === 'recruiter');
+  }, []);
   const [pendingRemove, setPendingRemove] = useState<{ appId: string; fromStage: string; candidateName: string } | null>(null);
 
   // Real per-stage "Manual" email send mode (2026-08-22) — see
@@ -194,6 +206,23 @@ function PipelineInner() {
     const visibleKeys = new Set(stageConfig.filter((s: any) => s.is_visible).map((s: any) => s.stage_key));
     return ALL_STAGES.filter((s: any) => visibleKeys.has(s.key));
   }, [stageConfig, ALL_STAGES]);
+  // Real workflow rule (2026-09-01, explicit ask): a plain recruiter owns
+  // sourcing through screening only — anything past Screened is a
+  // KAE/KAM hand-off. Real, server-side enforcement already lives in
+  // applications.py's PATCH .../stage and candidates.py's bulk-assign
+  // (this can never be bypassed by disabling JS) — this is purely the
+  // matching client-side UX: catch the blocked move before the optimistic
+  // board update even flickers, instead of the card briefly jumping to
+  // the target column and snapping back on a 403.
+  const recruiterCanMoveToStage = useCallback((targetStage: string) => {
+    if (targetStage === 'hold') return true;
+    const order: Record<string, number> = {};
+    (stageConfig || []).forEach((s: any) => { order[s.stage_key] = s.display_order; });
+    const screenedOrder = order['screened'];
+    const targetOrder = order[targetStage];
+    if (screenedOrder === undefined || targetOrder === undefined) return false;
+    return targetOrder <= screenedOrder;
+  }, [stageConfig]);
   const { data: reqs } = useFetch<any[]>('/requisitions?limit=200&status=open');
   const { data: rawBoard, refetch: refreshBoard } = useFetch<Record<string, any[]>>(
     selectedJobId ? `/requisitions/${selectedJobId}/pipeline` : null
@@ -260,6 +289,10 @@ function PipelineInner() {
 
   const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, extra: Record<string, any> = {}) => {
     if (fromStage === toStage) return;
+    if (isRecruiter && !recruiterCanMoveToStage(toStage)) {
+      showToast('Moving a candidate past Screened requires a KAE or KAM — hand off to your account team', false);
+      return;
+    }
     // Real "Client Submission" wiring (2026-08-25) — this stage's email
     // is a client-facing send, not a candidate notification, so it never
     // goes through the generic per-stage email path at all (sendEmail is
@@ -286,7 +319,7 @@ function PipelineInner() {
       return;
     }
     await commitStageMove(appId, fromStage, toStage, extra, true);
-  }, [getSendMode, board, commitStageMove]);
+  }, [getSendMode, board, commitStageMove, isRecruiter, recruiterCanMoveToStage, showToast]);
 
   // Full removal from the pipeline (distinct from Reject, which just
   // moves a card to the Rejected column — see pendingRemove above).
@@ -644,6 +677,14 @@ function PipelineInner() {
             {(activeStage === 'all' ? STAGES : STAGES.filter(s => s.key === activeStage)).map(stage => {
               const apps = filteredApps(board[stage.key] || []);
               const total = (board[stage.key] || []).length;
+              // Same real rule as moveStage() — shown as a lock + a dimmed
+              // header so a recruiter can see a column is off-limits before
+              // even attempting to drag a card there, rather than dragging
+              // and having it bounce back with a toast. Purely visual —
+              // the actual drop still goes through moveStage()'s own real
+              // check either way, this is just not making them find out
+              // the hard way.
+              const stageLocked = isRecruiter && !recruiterCanMoveToStage(stage.key);
               return (
                 <div key={stage.key} style={{ flexShrink: 0, width: 246, display: 'flex', flexDirection: 'column', background: '#F8FAFC', border: '1px solid #E5E9F0', borderTop: `3px solid ${stage.color}`, borderRadius: 12, overflow: 'hidden' }}
                   onDragOver={e => e.preventDefault()}
@@ -655,8 +696,10 @@ function PipelineInner() {
                   }}>
 
                   {/* Column header */}
-                  <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', background: '#fff', borderBottom: '1px solid #F1F5F9', flexShrink: 0 }}>
+                  <div title={stageLocked ? 'Requires a KAE or KAM — hand off to your account team' : undefined}
+                    style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '10px 12px', background: stageLocked ? '#F8FAFC' : '#fff', borderBottom: '1px solid #F1F5F9', flexShrink: 0, opacity: stageLocked ? 0.65 : 1 }}>
                     <span style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', flex: 1 }}>{stage.label}</span>
+                    {stageLocked && <Lock size={11} color="#94A3B8" />}
                     <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: stage.light, color: stage.color }}>{total}</span>
                   </div>
 
@@ -714,7 +757,8 @@ function PipelineInner() {
           onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
           onRequestRemove={canManage ? () => setPendingRemove({ appId: selected.id, fromStage: selected.stage, candidateName: selected.candidate_name }) : undefined}
           drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES}
-          requisitionId={selectedJobId} clientName={selectedJob?.client_name} />
+          requisitionId={selectedJobId} clientName={selectedJob?.client_name}
+          isRecruiter={isRecruiter} recruiterCanMoveToStage={recruiterCanMoveToStage} />
       )}
 
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
@@ -908,7 +952,7 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onD
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, onRequestRemove, drawerTab, setDrawerTab, showToast, stages, allStages, requisitionId, clientName }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onRequestReject, onRequestRemove, drawerTab, setDrawerTab, showToast, stages, allStages, requisitionId, clientName, isRecruiter, recruiterCanMoveToStage }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -955,12 +999,20 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               Current Stage: <span style={{ color: stageCfg?.color }}>{stageCfg?.label}</span>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {stages.filter((s: any) => s.key !== 'rejected' && s.key !== 'hold').map((s: any) => (
-                <button key={s.key} data-testid={`stage-pill-${s.key}`} onClick={() => onMoveStage(s.key)}
-                  style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: `1px solid ${s.color}40`, background: app.stage === s.key ? s.color : `${s.color}15`, color: app.stage === s.key ? '#fff' : s.color, transition: 'all 0.15s' }}>
-                  {s.label}
-                </button>
-              ))}
+              {stages.filter((s: any) => s.key !== 'rejected' && s.key !== 'hold').map((s: any) => {
+                // Same real rule as the Kanban board's own column lock
+                // (2026-09-01) — moveStage() (via onMoveStage) already
+                // enforces this for real, this is purely the matching
+                // visual cue on the drawer's own stage pills.
+                const locked = isRecruiter && recruiterCanMoveToStage && !recruiterCanMoveToStage(s.key);
+                return (
+                  <button key={s.key} data-testid={`stage-pill-${s.key}`} onClick={() => onMoveStage(s.key)}
+                    title={locked ? 'Requires a KAE or KAM — hand off to your account team' : undefined}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: `1px solid ${s.color}40`, background: app.stage === s.key ? s.color : `${s.color}15`, color: app.stage === s.key ? '#fff' : s.color, opacity: locked ? 0.55 : 1, transition: 'all 0.15s' }}>
+                    {locked && <Lock size={9} />}{s.label}
+                  </button>
+                );
+              })}
               <button onClick={() => onMoveStage('hold')} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #CBD5E140', background: app.stage === 'hold' ? '#94A3B8' : '#F8FAFC', color: app.stage === 'hold' ? '#fff' : '#94A3B8' }}>Hold</button>
               <button onClick={() => onRequestReject()} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>Reject</button>
               {/* Remove from Pipeline (2026-08-20) — deliberately separate
