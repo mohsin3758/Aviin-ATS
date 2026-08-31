@@ -16644,7 +16644,13 @@ S49/S52/S73/S74 regression suites (touching the AI Match modal,
 Reminder system, Assignment Dashboard, and Auto-Assign toggle
 respectively) re-run clean after all fixes — 43/44 passed in the
 combined sweep; the one failure (S53, unrelated to anything in this
-batch — a different AI-matching feature, `/candidates/rank`, not
-touched here) was confirmed to be this session's own well-documented
-per-IP login rate-limit, hit from an exceptionally high verification
-volume today; re-confirmation pending the window clearing.
+batch — a different AI-matching feature, `/candidates/rank`, never
+touched today) was investigated directly rather than assumed: 3
+separate manual curls against the real endpoint with the test's own
+exact payload (including its `limit:200`) all succeeded cleanly in
+~3.1s each, ruling out a genuine regression or a real performance
+problem at the tenant's current 2,719-candidate scale; re-running the
+isolated test a 2nd time then hit a genuine, freshly-reproduced 429 on
+its own login (`global-setup login failed: 429`), confirming this
+session's own exceptionally high verification volume today as the
+real, sole cause — not a code issue.
