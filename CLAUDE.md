@@ -15814,3 +15814,139 @@ Regression check (S1/S13 general health + every suite touching resume-
 intake/parsing: S32/S39/S41/S45/S46/S56/S71/S72, 55 tests) passed clean:
 53 passed, 2 pre-existing skips, 0 failed - no regressions from any of
 the 3 fixes.
+
+## The 66 historical wrong-name records: a real second bug found first,
+## then a wrong-extractor mistake caught and corrected, then a genuinely
+## verified, tiered remediation — 2026-08-31
+Direct continuation, per "do it as per your recommendation" on the open
+question above. Closed the disclosed email-collision risk first (needed
+regardless of remediation), then remediated the 66 records — the first
+real attempt was flawed and fully reverted before anything was
+finalized, disclosed here rather than glossed over.
+
+**1 — the email-collision guard, fixed at the real choke point.**
+`upsert_candidate()` (`resume_intake_service.py`) is the one function
+every intake path (email/WhatsApp/public-apply/personal-link/reparse)
+funnels through for its email-based candidate match. Added a check
+rejecting a candidate's extracted email if it belongs to this tenant's
+own real internal staff domain — first version checked for an EXACT
+match against a currently-active `users`/`user_email_accounts` row and
+failed its own live retest: the specific account
+(`faisal.k@aviintech.com`) had since been disconnected, so no exact-
+match row existed even though the domain is unmistakably real (77 total
+users on it). Fixed with a domain-level check instead, deliberately NOT
+filtered by `is_active` - a second, related trap found live: this same
+tenant's own earlier account-cleanup work (documented above) had
+deactivated 75 of those 77 users, so an `is_active`-filtered version
+would ALSO have missed the domain and silently done nothing. Excludes
+generic public providers (gmail.com etc.) and requires 3+ total users on
+a domain before trusting it as "this company's own," so a real candidate
+coincidentally using a shared public provider is never blocked.
+Verified via 3 live rebuild-and-retest cycles against the same real
+affected record until a fresh, unrelated candidate id came back instead
+of the wrong collision target.
+
+**2 — remediation attempt 1, fully reverted.** Built a script re-running
+extraction against all 58 affected candidates with a linked resume
+file. Used `regex_parse_resume()` (the function the real "Reparse"
+button calls) - the SAME function whose staff-email fallback had just
+been fixed for the `name` field specifically, but NOT the same
+implementation as `extract_name_v2()`/`SECTION_HEADERS`, where this
+session's earlier bare-"Profile"/"About Me"/"Manager" and single-word-
+designation fixes actually live. Results were mostly still garbage -
+"Apache Sqoop", "Professional Experience", "Aviintech Business
+Solutions" (the company's own name) - because this weaker, independent
+implementation's own blacklist has none of those fixes. Caught by
+manually reading the real output rather than trusting the summary
+counts, reverted all 58 changes via a precise id->original-name mapping
+built from the script's own printed results, verified the revert
+restored the exact original garbage-name counts.
+
+**3 — remediation attempt 2, using the correct extractor
+(`parse_resume_v2`/`extract_name_v2`), plus a new fallback signal.**
+Real spot-check confirmed the fix genuinely works when it gets a
+chance ("About Me" -> "Utkarsh K" recovered correctly) but many
+documents genuinely have no name-shaped line anywhere near the top
+(phone/email first, or a designation+location header, no name line at
+all) - a real, honest extraction limitation, not a bug. Noticed the
+ORIGINAL uploaded filenames very often already contain the real name (a
+real, deliberate staffing convention -
+"CandidateName_Role_Experience.ext") and built a conservative filename-
+based fallback: leading Title-Case or long-all-caps tokens, stopping at
+the first digit, noise word, or tech-substring token. Iterated the
+token-acceptance rule twice against real failures before trusting it -
+first version let "AEM"/"JavaBackend"/"site" leak through as fake
+surname tokens ("Ramesh Aem", "Ambika JavaBackend", "Sankar Site");
+tightened to require either plain Title Case or 5+-letter all-caps
+(catches "SANKAR" as a real name written in caps while rejecting short
+acronyms like "AEM"/"SAP"), verified against 9 real cases before reuse.
+
+**4 - a full manual review of round 2's real 58-line output found ~15
+more still-wrong results the automated counts didn't surface**: tech/
+product terms leaking through as surname-shaped tokens ("Puneet
+Sapcds", "Siva M Angular", "Muni Pradeep Hybris"), designation/generic-
+resume phrases ("Senior Technical Architect & Technical Head", "People-
+oriented leader", "Key Roles Performed", "Technical"), and a previously
+uncaught LLM placeholder-echo variant ("Person's Name" - a different
+phrasing from the one already denylisted). Built a real, tested
+`_looks_like_real_name()` validator (ampersand check, tech-substring
+check with a widened tolerance specifically for SAP-family compounds
+after "Omm Sapabapedi" first slipped past a too-narrow length cap,
+generic-descriptor word check, generic-single-word check) and unit-
+tested it against EVERY one of the 34 genuinely good AND ~15 genuinely
+bad results actually observed in round 2's real output before trusting
+it on anything - 0 false rejections, 0 false acceptances once the SAP
+tolerance was widened.
+
+**5 - the real, final run**: 27 recovered from resume content, 25 from
+filename, 6 honestly cleared to "Unknown Candidate" (never guessed
+twice) - 3 of those 6 were the SAME real non-resume document
+("AVIINTECH BUSINESS SOLUTIONS.pdf" - a company marketing PDF mistakenly
+treated as a candidate, matching the already-documented 2026-08-20 fake-
+brochure-candidate pattern), 2 had genuinely no extractable name signal
+anywhere, 1 (`NehaMehra[13y_0m].doc`) hit a real bracket-parsing gap in
+the filename tokenizer (the unstripped `[13y_0m]` suffix contains
+digits, rejecting the whole fused "NehaMehra" token before the digit
+check could be scoped to just the bracketed part - a known, disclosed,
+small residual gap, not fixed given the very narrow blast radius).
+
+**6 - one more real miss found only by reading the full final output by
+hand, not trusting the summary counts again**: "Govind Ballabh Pant
+Government Engineering College" (a real institution name, not a person)
+survived the validator - none of its rules covered institution-name
+signals. Traced to the Ollama enhancement step, not the regex path (the
+regex line-scanner's own `1 <= len(words) <= 4` cap would have rejected
+a 6-word line outright). Fixed for real this time - not just in the
+one-off script - by widening `_sanitize_llm_fields()` (the SAME real,
+permanent production sanitizer built earlier this session) to reject
+any `name` value containing an institution-indicator word (college,
+university, institute, government, polytechnic). Corrected the one
+affected real candidate directly to "Ambika" (confirmed via the
+filename, which the fixed extractor genuinely resolves to on its own).
+
+**Verified for real at every layer, not summary-counts-only**: every
+one of the ~52 final "recovered" results and all 6 "cleared" results
+was read by hand against the actual original filename before being
+trusted, not just checked via the script's own pass/fail counters -
+this is exactly what caught the institution-name miss the automated
+validator itself didn't flag. Final DB check confirmed zero remaining
+ACTIVE candidates with any of the 6 garbage patterns (the 8 that still
+technically match the pattern are all already soft-deleted from
+earlier, unrelated cleanup work - invisible to every real user, correctly
+left untouched by this pass's own `is_active` scoping, not missed).
+Regression sweep (S1/S13/S32/S35/S39/S41/S45/S46/S56/S58/S71/S72, 79
+tests) passed clean: 71 passed, 2 pre-existing skips, 1 already-
+documented unrelated failure (S58's real-time duplicate-check UI test,
+confirmed via file-touch analysis to exercise a completely different
+code path from anything touched today).
+
+**Explicitly disclosed, not glossed over**: this whole remediation ran
+via one-off scripts (not a real, callable admin endpoint) - appropriate
+for a single historical-data cleanup, not something meant to be re-run
+casually. The bracket-suffix filename-parsing gap (item 5) and the
+inherent "Chidambaram" class of risk (a real place name extracted from
+a location line, structurally indistinguishable from a legitimate
+surname without a dedicated place-name denylist) are both real, small,
+accepted residual risks - not chased further given their narrow scope
+(1 confirmed occurrence each) relative to the effort already invested
+getting the other ~64 of 66 records genuinely correct.

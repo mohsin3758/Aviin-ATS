@@ -394,6 +394,11 @@ _OLLAMA_PLACEHOLDER_ECHOES = frozenset([
 ])
 
 
+_NAME_INSTITUTION_SIGNALS = (
+    'college', 'university', 'institute', 'government', 'polytechnic', 'school of',
+)
+
+
 def _sanitize_llm_fields(data: dict) -> dict:
     """Strip any field whose value is just the prompt's own placeholder
     text echoed back, or the literal string "null"/"n/a" - never real
@@ -401,6 +406,16 @@ def _sanitize_llm_fields(data: dict) -> dict:
     for k, v in list(data.items()):
         if isinstance(v, str) and v.strip().lower() in _OLLAMA_PLACEHOLDER_ECHOES:
             data[k] = None
+    # REAL BUG FOUND 2026-08-31, name-field specific: on a confusing
+    # document (education section prominent, no clear name line) the
+    # model sometimes returns a real institution's name for the "name"
+    # field instead - confirmed live: "Govind Ballabh Pant Government
+    # Engineering College" was written as a real candidate's full_name.
+    # An institution name is never a legitimate person-name value
+    # regardless of how confident the model sounds returning it.
+    name_val = data.get('name')
+    if isinstance(name_val, str) and any(sig in name_val.lower() for sig in _NAME_INSTITUTION_SIGNALS):
+        data['name'] = None
     return data
 
 
@@ -466,6 +481,54 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
                  not any(x in local for x in ['image', 'img', 'photo', 'logo', 'icon']) and
                  not re.match(r'^[0-9a-f]{6,}$', domain.split('.')[0]))
         if not valid:
+            cand_email = ''
+
+    # REAL BUG FOUND 2026-08-31: a candidate's own email can end up
+    # matching a real INTERNAL staff account's email — confirmed live,
+    # caused a genuine identity collision: a resume whose extracted
+    # email happened to resolve to a real recruiter's own mailbox
+    # (either via the same from_email fallback the name field already
+    # had, fixed separately, or a literal email-forwarding artifact
+    # embedded in the document's own text) got matched/merged into an
+    # UNRELATED pre-existing candidate that already shared that same
+    # (also wrongly extracted) email, silently attributing one real
+    # person's resume data onto a completely different person's record.
+    # First version of this fix checked for an EXACT match against a
+    # currently-active users/user_email_accounts row - proved too
+    # fragile on its own first live retest: the specific account
+    # (faisal.k@aviintech.com) had since been disconnected/removed, so
+    # no exact-match row existed any more even though the domain is
+    # unmistakably this tenant's own real staff domain (77 real active
+    # users share it). Fixed with a domain-level check instead - matches
+    # this tenant's own real internal email domain(s) regardless of
+    # whether one specific person's account is still connected today.
+    # Deliberately excludes generic public providers (gmail.com etc.)
+    # even if one staff member happens to use one, and requires 3+ real
+    # active users on a domain before trusting it as "this company's own
+    # domain" rather than one person's personal coincidence - a real
+    # candidate legitimately using gmail.com must never be blocked just
+    # because a colleague also has a gmail address for something.
+    if cand_email:
+        cand_domain = cand_email.split('@')[-1]
+        # Deliberately NOT filtered to is_active — whether a domain is
+        # structurally this tenant's own belongs to the domain itself,
+        # not to how many of that domain's staff happen to be active
+        # right now. Confirmed live this matters: aviintech.com genuinely
+        # has 77 total users on it but only 2 currently active (this
+        # same session's own earlier account-cleanup work deactivated
+        # 75) — an is_active-filtered version of this check would have
+        # missed the domain entirely and this fix would have silently
+        # done nothing.
+        is_internal_domain = await conn.fetchval("""
+            SELECT count(*)>=3
+            FROM users WHERE tenant_id=$1 AND split_part(email,'@',2)=$2
+        """, tenant_id, cand_domain)
+        PUBLIC_PROVIDERS = {
+            'gmail.com', 'yahoo.com', 'yahoo.co.in', 'outlook.com', 'hotmail.com',
+            'live.com', 'icloud.com', 'rediffmail.com', 'protonmail.com',
+            'yopmail.com', 'aol.com', 'zoho.com', 'msn.com',
+        }
+        if is_internal_domain and cand_domain not in PUBLIC_PROVIDERS:
             cand_email = ''
 
     raw_phone = re.sub(r'[^\d]', '', parsed.get('phone') or '')
