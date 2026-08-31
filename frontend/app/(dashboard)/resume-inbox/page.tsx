@@ -633,7 +633,16 @@ function ResumeInboxPageInner() {
   // visibly changes). Now a real direction that actually reverses order.
   const [addedDir, setAddedDir] = useState<'desc' | 'asc'>('desc');
 
-  const { data: stats, refetch: reloadStats } = useFetch<any>('/resume-intake/stats');
+  // Real bug fix (2026-08-31): reported live as "My/All resumes not
+  // working correctly" — this stats fetch never took the same owned=mine
+  // param the queue fetch below already does, so every KPI card (Resumes
+  // Today, Candidates Created, Total Auto-Created, Pending Processing)
+  // and the source-breakdown chips stayed byte-identical between the
+  // "All Resumes"/"My Resumes" tabs while only the actual row list
+  // changed — confirmed live: "Total Auto-Created: 2694" identical on
+  // both. Backend (resume_intake.py) now accepts and applies the same
+  // real owned=mine scope everywhere in this endpoint.
+  const { data: stats, refetch: reloadStats } = useFetch<any>(`/resume-intake/stats${ownedFilter ? `?owned=${ownedFilter}` : ''}`);
   const { data: reqs } = useFetch<any>('/requisitions?limit=200&status=open');
   // Real bug fix (2026-08-20): "Load more" used to grow a single `limit`
   // param and re-fetch from offset 0 every click — wasteful (re-downloads

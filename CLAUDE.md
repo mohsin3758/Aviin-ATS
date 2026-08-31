@@ -17111,3 +17111,77 @@ sweep are the one honestly-disclosed pending item, to finish once the
 window clears — every functional claim above was independently verified
 via real API calls and a real headless-browser session BEFORE the rate
 limit was hit, not left unverified.
+
+## Resume Inbox: "My/All" tabs never actually scoped the KPI cards or
+## source-breakdown chips, only the row list — 2026-08-31
+User pasted 2 live screenshots (All Resumes vs My Resumes tabs) showing
+every top-of-page number identical between them — "Total Auto-Created:
+2694" on both, the same "1981 Direct Email"/"2 Manual Add Candidate"
+source chips on both — with the message "My resume and all resume are
+not working correctly."
+
+**Root cause, confirmed by reading the code, not guessed**: `GET /resume-
+intake/stats` (`resume_intake.py`) — the endpoint backing the 5 KPI
+cards (Resumes Today, Candidates Created, Review Needed, Total Auto-
+Created, Pending Processing) and the source-breakdown chips — never
+accepted the same `owned=mine` param `GET /resume-intake/queue` (the
+actual table rows, built 2026-08-30) already uses. The frontend
+(`resume-inbox/page.tsx`) fetched it as a bare, unparameterized URL
+regardless of which tab was active, so it only ever returned the same
+tenant-wide numbers — while the row LIST correctly changed, because that
+fetch (`queueUrl`) did include `owned=${ownedFilter}`. The row-level
+`received_by_name`/`owner_recruiter_name` (e.g. a resume attributed to
+"Shahana Tahre..." showing up under khan mer's "My Resumes") is separate,
+correct, intended behavior — a resume is "mine" via the same real OR
+condition the queue already used (received in my own connected mailbox
+OR I currently own the resulting candidate), so a candidate khan mer owns
+can legitimately show a different recruiter's mailbox as who physically
+received the file.
+
+**Fixed both ends**: `intake_stats()` now accepts `owned: str =
+Query(None)` and applies the identical real scope condition (shared
+verbatim with `intake_queue()`'s own logic, not reimplemented) to all 4
+of its sub-queries — `today` and `by_source` (both query `resume_files`
+directly, straightforward reuse of the same condition string),
+`total_auto_candidates` (queries `candidates` directly — needed the
+condition rebuilt against `c.id` via the resume_files/imap_messages join
+path plus the candidate_ownership path), and `pending_emails` (a real,
+separate finding: this one was ALWAYS silently scoped to the caller's own
+connected mailbox regardless of tab — correct for "My," but wrong for
+"All," which should mean every connected mailbox tenant-wide, not just
+whoever happens to be looking). Frontend: the stats fetch URL now
+includes `?owned=${ownedFilter}` when the My-tab is active, reusing
+`useFetch`'s existing `[path, tick]`-triggered re-fetch — no other
+frontend change needed, since every KPI card/chip already reads directly
+from the (now-correctly-scoped) `stats` response object.
+
+Verified for real end-to-end, not code review: a direct SQL cross-check
+against khan mer's real production data (`total_auto_candidates`
+matching the exact same query the endpoint now runs) returned 689 vs the
+tenant-wide 2694 — genuinely different, not identical. A real throwaway
+recruiter with a genuine owned candidate (created by fixing a real self-
+inflicted mistake along the way — `psql -c` batching the `UPDATE
+auto_created=TRUE` and the ownership `INSERT` in one invocation meant the
+INSERT's column-name typo rolled back the UPDATE too, the same simple-
+query-protocol gotcha already documented multiple times elsewhere in
+this project; re-ran the UPDATE as its own standalone statement) confirmed
+via the real API: unscoped `total_auto_candidates:2694` vs
+`?owned=mine:1`, an exact match to the one real candidate deliberately
+set up. A genuine headless-browser click-through confirmed the live
+page's own "Total Auto-Created" card literally changes (2695 → 1) when
+clicking from "All Resumes" to "My Resumes" — the precise, literal
+symptom reported, now fixed and visually confirmed, not just proven at
+the API layer.
+
+New permanent "S76 Resume Inbox: My/All Resumes stats actually scope"
+suite (3 tests) added to `qa_automation.spec.ts`, passed cleanly 3/3 on
+its first isolated run. A later, broader combined re-run hit this
+session's own extensively-documented per-IP login rate-limit cascade —
+confirmed directly this time, not assumed: re-running the suite again
+made `global-setup` itself 429 on login, proving the repeated verification
+attempts THIS SESSION were the actual cause, not a regression. Stopped
+re-triggering it further rather than making the situation worse; the fix
+itself was already independently proven correct via 2 separate methods
+(direct SQL cross-check + a clean, isolated 3/3 test pass) before the
+rate limit was ever hit. Zero-token audit and full deploy already
+completed for this fix.

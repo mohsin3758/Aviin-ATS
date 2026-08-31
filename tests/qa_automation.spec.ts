@@ -10107,6 +10107,89 @@ test.describe.serial('S74 Auto-Assign on/off toggle: manual assign/reassign neve
   });
 });
 
+test.describe.serial('S76 Resume Inbox: My/All Resumes stats actually scope', () => {
+  // 2026-08-31 — reported live off screenshots: "Total Auto-Created"
+  // (and every other KPI card, plus the source-breakdown chips) stayed
+  // byte-identical between "All Resumes" and "My Resumes" — only the
+  // actual row list changed. Root cause: GET /resume-intake/stats never
+  // accepted the same owned=mine param intake_queue() already used; the
+  // frontend's tab click never even sent it. Fixed with the identical
+  // real "mine = received in my own connected mailbox OR I currently own
+  // the resulting candidate" scope, applied to every sub-query (today,
+  // by_source, total_auto_candidates, pending_emails).
+  let gateUserId = '', gateUserEmail = '', candId = '';
+  const stamp = Date.now();
+
+  test('setup: a real throwaway recruiter', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const res = await request.post(`${API}/users`, {
+      headers: auth,
+      data: { email: `qa.s76.recruiter.${stamp}@test.com`, full_name: 'QA S76 Recruiter', role: 'recruiter', password: 'TestPass123!' },
+    });
+    const body = await res.json();
+    gateUserId = body.id; gateUserEmail = body.email;
+    expect(gateUserId).toBeTruthy();
+  });
+
+  test('GET /resume-intake/stats?owned=mine genuinely differs from the unscoped total — not byte-identical', async ({ request }) => {
+    const rec = await (await request.post(`${API}/auth/login`, { data: { email: gateUserEmail, password: 'TestPass123!' } })).json();
+    const auth = { 'Authorization': `Bearer ${rec.access_token}`, 'Content-Type': 'application/json' };
+
+    // A fresh throwaway candidate created BY this recruiter auto-claims
+    // ownership for them (candidate_ownership.claim_ownership(), the
+    // same real mechanism the Candidates page's own "My Candidates"
+    // filter uses) — no raw SQL needed to set up a genuine "mine" row.
+    const cand = await request.post(`${API}/candidates`, {
+      headers: auth,
+      data: { full_name: `QA S76 Candidate ${stamp}`, email: `qa.s76.cand.${stamp}@example.com`, phone: '9876500088' },
+    });
+    const candBody = await cand.json();
+    candId = candBody.id;
+    expect(candId).toBeTruthy();
+
+    const all = await (await request.get(`${API}/resume-intake/stats`, { headers: auth })).json();
+    const mine = await (await request.get(`${API}/resume-intake/stats?owned=mine`, { headers: auth })).json();
+
+    // This tenant has thousands of real resumes from OTHER recruiters —
+    // a brand-new throwaway account's own "mine" total must be a small
+    // fraction of the tenant-wide total, never identical to it (the
+    // exact, literal bug reported: both numbers were the same).
+    expect(mine.total_auto_candidates).toBeLessThan(all.total_auto_candidates);
+    expect(all.by_source.reduce((s: number, r: any) => s + r.total, 0))
+      .toBeGreaterThan(mine.by_source.reduce((s: number, r: any) => s + r.total, 0));
+  });
+
+  test('real headless UI: switching All Resumes -> My Resumes on the live page changes the KPI card value', async ({ page }) => {
+    await page.request.post(`${API}/auth/login`, { data: { email: gateUserEmail, password: 'TestPass123!' } })
+      .then(r => r.json()).then(async d => {
+        await page.addInitScript(token => window.localStorage.setItem('airecruit_token', token), d.access_token);
+      });
+    await page.goto('/resume-inbox', { waitUntil: 'networkidle' });
+    await expect(page.getByText('Total Auto-Created')).toBeVisible({ timeout: 15000 });
+    const cardLocator = page.getByText('Total Auto-Created').locator('..').locator('..');
+    const allText = await cardLocator.innerText();
+
+    await page.getByRole('button', { name: 'My Resumes' }).click();
+    await page.waitForTimeout(1000);
+    const mineText = await cardLocator.innerText();
+
+    // Before this fix, these two strings were always identical — the
+    // literal, reported symptom.
+    expect(mineText).not.toBe(allText);
+  });
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth }).catch(() => {});
+    if (gateUserId) {
+      await request.patch(`${API}/users/${gateUserId}/deactivate`, { headers: auth }).catch(() => {});
+      await request.delete(`${API}/users/${gateUserId}/purge?force=true`, { headers: auth }).catch(() => {});
+    }
+  });
+});
+
 test.describe.serial('S75 Conversations: draft ownership + IMAP write ownership + mark-all-read scoping', () => {
   // 2026-08-31 — 3 real gaps closed in the same file, found while
   // continuing this project's own established audit discipline (all 3

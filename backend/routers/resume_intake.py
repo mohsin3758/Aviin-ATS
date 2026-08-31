@@ -14,12 +14,31 @@ OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'qwen2.5:1.5b-instruct-q4_K_M')
 
 # ─── Stats endpoint (Phase 6) ─────────────────────────────────────────────────
 @router.get('/stats')
-async def intake_stats(actor: Actor = Depends(get_actor)):
+async def intake_stats(owned: str = Query(None), actor: Actor = Depends(get_actor)):
+    # REAL BUG FIX (2026-08-31): reported live — every number on this page
+    # ("Resumes Today"/"Candidates Created"/"Total Auto-Created"/"Pending
+    # Processing", plus the source-breakdown chips just below them) stayed
+    # byte-identical whether "All Resumes" or "My Resumes" was selected,
+    # while the actual row list correctly changed. Root cause: this
+    # endpoint never accepted the same real owned=mine param
+    # intake_queue() already uses — the frontend's tab click never even
+    # sent it. Same "mine = received in my own connected mailbox OR I
+    # currently own the resulting candidate" definition, reused via a
+    # shared condition string rather than 3 near-duplicate copies.
+    mine_cond, mine_params = '', []
+    if owned == 'mine':
+        mine_cond = (
+            " AND (EXISTS (SELECT 1 FROM imap_messages im2 JOIN user_email_accounts ua2 ON ua2.id=im2.account_id "
+            "WHERE im2.id=rf.imap_msg_id AND ua2.user_id=$2) "
+            "OR EXISTS (SELECT 1 FROM candidate_ownership co2 WHERE co2.tenant_id=$1 AND co2.candidate_id=rf.candidate_id "
+            "AND co2.status='active' AND co2.ownership_expires_at > now() AND co2.recruiter_id=$2))"
+        )
+        mine_params = [actor.user_id]
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Same is_active gap as by_source below — "Resumes Today"/
         # "Candidates Created" were counting resumes whose candidate has
         # since been soft-deleted.
-        today = await conn.fetchrow("""
+        today = await conn.fetchrow(f"""
             SELECT
               COUNT(*) as total_today,
               COUNT(candidate_id) as candidates_today,
@@ -27,8 +46,8 @@ async def intake_stats(actor: Actor = Depends(get_actor)):
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id = rf.candidate_id
             WHERE rf.tenant_id=$1 AND rf.created_at::date=CURRENT_DATE
-              AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE)""",
-            actor.tenant_id)
+              AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE){mine_cond}""",
+            actor.tenant_id, *mine_params)
         # Real bug fix (2026-08-30): had no is_active filter on the linked
         # candidate — a resume whose candidate has since been soft-deleted
         # still counted toward this badge's total, even though the actual
@@ -40,7 +59,7 @@ async def intake_stats(actor: Actor = Depends(get_actor)):
         # resume_files row was never cleaned up. Same is_active-on-a-
         # joined-table gap class documented repeatedly elsewhere in this
         # project, just never checked in this specific summary query.
-        by_source = await conn.fetch("""
+        by_source = await conn.fetch(f"""
             SELECT job_board_label as source, job_board,
                    COUNT(*) as total,
                    COUNT(candidate_id) as with_candidate,
@@ -48,20 +67,46 @@ async def intake_stats(actor: Actor = Depends(get_actor)):
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id = rf.candidate_id
             WHERE rf.tenant_id=$1 AND rf.created_at > NOW()-INTERVAL '7 days'
-              AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE)
+              AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE){mine_cond}
             GROUP BY job_board_label, job_board ORDER BY total DESC""",
-            actor.tenant_id)
-        total_auto = await conn.fetchval(
-            "SELECT COUNT(*) FROM candidates WHERE tenant_id=$1 AND auto_created=TRUE AND is_active IS NOT FALSE",
-            actor.tenant_id)
-        pending = await conn.fetchval("""
-            SELECT COUNT(*) FROM imap_messages im
-            JOIN user_email_accounts ua ON ua.id=im.account_id
-            WHERE im.tenant_id=$1 AND ua.user_id=$2 AND ua.is_active=TRUE
-              AND im.is_deleted IS NOT TRUE AND im.folder='INBOX'
-              AND (im.auto_processed IS NOT TRUE)
-              AND im.attachments IS NOT NULL AND im.attachments!='[]'""",
-            actor.tenant_id, actor.user_id)
+            actor.tenant_id, *mine_params)
+        if owned == 'mine':
+            total_auto = await conn.fetchval("""
+                SELECT COUNT(*) FROM candidates c
+                WHERE c.tenant_id=$1 AND c.auto_created=TRUE AND c.is_active IS NOT FALSE
+                  AND (EXISTS (SELECT 1 FROM resume_files rf2 JOIN imap_messages im2 ON im2.id=rf2.imap_msg_id
+                               JOIN user_email_accounts ua2 ON ua2.id=im2.account_id
+                               WHERE rf2.candidate_id=c.id AND ua2.user_id=$2)
+                       OR EXISTS (SELECT 1 FROM candidate_ownership co2 WHERE co2.tenant_id=$1 AND co2.candidate_id=c.id
+                                  AND co2.status='active' AND co2.ownership_expires_at > now() AND co2.recruiter_id=$2))""",
+                actor.tenant_id, actor.user_id)
+        else:
+            total_auto = await conn.fetchval(
+                "SELECT COUNT(*) FROM candidates WHERE tenant_id=$1 AND auto_created=TRUE AND is_active IS NOT FALSE",
+                actor.tenant_id)
+        # "Pending Processing" (unprocessed inbox attachments) is real per-
+        # mailbox data — in the "All" view it should mean every connected
+        # mailbox tenant-wide, not just the caller's own (the old,
+        # unconditional ua.user_id=$2 filter made it silently identical
+        # regardless of tab). "My" keeps the original, correct self-scope.
+        if owned == 'mine':
+            pending = await conn.fetchval("""
+                SELECT COUNT(*) FROM imap_messages im
+                JOIN user_email_accounts ua ON ua.id=im.account_id
+                WHERE im.tenant_id=$1 AND ua.user_id=$2 AND ua.is_active=TRUE
+                  AND im.is_deleted IS NOT TRUE AND im.folder='INBOX'
+                  AND (im.auto_processed IS NOT TRUE)
+                  AND im.attachments IS NOT NULL AND im.attachments!='[]'""",
+                actor.tenant_id, actor.user_id)
+        else:
+            pending = await conn.fetchval("""
+                SELECT COUNT(*) FROM imap_messages im
+                JOIN user_email_accounts ua ON ua.id=im.account_id
+                WHERE im.tenant_id=$1 AND ua.is_active=TRUE
+                  AND im.is_deleted IS NOT TRUE AND im.folder='INBOX'
+                  AND (im.auto_processed IS NOT TRUE)
+                  AND im.attachments IS NOT NULL AND im.attachments!='[]'""",
+                actor.tenant_id)
     return {
         'today': dict(today) if today else {},
         'total_auto_candidates': total_auto,
