@@ -80,8 +80,25 @@ function HistoryModal({ requisitionId, onClose }: { requisitionId: string; onClo
   );
 }
 
+// Same Low/Medium/High convention already used by the requisition detail
+// page's own AssignedRecruiterCard picker (WORKLOAD_BADGE) — matched here
+// for a consistent look between the single-requisition and bulk pickers.
+const RECRUITER_WORKLOAD_BADGE: Record<string, { color: string; bg: string }> = {
+  Low: { color: '#16A34A', bg: '#F0FDF4' },
+  Medium: { color: '#CA8A04', bg: '#FEFCE8' },
+  High: { color: '#DC2626', bg: '#FEF2F2' },
+};
+
 function BulkReassignModal({ ids, onDone, onClose }: { ids: string[]; onDone: () => void; onClose: () => void }) {
   const { data: users } = useFetch<any[]>('/users?is_active=true&role=recruiter');
+  // Real workload/capacity/on-leave per recruiter (2026-08-31) — a bulk
+  // selection can span several different requisitions at once, so this
+  // deliberately reuses the requisition-INDEPENDENT capacity signal
+  // (/analytics/recruiter-capacity, not the per-requisition
+  // match-recruiters score AssignedRecruiterCard uses) rather than
+  // averaging or picking one arbitrary requisition's match score.
+  const { data: capacity } = useFetch<any[]>('/analytics/recruiter-capacity');
+  const capMap = Object.fromEntries((capacity || []).map((c: any) => [c.recruiter_id, c]));
   const [recruiterId, setRecruiterId] = useState('');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -103,14 +120,59 @@ function BulkReassignModal({ ids, onDone, onClose }: { ids: string[]; onDone: ()
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
-      <div style={{ background: '#fff', borderRadius: 14, padding: 20, width: 420 }} onClick={e => e.stopPropagation()}>
+      <div style={{ background: '#fff', borderRadius: 14, padding: 20, width: 460 }} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 4 }}>Bulk Reassign</div>
-        <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>{ids.length} assignment(s) selected. Leave recruiter blank to auto-pick the next-best match for each.</p>
-        <label style={label}>NEW RECRUITER (OPTIONAL — AUTO-PICK IF BLANK)</label>
-        <select value={recruiterId} onChange={e => setRecruiterId(e.target.value)} style={{ ...inputSm, width: '100%', marginBottom: 10 }}>
-          <option value="">-- Auto-pick per assignment --</option>
-          {(users || []).map((u: any) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-        </select>
+        <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>{ids.length} assignment(s) selected.</p>
+        <label style={label}>NEW RECRUITER — pick a name, or auto-pick the next-best match per assignment</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10, maxHeight: 280, overflowY: 'auto' }} data-testid="bulk-recruiter-picker">
+          <div
+            onClick={() => setRecruiterId('')}
+            data-testid="bulk-recruiter-option-autopick"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+              border: `1px solid ${recruiterId === '' ? '#93C5FD' : '#E2E8F0'}`,
+              background: recruiterId === '' ? '#EFF6FF' : '#fff',
+            }}>
+            <Sparkles size={14} style={{ color: '#4338CA', flexShrink: 0 }} />
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>
+              Auto-pick per assignment <span style={{ fontWeight: 400, color: '#94A3B8' }}>(next-best match for each role)</span>
+            </div>
+          </div>
+          {(users || []).map((u: any) => {
+            const c = capMap[u.id];
+            const wl = RECRUITER_WORKLOAD_BADGE[c?.workload_label] || RECRUITER_WORKLOAD_BADGE.Medium;
+            const isSelected = recruiterId === u.id;
+            return (
+              <div key={u.id} data-testid={`bulk-recruiter-option-${u.id}`}
+                onClick={() => setRecruiterId(u.id)}
+                title={c ? `${c.available_capacity}/${c.capacity_weekly ?? c.max_active_reqs} slots free · ${c.active_assignments ?? 0} active assignment(s)${c.on_leave ? ' · on leave' : ''}` : 'No capacity data yet'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                  border: `1px solid ${isSelected ? '#93C5FD' : '#E2E8F0'}`,
+                  background: isSelected ? '#EFF6FF' : '#fff',
+                }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{u.full_name}</div>
+                  {c && (
+                    <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 2 }}>
+                      {c.available_capacity}/{c.max_active_reqs} req slots free · {c.active_assignments} active
+                      {c.on_leave ? ' · on leave' : ''}
+                    </div>
+                  )}
+                </div>
+                {c?.on_leave && (
+                  <span title="On leave right now" style={{ color: '#D97706', flexShrink: 0 }}><Moon size={13} /></span>
+                )}
+                {c && (
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 6, color: wl.color, background: wl.bg, flexShrink: 0 }}>
+                    {c.workload_label} load
+                  </span>
+                )}
+              </div>
+            );
+          })}
+          {!(users || []).length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No active recruiters found.</div>}
+        </div>
         <label style={label}>REASON</label>
         <input value={reason} onChange={e => setReason(e.target.value)} style={{ ...inputSm, width: '100%', marginBottom: 14, boxSizing: 'border-box' }} placeholder="e.g. Rebalancing workload" />
         {result && !result.error && (
@@ -166,6 +228,12 @@ export default function AssignmentDashboardPage() {
     next.has(id) ? next.delete(id) : next.add(id);
     return next;
   });
+
+  // Select-all toggles every currently VISIBLE (filtered) row, not every
+  // assignment that ever existed — matching the same "select all" scope
+  // convention used elsewhere in this app (Resume Inbox, Users & Roles).
+  const allVisibleSelected = rows.length > 0 && rows.every((r: any) => selected.has(r.id));
+  const toggleSelectAll = () => setSelected(allVisibleSelected ? new Set() : new Set(rows.map((r: any) => r.id)));
 
   const exportCsv = async () => {
     const token = localStorage.getItem('airecruit_token');
@@ -310,7 +378,15 @@ export default function AssignmentDashboardPage() {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 900 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid #E2E8F0', textAlign: 'left' }}>
-                {isManager && <th style={{ padding: '6px 8px', width: 24 }}></th>}
+                {isManager && (
+                  <th style={{ padding: '6px 8px', width: 24 }}>
+                    {rows.length > 0 && (
+                      <button onClick={toggleSelectAll} data-testid="select-all-assignments" title={allVisibleSelected ? 'Clear selection' : 'Select all visible'} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}>
+                        {allVisibleSelected ? <CheckSquare size={15} /> : <Square size={15} />}
+                      </button>
+                    )}
+                  </th>
+                )}
                 <th style={{ padding: '6px 8px' }}>Requisition</th>
                 <th style={{ padding: '6px 8px' }}>Client</th>
                 {isManager && <th style={{ padding: '6px 8px' }}>Recruiter</th>}

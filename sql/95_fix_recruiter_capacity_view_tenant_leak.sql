@@ -1,0 +1,22 @@
+-- Real, live cross-tenant data leak found and fixed, 2026-08-31.
+--
+-- v_recruiter_capacity (backend/routers/analytics.py's GET /analytics/
+-- recruiter-capacity, which feeds the Dashboard's "Recruiter Capacity"/
+-- "My Capacity" widget and was being reused for a new Assignment
+-- Dashboard bulk-picker) was missing `security_invoker = true`, despite
+-- the calling code's own comment claiming "All four views are WITH
+-- (security_invoker = true), so RLS applies to the calling role
+-- (app_user) exactly as for ordinary table queries." Its 3 sibling
+-- views (v_redeployment_queue, v_agency_funnel, v_skill_gap) all
+-- genuinely have it set; this one was the sole exception.
+--
+-- Without security_invoker, a view runs with the OWNER's (postgres,
+-- which bypasses RLS) privileges regardless of the querying session's
+-- app_user role and app.tenant_id GUC - confirmed live, reproducibly:
+-- a real admin login on tenant a92d7fd7-... received a real recruiter
+-- row (name, email, workload) belonging to tenant 539f4aea-..., a
+-- completely different tenant, through this exact endpoint.
+--
+-- Fix: set the same option its siblings already correctly have. No
+-- view-definition change needed - just the missing security option.
+ALTER VIEW v_recruiter_capacity SET (security_invoker = true);

@@ -54,7 +54,31 @@ async def recruiter_capacity(actor: Actor = Depends(get_actor)):
         else:
             rows = await conn.fetch(
                 "SELECT * FROM v_recruiter_capacity WHERE recruiter_id = $1", actor.user_id)
-    return [dict(r) for r in rows]
+        # Real on-leave flag (2026-08-31, added for the Assignment
+        # Dashboard's bulk-reassign recruiter picker, which needs a
+        # requisition-INDEPENDENT signal since a bulk selection can span
+        # several different roles at once — unlike match-recruiters,
+        # which is scoped to one specific requisition). Same real
+        # recruiter_leave table/date-range check already used in
+        # assignment_dashboard.py's list_assignments().
+        leave_rows = await conn.fetch(
+            """SELECT DISTINCT recruiter_id FROM recruiter_leave
+               WHERE tenant_id=$1 AND now()::date BETWEEN start_date AND end_date""",
+            actor.tenant_id)
+    on_leave_ids = {str(r["recruiter_id"]) for r in leave_rows}
+    out = []
+    for r in rows:
+        d = dict(r)
+        # Same Low/Medium/High threshold convention already used for
+        # ratio_workload_label in assignment_dashboard.py's summary().
+        ratio = None
+        if d.get("available_capacity") is not None and d.get("max_active_reqs"):
+            ratio = d["available_capacity"] / d["max_active_reqs"]
+        d["workload_label"] = ("Low" if ratio is None or ratio >= 0.6
+                                else "Medium" if ratio >= 0.3 else "High")
+        d["on_leave"] = str(d["recruiter_id"]) in on_leave_ids
+        out.append(d)
+    return out
 
 
 @router.get("/skill-gap")

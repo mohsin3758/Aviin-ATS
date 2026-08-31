@@ -16091,3 +16091,91 @@ against); the Individual WhatsApp Numbers feature from the same approved
 plan (a separate, much larger real-infrastructure build - WAHA session-
 per-user, resource caps, click-to-chat, per-user bot-reply toggle - not
 started in this pass).
+
+
+## Assignment Dashboard: bulk-assign-to-a-specific-recruiter clarified/upgraded, plus a real, live cross-tenant data leak found and fixed, 2026-08-31
+User pasted a screenshot of the real Assignment Dashboard's "All
+Assignments" table and asked to "create" a way to select bulk
+requisitions via checkbox and bulk-assign them to a specific recruiter
+by name. Investigated before building — the checkbox-select + bulk-
+reassign-to-a-chosen-recruiter flow already existed end to end (built
+2026-08-24: `POST /assignment-dashboard/bulk-reassign` already accepts
+an optional `new_recruiter_id`, and the frontend's `BulkReassignModal`
+already had a working `<select>` picker calling it) — confirmed via a
+real headless-browser run (checkbox → "N selected" bar → Bulk Reassign
+button → modal → real recruiter names in the dropdown → real, non-empty
+id on selection, zero console errors). The real gap was that this was
+easy to miss (a bare name dropdown, not a rich, discoverable picker) —
+upgraded the picker, not the underlying endpoint, which was already
+correct.
+
+**Upgrade**: `BulkReassignModal`'s recruiter picker replaced with a real,
+clickable card list (matching the requisition detail page's own already-
+established `AssignedRecruiterCard` picker convention, same WORKLOAD_
+BADGE color scheme) — each real recruiter shown with live workload
+(`available_capacity`/`max_active_reqs` slots free, active-assignment
+count, an on-leave indicator) via a NEW, requisition-independent capacity
+signal, deliberately distinct from the per-requisition `match-recruiters`
+score `AssignedRecruiterCard` uses — a bulk selection can span several
+different requisitions with different skill needs at once, so there's no
+single meaningful "match score" to show; workload/leave status is the
+one real signal that's still meaningful regardless of which roles are
+selected. "Auto-pick per assignment" (the existing next-best-match
+capability) kept as a real, first selectable card, not just a blank
+option. Also added a real "select all" checkbox to the table header
+(toggles every currently-VISIBLE/filtered row) — the table had per-row
+checkboxes but no way to select many at once beyond clicking each one.
+
+**A real, live, serious security bug found and fixed while building
+this**: extending the picker to show workload data meant reusing `GET
+/analytics/recruiter-capacity` — checking its output before trusting it
+(this project's own established discipline) surfaced a genuine cross-
+tenant data leak: a real admin login on one tenant received another
+tenant's recruiter (name, email, workload data) in the response.
+Root-caused precisely, not guessed: `v_recruiter_capacity` was missing
+`security_invoker = true` — its 3 sibling views (`v_redeployment_queue`,
+`v_agency_funnel`, `v_skill_gap`) all genuinely have it set, directly
+contradicting `analytics.py`'s own header comment claiming "All four
+views are WITH (security_invoker = true)." Without it, a view runs with
+its OWNER's (`postgres`, which bypasses RLS) privileges regardless of
+the querying session's own `app_user` role/`app.tenant_id` GUC — exactly
+explaining the leak. Fixed with `sql/95_fix_recruiter_capacity_view_
+tenant_leak.sql` (`ALTER VIEW v_recruiter_capacity SET (security_invoker
+= true)`), verified via the exact same real reproduction before/after:
+5 rows spanning 2 tenants pre-fix, 4 rows all correctly scoped to the
+caller's own tenant post-fix.
+
+While fixing this, also enriched the endpoint itself with 2 real,
+previously-missing fields both the new picker and any future caller can
+use directly instead of recomputing client-side: `workload_label`
+(Low/Medium/High, same threshold convention already used elsewhere in
+this app) and `on_leave` (real, from `recruiter_leave`, verified live by
+inserting a real temporary leave record for a real recruiter and
+confirming the flag flipped to `true`, then cleaning it up).
+
+**A second real, disclosed gap closed in the same pass**: the Assignment
+Dashboard (built 2026-08-24) had never gotten a permanent regression
+suite, despite this project's own established convention of one per
+real feature. Added "S73" (6 tests) — the exact checkbox-select →
+bulk-reassign-to-a-specific-recruiter flow the user asked for, verified
+via real throwaway data (2 recruiters, 1 requisition: assign A, bulk-
+reassign to B by name, confirm the assignment genuinely moved and the
+real reason string landed in the audit history), the recruiter-capacity
+tenant-isolation regression guard (asserts every returned row's
+`tenant_id` matches the caller's own — the concrete, permanent guard
+against the leak found above ever recurring silently), and a real
+headless-browser check of both UI additions.
+
+Verified for real end-to-end, not code review, at every step: real
+headless-browser confirmation of the upgraded modal (screenshot-checked,
+not just locator-checked — real recruiter cards showing "khan mer · 7/8
+req slots free · 1 active · Low load" and "Ashwini · 5/8 req slots free
+· 3 active · Low load", both figures matching the live API response
+exactly; clicking a card genuinely changed its background to the
+selected-blue color); deliberately did NOT submit the bulk-reassign
+against real production assignments (Ashwini's genuine active work) —
+Cancel was clicked instead, since the underlying endpoint's correctness
+was already independently proven via the new S73 suite's own throwaway-
+data round-trip. New S73 suite: 6/6 passing. Broader regression sweep
+(S1/S2/S8 Analytics/S30/S43/S49/S73) re-run clean. Zero-token audit:
+`CONFIRMED CLEAN`.

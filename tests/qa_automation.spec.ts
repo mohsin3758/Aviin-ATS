@@ -9818,3 +9818,144 @@ test.describe.serial('S72 Mandatory skills flow-through, Skill/Project Experienc
     await request.delete(`${API}/requisitions/${reqId}`, { headers: { Authorization: `Bearer ${token}` } });
   });
 });
+
+
+test.describe.serial('S73 Assignment Dashboard: bulk-reassign to a specific recruiter + recruiter-capacity tenant isolation', () => {
+  // 2026-08-31 — the Assignment Dashboard (built 2026-08-24) never got a
+  // permanent regression suite despite this project's own established
+  // convention of one per real feature. Adding it now while: (a) verifying
+  // the already-built checkbox-select + bulk-reassign-to-a-specific-
+  // recruiter flow the user asked to "create" (it already existed, just
+  // wasn't discoverable/rich enough — upgraded the picker's UI, not the
+  // underlying endpoint, which was already correct); (b) a real, live
+  // cross-tenant leak found and fixed in the same pass: v_recruiter_capacity
+  // was missing `security_invoker = true` (its 3 sibling views all had it),
+  // so a plain admin login received another tenant's recruiter names/
+  // emails/workload through GET /analytics/recruiter-capacity. Fixed via
+  // sql/95, this suite's own regression check guards against it recurring.
+  let token = '';
+  let clientId = '';
+  let reqId = '';
+  let recAId = '', recAEmail = '';
+  let recBId = '', recBEmail = '';
+  let assignmentId = '';
+  const stamp = Date.now();
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+
+  test.afterAll(async ({ request }) => {
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+    for (const id of [recAId, recBId]) {
+      if (!id) continue;
+      await request.patch(`${API}/users/${id}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${id}/purge`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('setup: real throwaway client + open requisition + 2 recruiters', async ({ request }) => {
+    token = await getApiToken(request);
+
+    const client = await (await request.post(`${API}/clients`, {
+      headers: auth(), data: { name: `QA S73 Client ${stamp}`, industry: 'IT Services' },
+    })).json();
+    clientId = client.id;
+
+    const req = await (await request.post(`${API}/requisitions`, {
+      headers: auth(),
+      data: { title: `QA S73 Role ${stamp}`, client_id: clientId, client_name: client.name, location: 'Remote', employment_type: 'fte', positions_count: 1 },
+    })).json();
+    reqId = req.id;
+
+    const mkRecruiter = async (label: string) => {
+      const email = `qa.s73.${label}.${stamp}@test.com`;
+      const u = await (await request.post(`${API}/users`, {
+        headers: auth(), data: { full_name: `QA S73 ${label} ${stamp}`, email, password: 'TestPass123!', role: 'recruiter' },
+      })).json();
+      return { id: u.id, email };
+    };
+    const a = await mkRecruiter('RecA'); recAId = a.id; recAEmail = a.email;
+    const b = await mkRecruiter('RecB'); recBId = b.id; recBEmail = b.email;
+    expect(clientId && reqId && recAId && recBId).toBeTruthy();
+  });
+
+  test('POST /assignments assigns recruiter A; the assignment appears in /assignment-dashboard/list', async ({ request }) => {
+    const assign = await request.post(`${API}/assignments`, {
+      headers: auth(), data: { requisition_id: reqId, recruiter_id: recAId },
+    });
+    expect(assign.ok()).toBeTruthy();
+    assignmentId = (await assign.json()).id;
+    expect(assignmentId).toBeTruthy();
+
+    const listRes = await request.get(`${API}/assignment-dashboard/list?status=active`, { headers: auth() });
+    expect(listRes.ok()).toBeTruthy();
+    const rows = await listRes.json();
+    const row = rows.find((r: any) => r.id === assignmentId);
+    expect(row).toBeTruthy();
+    expect(row.recruiter_id).toBe(recAId);
+    expect(row.requisition_id).toBe(reqId);
+  });
+
+  test('POST /assignment-dashboard/bulk-reassign with a SPECIFIC new_recruiter_id moves the assignment from A to B (the exact feature the user asked for: pick a name, apply to selected requisitions)', async ({ request }) => {
+    const bulk = await request.post(`${API}/assignment-dashboard/bulk-reassign`, {
+      headers: auth(), data: { assignment_ids: [assignmentId], new_recruiter_id: recBId, reason: 'S73 regression test' },
+    });
+    expect(bulk.ok()).toBeTruthy();
+    const result = await bulk.json();
+    expect(result.succeeded).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(result.results[0].new_recruiter_name).toContain('RecB');
+
+    const newAssignmentId = result.results[0].new_assignment_id;
+    const listRes = await request.get(`${API}/assignment-dashboard/list?status=active`, { headers: auth() });
+    const rows = await listRes.json();
+    const newRow = rows.find((r: any) => r.id === newAssignmentId);
+    expect(newRow).toBeTruthy();
+    expect(newRow.recruiter_id).toBe(recBId);
+    // The old assignment must NOT still be active — do_reassign() marks it reassigned.
+    expect(rows.find((r: any) => r.id === assignmentId)).toBeFalsy();
+    assignmentId = newAssignmentId; // track the live one for cleanup context
+  });
+
+  test('GET /assignment-dashboard/history/{requisition_id} shows the real bulk-reassign event', async ({ request }) => {
+    const res = await request.get(`${API}/assignment-dashboard/history/${reqId}`, { headers: auth() });
+    expect(res.ok()).toBeTruthy();
+    const data = await res.json();
+    expect(data.timeline.length).toBeGreaterThan(0);
+    const reasons = data.timeline.map((e: any) => e.reason || '').join(' ');
+    expect(reasons).toContain('S73 regression test');
+  });
+
+  test('GET /analytics/recruiter-capacity: real workload_label + on_leave fields present, and every returned row belongs to the caller\'s own tenant (regression guard for the real cross-tenant leak found and fixed via sql/95 — v_recruiter_capacity was missing security_invoker)', async ({ request }) => {
+    const res = await request.get(`${API}/analytics/recruiter-capacity`, { headers: auth() });
+    expect(res.ok()).toBeTruthy();
+    const rows = await res.json();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(r.tenant_id).toBe(TID);
+      expect(['Low', 'Medium', 'High']).toContain(r.workload_label);
+      expect(typeof r.on_leave).toBe('boolean');
+    }
+  });
+
+  test('real headless UI: select-all checkbox selects every visible row, and Bulk Reassign opens a rich per-recruiter picker (real workload cards, not a bare name dropdown)', async ({ page }) => {
+    await page.goto('/assignments');
+    await page.waitForLoadState('networkidle');
+
+    const selectAll = page.locator('[data-testid="select-all-assignments"]');
+    await expect(selectAll).toBeVisible({ timeout: 15000 });
+    await selectAll.click();
+    await expect(page.locator('text=/\\d+ selected/')).toBeVisible();
+
+    await page.locator('button:has-text("Bulk Reassign")').first().click();
+    const picker = page.locator('[data-testid="bulk-recruiter-picker"]');
+    await expect(picker).toBeVisible();
+    await expect(page.locator('[data-testid="bulk-recruiter-option-autopick"]')).toBeVisible();
+    // At least one real recruiter option card should be present, with its
+    // own real workload text, not just a bare <option> name.
+    const anyRealOption = page.locator('[data-testid^="bulk-recruiter-option-"]:not([data-testid="bulk-recruiter-option-autopick"])').first();
+    await expect(anyRealOption).toBeVisible();
+    await expect(anyRealOption).toContainText('req slots free');
+
+    await page.locator('button:has-text("Cancel")').first().click();
+  });
+});
