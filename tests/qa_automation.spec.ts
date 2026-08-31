@@ -10778,40 +10778,26 @@ test.describe.serial('S79 Pipeline board "Add Candidate" modal: View Profile + m
     await page.waitForSelector('text=Select all', { timeout: 10000 });
   });
 
-  test('real end-to-end: select + add a real ranked candidate to a real stage through the actual UI, verify via API, then clean up via Remove from Pipeline', async ({ page, request }) => {
-    let addedAppId = '';
-    try {
-      await page.goto(`/pipeline?job=${REAL_REQ_ID}`);
-      await page.waitForSelector('button:has-text("Add Candidate")', { timeout: 15000 });
-      await page.click('button:has-text("Add Candidate")');
-      await page.waitForSelector('text=Select all', { timeout: 20000 });
-
-      const statsBefore = await (await request.get(`${API}/requisitions/${REAL_REQ_ID}/pipeline`, { headers: auth() })).json();
-      const before = new Set((Object.values(statsBefore).flat() as any[]).map((a: any) => a.id));
-
-      // Same real data-testid targeting as the test above — a real
-      // recruiter could genuinely have added someone to this real
-      // requisition between test runs, and only an addable row has a
-      // real, clickable (non-disabled) checkbox here.
-      const addableRow = page.locator('[data-testid="addcand-row-addable"]').first();
-      await addableRow.locator('input[type="checkbox"]').click();
-      const select = page.locator('select'); // exactly one visible select while this modal is open
-      const optionValues = await select.locator('option').evaluateAll(opts => opts.map((o: any) => o.value).filter(Boolean));
-      expect(optionValues.length).toBeGreaterThan(0);
-      await select.selectOption(optionValues[0]);
-      await page.click('button:has-text("Add 1 to")');
-      await page.waitForTimeout(1500);
-
-      const board = await (await request.get(`${API}/requisitions/${REAL_REQ_ID}/pipeline`, { headers: auth() })).json();
-      const allApps: any[] = Object.values(board).flat() as any[];
-      const added = allApps.find((a: any) => !before.has(a.id));
-      expect(added).toBeTruthy(); // exactly one genuinely new application landed
-      addedAppId = added.id;
-    } finally {
-      // Clean up via the real Remove-from-Pipeline endpoint regardless of
-      // whether the assertions above passed — a mid-test failure must
-      // never leave a real add on this real, live production requisition.
-      if (addedAppId) await request.delete(`${API}/applications/${addedAppId}`, { headers: auth() }).catch(() => {});
-    }
-  });
+  // A real, live-UI "select from the ranked list + click Add" cycle
+  // against REAL_REQ_ID was deliberately REMOVED here (2026-09-01,
+  // found the hard way): repeated real runs of this exact test added
+  // and removed a real candidate (N.Sathish) on this real, actively-
+  // used production requisition — and a real user, working on this
+  // exact board at the same time, ended up interacting with a
+  // candidate mid-way through one of this test's own add/remove
+  // cycles, producing a confusing, disruptive "stuck loading" report
+  // that took real investigation to trace back to test interference
+  // (the resulting fixes — a genuine data-linking gap on this
+  // requisition, plus 2 real frontend bugs the investigation
+  // surfaced — are documented in CLAUDE.md's own dated entry, but the
+  // test itself should never have been touching live, in-use
+  // production data for this). The underlying "select + add + verify +
+  // remove" mechanism this modal's Submit button calls is already
+  // covered end-to-end via a fully throwaway pair by the "backend: the
+  // underlying add-to-pipeline mechanism" test above — a real UI-click
+  // version of the SAME mechanism, without ever touching a real,
+  // currently-in-use requisition again, would need its own genuinely
+  // isolated throwaway board (not this real one) to be safe, which is
+  // a real, deliberate scope decision left for later rather than
+  // risked again here.
 });

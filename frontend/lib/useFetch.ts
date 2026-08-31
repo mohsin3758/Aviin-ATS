@@ -21,6 +21,16 @@ export function useFetch<T>(path: string | null) {
     if (!path) return;
     let cancelled = false;
     setLoading(true);
+    // REAL BUG FIX (2026-09-01): `error` was never reset at the start of a
+    // new attempt — a caller reading `error` (e.g. to show a Retry panel)
+    // would stay stuck showing the FIRST failure's message forever, even
+    // after a later refetch() genuinely succeeded and `data` was set
+    // correctly underneath. Found live while adding the first 2 real
+    // callers of this hook's `error` field that actually retry in place
+    // (pipeline/page.tsx's Submit to KAE / Submit to Client tabs) — a
+    // real click on Retry silently did nothing visible because the stale
+    // error never cleared, even though the retried fetch itself worked.
+    setError(null);
     fetch(API + path, { headers: authHeaders() })
       .then(r => {
         if (r.status === 401) { handle401(); return Promise.reject('session_expired'); }

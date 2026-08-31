@@ -17443,3 +17443,126 @@ works correctly (200, real results) and the failure is specifically the
 test's own throwaway-candidate-ranking assumption, not a broken
 feature. Not touched in this pass — out of scope for today's request.
 Zero-token audit: `CONFIRMED CLEAN` (430 files, 0 external API refs).
+
+## "Submit to Client" stuck on Loading forever: 4 real, distinct causes
+## found and fixed — a genuine data gap, a shared-hook bug, and the
+## actual root cause: my own S79 test disrupting a real live user
+## session, 2026-09-01
+User reported "Submit to client is not working... still loading" with a
+screenshot of `ClientSubmissionMoveModal` (N.Sathish, the real
+"Associate Managing Consultant - SAP FICO" requisition) stuck on
+"Loading…" indefinitely. Investigated for real rather than guessed —
+found this was actually 3 layered problems, the deepest of which was my
+own doing from the same-day work above.
+
+**1 — a genuine, real data gap on this specific requisition.** Confirmed
+directly: this requisition displays "Invenio" as its `client_name`, but
+`client_id` was `NULL` — a legacy record predating the 2026-08-25 "Client
+Combobox" fix (which made the New Client Requirement form correctly link
+a real `client_id`, not just a display string). Widened the check: **3 of
+this tenant's 4 real active requisitions** had the identical gap
+(2 "Invenio"-displayed, 1 "Acme Corp"-displayed). Linked the 2 real
+Invenio ones to the real, existing Invenio client record via a normal
+`PATCH /requisitions/{id}` (safe — exactly one unambiguous exact-name
+match existed). Left "Acme Corp" alone and flagged it, since **zero**
+real client record named "Acme Corp" exists at all — a genuinely
+different situation (nothing to safely auto-link to) that needs the
+user's own explicit choice via the working Client combobox, not a guess.
+Separately confirmed: the real Invenio client itself currently has
+**zero configured SPOCs/contacts** — meaning even with `client_id`
+correctly linked, "Submit to Client" will honestly show "No client
+contact configured" until a real one is added via Companies > Invenio >
+Client SPOCs — a genuine, necessary manual step, not something to
+fabricate.
+
+**2 — a real, previously-undiscovered bug in `SubmitClientTab` (and its
+sibling `SubmitKaeTab`): neither ever read `error` from its own
+`useFetch()` call.** Both components gate their whole render on a bare
+`if (!preview) return <Loading…>` — with `contacts:[]` (the Invenio gap
+above) this SHOULD correctly fall through to a real "No client contact
+configured" panel (confirmed live: the endpoint itself returns fast,
+200, with `contacts:[]`) — but if the fetch ever genuinely FAILS
+(network hiccup, backend timeout, a 500), `useFetch` sets its own
+`error` state and leaves `data` null — and since neither component ever
+looked at `error`, that failure silently rendered as the SAME "Loading…"
+message forever, with zero indication anything went wrong and no way to
+recover short of closing the whole modal. Fixed both tabs identically:
+read `error` from the hook, show a real error panel + a working Retry
+button (`data-testid` preserved on both) instead of falling through to
+the stale loading gate.
+
+**3 — a real, deeper bug in the SHARED `useFetch` hook itself, found
+only by testing the fix's own Retry button, not by inspection.**
+`useFetch`'s `error` state was never reset at the start of a NEW fetch
+attempt — so once set, it stayed truthy forever, even after a later
+`refetch()` genuinely succeeded and `data` was set correctly underneath.
+Confirmed live via real route interception: forced the preview fetch to
+fail (real 500), confirmed the new error panel + Retry button rendered
+correctly (not stuck loading) — but clicking Retry after un-forcing the
+failure still showed the STALE error text, not the real, successfully-
+reloaded form, because `error` was never cleared. Fixed at the source
+(`frontend/lib/useFetch.ts`): `setError(null)` at the start of every
+fetch attempt, matching the existing `setLoading(true)` reset right next
+to it. Re-verified the identical route-interception test after this fix:
+force-fail → real error panel → un-force → click Retry → genuinely
+recovers to the real form. This hook is used across the whole app; this
+was a real, previously-latent bug, not something specific to either
+Submit tab — just never manifested anywhere else since these were the
+first 2 callers to actually read `error` back and expect it to clear.
+
+**4 — the actual root cause of THIS specific report, and the more
+serious finding of the investigation: my own same-day S79 permanent
+test suite (built earlier the same day, see the entry above) was
+directly, repeatedly adding and removing a REAL candidate
+(N.Sathish) on this SAME real, live, currently-in-use production
+requisition** — confirmed via direct DB inspection: 5 separate
+`applications` rows for N.Sathish on this exact requisition, all
+created within a ~15-minute window matching my own automated test runs,
+all correctly soft-removed by my own test cleanup — except the timing
+means a real user working on this exact board at the same time could
+genuinely see N.Sathish appear, interact with them (drag to "Submit to
+Client"), and then have my test's own cleanup pull the underlying
+`appId` out from under them moments later, all while my test suite's
+own heavy concurrent load on the backend plausibly made the specific
+fetch involved slow or timeout — which bug #2/#3 above then silently
+swallowed as an indefinite spinner instead of a real, actionable error.
+**Fixed the actual root cause, not just the symptom**: removed S79's
+real end-to-end UI-click test against this real requisition entirely —
+the underlying "select + add + verify + remove" mechanism this modal's
+Submit button calls was already independently covered by a fully
+throwaway-data test in the same suite (added the same day, decoupled
+from AI-ranking-pool inclusion), so nothing regressed in real coverage;
+S79 now only ever performs read-only checks against real production
+data (view-only rendering assertions, never a write). This is
+documented plainly in the test file itself as a real lesson, not
+silently reverted.
+
+Verified for real end-to-end, not code review: the real Invenio
+requisition confirmed `client_id` correctly linked and `pipeline-stats`
+showing zero residue after cleanup. Built a fully isolated throwaway
+client (with a real SPOC contact)/requisition/candidate to prove BOTH
+paths without ever touching the real Invenio board again: the genuine
+success path (real headless-browser click through the drawer's own
+"Submit to Client" tab — full form loads correctly: contact picker,
+tracking-sheet template, resume format, visual layout, logo position,
+zero stuck loading, zero console errors) and the genuine failure+
+recovery path (real Playwright route interception forcing the exact
+`submit-to-client/preview` call to 500 — confirmed the new error panel
+renders instead of infinite loading, confirmed Retry genuinely recovers
+to the real form once the fault clears). All throwaway data (client,
+requisition, candidate) cleaned up via real APIs afterward. S79 re-run
+in isolation: 4/4 clean, confirmed zero residue on the real Invenio
+requisition. A broader regression sweep across every suite touching
+`SubmitClientTab`/`SubmitKaeTab`/`useFetch` (S1/S14/S17/S29/S54/S61/
+S65/S79, 66 tests) passed 66/66. Zero-token audit: `CONFIRMED CLEAN`
+(430 files, 0 external API refs).
+
+**A real, disclosed lesson for future test design**: a permanent
+regression suite that adds/removes real data on a real, currently-in-
+use production entity is a genuine operational risk, not just a
+theoretical one — this incident is the concrete proof. Going forward,
+any write-based UI regression test against real production data (as
+opposed to a fully throwaway pair) needs a specific, deliberate
+justification for why a throwaway equivalent can't cover the same
+ground, not just "the throwaway data doesn't rank high enough" as
+sufficient reason on its own.

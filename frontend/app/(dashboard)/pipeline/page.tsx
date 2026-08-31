@@ -1483,7 +1483,10 @@ function SkillSummaryParseTool({ candidateId, text, showToast }: any) {
 }
 
 function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
-  const { data: preview, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-kae/preview`);
+  // Same real bug fix as SubmitClientTab below (2026-09-01) — a genuine
+  // fetch failure here left this sibling tab stuck on "Loading…" forever
+  // too, since only `data`/`refetch` were ever read from this hook.
+  const { data: preview, error: previewError, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-kae/preview`);
   const { data: templates } = useFetch<any[]>('/submission-templates');
   const { data: history, refetch: refetchHistory } = useFetch<any[]>(`/applications/${appId}/submissions`);
   // Real improvement (2026-08-19): the 8 visual themes built for the
@@ -1527,6 +1530,16 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
 
   const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em', marginBottom: 6, display: 'block' };
 
+  if (previewError) {
+    return (
+      <div data-testid="kae-submit-panel" style={{ padding: 16, textAlign: 'center', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10 }}>
+        <AlertTriangle size={20} color="#DC2626" style={{ marginBottom: 6 }} />
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#991B1B', marginBottom: 4 }}>Couldn't load this candidate's submission details</div>
+        <div style={{ fontSize: 11, color: '#991B1B', marginBottom: 8 }}>{String(previewError)}</div>
+        <button onClick={refetchPreview} style={{ padding: '6px 14px', borderRadius: 8, border: '1px solid #DC2626', background: '#fff', color: '#DC2626', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>Retry</button>
+      </div>
+    );
+  }
   if (!preview) return <div style={{ color: '#94A3B8', fontSize: 12, textAlign: 'center', padding: 20 }}>Loading…</div>;
 
   if (!preview.kae) {
@@ -1713,7 +1726,20 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
 }
 
 function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
-  const { data: preview, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-client/preview`);
+  // REAL BUG FIX (2026-09-01, reported live: "Submit to client... still
+  // loading"): the previous version destructured only `data`/`refetch`
+  // from this hook — a genuine fetch failure (network hiccup, backend
+  // timeout, a 500) sets useFetch's own `error` state but leaves `data`
+  // null, and since nothing here ever read `error`, the component fell
+  // straight through to the bare `if (!preview) return <Loading…>`
+  // gate below regardless — a real error silently rendered as
+  // "Loading…" forever, with no message and no way to recover short of
+  // closing the whole modal. Confirmed live: this exact real
+  // requisition's client_id was NULL (a legacy pre-2026-08-25 record,
+  // now fixed to link the real Invenio client) — combined with this
+  // bug, a slow/failed request under load had no visible failure state
+  // at all. Now surfaces a real error with a one-click Retry.
+  const { data: preview, error: previewError, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-client/preview`);
   const { data: templates } = useFetch<any[]>('/submission-templates?direction=kae_to_client');
   const { data: allHistory, refetch: refetchHistory } = useFetch<any[]>(`/applications/${appId}/submissions`);
   const history = (allHistory || []).filter((h: any) => h.direction === 'kae_to_client');
@@ -1754,6 +1780,16 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
 
   const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#94A3B8', letterSpacing: '0.04em', marginBottom: 6, display: 'block' };
 
+  if (previewError) {
+    return (
+      <div data-testid="client-submit-panel" style={{ padding: 16, textAlign: 'center', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10 }}>
+        <AlertTriangle size={20} color="#DC2626" style={{ marginBottom: 6 }} />
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#991B1B', marginBottom: 4 }}>Couldn't load this candidate's submission details</div>
+        <div style={{ fontSize: 11, color: '#991B1B', marginBottom: 8 }}>{String(previewError)}</div>
+        <button onClick={refetchPreview} style={{ padding: '6px 14px', borderRadius: 8, border: '1px solid #DC2626', background: '#fff', color: '#DC2626', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>Retry</button>
+      </div>
+    );
+  }
   if (!preview) return <div style={{ color: '#94A3B8', fontSize: 12, textAlign: 'center', padding: 20 }}>Loading…</div>;
 
   if (!preview.contacts?.length) {
