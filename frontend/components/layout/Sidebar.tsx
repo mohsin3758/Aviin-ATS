@@ -1,6 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { getTokenPayload } from '@/lib/auth';
+import { apiFetch } from '@/lib/useFetch';
 import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import {
@@ -19,98 +20,114 @@ import {
   Laptop, KeyRound, MapPin, CalendarClock, HeartPulse, Bell,
 } from 'lucide-react';
 
+// REAL BUG FIX (2026-08-31): reported live off Settings > Permissions
+// screenshots - unchecking a feature's grants for recruiter/kae/kam had
+// ZERO effect on the sidebar, because it never consulted that data at
+// all. This whole file's item/group visibility was driven purely by 2
+// small, hardcoded, disconnected `roles:[...]` allowlists that predate
+// the real, dynamic Permissions system (built 2026-08-17) and were never
+// wired to it. Every item below now carries a real `feature:` key
+// (mirroring `permissions.py`'s FEATURE_GROUPS 1:1, by the same design
+// intent already documented there) - `hasFeatureAccess()` (below) checks
+// the CURRENT USER's own role's real, live `read` grant for that key,
+// fetched from GET /roles (already unrestricted to any authenticated
+// user - no new backend endpoint needed). Items with no `feature:` key
+// (Dashboard, and every My Account item) are deliberately exempt - a
+// logged-in user must always be able to reach their own home page and
+// their own account settings, matching how real-world RBAC UX always
+// treats self-service items as separate from organizational data.
 const NAV_GROUPS = [
   { id:'core', label:'CORE', defaultOpen:true, items:[
     { icon:LayoutDashboard, href:'/dashboard',    label:'Dashboard' },
-    { icon:Bell,            href:'/reminders',    label:'Reminders & Follow-Ups' },
-    { icon:Users,           href:'/candidates',   label:'Candidates' },
-    { icon:Building2,       href:'/companies',    label:'Companies', roles:['admin','super_admin','kae','kae_manager','lead_recruiter'] },
-    { icon:Briefcase,       href:'/requisitions', label:'Jobs / Requisitions', roles:['admin','super_admin','kae','kae_manager','lead_recruiter'] },
-    { icon:KanbanSquare,    href:'/pipeline',     label:'Pipeline (Kanban)' },
-    { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity', roles:['admin','super_admin','lead_recruiter'] },
-    { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates' },
-    { icon:Users2,          href:'/recruiter-ops', label:'Recruiter Ops' },
-    { icon:ClipboardList,   href:'/assignments',   label:'Assignment Dashboard' },
-    { icon:Laptop,          href:'/device-monitoring', label:'Device Monitoring' },
-    { icon:MapPin,          href:'/field-attendance', label:'Field Attendance', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:CalendarClock,   href:'/shift-scheduling', label:'Shift Scheduling' },
+    { icon:Bell,            href:'/reminders',    label:'Reminders & Follow-Ups', feature:'reminders' },
+    { icon:Users,           href:'/candidates',   label:'Candidates', feature:'candidates' },
+    { icon:Building2,       href:'/companies',    label:'Companies', feature:'companies' },
+    { icon:Briefcase,       href:'/requisitions', label:'Jobs / Requisitions', feature:'requisitions' },
+    { icon:KanbanSquare,    href:'/pipeline',     label:'Pipeline (Kanban)', feature:'pipeline' },
+    { icon:TrendingUp,      href:'/pipeline-velocity',label:'Pipeline Velocity', feature:'pipeline_velocity' },
+    { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates', feature:'duplicates' },
+    { icon:Users2,          href:'/recruiter-ops', label:'Recruiter Ops', feature:'recruiter_ops' },
+    { icon:ClipboardList,   href:'/assignments',   label:'Assignment Dashboard', feature:'assignment_dashboard' },
+    { icon:Laptop,          href:'/device-monitoring', label:'Device Monitoring', feature:'device_monitoring' },
+    { icon:MapPin,          href:'/field-attendance', label:'Field Attendance', feature:'field_attendance' },
+    { icon:CalendarClock,   href:'/shift-scheduling', label:'Shift Scheduling', feature:'shift_scheduling' },
   ]},
   { id:'ai', label:'AI & INTELLIGENCE', defaultOpen:true, items:[
-    { icon:Brain,           href:'/intelligence', label:'AI Intelligence' },
-    { icon:Sparkles,        href:'/ai-tools',     label:'AI Tools' },
-    { icon:TrendingUp,      href:'/predictions',  label:'Predictive Hiring' },
+    { icon:Brain,           href:'/intelligence', label:'AI Intelligence', feature:'ai_intelligence' },
+    { icon:Sparkles,        href:'/ai-tools',     label:'AI Tools', feature:'ai_tools' },
+    { icon:TrendingUp,      href:'/predictions',  label:'Predictive Hiring', feature:'predictive_hiring' },
   ]},
   { id:'recruitment', label:'RECRUITMENT', defaultOpen:true, items:[
-    { icon:Inbox,           href:'/resume-inbox',  label:'Resume Inbox' },
-    { icon:Calendar,        href:'/interviews',   label:'Interviews' },
-    { icon:CalendarDays,    href:'/calendar',      label:'Calendar' },
-    { icon:Video,           href:'/video-screening', label:'Video Screening' },
-    { icon:FileText,       href:'/offers',       label:'Offer Engine' },
-    { icon:FileSignature,   href:'/nda-documents', label:'NDA Documents' },
-    { icon:FileText,        href:'/jd-templates', label:'JD Templates' },
-    { icon:Mail,            href:'/email-templates', label:'Email Templates' },
-    { icon:BookOpen,        href:'/question-bank',label:'Question Bank' },
-    { icon:FileCheck,       href:'/reference-checks', label:'Reference Checks' },
-    { icon:FileBarChart,    href:'/submittals',   label:'Submittals' },
-    { icon:Globe,           href:'/jobs',         label:'Job Board' },
-    { icon:Share2,          href:'/job-sharing',  label:'Job Sharing' },
-    { icon:ExternalLink,    href:'/careers',      label:'Career Page', external:true },
-    { icon:ClipboardList,   href:'/onboarding',   label:'Onboarding' },
-    { icon:Smile,           href:'/candidate-engagement', label:'Candidate Engagement' },
-    { icon:UserPlus,        href:'/captured-profiles', label:'Captured Profiles' },
+    { icon:Inbox,           href:'/resume-inbox',  label:'Resume Inbox', feature:'resume_inbox' },
+    { icon:Calendar,        href:'/interviews',   label:'Interviews', feature:'interviews' },
+    { icon:CalendarDays,    href:'/calendar',      label:'Calendar', feature:'calendar' },
+    { icon:Video,           href:'/video-screening', label:'Video Screening', feature:'video_screening' },
+    { icon:FileText,       href:'/offers',       label:'Offer Engine', feature:'offer_engine' },
+    { icon:FileSignature,   href:'/nda-documents', label:'NDA Documents', feature:'nda_documents' },
+    { icon:FileText,        href:'/jd-templates', label:'JD Templates', feature:'jd_templates' },
+    { icon:Mail,            href:'/email-templates', label:'Email Templates', feature:'email_templates' },
+    { icon:BookOpen,        href:'/question-bank',label:'Question Bank', feature:'question_bank' },
+    { icon:FileCheck,       href:'/reference-checks', label:'Reference Checks', feature:'reference_checks' },
+    { icon:FileBarChart,    href:'/submittals',   label:'Submittals', feature:'submittals' },
+    { icon:Globe,           href:'/jobs',         label:'Job Board', feature:'job_board' },
+    { icon:Share2,          href:'/job-sharing',  label:'Job Sharing', feature:'job_sharing' },
+    { icon:ExternalLink,    href:'/careers',      label:'Career Page', external:true, feature:'career_page' },
+    { icon:ClipboardList,   href:'/onboarding',   label:'Onboarding', feature:'onboarding' },
+    { icon:Smile,           href:'/candidate-engagement', label:'Candidate Engagement', feature:'candidate_engagement' },
+    { icon:UserPlus,        href:'/captured-profiles', label:'Captured Profiles', feature:'captured_profiles' },
   ]},
   { id:'analytics', label:'ANALYTICS', defaultOpen:false, items:[
-    { icon:BarChart3,       href:'/analytics',        label:'Analytics', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:PieChart,        href:'/reports',           label:'Reports', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:AlertTriangle,   href:'/sla',               label:'SLA Dashboard' },
-    { icon:TrendingUp,      href:'/revenue-forecast',  label:'Revenue Forecast', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:Heart,           href:'/client-health',     label:'Client Health', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:Building2,       href:'/clients',           label:'Clients & Packs' },
-    { icon:Target,          href:'/headcount',         label:'Headcount Plan', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:Activity,        href:'/command-center',    label:'War Room', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:FileBarChart,    href:'/report-builder',    label:'Report Builder', roles:['admin','super_admin','manager','lead_recruiter'] },
+    { icon:BarChart3,       href:'/analytics',        label:'Analytics', feature:'analytics' },
+    { icon:PieChart,        href:'/reports',           label:'Reports', feature:'reports' },
+    { icon:AlertTriangle,   href:'/sla',               label:'SLA Dashboard', feature:'sla_dashboard' },
+    { icon:TrendingUp,      href:'/revenue-forecast',  label:'Revenue Forecast', feature:'revenue_forecast' },
+    { icon:Heart,           href:'/client-health',     label:'Client Health', feature:'client_health' },
+    { icon:Building2,       href:'/clients',           label:'Clients & Packs', feature:'clients_packs' },
+    { icon:Target,          href:'/headcount',         label:'Headcount Plan', feature:'headcount_plan' },
+    { icon:Activity,        href:'/command-center',    label:'War Room', feature:'war_room' },
+    { icon:FileBarChart,    href:'/report-builder',    label:'Report Builder', feature:'report_builder' },
   ]},
   { id:'finance', label:'FINANCE', defaultOpen:false, items:[
-    { icon:DollarSign,      href:'/finance',          label:'ERP / Finance', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:BarChart3,       href:'/account-pl',       label:'Account P&L', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:Wallet,          href:'/collections',      label:'Collections', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:Building,        href:'/bu-tracker',       label:'BU Tracker', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:Crown,           href:'/ceo-dashboard',    label:'CEO Dashboard', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:FileCheck,       href:'/compliance',       label:'PF/ESI/TDS', roles:['admin','super_admin','manager','lead_recruiter'] },
-    { icon:Gauge,           href:'/salary-benchmark', label:'Salary Benchmark', roles:['admin','super_admin','manager','lead_recruiter'] },
+    { icon:DollarSign,      href:'/finance',          label:'ERP / Finance', feature:'erp_finance' },
+    { icon:BarChart3,       href:'/account-pl',       label:'Account P&L', feature:'account_pl' },
+    { icon:Wallet,          href:'/collections',      label:'Collections', feature:'collections' },
+    { icon:Building,        href:'/bu-tracker',       label:'BU Tracker', feature:'bu_tracker' },
+    { icon:Crown,           href:'/ceo-dashboard',    label:'CEO Dashboard', feature:'ceo_dashboard' },
+    { icon:FileCheck,       href:'/compliance',       label:'PF/ESI/TDS', feature:'compliance_pf_esi_tds' },
+    { icon:Gauge,           href:'/salary-benchmark', label:'Salary Benchmark', feature:'salary_benchmark' },
   ]},
   { id:'incentives', label:'INCENTIVES & KAE', defaultOpen:false, items:[
-    { icon:Award,           href:'/incentives',  label:'Incentives' },
-    { icon:Handshake,       href:'/kae',         label:'KAE Module' },
+    { icon:Award,           href:'/incentives',  label:'Incentives', feature:'incentives' },
+    { icon:Handshake,       href:'/kae',         label:'KAE Module', feature:'kae' },
   ]},
   { id:'bgv', label:'BGV & COMPLIANCE', defaultOpen:false, items:[
-    { icon:Shield,          href:'/bgv',   label:'BGV Checks' },
-    { icon:FileSearch,      href:'/audit', label:'Audit Log' },
+    { icon:Shield,          href:'/bgv',   label:'BGV Checks', feature:'bgv_checks' },
+    { icon:FileSearch,      href:'/audit', label:'Audit Log', feature:'audit_log' },
   ]},
   { id:'communication', label:'COMMUNICATION', defaultOpen:false, items:[
-    { icon:Mail,            href:'/conversations', label:'Email / Conversations' },
-    { icon:MessageCircle,   href:'/whatsapp',      label:'WhatsApp Bot' },
-    { icon:Send,            href:'/whatsapp?tab=stage-notifications', label:'WhatsApp Stage Notifications' },
-    { icon:Globe,            href:'/whatsapp-setup', label:'Company WhatsApp Number' },
-    { icon:MessageSquare,   href:'/sms',           label:'SMS Notifications' },
-    { icon:Zap,             href:'/automations',   label:'Automations' },
-    { icon:Workflow,        href:'/nurture',       label:'Nurture Sequences' },
-    { icon:Webhook,         href:'/integrations',  label:'Integrations' },
+    { icon:Mail,            href:'/conversations', label:'Email / Conversations', feature:'email_communication' },
+    { icon:MessageCircle,   href:'/whatsapp',      label:'WhatsApp Bot', feature:'whatsapp_bot' },
+    { icon:Send,            href:'/whatsapp?tab=stage-notifications', label:'WhatsApp Stage Notifications', feature:'whatsapp_stage_notifications' },
+    { icon:Globe,            href:'/whatsapp-setup', label:'Company WhatsApp Number', feature:'whatsapp_setup' },
+    { icon:MessageSquare,   href:'/sms',           label:'SMS Notifications', feature:'sms_notifications' },
+    { icon:Zap,             href:'/automations',   label:'Automations', feature:'automations' },
+    { icon:Workflow,        href:'/nurture',       label:'Nurture Sequences', feature:'nurture_sequences' },
+    { icon:Webhook,         href:'/integrations',  label:'Integrations', feature:'integrations' },
   ]},
   { id:'vendors', label:'VENDORS', defaultOpen:false, items:[
-    { icon:Truck,           href:'/vendor-analytics', label:'Vendor Analytics' },
-    { icon:UserPlus,        href:'/agency-portal',    label:'Agency Portal' },
+    { icon:Truck,           href:'/vendor-analytics', label:'Vendor Analytics', feature:'vendor_analytics' },
+    { icon:UserPlus,        href:'/agency-portal',    label:'Agency Portal', feature:'agency_portal' },
   ]},
   { id:'settings', label:'SETTINGS', defaultOpen:false, items:[
-    { icon:UserCog,         href:'/settings/users',       label:'Users & Roles' },
+    { icon:UserCog,         href:'/settings/users',       label:'Users & Roles', feature:'users_roles' },
     { icon:KeyRound,        href:'/settings/permissions', label:'Permissions', roles:['admin','super_admin'] },
-    { icon:KanbanSquare,    href:'/settings/pipeline',    label:'Pipeline Stages' },
-    { icon:Mail,            href:'/settings/email',           label:'Company Email (SMTP)' },
-    { icon:MessageSquare,   href:'/settings/signatures',       label:'Email Signatures', roles:['admin','lead_recruiter','recruiter','delivery','kae','kae_manager'] },
-    { icon:Lock,            href:'/security',             label:'Security / 2FA' },
-    { icon:BookMarked,      href:'/settings/skills',      label:'Skills Taxonomy' },
-    { icon:Palette,         href:'/themes',               label:'6 Themes' },
-    { icon:Sliders,         href:'/ops-settings',         label:'Ops Settings', roles:['admin','super_admin','manager'] },
+    { icon:KanbanSquare,    href:'/settings/pipeline',    label:'Pipeline Stages', feature:'pipeline_stages' },
+    { icon:Mail,            href:'/settings/email',           label:'Company Email (SMTP)', feature:'company_email_smtp' },
+    { icon:MessageSquare,   href:'/settings/signatures',       label:'Email Signatures', feature:'email_signatures' },
+    { icon:Lock,            href:'/security',             label:'Security / 2FA', feature:'security_2fa' },
+    { icon:BookMarked,      href:'/settings/skills',      label:'Skills Taxonomy', feature:'skills_taxonomy' },
+    { icon:Palette,         href:'/themes',               label:'6 Themes', feature:'themes' },
+    { icon:Sliders,         href:'/ops-settings',         label:'Ops Settings', feature:'ops_settings' },
   ]},
   { id:'my_account', label:'MY ACCOUNT', defaultOpen:true, items:[
     { icon:Mail,            href:'/settings/mail-accounts', label:'My Email Accounts' },
@@ -129,11 +146,50 @@ export function Sidebar() {
   const [_mounted2, set_Mounted2] = useState(false);
   useEffect(() => { set_Mounted2(true); }, []);
   const userRole = _mounted2 ? (getTokenPayload()?.role || 'admin') : 'admin';
-  const isAdmin = ['admin','super_admin'].includes(userRole);
-  const isLead = ['admin','super_admin','lead_recruiter'].includes(userRole);
   const [openGroups, setOpenGroups] = useState<Record<string,boolean>>(
     () => Object.fromEntries(NAV_GROUPS.map(g => [g.id, g.defaultOpen]))
   );
+
+  // Real permission grants for the current user's own role — fetched once
+  // after mount (GET /roles is unrestricted to any authenticated user,
+  // already returns every role's real permissions dict; no new endpoint
+  // needed). `null` = "not yet loaded" (show everything, avoids an empty
+  // sidebar flash on first paint) and is also the real server-side
+  // semantics for "this role has no role_definitions row at all" — both
+  // cases mean "don't gate," matching require_permission()'s own
+  // documented default in backend/permissions.py.
+  const [rolePerms, setRolePerms] = useState<Record<string, string[]> | null>(null);
+  useEffect(() => {
+    if (!_mounted2 || ['admin','super_admin'].includes(userRole)) return;
+    let cancelled = false;
+    apiFetch('/roles').then((rows: any[]) => {
+      if (cancelled) return;
+      const mine = (rows || []).find(r => r.role_code === userRole);
+      setRolePerms(mine ? (mine.permissions || {}) : null);
+    }).catch(() => { if (!cancelled) setRolePerms(null); });
+    return () => { cancelled = true; };
+  }, [_mounted2, userRole]);
+
+  // Mirrors backend/permissions.py's check_permission() exactly: no
+  // permissions loaded (admin, or not fetched yet) → allow; a real "*"
+  // wildcard on the action → allow; otherwise the feature's own action
+  // list must contain "*" or the specific action.
+  const hasFeatureAccess = (feature?: string, action = 'read') => {
+    if (!feature || rolePerms === null || ['admin','super_admin'].includes(userRole)) return true;
+    const wildcard = rolePerms['*'];
+    if (wildcard && (wildcard.includes('*') || wildcard.includes(action))) return true;
+    const acts = rolePerms[feature];
+    if (!acts) return false;
+    return acts.includes('*') || acts.includes(action);
+  };
+
+  // Combines the small number of genuinely hard role-restricted items
+  // (e.g. Settings > Permissions, always admin-only regardless of the
+  // matrix) with the real, dynamic per-feature check above.
+  const itemVisible = (item: any) => {
+    if (item.roles && (!_mounted2 || !item.roles.includes(userRole))) return false;
+    return hasFeatureAccess(item.feature);
+  };
 
   const isActive = (href: string) =>
     pathname === href || (href !== '/dashboard' && pathname.startsWith(href));
@@ -200,19 +256,12 @@ export function Sidebar() {
 
         {/* Nav items */}
         <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '8px 6px 16px', }} suppressHydrationWarning>
-          {_mounted2 ? NAV_GROUPS.filter(group => {
-            // Role-based sidebar filtering
-            if (userRole === 'recruiter' || userRole === 'delivery') {
-              return ['core','recruitment','ai','communication','my_account'].includes(group.id);
-            }
-            if (userRole === 'kae' || userRole === 'kae_manager') {
-              return ['core','recruitment','finance','settings','communication','my_account'].includes(group.id);
-            }
-            if (userRole === 'lead_recruiter') {
-              return !['finance','incentives','vendors'].includes(group.id);
-            }
-            return true; // admin/super_admin see everything
-          }).map(group => {
+          {_mounted2 ? NAV_GROUPS.filter(group =>
+            // A group renders only if at least one of its own items would
+            // (real permission grant, or a role-restricted item this role
+            // is allowed, or a self-service item with no gate at all).
+            group.items.some(itemVisible)
+          ).map(group => {
             const isOpen = openGroups[group.id];
             const hasActive = group.items.some(item => isActive(item.href));
 
@@ -268,12 +317,7 @@ export function Sidebar() {
                   maxHeight: collapsed ? '1000px' : (isOpen ? '600px' : '0px'),
                   transition: collapsed ? 'none' : 'max-height 0.22s ease',
                 }}>
-                  {group.items.filter((item:any) => {
-                    if (!item.roles) return true;
-                    // Only filter AFTER client is mounted (prevents hydration mismatch)
-                    if (!_mounted2) return true;
-                    return item.roles.includes(userRole);
-                  }).map(item => {
+                  {group.items.filter(itemVisible).map(item => {
                     const active = isActive(item.href);
                     return (
                       <Link

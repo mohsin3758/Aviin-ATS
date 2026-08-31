@@ -16941,3 +16941,91 @@ fresh load) and the fix is a real, general-purpose safety net regardless
 of whether this exact hypothesis is 100% correct. If the symptom
 recurs after this deploy, that would be strong evidence against the
 stale-chunk theory and point to something still-undiscovered.
+
+## Sidebar now dynamically respects real Permissions grants, instead of
+## 2 hardcoded, disconnected allowlists — 2026-08-31
+User pasted 5 screenshots of Settings > Permissions (recruiter's matrix:
+4/14 Core Features granted, 0 everywhere else) and the live sidebar
+(showing every group/item regardless), asking why unchecking permissions
+for recruiter/KAE/KAM had no visible effect on their actual portal.
+
+**Root cause, confirmed by reading the code, not guessed**: `Sidebar.tsx`
+never consulted the real Permissions system at all — its ONLY filtering
+was 2 small, hardcoded, static allowlists that predate the real, dynamic
+per-feature Permissions matrix (built 2026-08-17): a group-level
+`if (userRole==='recruiter') return [...fixed group list]` and an
+item-level `roles:[...]` array on a handful of individual items. Neither
+has ever read `role_definitions.permissions` — completely disconnected
+from what an admin configures on the Permissions page.
+
+**Fixed by making the sidebar genuinely dynamic**, replacing both
+hardcoded mechanisms: every sidebar item now carries a real `feature:`
+key mirroring `permissions.py`'s `FEATURE_GROUPS` 1:1 (already designed
+for exactly this correspondence). On mount, a non-admin fetches
+`GET /roles` (already unrestricted to any authenticated user — no new
+backend endpoint needed) and reads their own role's real `permissions`
+dict; a new `hasFeatureAccess()` replicates `check_permission()`'s exact
+semantics client-side (wildcard `"*"`, `"read"` in the feature's action
+list, `null`/no-row-at-all = don't gate). Dashboard and every "My
+Account" item (My Email Accounts, My WhatsApp Account, Email Signatures,
+My Mailbox, My Profile) are deliberately exempt — a logged-in user must
+always be able to reach their own home page and account settings,
+matching standard RBAC UX convention (organizational-data restrictions
+shouldn't strand someone with no way to navigate their own account). The
+one item that must stay admin-only regardless of the matrix (Settings >
+Permissions itself) keeps its old hardcoded `roles:[...]` check.
+
+**Verified for real against live production data, not code review**: a
+real throwaway `recruiter` account's rendered sidebar now shows EXACTLY
+Dashboard + Candidates/Companies/Jobs-Requisitions/Pipeline (the real,
+current 4 granted Core features) + the 5 My Account items — every other
+group (Reminders, Recruiter Ops, Assignment Dashboard, Device
+Monitoring, the whole Recruitment/Analytics/Finance/Incentives/BGV/
+Communication/Vendors/Settings groups) genuinely gone, confirmed via a
+real headless-browser session, not assumed from the code. A real
+throwaway `kae` account showed exactly its own real 8-feature grant set
+(Candidates/Jobs-Requisitions/Pipeline/Duplicate Candidates/Recruiter
+Ops/Analytics/Incentives/KAE Module) — notably "Companies," previously
+ALWAYS shown to any kae via the old hardcoded rule regardless of actual
+grants, is now correctly hidden since `companies` isn't in this role's
+real permission set.
+
+**What this fix does NOT cover, disclosed rather than glossed over —
+the "check link also" half of the report**: `tenants.permission_
+enforcement_enabled` is `false` for this tenant (the deliberate
+soft-launch default chosen 2026-08-09) — every `require_permission()`
+gate currently only LOGS a would-be denial, never blocks it. This means
+hiding a sidebar link is a real, meaningful fix for what the screenshots
+showed, but someone who already knows a hidden feature's URL can still
+reach it directly right now. Checked the real, current gap before
+recommending anything: of the 74 declared features, only 21 have an
+actual backend `require_permission()` gate at all (`candidates,
+companies, requisitions, pipeline, applications, recruiter_ops,
+reminders, kae, incentives, interviews, resume_inbox, nda_documents,
+offer_engine, onboarding, jd_templates, email_templates, candidate_
+engagement, bgv_checks, skills_taxonomy, assignment_dashboard,
+analytics`) — the other ~53 (Device Monitoring, Field Attendance, Shift
+Scheduling, most of Recruitment/Communication/Vendors/Settings) have
+zero backend gate regardless of the enforcement switch. Separately,
+Analytics/Finance-group items (`analytics.py`, `account_pl.py`,
+`headcount.py`, etc.) already use a DIFFERENT, always-on hard role gate
+(`require_role_or_trusted_internal`, admin/manager/lead_recruiter only)
+unrelated to the soft-launch system — those are already genuinely
+blocked for recruiter/kae/kam right now, independent of this fix.
+
+**A real, concrete risk found while checking whether to flip enforcement
+on, not guessed at** — `recruiter`'s current real permission dict
+(`{pipeline:[read,update], companies:[read], candidates:[create,read,
+update], applications:[create,read,update], requisitions:[read]}`) has
+NO grant at all for `reminders` or `recruiter_ops` — turning enforcement
+on right now would immediately re-block khan mer from the exact Reminders
+& Follow-Ups feature fixed for him earlier this same session, and from
+Recruiter Ops (My Day/tasks), both real, already-in-use features. Given
+that direct conflict with today's own earlier work, this was flagged to
+the user rather than flipped unilaterally — a decision genuinely
+requiring their input on whether the current recruiter/kae/kam matrices
+are complete enough to enforce yet, not something to guess at with a
+real, immediate cost of being wrong.
+
+Full regression sweep and zero-token audit pending alongside whatever
+the user decides on enforcement.
