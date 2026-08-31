@@ -17029,3 +17029,85 @@ real, immediate cost of being wrong.
 
 Full regression sweep and zero-token audit pending alongside whatever
 the user decides on enforcement.
+
+## Follow-up same day: user picked "fix the gaps first, then enable" —
+## real grants added, enforcement turned on, thoroughly verified
+User's answer to the AskUserQuestion above. Reasoned about what
+recruiter/KAE/KAM genuinely need using the SAME principled basis used
+throughout this project rather than guessing feature-by-feature: cross-
+referenced the 21 features that actually have a backend gate against
+which sidebar groups the OLD hardcoded rule already showed each role
+(recruiter: core/recruitment/ai/communication/my_account), plus real,
+demonstrated usage this session (Follow-Ups just fixed for khan mer,
+Recruiter Ops' My Day feed, Interviews Scheduled/Offers Released KPI
+cards, Incentives as self-relevant to any recruiter).
+
+**Added via the real `PUT /roles/{id}/permissions` API** (not raw SQL):
+- `recruiter` — added `reminders`/`recruiter_ops`/`interviews`/
+  `resume_inbox` (read+create+update, real day-to-day tools),
+  `offer_engine`/`nda_documents` (read+create), `jd_templates`/
+  `email_templates`/`onboarding`/`candidate_engagement`/`incentives`/
+  `assignment_dashboard` (read) — kept the existing `pipeline`/
+  `companies`/`candidates`/`applications`/`requisitions` grants
+  untouched. Deliberately did NOT add `analytics`/`bgv_checks`/
+  `skills_taxonomy`/`kae` — no real evidence a plain recruiter needs
+  them, and `analytics` is separately, permanently hard-gated to
+  admin/manager/lead_recruiter anyway via a different mechanism
+  (`require_role_or_trusted_internal`) regardless of this decision.
+- `kae` — added `reminders` (read+create+update) alongside the
+  existing, already-solid `kae`/`pipeline`/`analytics`/`candidates`/
+  `duplicates`/`incentives`/`applications`/`requisitions`/
+  `recruiter_ops` grants.
+- `kam` — added `reminders` too, for consistency, though no real active
+  user exists on this role yet so the practical risk was zero either
+  way; left the rest of its existing account/financial-oversight-
+  shaped grant set (`kae:*`, `analytics`, `account_pl`, `bu_tracker`,
+  `candidates`, `collections`, `requisitions:*`) untouched — a KAM's
+  role is account oversight, not hands-on recruiting, so interviews/
+  resume_inbox/offer_engine were deliberately NOT added here the way
+  they were for recruiter/kae.
+
+**Then enabled real enforcement**: `PUT /roles/enforcement
+{"enabled":true}` — this tenant is no longer soft-launch/log-only.
+
+**Verified thoroughly with real API calls, not assumed from the grant
+list alone**: a real throwaway `recruiter` login — newly-granted
+`GET /recruiter-tasks` (reminders), `GET /candidates`, `GET
+/auto-interview/list` (interviews) all correctly 200; a genuinely
+still-ungranted, read-gated feature (`GET /analytics/hiring-funnel`)
+correctly 403'd with the real, specific error message ("Your role
+('recruiter') does not have 'read' access to 'analytics'") — proving
+enforcement isn't just "on," it's discriminating correctly between
+granted and ungranted features. A real throwaway `kae` login — newly-
+granted `GET /recruiter-tasks` correctly 200, genuinely still-ungranted
+`GET /clients` (companies) correctly 403. Admin confirmed completely
+unaffected either way (`GET /kae/summary`, `GET /analytics/hiring-
+funnel` both still 200 as admin, matching the documented, permanent
+admin/super_admin exemption in `require_permission()`). A real headless-
+browser pass confirmed the actual live `/reminders` page — the exact
+feature fixed for khan mer earlier this same session — still renders
+correctly end-to-end for a real recruiter under enforcement, zero
+console errors, no 403 banner.
+
+**Two real, incidental discoveries made while picking negative test
+cases, not code bugs, just useful to know**: `GET /bgv/stats` and
+`GET /skills` both returned 200 for a recruiter with no `bgv_checks`/
+`skills_taxonomy` grant at all — confirmed via `grep` this is expected,
+pre-existing, and unrelated to today's work: only the WRITE endpoints
+for those 2 features have ever had a `require_permission()` gate
+(`create_bgv_check`/`update_bgv_check`/`add_trust_edge`/`add_skill`),
+their read/list endpoints never did. Not fixed in this pass — wiring
+gates onto the remaining ~53 ungated features (of 74 total) is a real,
+separate, much larger undertaking explicitly out of scope for "fix the
+gaps in what's already gated, then enable" — flagged honestly rather
+than silently expanded into or silently left unmentioned.
+
+Hit this session's own extensively-documented per-IP login rate-limit
+cascade (from today's own very high verification volume) right at final
+cleanup/regression-sweep time — genuine 429s, confirmed transient, not a
+regression. Final cleanup of the 2 throwaway test accounts (both already
+`@aviintest.com`, harmless, easily identifiable) and a broader regression
+sweep are the one honestly-disclosed pending item, to finish once the
+window clears — every functional claim above was independently verified
+via real API calls and a real headless-browser session BEFORE the rate
+limit was hit, not left unverified.
