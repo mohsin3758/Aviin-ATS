@@ -1097,6 +1097,10 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   // tenant shows up, not just a top-5 shortlist.
   const { data: matchRecruiters } = useFetch<any[]>(`/requisitions/${reqId}/match-recruiters?limit=50`);
   const matchMap = Object.fromEntries((matchRecruiters || []).map((m: any) => [m.recruiter_id, m]));
+  // Real tenant-wide Auto-Assign on/off switch (2026-08-31) — hides the AI
+  // buttons below when off; manual Assign/Reassign is never affected.
+  const { data: autoAssignCfg } = useFetch<any>('/ops-config/auto-assign');
+  const autoAssignEnabled = autoAssignCfg?.enabled !== false;
   const [showForm, setShowForm] = useState(false);
   const [newRecruiterId, setNewRecruiterId] = useState('');
   const [reason, setReason] = useState('');
@@ -1170,13 +1174,13 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
         )}
         {canReassign && !showForm && (
           <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-            {!recruiter && (
+            {!recruiter && autoAssignEnabled && (
               <button onClick={autoAssign} disabled={autoAssigning}
                 style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
                 <Sparkles size={12} /> {autoAssigning ? 'Assigning…' : 'Auto-Assign (AI)'}
               </button>
             )}
-            {recruiter && (
+            {recruiter && autoAssignEnabled && (
               <button onClick={autoReassign} disabled={autoAssigning} title="Auto-pick the next-best alternative recruiter"
                 style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
                 <Sparkles size={12} /> {autoAssigning ? 'Reassigning…' : 'Auto-Reassign (AI)'}

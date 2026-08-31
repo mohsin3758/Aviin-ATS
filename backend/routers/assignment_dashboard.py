@@ -25,6 +25,7 @@ from deps import Actor, get_actor, require_role
 from permissions import require_permission
 from pydantic import BaseModel
 from typing import Optional
+from routers.ops_gaps import is_auto_assign_enabled
 
 router = APIRouter(prefix="/assignment-dashboard", tags=["assignment-dashboard"])
 
@@ -368,6 +369,13 @@ async def bulk_reassign(body: BulkReassignBody, actor: Actor = Depends(require_r
     one failure never aborts the rest of the batch."""
     results, errors = [], []
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Real, server-side gate (2026-08-31) - the "Auto-pick per
+        # assignment" option in the bulk-reassign modal is the same real
+        # AI capability as the single-assignment auto-reassign path, so
+        # it's gated by the exact same tenant-wide switch. Picking a
+        # specific recruiter for the whole batch stays manual, unaffected.
+        if body.new_recruiter_id is None and not await is_auto_assign_enabled(conn, actor.tenant_id):
+            raise HTTPException(status_code=403, detail="AI Auto-Assign is turned off for this tenant (Ops Settings). Pick a specific recruiter instead of auto-pick.")
         for assignment_id in body.assignment_ids:
             try:
                 old = await conn.fetchrow(

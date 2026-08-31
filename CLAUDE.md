@@ -16179,3 +16179,117 @@ was already independently proven via the new S73 suite's own throwaway-
 data round-trip. New S73 suite: 6/6 passing. Broader regression sweep
 (S1/S2/S8 Analytics/S30/S43/S49/S73) re-run clean. Zero-token audit:
 `CONFIRMED CLEAN`.
+
+
+## 6 reported issues: 5 already fixed (stale screenshots), 1 real new feature — a tenant-wide Auto-Assign on/off switch, 2026-08-31
+User sent 7 screenshots and a 6-item list, all off a real recruiter's
+(Ashwini) live session: (1)/(5) Resume Inbox's "Manual Add Candidate"
+source chip showing 101 with only 2 real resumes visible when filtered;
+(2) the Create Follow-Up modal missing a candidate-name field; (3) "1
+Personal Resume Link" chip showing 0 results when filtered; (4) a real
+"Download failed: 502" on a candidate's resume file; (6) no way to turn
+the AI Auto-Assign feature off. Investigated each individually against
+real, live data rather than assuming any were new — 5 of the 6 turned
+out to already be fixed by earlier work (mostly dated 2026-08-30), and
+re-verifying them right now, not just trusting the old fix, was itself
+the real work here.
+
+**Issues #1/#3/#5 (Resume Inbox source-chip counts) — already fixed,
+re-confirmed live.** `GET /resume-intake/stats`'s `by_source` query
+already has the real `is_active` filter (fixed 2026-08-30, the exact
+"101 vs 2" discrepancy this session's own earlier notes describe
+reproducing and fixing). Called the live endpoint directly: `Manual Add
+Candidate: total=2` (not 101), `Direct Email: total=1973` (not 936), and
+no `personal_link` entry at all — matching a direct DB check showing
+genuinely **zero** `resume_files` rows with `job_board='personal_link'`
+tenant-wide, ever (every real `personal_link`/`job_share_link` ownership
+row in this tenant traces to the S71 automated test suite, correctly
+soft-deleted after each run — no real human has used this feature yet,
+which is an honest, different finding from "it's broken"). A real
+headless-browser reload of the live page confirmed the same numbers
+render correctly right now. The user's screenshots were stale — from
+before this fix deployed, or an unrefreshed tab.
+
+**Issue #4 (502 resume download) — already fixed, re-confirmed by
+direct reproduction of the EXACT failing download.** Looked up the
+precise `resume_files` row from the screenshot's own URL
+(`?item=d4ab23ed-...`) — its `file_name` genuinely contains an embedded
+`\r\n` (a raw control character in an original email attachment name),
+the exact bug already found and fixed on 2026-08-30
+(`download_resume_file()` strips control chars before building the
+`Content-Disposition` header). Called that exact download URL directly:
+`HTTP 200`, `34101` bytes — the identical byte count stored in the DB —
+proving the fix genuinely resolves this specific file, live, right now.
+
+**Issue #2 (Follow-Up form candidate field) — already fixed, re-confirmed
+live.** The code has carried a real "CANDIDATE" debounced search field
+(with a working `/candidates?search=` autocomplete) since 2026-08-30 —
+found via the code's own comment, itself referencing this exact user
+report from a day earlier. A real headless-browser open of the actual
+"+ New Follow-Up" modal confirmed the field renders, positioned right
+between Description and Follow-Up Reason (screenshot-checked, not just
+locator-checked) — the field the user's new screenshot appears to be
+missing was simply cropped/scrolled or from a stale page load.
+
+**Issue #6 — a genuinely new, real feature, built end to end.** Checked
+before designing anything: there is no automatic/scheduled trigger for
+AI Auto-Assign anywhere in this codebase — `assign_with_explanation()`
+only ever runs from a human clicking "Auto-Assign (AI)" (requisition
+detail page or Recruiter Ops' Auto-Assign tab), and `do_reassign()`'s
+auto-pick path only runs from "Auto-Reassign (AI)" or the Assignment
+Dashboard's bulk-reassign "Auto-pick" option. Given that, "on/off" had
+two real, materially different interpretations — asked the user
+directly rather than guess; they picked the smaller, safer one: a
+tenant-wide switch that shows/hides the existing AI buttons everywhere,
+with ON matching today's exact current behavior and never touching
+manual, human-chosen-recruiter assignment at any setting.
+
+`sql/96_auto_assign_config.sql` — `auto_assign_config` (one row per
+tenant, `enabled BOOLEAN DEFAULT TRUE`, FORCE RLS, owned by `app_user`
+matching every other tenant-self-service config table), get-or-create
+pattern matching `scoring_weight_config`/`sla_tier_config` exactly.
+`backend/routers/ops_gaps.py` gains `GET`/`PUT /ops-config/auto-assign`
+(admin/manager-gated writes) and a shared `is_auto_assign_enabled(conn,
+tenant_id)` helper, imported into the 3 real files with an actual AI
+auto-pick code path — `requisitions.py`'s `assign_requisition()`,
+`assignments.py`'s `reassign()` (gated ONLY when `new_recruiter_id is
+None` — a specific, human-chosen reassign is never blocked), and
+`assignment_dashboard.py`'s `bulk_reassign()` (same `new_recruiter_id is
+None` scoping, checked once before the batch loop). Every gate is real,
+server-side enforcement — never relies on the frontend alone hiding a
+button, matching this project's own established discipline. Frontend:
+new "Auto-Assign" tab on Ops Settings (a real ON/OFF toggle with plain-
+language scope explanation), and the 3 real AI buttons (requisition
+detail page's `AssignedRecruiterCard`, Recruiter Ops' `AutoAssignTab`,
+the Assignment Dashboard's `BulkReassignModal`'s "Auto-pick" card) all
+now fetch the same config and hide/disable themselves when off — the
+Recruiter Ops tab additionally shows a clear "assign manually instead"
+message with a link to the requisition, rather than just vanishing the
+button with no explanation.
+
+Verified for real end-to-end, not code review, at every layer: a full
+scripted real-data cycle (2 throwaway requisitions, 2 throwaway
+recruiters) proved every combination — AI auto-assign genuinely 403s
+while off, manual `POST /assignments` to a specific recruiter still
+succeeds while off, AI auto-reassign 403s while off, manual reassign to
+a specific recruiter still succeeds while off, bulk-reassign auto-pick
+403s while off, bulk-reassign to a specific recruiter still succeeds
+while off, and turning it back on immediately restores a real, working
+AI auto-assign call (real match score, real explanation). Real headless-
+browser pass confirmed the Ops Settings toggle genuinely flips on a real
+click, the Recruiter Ops tab correctly hides its AI button and shows the
+off-message, the requisition detail page's AI buttons are genuinely
+absent while manual Assign/Reassign stays visible (one real test-
+locator mistake caught and fixed along the way, not an app bug — the
+detail page defaults to its Candidates tab, not Summary, where the
+Assigned Recruiter card actually lives; already documented once
+elsewhere in this project, re-learned here), and the bulk-reassign
+modal's "Auto-pick" card is genuinely gone while the rest of the picker
+still renders correctly. The real, live tenant's own config was
+restored to its original value (enabled) at the very end via both the
+verification script and the permanent test's own `afterAll`, confirmed
+directly afterward.
+
+New permanent "S74 Auto-Assign on/off toggle" suite (6 tests) added to
+`qa_automation.spec.ts`. Full regression sweep (S1/S2/S8 Analytics/
+S30/S43/S49/S73/S74) re-run clean. Zero-token audit: `CONFIRMED CLEAN`.

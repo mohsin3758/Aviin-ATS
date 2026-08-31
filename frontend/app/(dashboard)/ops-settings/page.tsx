@@ -16,6 +16,7 @@ const TABS = [
   { key: 'screening', label: 'Screening Notifications', icon: Mail },
   { key: 'gdpr', label: 'Data Retention (GDPR)', icon: ShieldOff },
   { key: 'whatsapp_sessions', label: 'WhatsApp Sessions', icon: MessageCircle },
+  { key: 'auto_assign', label: 'Auto-Assign', icon: Power },
 ];
 
 const card: React.CSSProperties = { background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: 18 };
@@ -176,6 +177,60 @@ function PerformanceWeightsTab() {
       </div>
       {err && <div style={{ color: '#DC2626', fontSize: 12, margin: '8px 0' }}>{err}</div>}
       <button onClick={save} disabled={saving} style={{ ...btn, marginTop: 10 }}>{saving ? 'Saving…' : 'Save Weights'}</button>
+    </div>
+  );
+}
+
+function AutoAssignConfigTab() {
+  // Reported live (2026-08-31): "need option to off and on auto assign
+  // features". No automatic/scheduled trigger exists anywhere in this
+  // codebase - the AI capability only ever runs when a real human clicks
+  // "Auto-Assign (AI)"/"Auto-Reassign (AI)" (requisition detail page,
+  // Recruiter Ops' Auto-Assign tab) or picks "Auto-pick per assignment"
+  // on the Assignment Dashboard's bulk-reassign modal. This tenant-wide
+  // switch (per the user's own explicit choice between the two real
+  // options offered) shows/hides those AI buttons - enforced server-side
+  // too, not just hidden in the UI. Manual assignment/reassignment to a
+  // specific, human-chosen recruiter is never affected, at any setting.
+  const { data: config, refetch } = useFetch<any>('/ops-config/auto-assign');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const toggle = async () => {
+    setSaving(true); setSaved(false);
+    try {
+      await apiFetch('/ops-config/auto-assign', { method: 'PUT', body: JSON.stringify({ enabled: !config?.enabled }) });
+      await refetch();
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } finally { setSaving(false); }
+  };
+
+  const enabled = config?.enabled !== false;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={card}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>AI Auto-Assign</div>
+        <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>
+          Controls the real "Auto-Assign (AI)" / "Auto-Reassign (AI)" buttons on requisitions, the Recruiter Ops Auto-Assign
+          tab, and the "Auto-pick per assignment" option on the Assignment Dashboard's bulk-reassign — the AI picks the
+          top-ranked recruiter by skill match + capacity (<code>assign_with_explanation()</code>). Turning this off does
+          <strong> not</strong> affect manually assigning or reassigning a specific, named recruiter — that always stays
+          available.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button onClick={toggle} disabled={saving} data-testid="auto-assign-toggle"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', borderRadius: 999, border: 'none',
+              cursor: saving ? 'default' : 'pointer', fontSize: 12, fontWeight: 700,
+              background: enabled ? '#DCFCE7' : '#FEE2E2', color: enabled ? '#16A34A' : '#DC2626',
+            }}>
+            <Power size={14} /> {saving ? 'Saving…' : enabled ? 'ON — AI Auto-Assign enabled' : 'OFF — AI Auto-Assign disabled'}
+          </button>
+          {saved && <span style={{ color: '#16A34A', fontSize: 12, fontWeight: 700 }}>✓ Saved</span>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -801,6 +856,7 @@ export default function OpsSettingsPage() {
       {tab === 'templates' && <TemplatesTab />}
       {tab === 'screening' && <ScreeningTab />}
       {tab === 'gdpr' && <GdprTab />}
+      {tab === 'auto_assign' && <AutoAssignConfigTab />}
     </div>
   );
 }

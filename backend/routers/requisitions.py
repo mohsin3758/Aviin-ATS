@@ -15,6 +15,7 @@ from services.candidate_rediscovery import scan_requisition_for_rediscovery
 from routers.assignments import _workload_label
 from permissions import require_permission, get_job_visibility_scope
 from services import assignment_notify
+from routers.ops_gaps import is_auto_assign_enabled
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 
@@ -636,6 +637,12 @@ async def assign_requisition(requisition_id: str, actor: Actor = Depends(get_act
     if actor.role is not None and actor.role not in ("admin", "manager", "kae"):
         raise HTTPException(status_code=403, detail="Requires role in ('admin', 'manager', 'kae')")
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Real, server-side enforcement of the tenant's Auto-Assign on/off
+        # switch (2026-08-31) — never rely on the frontend alone hiding the
+        # button. Manual assignment (POST /assignments) is a completely
+        # separate endpoint and is never affected by this.
+        if not await is_auto_assign_enabled(conn, actor.tenant_id):
+            raise HTTPException(status_code=403, detail="AI Auto-Assign is turned off for this tenant (Ops Settings). Assign manually instead.")
         try:
             row = await conn.fetchrow("SELECT * FROM assign_with_explanation($1)", requisition_id)
         except asyncpg.exceptions.RaiseError as exc:

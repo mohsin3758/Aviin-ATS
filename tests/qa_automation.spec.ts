@@ -9959,3 +9959,134 @@ test.describe.serial('S73 Assignment Dashboard: bulk-reassign to a specific recr
     await page.locator('button:has-text("Cancel")').first().click();
   });
 });
+
+
+test.describe.serial('S74 Auto-Assign on/off toggle: manual assign/reassign never blocked, AI auto-pick is', () => {
+  // 2026-08-31 — reported live: "need option to off and on auto assign
+  // features." No automatic/scheduled trigger exists anywhere in this
+  // codebase - per the user's own explicit choice between the two real
+  // options offered, this is a tenant-wide switch (auto_assign_config,
+  // GET/PUT /ops-config/auto-assign) that shows/hides the real
+  // "Auto-Assign (AI)"/"Auto-Reassign (AI)" buttons AND enforces it
+  // server-side at all 3 real AI auto-pick entry points
+  // (assign_with_explanation() via requisitions.py, do_reassign()'s
+  // auto-pick path via assignments.py and assignment_dashboard.py's
+  // bulk-reassign) - manual assignment/reassignment to a specific,
+  // human-chosen recruiter is NEVER affected, at any setting.
+  let token = '';
+  let clientId = '';
+  let req1Id = '', req2Id = '';
+  let rec1Id = '', rec2Id = '';
+  let assignment1Id = '';
+  let originalEnabled = true;
+  const stamp = Date.now();
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+
+  test.afterAll(async ({ request }) => {
+    // Restore the real tenant's config, whatever it was before this suite ran.
+    await request.put(`${API}/ops-config/auto-assign`, { headers: auth(), data: { enabled: originalEnabled } }).catch(() => {});
+    if (req1Id) await request.delete(`${API}/requisitions/${req1Id}`, { headers: auth() }).catch(() => {});
+    if (req2Id) await request.delete(`${API}/requisitions/${req2Id}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+    for (const id of [rec1Id, rec2Id]) {
+      if (!id) continue;
+      await request.patch(`${API}/users/${id}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${id}/purge`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('setup: real throwaway client + 2 requisitions + 2 recruiters; capture the real current config', async ({ request }) => {
+    token = await getApiToken(request);
+    const cfg = await (await request.get(`${API}/ops-config/auto-assign`, { headers: auth() })).json();
+    originalEnabled = cfg.enabled;
+
+    const c = await (await request.post(`${API}/clients`, { headers: auth(), data: { name: `QA S74 Client ${stamp}`, industry: 'IT Services' } })).json();
+    clientId = c.id;
+    const r1 = await (await request.post(`${API}/requisitions`, { headers: auth(), data: { title: `QA S74 Req1 ${stamp}`, client_id: clientId, client_name: c.name, location: 'Remote', employment_type: 'fte', positions_count: 1 } })).json();
+    req1Id = r1.id;
+    const r2 = await (await request.post(`${API}/requisitions`, { headers: auth(), data: { title: `QA S74 Req2 ${stamp}`, client_id: clientId, client_name: c.name, location: 'Remote', employment_type: 'fte', positions_count: 1 } })).json();
+    req2Id = r2.id;
+    const mkRec = async (n: string) => (await (await request.post(`${API}/users`, { headers: auth(), data: { full_name: `QA S74 ${n} ${stamp}`, email: `qa.s74.${n.toLowerCase()}.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' } })).json()).id;
+    rec1Id = await mkRec('Rec1');
+    rec2Id = await mkRec('Rec2');
+    expect(clientId && req1Id && req2Id && rec1Id && rec2Id).toBeTruthy();
+  });
+
+  test('turning OFF blocks AI auto-assign (POST /requisitions/{id}/assign) with a clear 403, but manual POST /assignments still succeeds', async ({ request }) => {
+    const off = await request.put(`${API}/ops-config/auto-assign`, { headers: auth(), data: { enabled: false } });
+    expect(off.ok()).toBeTruthy();
+    expect((await off.json()).enabled).toBe(false);
+
+    const aiTry = await request.post(`${API}/requisitions/${req1Id}/assign`, { headers: auth() });
+    expect(aiTry.status()).toBe(403);
+    expect((await aiTry.json()).detail).toContain('turned off');
+
+    const manual = await request.post(`${API}/assignments`, { headers: auth(), data: { requisition_id: req1Id, recruiter_id: rec1Id } });
+    expect(manual.ok()).toBeTruthy();
+    assignment1Id = (await manual.json()).id;
+    expect(assignment1Id).toBeTruthy();
+  });
+
+  test('while OFF: AI auto-reassign (new_recruiter_id omitted) 403s, but a manual reassign to a SPECIFIC recruiter still succeeds', async ({ request }) => {
+    const autoTry = await request.post(`${API}/assignments/${assignment1Id}/reassign`, { headers: auth(), data: { reason: 'auto test' } });
+    expect(autoTry.status()).toBe(403);
+
+    const manualReassign = await request.post(`${API}/assignments/${assignment1Id}/reassign`, { headers: auth(), data: { new_recruiter_id: rec2Id, reason: 'manual test' } });
+    expect(manualReassign.ok()).toBeTruthy();
+    const body = await manualReassign.json();
+    expect(body.new_recruiter_id).toBe(rec2Id);
+    assignment1Id = body.new_assignment_id;
+  });
+
+  test('while OFF: bulk-reassign auto-pick 403s, but bulk-reassign to a SPECIFIC recruiter still succeeds', async ({ request }) => {
+    const autoBulk = await request.post(`${API}/assignment-dashboard/bulk-reassign`, { headers: auth(), data: { assignment_ids: [assignment1Id] } });
+    expect(autoBulk.status()).toBe(403);
+
+    const specificBulk = await request.post(`${API}/assignment-dashboard/bulk-reassign`, { headers: auth(), data: { assignment_ids: [assignment1Id], new_recruiter_id: rec1Id } });
+    expect(specificBulk.ok()).toBeTruthy();
+    const result = await specificBulk.json();
+    expect(result.succeeded).toBe(1);
+  });
+
+  test('turning back ON restores real AI auto-assign', async ({ request }) => {
+    const on = await request.put(`${API}/ops-config/auto-assign`, { headers: auth(), data: { enabled: true } });
+    expect(on.ok()).toBeTruthy();
+    const aiTry = await request.post(`${API}/requisitions/${req2Id}/assign`, { headers: auth() });
+    expect(aiTry.ok()).toBeTruthy();
+    const body = await aiTry.json();
+    expect(body.recruiter_id).toBeTruthy();
+  });
+
+  test('real headless UI: Ops Settings toggle flips real state, Recruiter Ops Auto-Assign tab hides the AI button and shows the off-message while OFF', async ({ page, request }) => {
+    await page.goto('/ops-settings');
+    await page.waitForLoadState('networkidle');
+    await page.locator('text=Auto-Assign').first().click();
+    const toggleBtn = page.locator('[data-testid="auto-assign-toggle"]');
+    await expect(toggleBtn).toBeVisible({ timeout: 15000 });
+    const before = await toggleBtn.innerText();
+    await toggleBtn.click();
+    await page.waitForTimeout(1000);
+    const after = await toggleBtn.innerText();
+    expect(before).not.toBe(after);
+
+    await page.goto('/recruiter-ops');
+    await page.waitForLoadState('networkidle');
+    await page.locator('button:has-text("Auto-Assign")').first().click();
+    await page.waitForTimeout(1000);
+    const isOff = (after.includes('OFF'));
+    if (isOff) {
+      await expect(page.locator('text=/AI Auto-Assign is turned off/')).toBeVisible();
+    }
+    // Restore to ON via the same real UI toggle, not just the API, closing
+    // the loop end to end.
+    await page.goto('/ops-settings');
+    await page.waitForLoadState('networkidle');
+    await page.locator('text=Auto-Assign').first().click();
+    const toggleBtn2 = page.locator('[data-testid="auto-assign-toggle"]');
+    await expect(toggleBtn2).toBeVisible({ timeout: 15000 });
+    if ((await toggleBtn2.innerText()).includes('OFF')) {
+      await toggleBtn2.click();
+      await page.waitForTimeout(800);
+    }
+  });
+});

@@ -16,6 +16,7 @@ import events
 from deps import Actor, get_actor, require_role
 from schemas import AssignmentCreate, ReassignRequest
 from services import assignment_notify
+from routers.ops_gaps import is_auto_assign_enabled
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
@@ -160,6 +161,13 @@ async def reassign(
             raise HTTPException(status_code=404, detail="Assignment not found")
         if old["status"] != "active":
             raise HTTPException(status_code=409, detail=f"Assignment is '{old['status']}', expected 'active'")
+
+        # Real, server-side gate (2026-08-31) - only the AUTO-PICK path
+        # (new_recruiter_id omitted) is affected by the tenant's Auto-
+        # Assign on/off switch. Reassigning to a specific, human-chosen
+        # recruiter is manual and is never blocked by this.
+        if body.new_recruiter_id is None and not await is_auto_assign_enabled(conn, actor.tenant_id):
+            raise HTTPException(status_code=403, detail="AI Auto-Assign is turned off for this tenant (Ops Settings). Pick a specific recruiter instead.")
 
         try:
             result = await conn.fetchrow(

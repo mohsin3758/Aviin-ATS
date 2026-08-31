@@ -99,6 +99,11 @@ function BulkReassignModal({ ids, onDone, onClose }: { ids: string[]; onDone: ()
   // averaging or picking one arbitrary requisition's match score.
   const { data: capacity } = useFetch<any[]>('/analytics/recruiter-capacity');
   const capMap = Object.fromEntries((capacity || []).map((c: any) => [c.recruiter_id, c]));
+  // Real tenant-wide Auto-Assign on/off switch (2026-08-31) — hides the
+  // "Auto-pick" card below when off; picking a specific recruiter always
+  // stays available.
+  const { data: autoAssignCfg } = useFetch<any>('/ops-config/auto-assign');
+  const autoAssignEnabled = autoAssignCfg?.enabled !== false;
   const [recruiterId, setRecruiterId] = useState('');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -123,21 +128,23 @@ function BulkReassignModal({ ids, onDone, onClose }: { ids: string[]; onDone: ()
       <div style={{ background: '#fff', borderRadius: 14, padding: 20, width: 460 }} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 4 }}>Bulk Reassign</div>
         <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>{ids.length} assignment(s) selected.</p>
-        <label style={label}>NEW RECRUITER — pick a name, or auto-pick the next-best match per assignment</label>
+        <label style={label}>NEW RECRUITER{autoAssignEnabled ? ' — pick a name, or auto-pick the next-best match per assignment' : ' — pick a name (AI auto-pick is turned off, Ops Settings > Auto-Assign)'}</label>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10, maxHeight: 280, overflowY: 'auto' }} data-testid="bulk-recruiter-picker">
-          <div
-            onClick={() => setRecruiterId('')}
-            data-testid="bulk-recruiter-option-autopick"
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-              border: `1px solid ${recruiterId === '' ? '#93C5FD' : '#E2E8F0'}`,
-              background: recruiterId === '' ? '#EFF6FF' : '#fff',
-            }}>
-            <Sparkles size={14} style={{ color: '#4338CA', flexShrink: 0 }} />
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>
-              Auto-pick per assignment <span style={{ fontWeight: 400, color: '#94A3B8' }}>(next-best match for each role)</span>
+          {autoAssignEnabled && (
+            <div
+              onClick={() => setRecruiterId('')}
+              data-testid="bulk-recruiter-option-autopick"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                border: `1px solid ${recruiterId === '' ? '#93C5FD' : '#E2E8F0'}`,
+                background: recruiterId === '' ? '#EFF6FF' : '#fff',
+              }}>
+              <Sparkles size={14} style={{ color: '#4338CA', flexShrink: 0 }} />
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>
+                Auto-pick per assignment <span style={{ fontWeight: 400, color: '#94A3B8' }}>(next-best match for each role)</span>
+              </div>
             </div>
-          </div>
+          )}
           {(users || []).map((u: any) => {
             const c = capMap[u.id];
             const wl = RECRUITER_WORKLOAD_BADGE[c?.workload_label] || RECRUITER_WORKLOAD_BADGE.Medium;
@@ -182,7 +189,7 @@ function BulkReassignModal({ ids, onDone, onClose }: { ids: string[]; onDone: ()
         )}
         {result?.error && <div style={{ fontSize: 12, color: '#DC2626', marginBottom: 10 }}>{result.error}</div>}
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={submit} disabled={busy} style={btn}>{busy ? 'Reassigning…' : 'Confirm Bulk Reassign'}</button>
+          <button onClick={submit} disabled={busy || (!autoAssignEnabled && !recruiterId)} style={btn}>{busy ? 'Reassigning…' : 'Confirm Bulk Reassign'}</button>
           <button onClick={onClose} style={btnGhost}>{result ? 'Close' : 'Cancel'}</button>
         </div>
       </div>

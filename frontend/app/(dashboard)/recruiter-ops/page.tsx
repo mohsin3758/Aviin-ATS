@@ -533,6 +533,11 @@ function MyDayTab() {
 function AutoAssignTab() {
   const { data: reqs, loading: reqsLoading } = useFetch<any[]>('/requisitions?status=open');
   const { data: assignments, loading: assignLoading, refetch } = useFetch<any[]>('/assignments');
+  // Real tenant-wide Auto-Assign on/off switch (2026-08-31) — hides the AI
+  // button below when off; the queue itself still shows so nothing needing
+  // a recruiter goes unnoticed, just with a note to assign manually.
+  const { data: autoAssignCfg } = useFetch<any>('/ops-config/auto-assign');
+  const autoAssignEnabled = autoAssignCfg?.enabled !== false;
   const [busyId, setBusyId] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, any>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -576,6 +581,11 @@ function AutoAssignTab() {
             Assigning recruiters to requisitions is an admin/manager action — you can see the queue below, but the Auto-Assign button is disabled for your role.
           </div>
         )}
+        {canManage && !autoAssignEnabled && (
+          <div style={{ fontSize: 12, color: '#64748B', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '8px 10px', marginBottom: 12 }}>
+            AI Auto-Assign is turned off for this tenant (Ops Settings &gt; Auto-Assign) — you can see the queue below, assign each one manually from the requisition's own page.
+          </div>
+        )}
         {loading && <div style={{ fontSize: 12, color: '#94A3B8' }}>Loading…</div>}
         {!loading && !unassigned.length && (
           <div style={{ fontSize: 12, color: '#16A34A', display: 'flex', alignItems: 'center', gap: 6 }}>✓ Every open requisition has an active recruiter assigned.</div>
@@ -587,11 +597,15 @@ function AutoAssignTab() {
               <div style={{ color: '#64748B' }}>{r.location || 'Remote'} · {r.positions_count} opening{r.positions_count > 1 ? 's' : ''}</div>
               {errors[r.id] && <div style={{ color: '#DC2626', marginTop: 4 }}>{errors[r.id]}</div>}
             </div>
-            <button onClick={() => autoAssign(r.id)} disabled={busyId === r.id || !canManage}
-              title={!canManage ? 'Admin/manager only' : undefined}
-              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 8, border: '1px solid #C7D2FE', background: !canManage ? '#F1F5F9' : '#EEF2FF', fontSize: 11, fontWeight: 700, color: !canManage ? '#94A3B8' : '#4338CA', cursor: busyId === r.id || !canManage ? 'default' : 'pointer', flexShrink: 0 }}>
-              <Sparkles size={12} /> {busyId === r.id ? 'Assigning…' : 'Auto-Assign (AI)'}
-            </button>
+            {autoAssignEnabled ? (
+              <button onClick={() => autoAssign(r.id)} disabled={busyId === r.id || !canManage}
+                title={!canManage ? 'Admin/manager only' : undefined}
+                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 8, border: '1px solid #C7D2FE', background: !canManage ? '#F1F5F9' : '#EEF2FF', fontSize: 11, fontWeight: 700, color: !canManage ? '#94A3B8' : '#4338CA', cursor: busyId === r.id || !canManage ? 'default' : 'pointer', flexShrink: 0 }}>
+                <Sparkles size={12} /> {busyId === r.id ? 'Assigning…' : 'Auto-Assign (AI)'}
+              </button>
+            ) : (
+              <a href={`/requisitions/${r.id}`} style={{ fontSize: 11, fontWeight: 700, color: '#2563EB', textDecoration: 'none', flexShrink: 0 }}>Assign manually →</a>
+            )}
           </div>
         ))}
       </div>

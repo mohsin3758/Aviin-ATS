@@ -163,6 +163,55 @@ async def update_sla_tiers(body: SlaTiersIn, actor: Actor = Depends(require_role
     return dict(row)
 
 
+# ─── Auto-Assign on/off (2026-08-31) ────────────────────────────────────────
+# Reported live: "need option to off and on auto assign features." No
+# automatic/scheduled trigger exists anywhere in this codebase - this is a
+# tenant-wide switch (per the user's own explicit choice) that shows/hides
+# the real, already-built "Auto-Assign (AI)"/"Auto-Reassign (AI)" buttons
+# (requisition detail page, Recruiter Ops' Auto-Assign tab, the Assignment
+# Dashboard bulk-reassign modal's "Auto-pick" option) - never affects
+# manual assignment/reassignment to a specific, human-chosen recruiter.
+class AutoAssignConfigIn(BaseModel):
+    enabled: bool
+
+
+@config_router.get("/auto-assign")
+async def get_auto_assign_config(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("SELECT * FROM auto_assign_config WHERE tenant_id=$1", actor.tenant_id)
+        if not row:
+            row = await conn.fetchrow(
+                "INSERT INTO auto_assign_config (tenant_id) VALUES ($1) RETURNING *", actor.tenant_id,
+            )
+    return dict(row)
+
+
+@config_router.put("/auto-assign")
+async def update_auto_assign_config(body: AutoAssignConfigIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO auto_assign_config (tenant_id, enabled, updated_by, updated_at)
+               VALUES ($1,$2,$3,now())
+               ON CONFLICT (tenant_id) DO UPDATE SET
+                 enabled=$2, updated_by=$3, updated_at=now()
+               RETURNING *""",
+            actor.tenant_id, body.enabled, actor.user_id,
+        )
+    return dict(row)
+
+
+async def is_auto_assign_enabled(conn, tenant_id: str) -> bool:
+    """Shared server-side gate for every real AI auto-pick entry point
+    (assign_with_explanation() via requisitions.py, do_reassign()'s
+    auto-pick path via assignments.py and assignment_dashboard.py) - never
+    rely on the frontend alone hiding a button; enforce it here too, same
+    discipline already used throughout this codebase. Missing config row
+    (a tenant that's never touched this setting) defaults to enabled,
+    matching the table's own DEFAULT TRUE and today's existing behavior."""
+    row = await conn.fetchrow("SELECT enabled FROM auto_assign_config WHERE tenant_id=$1", tenant_id)
+    return row["enabled"] if row else True
+
+
 # ═══════════════════════════════════════════════════════ Shift Timings ═══
 # Tenant-configurable named shift presets (region + a real time range) for
 # the Requisition form's multi-select "Shift Timing" field - the same
