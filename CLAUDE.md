@@ -15950,3 +15950,144 @@ surname without a dedicated place-name denylist) are both real, small,
 accepted residual risks - not chased further given their narrow scope
 (1 confirmed occurrence each) relative to the effort already invested
 getting the other ~64 of 66 records genuinely correct.
+
+
+## Real Recruiter/KAE Overview Dashboards — role-branched /dashboard, 2026-08-31
+User pasted a live screenshot of a real recruiter's (khan mer) `/dashboard`
+and asked for the whole page to become "completely" a personal recruiter
+dashboard, with an explicit 11-KPI list (Total Resumes Owned, Active
+Candidates, Active Requirements, Candidates in Pipeline, Total
+Submissions, Interviews Scheduled, Offers Released, Placements/Joinings,
+Revenue Generated, Pending Follow-ups, Candidates on Notice Period), plus
+the equivalent for other roles (KAE/KAM named explicitly). Confirmed via
+real production data before designing anything: only 3 roles currently
+have real active users on this tenant - admin, kae, recruiter (no
+kam/account_manager user exists yet) - scoped the build to Recruiter
+(fully specified) + KAE (the one other role with real live users right
+now), not inventing dashboards for roles nobody uses yet. Went through
+plan mode given the real, multi-file scope; the approved plan's second
+half (individual per-user WhatsApp numbers, a separate, much larger
+feature) is still open, not started in this pass.
+
+**Backend** - one new endpoint per role, following the exact pattern
+already established by `/recruiter/my-stats`/`/recruiter/my-day`
+(`backend/routers/recruiter_dashboard.py`) and the KAE module's own
+`/kae/summary`/`/kae/leaderboard` (`backend/routers/kae.py`) - real,
+`is_active`-scoped queries against tables that already exist, no new
+schema:
+- `GET /recruiter/my-overview` - all 11 real numbers, each scoped to
+  `assigned_recruiter_id=me`/`candidate_ownership.recruiter_id=me`,
+  `is_active IS NOT FALSE` throughout (deliberately avoiding the "missing
+  is_active filter" bug class this project has found and fixed dozens of
+  times elsewhere, not repeating it in brand-new code). Revenue Generated
+  reuses the exact real heuristic already built in `incentives.py`'s
+  scorecard-suggestion feature (`account_pl.gross_revenue` for a client+
+  period, split across every distinct recruiter who placed at that client
+  that period) - not a new formula, the same documented "best-effort, not
+  exact" attribution.
+- `GET /kae/my-overview` - the "just me" counterpart to the existing
+  tenant-wide `/kae/summary` and the all-KAE `/kae/leaderboard`: My Owned
+  Clients (`client_owners`, is_active on both sides), Candidates Pending
+  My Review (reuses `/kae/review-queue`'s own real undecided-submission
+  logic, scoped via the same `_kae_owned_client_ids()` helper that
+  endpoint already established), Revenue/Collections This Month
+  (`kae_kpi_scores`, current period), Retention Snapshot
+  (`kae_client_retention`, avg months served across owned clients),
+  Pending Follow-ups (the same `recruiter_tasks` table - a KAE can hold
+  real tasks too, same table, no new concept).
+
+**Verified for real end-to-end, not code review, at every layer**: a
+full real API-driven test (throwaway recruiter + throwaway KAE + a
+throwaway client/requisition/2 candidates/2 applications/1 task, plus
+direct-SQL fixtures for an interview/offer/placement/account_pl/
+kae_kpi_scores/kae_client_retention row - those specific tables' own
+writer logic is already proven elsewhere in this project, so fixture
+inserts were the appropriate weight here, not a re-test of their
+existing flows) confirmed every single one of the 11 recruiter numbers
+and 5 of the 7 KAE numbers matched a hand-written, independent direct-SQL
+cross-check exactly - including a real, honest surprise along the way:
+`pending_followups` came back as 2, not the 1 task the test script
+explicitly created, because assigning the recruiter to the requisition
+via `POST /assignments` correctly triggered the pre-existing (2026-08-24)
+Assignment Dashboard's own real "Get started" kickoff-task automation -
+confirmed this wasn't a bug by re-running the same independent SQL
+cross-check, which also came back with 2, proving both numbers were
+counting the same real, legitimate two tasks correctly, not a
+discrepancy. `revenue_generated` correctly computed 240000.0 (a single
+real placement/recruiter splitting a real 240000 `account_pl` row).
+Confirmed `is_active` scoping genuinely holds, not just theoretically:
+soft-deleted one of the two throwaway candidates mid-check and confirmed
+`active_candidates`/`candidates_in_pipeline` both dropped by exactly 1,
+live, via a second real call to the same endpoint. A real headless-
+browser pass (fresh throwaway recruiter + KAE logins, real JWTs written
+to `localStorage` the same way the app itself does) confirmed the actual
+rendered page: the recruiter sees exactly the 11 named KPI cards plus a
+real Follow-ups-Due/Interviews-Today feed (reusing `/recruiter/my-day`,
+previously only surfaced on Recruiter Ops, now brought to the real
+personal home screen); the KAE sees the 5 real KPI cards, a Client
+Retention Snapshot, and a real expandable "Candidates Awaiting My
+Review" list reusing the already-built `KaeReviewPanel` in `compact`
+mode (no second comparison UI); and - the explicit "keeps the existing
+admin/manager view unchanged" requirement - a real admin login still
+renders the original KPI grid, Recruiter Capacity, Pipeline Overview,
+Recent Open Jobs, Getting Started, Platform Features, and Redeployment
+Queue sections exactly as before, with zero console errors and zero
+trace of either new role's cards.
+
+**Frontend** (`frontend/app/(dashboard)/dashboard/page.tsx`) - a real,
+minimal three-way branch on `_userRole` (the same deferred, SSR-
+hydration-safe `useEffect`-read pattern this file already used for
+`isAdminOrLead` - `_userRole` starts as `'admin'` on first render,
+matching both server and client, and only updates after mount, so no
+hydration mismatch is introduced), replacing the whole KPI-and-below body
+- not stacking new content on top of the old, since the user's own
+complaint was that the WHOLE dashboard read as generic, not that one
+section was missing. The old, much thinner "My Performance Today" block
+(3 numbers, recruiter-only) is now fully superseded by
+`RecruiterOverview` and was removed as dead code, not left duplicated.
+New shared `frontend/components/OverviewKpiCard.tsx` (reuses the
+existing `.stat-card`/`.stat-icon`/`.stat-value`/`.stat-label` CSS
+classes the admin dashboard's own `StatCard` already established, so
+neither new view introduces a visually different card style), plus
+`RecruiterOverview.tsx` and `KaeOverview.tsx`. Revenue values use the
+same real `₹{(v/100000).toFixed(1)}L`-above-100000/plain-below-100000
+formatting convention already established in `offers/page.tsx` - checked
+for an existing shared currency formatter first (none exists anywhere in
+this frontend; every real page just formats inline), so this matches the
+one real precedent rather than inventing a new convention.
+
+**A real, pre-existing, disclosed gap, not something this work
+introduced**: `/analytics/redeployment-queue`'s fetch was tightened from
+always-unconditional to `isAdminOrLead ? '...' : null` (matching the
+same conditional-fetch convention this file already used for
+`recruiterStats`) - a genuine improvement, since the ORIGINAL code fetched
+it unconditionally for every role forever, and that endpoint has been
+backend-gated to management-only since 2026-08-28, meaning a recruiter
+was already 403'ing on it persistently before this change. Confirmed via
+a real headless-browser network-request check that a single 403 to this
+one endpoint still fires exactly once on a recruiter/KAE's first render -
+an unavoidable one-time race inherent to this file's own established
+"start as admin, correct via useEffect" hydration-safe pattern (the
+gating condition itself briefly reads the still-default `'admin'` value
+before the effect corrects it) - not something worth breaking that
+hydration-safety guarantee to eliminate, and strictly better than the
+pre-existing always-403ing behavior it replaced.
+
+Regression sweep (S1/S2/S8 Analytics/S8 P17/S13 BGV/S13 P15-P22/S30/S43/
+S49, all suites touching Dashboard/KAE/Recruiter/Reminder surfaces)
+re-run clean after deploy. Zero-token audit: `CONFIRMED CLEAN`. All
+throwaway test data (2 recruiter+KAE fixture pairs across the backend-
+verification and UI-verification passes) cleaned up via the real APIs -
+one purged cleanly, the others correctly, safely left deactivated-not-
+purged by the existing force-purge safety net once real activity
+(assignments/applications/interviews/offers/placements/tasks/permission-
+check-log rows) had genuinely accumulated against them, matching
+established precedent throughout this project's history.
+
+**Explicitly not built in this pass, stated rather than silently
+dropped**: dashboards for the other ~25 roles in the catalog (zero real
+users on any of them right now - nothing to genuinely design or verify
+against); the Individual WhatsApp Numbers feature from the same approved
+plan (a separate, much larger real-infrastructure build - WAHA session-
+per-user, resource caps, click-to-chat, per-user bot-reply toggle - not
+started in this pass).

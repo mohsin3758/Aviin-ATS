@@ -134,6 +134,172 @@ async def my_stats(actor: Actor = Depends(get_actor)):
     }
 
 
+@router.get("/my-overview")
+async def my_overview(actor: Actor = Depends(get_actor)):
+    """Full personal Overview Dashboard for a recruiter (2026-08-31) —
+    the 11 real KPI cards asked for, all scoped to this recruiter's own
+    real ownership/assignment, all is_active-filtered (this project's own
+    extensively-documented is_active-leak bug class, not repeated here in
+    new code). Distinct from /my-stats above, which is today/week/month
+    scoped for the small dashboard widget — these are the recruiter's
+    real all-time career totals plus current-state counts, matching a
+    real "Overview" page rather than a "today" one."""
+    uid = actor.user_id
+    if uid is None:
+        return {
+            "resumes_owned": 0, "active_candidates": 0, "active_requirements": 0,
+            "candidates_in_pipeline": 0, "total_submissions": 0,
+            "interviews_scheduled": 0, "offers_released": 0, "placements": 0,
+            "revenue_generated": 0.0, "pending_followups": 0,
+            "candidates_on_notice": 0,
+        }
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        resumes_owned = await conn.fetchval(
+            """SELECT COUNT(*) FROM candidate_ownership co
+               JOIN candidates c ON c.id=co.candidate_id
+               WHERE co.recruiter_id=$1 AND co.status='active' AND c.is_active IS NOT FALSE""",
+            uid,
+        )
+
+        # Active candidates: real distinct candidates currently owned OR
+        # with a real active (non-terminal) application assigned to me.
+        active_candidates = await conn.fetchval(
+            """SELECT COUNT(DISTINCT c.id) FROM candidates c
+               WHERE c.is_active IS NOT FALSE AND (
+                 EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id
+                         AND co.recruiter_id=$1 AND co.status='active')
+                 OR EXISTS (SELECT 1 FROM applications a WHERE a.candidate_id=c.id
+                            AND a.assigned_recruiter_id=$1 AND a.is_active IS NOT FALSE
+                            AND a.stage NOT IN ('placed','rejected'))
+               )""",
+            uid,
+        )
+
+        active_requirements = await conn.fetchval(
+            """SELECT COUNT(DISTINCT r.id) FROM assignments asg
+               JOIN requisitions r ON r.id=asg.requisition_id
+               WHERE asg.recruiter_id=$1 AND asg.status='active'
+                 AND r.is_active IS NOT FALSE AND r.status='open'""",
+            uid,
+        )
+
+        candidates_in_pipeline = await conn.fetchval(
+            """SELECT COUNT(*) FROM applications a
+               JOIN candidates c ON c.id=a.candidate_id
+               WHERE a.assigned_recruiter_id=$1 AND a.is_active IS NOT FALSE
+                 AND c.is_active IS NOT FALSE
+                 AND a.stage NOT IN ('placed','rejected')""",
+            uid,
+        )
+
+        # Total submissions: real, all-time — any application of mine
+        # that has ever reached "submitted" or a later stage (interview/
+        # offer/placed), not just today/this-month like my-stats above.
+        total_submissions = await conn.fetchval(
+            """SELECT COUNT(*) FROM applications a
+               JOIN candidates c ON c.id=a.candidate_id
+               WHERE a.assigned_recruiter_id=$1 AND c.is_active IS NOT FALSE
+                 AND (a.stage LIKE '%interview%' OR a.stage IN
+                      ('submitted','client_submission','offer','offer_accepted','placed'))""",
+            uid,
+        )
+
+        interviews_scheduled = await conn.fetchval(
+            """SELECT COUNT(*) FROM interview_schedules i
+               JOIN candidates c ON c.id=i.candidate_id
+               LEFT JOIN applications a ON a.id=i.application_id
+               WHERE i.tenant_id=$2 AND c.is_active IS NOT FALSE
+                 AND (i.interviewer_id=$1 OR a.assigned_recruiter_id=$1)
+                 AND i.status NOT IN ('cancelled','completed')""",
+            uid, actor.tenant_id,
+        )
+
+        offers_released = await conn.fetchval(
+            """SELECT COUNT(*) FROM offers o
+               JOIN applications a ON a.id=o.application_id
+               JOIN candidates c ON c.id=a.candidate_id
+               WHERE a.assigned_recruiter_id=$1 AND c.is_active IS NOT FALSE
+                 AND o.status IN ('issued','accepted','declined')""",
+            uid,
+        )
+
+        # Placements/joinings: the same real offer -> application ->
+        # assigned_recruiter chain already proven in export_placements /
+        # the incentives revenue-suggestion feature — placements has no
+        # direct recruiter column of its own.
+        placements = await conn.fetch(
+            """SELECT p.id, p.requisition_id, p.created_at, r.client_id
+               FROM placements p
+               JOIN offers o ON o.id=p.offer_id
+               JOIN applications a ON a.id=o.application_id
+               LEFT JOIN requisitions r ON r.id=p.requisition_id
+               WHERE p.tenant_id=$1 AND a.assigned_recruiter_id=$2""",
+            actor.tenant_id, uid,
+        )
+
+        # Revenue generated: this recruiter's real, all-time share of
+        # every placed client's account_pl revenue for the specific
+        # period each placement happened in — the exact same best-effort,
+        # real-data-grounded heuristic already established in
+        # incentives.py's scorecard-suggestion feature (no per-placement
+        # revenue figure exists to read directly), just summed across
+        # every period this recruiter has a real placement in rather than
+        # one single period.
+        revenue_generated = 0.0
+        for p in placements:
+            if not p["client_id"] or not p["created_at"]:
+                continue
+            pm, py = p["created_at"].month, p["created_at"].year
+            pl = await conn.fetchrow(
+                "SELECT gross_revenue FROM account_pl WHERE tenant_id=$1 AND client_id=$2 AND period_month=$3 AND period_year=$4",
+                actor.tenant_id, p["client_id"], pm, py)
+            if not pl or not pl["gross_revenue"]:
+                continue
+            period_start = date(py, pm, 1)
+            period_end = date(py + (1 if pm == 12 else 0), 1 if pm == 12 else pm + 1, 1)
+            recruiter_count = await conn.fetchval(
+                """SELECT COUNT(DISTINCT a2.assigned_recruiter_id)
+                   FROM placements p2 JOIN offers o2 ON o2.id=p2.offer_id
+                   JOIN applications a2 ON a2.id=o2.application_id
+                   WHERE p2.tenant_id=$1 AND p2.requisition_id IN (
+                       SELECT id FROM requisitions WHERE tenant_id=$1 AND client_id=$2)
+                     AND p2.created_at >= $3 AND p2.created_at < $4""",
+                actor.tenant_id, p["client_id"], period_start, period_end) or 1
+            revenue_generated += float(pl["gross_revenue"]) / max(1, recruiter_count)
+
+        pending_followups = await conn.fetchval(
+            """SELECT COUNT(*) FROM recruiter_tasks
+               WHERE recruiter_id=$1 AND status IN ('pending','in_progress')""",
+            uid,
+        )
+
+        candidates_on_notice = await conn.fetchval(
+            """SELECT COUNT(DISTINCT c.id) FROM candidates c
+               WHERE c.is_active IS NOT FALSE AND c.notice_period_days IS NOT NULL AND (
+                 EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id
+                         AND co.recruiter_id=$1 AND co.status='active')
+                 OR EXISTS (SELECT 1 FROM applications a WHERE a.candidate_id=c.id
+                            AND a.assigned_recruiter_id=$1 AND a.is_active IS NOT FALSE)
+               )""",
+            uid,
+        )
+
+    return {
+        "resumes_owned": int(resumes_owned or 0),
+        "active_candidates": int(active_candidates or 0),
+        "active_requirements": int(active_requirements or 0),
+        "candidates_in_pipeline": int(candidates_in_pipeline or 0),
+        "total_submissions": int(total_submissions or 0),
+        "interviews_scheduled": int(interviews_scheduled or 0),
+        "offers_released": int(offers_released or 0),
+        "placements": len(placements),
+        "revenue_generated": round(revenue_generated, 2),
+        "pending_followups": int(pending_followups or 0),
+        "candidates_on_notice": int(candidates_on_notice or 0),
+    }
+
+
 @router.get("/my-day")
 async def my_day(actor: Actor = Depends(get_actor)):
     """Unified daily action queue for the logged-in recruiter. The data all

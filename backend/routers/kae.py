@@ -360,3 +360,68 @@ async def kae_leaderboard(actor: Actor=Depends(require_permission("kae", "read")
             SELECT * FROM v_kae_summary WHERE tenant_id=$1 ORDER BY total_revenue DESC
         """, actor.tenant_id)
     return [dict(r) for r in rows]
+
+@router.get("/my-overview")
+async def my_kae_overview(actor: Actor=Depends(get_actor)):
+    """Full personal Overview Dashboard for a KAE/KAM (2026-08-31) — the
+    "just me" counterpart to /kae/summary (tenant-wide) and /kae/leaderboard
+    (every KAE), matching the exact pattern established by
+    /recruiter/my-overview the same day. Real, is_active-scoped queries
+    only, no new schema."""
+    uid = actor.user_id
+    empty = {
+        "owned_clients": 0, "candidates_pending_review": 0,
+        "revenue_this_month": 0.0, "collections_this_month": 0.0,
+        "retention_avg_months": 0.0, "retention_clients_tracked": 0,
+        "pending_followups": 0,
+    }
+    if uid is None:
+        return empty
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        client_rows = await conn.fetch("""
+            SELECT DISTINCT co.client_id FROM client_owners co
+            JOIN clients cl ON cl.id=co.client_id
+            WHERE co.tenant_id=$1 AND co.user_id=$2 AND co.is_active
+              AND cl.is_active IS NOT FALSE
+        """, actor.tenant_id, uid)
+        scope_clients = [r["client_id"] for r in client_rows]
+        candidates_pending_review = 0
+        if scope_clients:
+            candidates_pending_review = await conn.fetchval("""
+                SELECT COUNT(*) FROM (
+                  SELECT DISTINCT ON (cs.requisition_id, cs.candidate_id)
+                    cs.requisition_id, cs.candidate_id, cs.kae_decision
+                  FROM candidate_submissions cs
+                  JOIN requisitions r ON r.id=cs.requisition_id
+                  JOIN candidates c ON c.id=cs.candidate_id
+                  WHERE cs.tenant_id=$1 AND cs.direction='recruiter_to_kae'
+                    AND r.client_id = ANY($2::uuid[])
+                    AND r.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
+                  ORDER BY cs.requisition_id, cs.candidate_id, cs.sent_at DESC
+                ) latest WHERE latest.kae_decision IS NULL
+            """, actor.tenant_id, scope_clients)
+        today = date.today()
+        kpi = await conn.fetchrow("""
+            SELECT COALESCE(revenue_actual,0) AS revenue, COALESCE(collection_actual,0) AS collections
+            FROM kae_kpi_scores
+            WHERE tenant_id=$1 AND user_id=$2 AND period_month=$3 AND period_year=$4
+        """, actor.tenant_id, uid, today.month, today.year)
+        retention = await conn.fetchrow("""
+            SELECT COUNT(*) AS n, COALESCE(ROUND(AVG(kr.months_served),1),0) AS avg_months
+            FROM kae_client_retention kr
+            JOIN clients cl ON cl.id=kr.client_id
+            WHERE kr.tenant_id=$1 AND kr.user_id=$2 AND cl.is_active IS NOT FALSE
+        """, actor.tenant_id, uid)
+        pending_followups = await conn.fetchval("""
+            SELECT COUNT(*) FROM recruiter_tasks
+            WHERE recruiter_id=$1 AND status IN ('pending','in_progress')
+        """, uid)
+    return {
+        "owned_clients": len(scope_clients),
+        "candidates_pending_review": int(candidates_pending_review or 0),
+        "revenue_this_month": float(kpi["revenue"]) if kpi else 0.0,
+        "collections_this_month": float(kpi["collections"]) if kpi else 0.0,
+        "retention_avg_months": float(retention["avg_months"]) if retention else 0.0,
+        "retention_clients_tracked": int(retention["n"]) if retention else 0,
+        "pending_followups": int(pending_followups or 0),
+    }

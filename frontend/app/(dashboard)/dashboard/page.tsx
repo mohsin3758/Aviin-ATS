@@ -6,6 +6,8 @@ import { Users, Briefcase, TrendingUp, Clock, Star, CheckCircle,
 import { useFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
 import Link from 'next/link';
+import RecruiterOverview from '@/components/RecruiterOverview';
+import KaeOverview from '@/components/KaeOverview';
 
 const CHECKLIST = [
   { id:1, icon:'👤', title:'Import Candidates',          desc:'Upload your candidate database',                href:'/candidates' },
@@ -60,11 +62,10 @@ export default function DashboardPage() {
   const { data: sla } = useFetch<any>('/sla/summary');
   const { data: cands } = useFetch<any>('/candidates');
   const { data: schedStat } = useFetch<any>('/scheduler/status');
-  const { data: recruiterStats } = useFetch<any>(_userRole === 'recruiter' ? '/recruiter/my-stats' : null);
   const { data: pipelineMetrics } = useFetch<any>('/pipeline/metrics');
   const { data: recruiterCapacity } = useFetch<any[]>('/analytics/recruiter-capacity');
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
-  const { data: redeployments } = useFetch<any[]>('/analytics/redeployment-queue');
+  const { data: redeployments } = useFetch<any[]>(isAdminOrLead ? '/analytics/redeployment-queue' : null);
   const { data: clients } = useFetch<any[]>('/clients');
   const { data: emailSettings } = useFetch<any>('/settings/email');
 
@@ -112,6 +113,12 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {_userRole === 'recruiter' ? (
+        <RecruiterOverview />
+      ) : _userRole === 'kae' ? (
+        <KaeOverview />
+      ) : (
+      <>
       {/* KPI Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4" data-testid="stat-cards">
         <StatCard icon="💼" label="Open Requisitions"        value={openJobs}    color="#1e40af" bg="#eff6ff" trend={12}  href="/requisitions" />
@@ -121,35 +128,6 @@ export default function DashboardPage() {
         {isAdminOrLead && <StatCard icon="⚙️" label="Cron Jobs"       value={schedStat?.jobs?.length||6}  color="#0f766e" bg="#ccfbf1" />}
         {isAdminOrLead && <StatCard icon="🤖" label="AI Features"     value={19}          color="#7c3aed" bg="#ede9fe" href="/ai-tools" />}
       </div>
-      {/* Recruiter Performance (shown to recruiter role only) */}
-      {_userRole === 'recruiter' && recruiterStats && (
-        <div style={{marginTop:'0',padding:'20px',background:'linear-gradient(135deg,#eff6ff,#f0fdf4)',borderRadius:'12px',border:'1px solid #bfdbfe'}}>
-          <h3 style={{fontSize:'15px',fontWeight:'700',color:'#1e40af',marginBottom:'14px'}}>&#x26A1; My Performance Today</h3>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px'}}>
-            <div style={{background:'white',borderRadius:'10px',padding:'14px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
-              <div style={{fontSize:'28px',fontWeight:'800',color:'#1e40af'}}>{recruiterStats.my_submissions_today}</div>
-              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Submissions Today</div>
-            </div>
-            <div style={{background:'white',borderRadius:'10px',padding:'14px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
-              <div style={{fontSize:'28px',fontWeight:'800',color:'#7c3aed'}}>{recruiterStats.my_interviews_this_week}</div>
-              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Interviews This Week</div>
-            </div>
-            <div style={{background:'white',borderRadius:'10px',padding:'14px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
-              <div style={{fontSize:'28px',fontWeight:'800',color:'#059669'}}>{recruiterStats.my_placements_month}</div>
-              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Placements This Month</div>
-            </div>
-          </div>
-          {Object.keys(recruiterStats.my_pipeline||{}).length > 0 && (
-            <div style={{marginTop:'14px',display:'flex',flexWrap:'wrap',gap:'8px'}}>
-              {Object.entries(recruiterStats.my_pipeline).map(([stage, cnt]:any) => (
-                <span key={stage} style={{fontSize:'11px',padding:'3px 10px',borderRadius:'20px',background:'white',border:'1px solid #e2e8f0',color:'#475569',fontWeight:'500'}}>
-                  {stage}: <strong>{cnt}</strong>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       <div data-testid="capacity-bars" style={{animation:"none",marginTop:"24px",padding:"20px",background:"white",borderRadius:"12px",border:"1px solid #e2e8f0",display:"block",minHeight:"80px"}}>
         <h3 style={{fontSize:"15px",fontWeight:"700",color:"#0f172a",marginBottom:"12px"}}>{isAdminOrLead ? "Recruiter Capacity" : "My Capacity"}</h3>
@@ -346,6 +324,8 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+      )}
+      </>
       )}
 
     </div>
