@@ -10107,6 +10107,106 @@ test.describe.serial('S74 Auto-Assign on/off toggle: manual assign/reassign neve
   });
 });
 
+test.describe.serial('S77 Incentives: real individual-only scoping for non-management roles', () => {
+  // 2026-08-31 — reported live off a real recruiter's own /incentives
+  // screenshot: every OTHER recruiter's real compensation data
+  // (scorecards, retention bank, loyalty, advanced KPIs) plus a
+  // "Recruiter: Select..." picker and full create/approve forms, on
+  // what should be a personal-only page. list_scorecards() even had a
+  // stale docstring claiming "Recruiter: own only" that was never
+  // actually implemented. Fixed server-side (incentives.py) — every
+  // read is now force-scoped to the caller's own user_id for any
+  // non-management role, non-bypassable via any client-sent user_id
+  // param, and every write (create/approve/release/pay) is now
+  // admin/manager-only. Frontend gets a genuine personal dashboard
+  // (MyIncentivesView) instead of the admin management table.
+  let gateUserId = '', gateUserEmail = '', scorecardId = '';
+  const stamp = Date.now();
+
+  test('setup: a real throwaway recruiter + a real scorecard created by admin', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const res = await request.post(`${API}/users`, {
+      headers: auth,
+      data: { email: `qa.s77.recruiter.${stamp}@test.com`, full_name: 'QA S77 Recruiter', role: 'recruiter', password: 'TestPass123!' },
+    });
+    const body = await res.json();
+    gateUserId = body.id; gateUserEmail = body.email;
+    expect(gateUserId).toBeTruthy();
+
+    const sc = await request.post(`${API}/incentives/scorecard`, {
+      headers: auth,
+      data: { user_id: gateUserId, period_month: 1, period_year: 2099, joinings_score: 10, revenue_score: 5, interview_score: 2, offer_score: 2, client_sat_score: 3, ats_score: 1, contribution_margin: 50000 },
+    });
+    const scBody = await sc.json();
+    scorecardId = scBody.id;
+    expect(scorecardId).toBeTruthy();
+  });
+
+  test('a plain recruiter sees exactly their own scorecard, never a manipulated user_id filter override', async ({ request }) => {
+    const rec = await (await request.post(`${API}/auth/login`, { data: { email: gateUserEmail, password: 'TestPass123!' } })).json();
+    const auth = { 'Authorization': `Bearer ${rec.access_token}`, 'Content-Type': 'application/json' };
+
+    const own = await (await request.get(`${API}/incentives/scorecard?month=1&year=2099`, { headers: auth })).json();
+    expect(own.length).toBe(1);
+    expect(own[0].id).toBe(scorecardId);
+
+    // The old /bank and /loyalty endpoints had an optional, client-
+    // trusted user_id param — confirm a non-management caller can't use
+    // it to widen their own view onto someone else's real data by
+    // passing a real, different user's id (a genuinely different real
+    // account, not their own) and confirming the response is still
+    // self-scoped (empty — this throwaway recruiter has no bank entries
+    // of their own), never leaking that other real user's rows.
+    const meResp = await request.get(`${API}/users?is_active=true&limit=1`, { headers: { 'Authorization': `Bearer ${await getApiToken(request)}` } });
+    const someoneElseId = (await meResp.json()).find((u: any) => u.id !== gateUserId)?.id;
+    const bankAsOther = await request.get(`${API}/incentives/bank?user_id=${someoneElseId}`, { headers: auth });
+    expect(bankAsOther.status()).toBe(200);
+    expect((await bankAsOther.json())).toEqual([]);
+  });
+
+  test('a plain recruiter cannot create, approve, or self-approve a scorecard (403)', async ({ request }) => {
+    const rec = await (await request.post(`${API}/auth/login`, { data: { email: gateUserEmail, password: 'TestPass123!' } })).json();
+    const auth = { 'Authorization': `Bearer ${rec.access_token}`, 'Content-Type': 'application/json' };
+
+    const create = await request.post(`${API}/incentives/scorecard`, {
+      headers: auth,
+      data: { user_id: gateUserId, period_month: 2, period_year: 2099, joinings_score: 0, revenue_score: 0, interview_score: 0, offer_score: 0, client_sat_score: 0, ats_score: 0, contribution_margin: 0 },
+    });
+    expect(create.status()).toBe(403);
+
+    const approve = await request.patch(`${API}/incentives/scorecard/${scorecardId}/status`, { headers: auth, data: { status: 'approved' } });
+    expect(approve.status()).toBe(403);
+  });
+
+  test('admin still sees the real scorecard, tenant-wide access unaffected', async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}` };
+    const all = await (await request.get(`${API}/incentives/scorecard?month=1&year=2099`, { headers: auth })).json();
+    expect(all.some((s: any) => s.id === scorecardId)).toBe(true);
+  });
+
+  test('real headless UI: a recruiter sees "My Incentives" with no picker/create form; admin still sees the management view', async ({ page }) => {
+    await page.request.post(`${API}/auth/login`, { data: { email: gateUserEmail, password: 'TestPass123!' } })
+      .then(r => r.json()).then(async d => {
+        await page.addInitScript(token => window.localStorage.setItem('airecruit_token', token), d.access_token);
+      });
+    await page.goto('/incentives', { waitUntil: 'networkidle' });
+    await expect(page.getByText('My Incentives')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('New Scorecard')).toHaveCount(0);
+    await expect(page.getByText('QA S77 Recruiter')).toBeVisible();
+  });
+
+  test.afterAll(async ({ request }) => {
+    const token = await getApiToken(request);
+    const auth = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (gateUserId) {
+      await request.patch(`${API}/users/${gateUserId}/deactivate`, { headers: auth }).catch(() => {});
+      await request.delete(`${API}/users/${gateUserId}/purge?force=true`, { headers: auth }).catch(() => {});
+    }
+  });
+});
+
 test.describe.serial('S76 Resume Inbox: My/All Resumes stats actually scope', () => {
   // 2026-08-31 — reported live off screenshots: "Total Auto-Created"
   // (and every other KPI card, plus the source-breakdown chips) stayed

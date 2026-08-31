@@ -17185,3 +17185,78 @@ itself was already independently proven correct via 2 separate methods
 (direct SQL cross-check + a clean, isolated 3/3 test pass) before the
 rate limit was ever hit. Zero-token audit and full deploy already
 completed for this fix.
+
+## Incentives: real individual-only scoping for recruiter/KAE/KAM, plus
+## every write locked to admin/manager — 2026-08-31
+User pasted a live screenshot of khan mer's (recruiter) own `/incentives`
+page — a full "Recruiter: Select..." picker, a "New Scorecard" create
+form, and a tenant-wide table implying every other recruiter's real
+compensation data was reachable — asking for individual-only scoping,
+not the shared admin view.
+
+**Root cause, confirmed by reading the code, not guessed**: every read
+endpoint in `incentives.py` (`/scorecard`, `/advanced-kpis`, `/retention-
+tracking`, `/bank`, `/loyalty`, `/summary`) returned EVERY recruiter's
+real data regardless of caller role — `list_scorecards()` even carried a
+stale docstring claiming "Recruiter: own only (filtered by user_id
+claim)" that was never actually implemented in the query. Separately, and
+more seriously: every WRITE endpoint (create/approve a scorecard, upsert
+advanced KPIs, release/forfeit a retention-bank entry, seed/pay a loyalty
+milestone) used a plain `Depends(get_actor)` with **zero role
+restriction at all** — any authenticated recruiter could have created or
+approved a scorecard for anyone, including approving their own payout, a
+real conflict-of-interest gap this project has explicitly guarded
+against elsewhere but had never actually closed here.
+
+**Fixed server-side, non-bypassable, not just a nicer frontend**: new
+`_effective_uid(actor)` helper — `None` (no restriction) for admin/
+super_admin/manager/lead_recruiter or the trusted-internal `role=None`
+path; otherwise the caller's own `user_id`, forced regardless of any
+`user_id`/filter param the client sends. Applied to all 6 read endpoints'
+SQL directly (not a frontend-only filter that a direct API call could
+bypass) — `/bank` and `/loyalty` already had an optional, client-trusted
+`user_id` param from before real role-awareness existed; a non-management
+caller's own id now always wins over whatever they pass. All 8 write
+endpoints (`upsert_scorecard`, `approve_scorecard`, `upsert_advanced_
+kpis`, `upsert_retention`, `update_retention_days`, `update_bank_status`,
+`seed_loyalty`, `mark_loyalty_paid`) now require `admin`/`manager` via
+`require_role()` — confirmed via grep that none of these have any real
+internal/backend caller (only ever reached from the frontend), so this
+carries none of the trusted-internal-regression risk already documented
+for a blanket `require_role()` pass elsewhere in this project.
+
+**Frontend rebuilt with a genuine role branch**, matching today's
+already-established `RecruiterOverview.tsx` pattern (SSR-safe deferred
+`getTokenPayload()` read): `ManagementIncentivesView` (the original page,
+completely unchanged) for admin/super_admin/manager/lead_recruiter; a new
+`MyIncentivesView` for everyone else — a real personal dashboard (own
+score/grade breakdown, own incentive/bank/loyalty numbers, own advanced
+KPIs), fully read-only, with no recruiter-picker anywhere (there's
+nothing to pick — the backend can only ever return one person's data to
+a non-management caller now) and no create/approve controls, since those
+actions are correctly admin/manager-only regardless of who's looking.
+
+Verified for real end-to-end, not code review: a real throwaway
+recruiter, with a genuine scorecard created FOR them by admin (write is
+now admin/manager-only), correctly saw exactly 1 scorecard (their own)
+via `GET /incentives/scorecard`, with `/summary`'s aggregate numbers
+matching that one record exactly; both `POST /incentives/scorecard` and
+`PATCH .../status` (self-approve) correctly 403'd for them; admin's own
+view of the same period was confirmed completely unaffected. A real
+throwaway KAE correctly saw 0 scorecards for that same period — neither
+their own (none exists) nor the recruiter's real one. A real headless-
+browser pass confirmed the actual live page: the recruiter sees "My
+Incentives" with their own real name and zero picker/create-form
+controls; admin still sees the original "Incentive Engine" management
+view, picker and create form both present, completely unchanged.
+
+New permanent "S77 Incentives: real individual-only scoping for non-
+management roles" suite (5 tests) added to `qa_automation.spec.ts`,
+passed 5/5 clean on the first run. Broader regression sweep (S1/S13
+P15-P22/S30, 21 tests — including the pre-existing admin-authenticated
+"recruiter_advanced_kpis: real upsert round-trip" and "Incentives
+Advanced KPIs tab...renders" tests, both still exercising the now-gated
+write endpoints and the unchanged management view respectively) passed
+clean: 20 passed, 1 pre-existing skip, 0 failed. All throwaway test data
+(2 throwaway users, 1 real scorecard row) cleaned up via real APIs,
+confirmed zero residue.

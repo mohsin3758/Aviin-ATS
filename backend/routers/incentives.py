@@ -12,12 +12,34 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 from permissions import require_permission
 
 router = APIRouter(prefix="/incentives", tags=["incentives"])
 
 LOYALTY_AMOUNTS = {1: 15000, 2: 30000, 3: 50000, 5: 100000}
+
+# REAL BUG FIX (2026-08-31): reported live — a plain recruiter's own
+# /incentives page showed every OTHER recruiter's real compensation data
+# (scorecards, retention bank, loyalty payouts, advanced KPIs) with a
+# recruiter-picker letting them view/create for anyone. list_scorecards()
+# already had a docstring claiming "Recruiter: own only" but the query
+# itself never actually filtered by anything — same for every other read
+# endpoint below. This is a real PII/compensation-privacy gap, not just a
+# UX one, so the fix is server-side and non-bypassable: a non-management
+# caller's own user_id is forced regardless of any user_id/filter param
+# they send, never trusted from the client.
+_MGMT_ROLES = {"admin", "super_admin", "manager", "lead_recruiter"}
+
+
+def _effective_uid(actor: Actor) -> Optional[str]:
+    """None = no restriction (see everyone — admin/manager/lead_recruiter,
+    or actor.role is None for the trusted-internal/n8n path, matching the
+    exemption already established throughout this project's permission
+    system). Anything else = force-scoped to that user's own id."""
+    if actor.role is None or actor.role in _MGMT_ROLES:
+        return None
+    return actor.user_id
 
 
 # ── schemas ────────────────────────────────────────────────
@@ -76,7 +98,9 @@ async def list_scorecards(
     year: Optional[int] = None,
     actor: Actor = Depends(require_permission("incentives", "read")),
 ):
-    """Admin: all recruiters. Recruiter: own only (filtered by user_id claim)."""
+    """Admin/manager/lead_recruiter: all recruiters. Anyone else: own only
+    (server-enforced via _effective_uid, not a trusted client param)."""
+    uid = _effective_uid(actor)
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT k.*, u.full_name, u.email,
@@ -88,8 +112,9 @@ async def list_scorecards(
             WHERE ($1::int IS NULL OR k.period_month = $1)
               AND ($2::int IS NULL OR k.period_year  = $2)
               AND u.is_active IS NOT FALSE
+              AND ($3::text IS NULL OR k.user_id::text = $3)
             ORDER BY k.period_year DESC, k.period_month DESC, u.full_name
-        """, month, year)
+        """, month, year, uid)
     return [dict(r) for r in rows]
 
 
@@ -198,7 +223,7 @@ async def suggest_scorecard(
 
 
 @router.post("/scorecard")
-async def upsert_scorecard(body: KpiScoreIn, actor: Actor = Depends(get_actor)):
+async def upsert_scorecard(body: KpiScoreIn, actor: Actor = Depends(require_role("admin", "manager"))):
     """Create or update a monthly KPI scorecard (trigger auto-calculates grade/incentive)."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
@@ -227,7 +252,7 @@ async def upsert_scorecard(body: KpiScoreIn, actor: Actor = Depends(get_actor)):
 
 @router.patch("/scorecard/{score_id}/status")
 async def approve_scorecard(
-    score_id: str, body: KpiApproveIn, actor: Actor = Depends(get_actor)
+    score_id: str, body: KpiApproveIn, actor: Actor = Depends(require_role("admin", "manager"))
 ):
     if body.status not in ('approved', 'paid'):
         raise HTTPException(400, "status must be approved or paid")
@@ -305,6 +330,7 @@ async def list_advanced_kpis(
     year: Optional[int] = None,
     actor: Actor = Depends(get_actor),
 ):
+    uid = _effective_uid(actor)
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT k.*, u.full_name
@@ -312,13 +338,14 @@ async def list_advanced_kpis(
             JOIN users u ON u.id = k.user_id AND u.is_active IS NOT FALSE
             WHERE ($1::int IS NULL OR k.period_month = $1)
               AND ($2::int IS NULL OR k.period_year  = $2)
+              AND ($3::text IS NULL OR k.user_id::text = $3)
             ORDER BY k.period_year DESC, k.period_month DESC, u.full_name
-        """, month, year)
+        """, month, year, uid)
     return [dict(r) for r in rows]
 
 
 @router.post("/advanced-kpis")
-async def upsert_advanced_kpis(body: AdvKpiIn, actor: Actor = Depends(get_actor)):
+async def upsert_advanced_kpis(body: AdvKpiIn, actor: Actor = Depends(require_role("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO recruiter_advanced_kpis
@@ -354,6 +381,7 @@ async def upsert_advanced_kpis(body: AdvKpiIn, actor: Actor = Depends(get_actor)
 
 @router.get("/retention-tracking")
 async def list_retention(actor: Actor = Depends(get_actor)):
+    uid = _effective_uid(actor)
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT rt.*, c.full_name AS candidate_name,
@@ -362,13 +390,14 @@ async def list_retention(actor: Actor = Depends(get_actor)):
             FROM candidate_retention_tracking rt
             JOIN candidates c ON c.id = rt.candidate_id
             JOIN users u ON u.id = rt.recruiter_id
+            WHERE ($1::text IS NULL OR rt.recruiter_id::text = $1)
             ORDER BY rt.joining_date DESC
-        """)
+        """, uid)
     return [dict(r) for r in rows]
 
 
 @router.post("/retention-tracking")
-async def upsert_retention(body: RetentionTrackIn, actor: Actor = Depends(get_actor)):
+async def upsert_retention(body: RetentionTrackIn, actor: Actor = Depends(require_role("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             INSERT INTO candidate_retention_tracking
@@ -387,7 +416,7 @@ async def upsert_retention(body: RetentionTrackIn, actor: Actor = Depends(get_ac
 
 @router.patch("/retention-tracking/{track_id}")
 async def update_retention_days(
-    track_id: str, days_employed: int, actor: Actor = Depends(get_actor)
+    track_id: str, days_employed: int, actor: Actor = Depends(require_role("admin", "manager"))
 ):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
@@ -405,6 +434,11 @@ async def update_retention_days(
 
 @router.get("/bank")
 async def get_bank(user_id: Optional[str] = None, actor: Actor = Depends(get_actor)):
+    # A non-management caller's own id always wins, regardless of what
+    # user_id they pass — never trust the client to only ask for its own
+    # data (this endpoint's optional filter pre-dates real role scoping).
+    eff = _effective_uid(actor)
+    scope = eff if eff is not None else user_id
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT rb.*, u.full_name
@@ -412,13 +446,13 @@ async def get_bank(user_id: Optional[str] = None, actor: Actor = Depends(get_act
             JOIN users u ON u.id = rb.user_id
             WHERE ($1::text IS NULL OR rb.user_id::text = $1)
             ORDER BY rb.accrued_year DESC, rb.accrued_month DESC
-        """, user_id)
+        """, scope)
     return [dict(r) for r in rows]
 
 
 @router.patch("/bank/{bank_id}")
 async def update_bank_status(
-    bank_id: str, body: BankReleaseIn, actor: Actor = Depends(get_actor)
+    bank_id: str, body: BankReleaseIn, actor: Actor = Depends(require_role("admin", "manager"))
 ):
     if body.status not in ('released', 'forfeited'):
         raise HTTPException(400, "status must be released or forfeited")
@@ -444,6 +478,9 @@ async def update_bank_status(
 
 @router.get("/loyalty")
 async def list_loyalty(user_id: Optional[str] = None, actor: Actor = Depends(get_actor)):
+    # Same non-bypassable scoping as /bank above.
+    eff = _effective_uid(actor)
+    scope = eff if eff is not None else user_id
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT lm.*, u.full_name, u.email
@@ -451,12 +488,12 @@ async def list_loyalty(user_id: Optional[str] = None, actor: Actor = Depends(get
             JOIN users u ON u.id = lm.user_id
             WHERE ($1::text IS NULL OR lm.user_id::text = $1)
             ORDER BY lm.milestone_date
-        """, user_id)
+        """, scope)
     return [dict(r) for r in rows]
 
 
 @router.post("/loyalty/seed")
-async def seed_loyalty(body: LoyaltyIn, actor: Actor = Depends(get_actor)):
+async def seed_loyalty(body: LoyaltyIn, actor: Actor = Depends(require_role("admin", "manager"))):
     """Seed all 4 milestone rows for a recruiter from their joining_date."""
     created = []
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -480,7 +517,7 @@ async def seed_loyalty(body: LoyaltyIn, actor: Actor = Depends(get_actor)):
 
 
 @router.patch("/loyalty/{milestone_id}/pay")
-async def mark_loyalty_paid(milestone_id: str, actor: Actor = Depends(get_actor)):
+async def mark_loyalty_paid(milestone_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE loyalty_milestones
@@ -499,7 +536,10 @@ async def get_summary(
     year: Optional[int] = None,
     actor: Actor = Depends(get_actor),
 ):
-    """KPI summary stats for the incentives dashboard."""
+    """KPI summary stats for the incentives dashboard — tenant-wide for
+    admin/manager/lead_recruiter, forced to the caller's own data for
+    anyone else (same real gap as every other endpoint in this file)."""
+    uid = _effective_uid(actor)
     async with db.tenant_conn(actor.tenant_id) as conn:
         stats = await conn.fetchrow("""
             SELECT
@@ -516,19 +556,22 @@ async def get_summary(
             FROM recruiter_kpi_scores
             WHERE ($1::int IS NULL OR period_month = $1)
               AND ($2::int IS NULL OR period_year  = $2)
-        """, month, year)
+              AND ($3::text IS NULL OR user_id::text = $3)
+        """, month, year, uid)
         bank = await conn.fetchrow("""
             SELECT COALESCE(SUM(amount) FILTER (WHERE status='held'), 0)      AS bank_held,
                    COALESCE(SUM(amount) FILTER (WHERE status='released'), 0)  AS bank_released,
                    COALESCE(SUM(amount) FILTER (WHERE status='forfeited'), 0) AS bank_forfeited
             FROM retention_bank
-        """)
+            WHERE ($1::text IS NULL OR user_id::text = $1)
+        """, uid)
         loyalty = await conn.fetchrow("""
             SELECT COUNT(*) FILTER (WHERE status='pending')  AS pending_milestones,
                    COUNT(*) FILTER (WHERE status='achieved') AS due_milestones,
                    COALESCE(SUM(bonus_amount) FILTER (WHERE status='achieved'), 0) AS due_amount
             FROM loyalty_milestones
-        """)
+            WHERE ($1::text IS NULL OR user_id::text = $1)
+        """, uid)
     return {
         **dict(stats),
         **dict(bank),
