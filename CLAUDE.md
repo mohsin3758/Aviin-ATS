@@ -17260,3 +17260,83 @@ write endpoints and the unchanged management view respectively) passed
 clean: 20 passed, 1 pre-existing skip, 0 failed. All throwaway test data
 (2 throwaway users, 1 real scorecard row) cleaned up via real APIs,
 confirmed zero residue.
+
+## Public resume-drop forms: mandatory phone (min 10 digits) + real
+## multi-document upload, 2026-08-31
+User asked, from the real personal resume-drop link
+(`/link/{token}`): add multi-document upload (previous company offer
+letter, relieving letter, notice period screenshot, salary slips, and
+other documents "as per standard"), and make Phone mandatory with a
+10-digit minimum. Given this project's own established pattern of two
+near-identical sibling public forms sharing the same backend logic
+(the job-less personal link and the job-specific link, built together
+2026-08-25/30, `_apply_extra_public_fields()` already shared between
+them), applied both changes to both — the personal link explicitly
+named in the report, and the job-specific link for consistency.
+
+**Documents** — reused the exact `candidate_documents` "other" bucket +
+`_save_candidate_document_file()` disk-write helper the internal Add
+Candidate form already established (2026-08-25), rather than inventing
+named per-type slots — no schema change needed (`document_type` was
+already `CHECK IN ('lwd_confirmation','other')`, resume files go
+through the separate `resume_files` table). New `_save_other_documents()`
+in `personal_links.py`, called from both `submit_resume()` and
+`submit_job_resume()` right after the candidate is created/found — loops
+a new `other_documents: list[UploadFile]` multipart field, writes each
+via a cross-module import (`from routers.candidates import
+_save_candidate_document_file`, matching this same file's own established
+`from routers.pipeline_stages import resolve_default_add_stage`
+cross-import convention), inserts with `uploaded_by=NULL` (no
+authenticated actor exists on a public submission — fabricating one
+would misattribute it), and is entirely best-effort (a bad/corrupt
+attachment never blocks the real submission, matching the resume-
+parsing try/except right next to it).
+
+**Phone** — new `_require_valid_phone()`, adapting `schemas.py`'s
+existing `_validate_phone` 10-12-digit-range logic (10 for a plain
+Indian mobile, 12 with the 91 country code) but mandatory instead of
+optional, called right after the existing consent/name/email checks in
+both endpoints — a clean 400 with an exact digit count on rejection,
+not a raw 422.
+
+Frontend (`link/[token]/page.tsx`, `apply/[token]/page.tsx`, kept in
+sync): "Phone *" with a live digit-count validation hint and the
+Submit button disabled until valid; a new "Additional Documents
+(optional)" section (multi-file input, hint text naming the exact
+document types requested, removable file chips) placed right after the
+existing single-file Resume upload, mirroring the internal Add
+Candidate form's own established "Other Documents" section shape.
+
+Verified for real end-to-end, not code review, at every layer: 4 real
+API cases against the live deployed endpoints (9-digit phone -> 400
+with exact count, missing phone -> 400, valid 10-digit phone -> 200,
+valid 12-digit-with-91-prefix phone -> 200) on the personal link, plus
+the identical short/missing-phone rejection on the job-specific link; a
+real 2-file multipart submission (via Python `requests`, since this
+exact Playwright version's object-form `multipart` option doesn't
+support two values under one field name) confirmed both files landed in
+`candidate_documents` with `document_type='other'`, correct filenames/
+sizes, `uploaded_by` correctly NULL — then confirmed both are visible
+and byte-identical-downloadable through the real, already-existing
+internal `GET /candidates/{id}/documents` + `.../documents/{id}/
+download` endpoints a recruiter would actually use (no new UI needed on
+that side, since this internal endpoint pair already existed). The
+job-specific link's document upload was verified end-to-end alongside
+its real application creation on the target requisition (confirmed via
+a direct pipeline-board data check). A real headless-browser pass on
+both live public pages confirmed the "Phone *" mandatory label, the
+live short-phone validation hint, the Submit button correctly disabled
+with an invalid phone, and the real "Additional Documents" section
+(hint text, multi-file input) — zero console errors on either page.
+
+New permanent "S78 Public forms: mandatory phone (min 10 digits) +
+multi-document upload" suite (7 tests) added to `qa_automation.spec.ts`,
+passed 7/7 clean. A regression sweep against S1 (health) + S71 (the
+pre-existing suite already exercising both public forms end-to-end,
+including their own real phone-bearing submissions — confirming the
+new mandatory-phone requirement introduced no regression there) passed
+clean: 16 passed, 1 pre-existing skip, 0 failed. Zero-token audit:
+`CONFIRMED CLEAN` (430 files, 0 external API refs). All throwaway test
+data (3 candidates from manual verification, plus each permanent test's
+own throwaway rows via its `afterAll`) cleaned up via real APIs,
+confirmed zero residue.

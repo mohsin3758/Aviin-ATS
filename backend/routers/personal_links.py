@@ -25,6 +25,60 @@ job_router = APIRouter(prefix="/personal-links/job", tags=["personal-links"])
 public_job_router = APIRouter(prefix="/public/job-links", tags=["public"])
 
 
+def _require_valid_phone(phone: Optional[str]) -> str:
+    """Real requirement (2026-08-31, reported live against this exact
+    form): a public resume-drop form must collect a genuine, reachable
+    mobile number — phone was previously fully optional here. Same
+    10-12 digit range as schemas.py's _validate_phone (10 for a plain
+    Indian mobile, 12 with the 91 country code, with or without a
+    leading +) but mandatory, not optional, matching the explicit ask
+    ("make mobile number is mandatory with minimum 10 digit numbers")."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if len(digits) < 10 or len(digits) > 12:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A valid mobile number (10 digits, or 12 with the 91 "
+                f"country code) is required — got {len(digits)} digit(s)"
+            ),
+        )
+    return phone.strip()
+
+
+async def _save_other_documents(conn, tenant_id: str, candidate_id: str, files) -> None:
+    """Real feature (2026-08-31, reported live): let a public applicant
+    attach supporting documents beyond just the resume — previous
+    company offer letter, relieving letter, notice-period screenshot,
+    salary slips, or anything else. Reuses the exact same
+    candidate_documents 'other' bucket + disk-write helper the internal
+    Add Candidate form already established (2026-08-25) rather than
+    inventing named per-type slots — every one of these tags as
+    document_type='other', same as that form's own "Other Documents"
+    section. uploaded_by is left NULL — there is no authenticated actor
+    on a public submission, and fabricating one would misattribute it."""
+    if not files:
+        return
+    from routers.candidates import _save_candidate_document_file
+    for f in files:
+        if not f or not getattr(f, "filename", None):
+            continue
+        try:
+            data = await f.read()
+            if not data:
+                continue
+            file_path = _save_candidate_document_file(data, tenant_id, f.filename)
+            await conn.execute(
+                """INSERT INTO candidate_documents
+                    (tenant_id, candidate_id, document_type, file_name, file_path, mime_type, file_size, uploaded_by)
+                   VALUES ($1,$2,'other',$3,$4,$5,$6,NULL)""",
+                tenant_id, candidate_id, f.filename, file_path, f.content_type or '', len(data))
+        except Exception:
+            # Best-effort only — a bad/corrupt attachment must never
+            # block the real submission, matching the resume-parsing
+            # try/except right below every caller of this function.
+            continue
+
+
 async def _apply_extra_public_fields(
     conn, tenant_id: str, candidate_id: str, is_new_candidate: bool, *,
     role_position: Optional[str], current_ctc: Optional[float], expected_ctc: Optional[float],
@@ -172,6 +226,10 @@ async def submit_resume(
     expert_skills: Optional[str] = Form(None),
     intermediate_skills: Optional[str] = Form(None),
     skill_experience: Optional[str] = Form(None),
+    # 2026-08-31 — reported live: mandatory phone + real multi-document
+    # upload (previous employer offer letter, relieving letter, notice
+    # period screenshot, salary slips, etc.)
+    other_documents: list[UploadFile] = File(default=[]),
 ):
     """No-auth public resume submission — same intake shape as
     public_apply() (p28_p32.py) minus the job/application half, since
@@ -185,6 +243,7 @@ async def submit_resume(
         raise HTTPException(status_code=400, detail="Consent to store and process your details is required to submit")
     if not full_name or not email:
         raise HTTPException(status_code=400, detail="Name and email are required")
+    phone = _require_valid_phone(phone)
 
     tenant_id = str(link["tenant_id"])
     recruiter_id = str(link["recruiter_id"])
@@ -264,6 +323,8 @@ async def submit_resume(
             linkedin_url=linkedin_url, expert_skills_csv=expert_skills,
             intermediate_skills_csv=intermediate_skills, skill_experience_json=skill_experience,
         )
+
+        await _save_other_documents(conn, tenant_id, str(cand['id']), other_documents)
 
         # On genuine creation only — never claim ownership on an update to
         # an existing candidate, matching every other intake path's rule.
@@ -357,6 +418,8 @@ async def submit_job_resume(
     expert_skills: Optional[str] = Form(None),
     intermediate_skills: Optional[str] = Form(None),
     skill_experience: Optional[str] = Form(None),
+    # 2026-08-31 — same real fields as submit_resume() above
+    other_documents: list[UploadFile] = File(default=[]),
 ):
     """No-auth public resume submission, scoped to one job — same intake
     shape as submit_resume() above, plus a real application on the target
@@ -371,6 +434,7 @@ async def submit_job_resume(
         raise HTTPException(status_code=400, detail="Consent to store and process your details is required to submit")
     if not full_name or not email:
         raise HTTPException(status_code=400, detail="Name and email are required")
+    phone = _require_valid_phone(phone)
 
     tenant_id = str(link["tenant_id"])
     recruiter_id = str(link["recruiter_id"])
@@ -448,6 +512,8 @@ async def submit_job_resume(
             linkedin_url=linkedin_url, expert_skills_csv=expert_skills,
             intermediate_skills_csv=intermediate_skills, skill_experience_json=skill_experience,
         )
+
+        await _save_other_documents(conn, tenant_id, str(cand['id']), other_documents)
 
         if is_new_candidate:
             recruiter_email = await conn.fetchval("SELECT email FROM users WHERE id=$1", recruiter_id)

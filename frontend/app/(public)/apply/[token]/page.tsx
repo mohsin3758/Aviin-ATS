@@ -35,6 +35,12 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
   });
   const [consent, setConsent] = useState(false);
   const [resumeFile, setResumeFile] = useState<File | null>(null);
+  // 2026-08-31 — reported live: supporting documents beyond just the
+  // resume (previous company offer letter, relieving letter, notice
+  // period screenshot, salary slips, or anything else) — same generic
+  // multi-file "other" bucket the internal Add Candidate form already
+  // uses, not separate named slots per document type.
+  const [otherDocs, setOtherDocs] = useState<File[]>([]);
 
   // Expert / Intermediate skills — same chip-add UX as the internal Add
   // Candidate form's Skills section.
@@ -67,15 +73,19 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
     })();
   }, [token]);
 
+  const phoneDigits = form.phone.replace(/\D/g, '').length;
+  const phoneValid = phoneDigits >= 10 && phoneDigits <= 12;
+
   async function submit() {
     if (!form.full_name || !form.email) { setError('Name and email are required'); return; }
+    if (!phoneValid) { setError('A valid mobile number (minimum 10 digits) is required'); return; }
     if (!consent) { setError('Please confirm you consent to us storing and processing your details before submitting'); return; }
     setSaving(true); setError('');
     try {
       const fd = new FormData();
       fd.append('full_name', form.full_name);
       fd.append('email', form.email);
-      if (form.phone) fd.append('phone', form.phone);
+      fd.append('phone', form.phone);
       if (form.location) fd.append('location', form.location);
       if (form.current_employer) fd.append('current_employer', form.current_employer);
       fd.append('experience_months', String(Number(form.experience_months) || 0));
@@ -90,6 +100,7 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
       if (expertSkills.length) fd.append('expert_skills', expertSkills.join(','));
       if (intermediateSkills.length) fd.append('intermediate_skills', intermediateSkills.join(','));
       if (skillExpRows.length) fd.append('skill_experience', JSON.stringify(skillExpRows));
+      otherDocs.forEach(f => fd.append('other_documents', f));
       const r = await fetch(`${API_URL}/public/job-links/${token}/apply`, { method: 'POST', body: fd });
       if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
       setDone(true);
@@ -195,8 +206,13 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
         <label style={label}>Email *</label>
         <input style={input} type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
 
-        <label style={label}>Phone</label>
-        <input style={input} value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} />
+        <label style={label}>Phone *</label>
+        <input style={input} value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="10-digit mobile number" />
+        {form.phone.length > 0 && !phoneValid && (
+          <div style={{ fontSize: 11, color: '#dc2626', marginTop: -8, marginBottom: 12 }}>
+            {phoneDigits} digit{phoneDigits === 1 ? '' : 's'} — needs at least 10 (or 12 with the 91 country code)
+          </div>
+        )}
 
         <div style={rowGrid}>
           <div>
@@ -339,6 +355,27 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
           <input type="file" accept=".pdf,.doc,.docx" onChange={e => setResumeFile(e.target.files?.[0] || null)} style={{ border: 'none', fontSize: 13 }} />
         </div>
 
+        <div style={sectionLabel}>Additional Documents (optional)</div>
+        <p style={{ fontSize: 11, color: '#64748b', margin: '0 0 8px' }}>
+          e.g. previous company offer letter, relieving letter, notice period screenshot, salary slips, or anything else relevant. Multiple files allowed.
+        </p>
+        <div style={{ ...input, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <UploadCloud size={16} color="#64748b" />
+          <input type="file" multiple accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+            onChange={e => setOtherDocs(Array.from(e.target.files || []))}
+            style={{ border: 'none', fontSize: 13 }} />
+        </div>
+        {otherDocs.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+            {otherDocs.map((f, i) => (
+              <span key={i} style={{ padding: '4px 10px', borderRadius: 20, background: '#f1f5f9', color: '#334155', fontSize: 11, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 5 }}>
+                {f.name}
+                <button type="button" onClick={() => setOtherDocs(docs => docs.filter((_, x) => x !== i))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', padding: 0, lineHeight: 1, fontSize: 14 }}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
+
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: '#475569', margin: '8px 0 16px', cursor: 'pointer' }}>
           <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} style={{ marginTop: 2 }} />
           I consent to my details and resume being stored and processed for recruitment purposes, in line with applicable data protection law.
@@ -348,7 +385,7 @@ export default function RecruiterJobLinkPage({ params }: { params: { token: stri
 
         {(() => {
           const needsSkillExp = (info?.mandatory_skills?.length ?? 0) > 0 && skillExpRows.length === 0;
-          const disabled = saving || !consent || needsSkillExp;
+          const disabled = saving || !consent || needsSkillExp || !phoneValid;
           return (
             <>
               {needsSkillExp && (

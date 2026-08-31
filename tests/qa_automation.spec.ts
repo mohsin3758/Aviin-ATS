@@ -10455,3 +10455,173 @@ test.describe.serial('S75 Conversations: draft ownership + IMAP write ownership 
     }
   });
 });
+
+test.describe.serial('S78 Public forms: mandatory phone (min 10 digits) + multi-document upload', () => {
+  // 2026-08-31 — reported live against a real personal resume-drop
+  // link: "add one more option to add upload for multiple documents
+  // like previous company offer letter, releviling letter, notice
+  // screenshot, salary slips and other documents... and make mobile
+  // number is mandatory with minimum 10 digit numbers". Both changes
+  // applied to BOTH sibling public forms (the job-less personal link
+  // and the job-specific link), matching this project's own
+  // established practice of keeping these two forms in sync.
+  //
+  // Documents are stored in the exact same candidate_documents 'other'
+  // bucket the internal Add Candidate form already established
+  // (2026-08-25), not a new named-slot concept — reuses
+  // _save_candidate_document_file() via a cross-module import, same
+  // convention as personal_links.py's existing resolve_default_add_
+  // stage import. Verified live during development (not just here):
+  // a genuine 2-file multipart submission (a real Python `requests`
+  // call, since this exact Playwright version's object-form `multipart`
+  // option doesn't support two values under the same field name) landed
+  // both files correctly, downloadable byte-identical through the real
+  // internal GET /candidates/{id}/documents + .../download endpoints a
+  // recruiter would actually use — this permanent suite covers the
+  // same real mechanism with one file per submission, a faithful,
+  // fully-automatable regression guard on the identical code path.
+  let token = '';
+  let personalLinkToken = '';
+  let jobLinkToken = '';
+  let reqId = '';
+  const stamp = Date.now();
+  const authAdmin = () => ({ Authorization: `Bearer ${token}` });
+  const cleanupEmails: string[] = [];
+
+  test.afterAll(async ({ request }) => {
+    for (const email of cleanupEmails) {
+      const listR = await request.get(`${API}/candidates?search=${encodeURIComponent(email)}&limit=5`, { headers: authAdmin() }).catch(() => null);
+      if (!listR) continue;
+      const found = (await listR.json()).items?.find((c: any) => c.email === email);
+      if (found) await request.delete(`${API}/candidates/${found.id}`, { headers: authAdmin() }).catch(() => {});
+    }
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: authAdmin() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a real recruiter\'s personal link + a real open requisition\'s job-specific link', async ({ request }) => {
+    token = await getApiToken(request);
+    const linkR = await request.get(`${API}/personal-links/me`, { headers: authAdmin() });
+    expect(linkR.status()).toBe(200);
+    personalLinkToken = (await linkR.json()).token;
+
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: authAdmin(),
+      data: { title: `S78 Doc Upload Test Role ${stamp}`, status: 'open', location: 'Remote', employment_type: 'fte' },
+    });
+    expect(reqR.status()).toBe(200);
+    reqId = (await reqR.json()).id;
+    const jlinkR = await request.get(`${API}/personal-links/job/${reqId}`, { headers: authAdmin() });
+    expect(jlinkR.status()).toBe(200);
+    jobLinkToken = (await jlinkR.json()).token;
+
+    expect(personalLinkToken && jobLinkToken && reqId).toBeTruthy();
+  });
+
+  test('BUG FIX: personal link rejects a missing phone with a clean 400, not a silent optional field', async ({ request }) => {
+    const r = await request.post(`${API}/public/personal-links/${personalLinkToken}/apply`, {
+      multipart: { full_name: `S78 No Phone ${stamp}`, email: `s78.nophone.${stamp}@qatest.example`, consent_given: 'true' },
+    });
+    expect(r.status()).toBe(400);
+    expect((await r.json()).detail).toContain('mobile number');
+  });
+
+  test('BUG FIX: personal link rejects a too-short phone (9 digits) with a clean 400', async ({ request }) => {
+    const r = await request.post(`${API}/public/personal-links/${personalLinkToken}/apply`, {
+      multipart: { full_name: `S78 Short Phone ${stamp}`, email: `s78.shortphone.${stamp}@qatest.example`, phone: '987654321', consent_given: 'true' },
+    });
+    expect(r.status()).toBe(400);
+    expect((await r.json()).detail).toContain('9 digit');
+  });
+
+  test('BUG FIX: job-specific link also requires a real 10-12 digit phone, not just the personal link', async ({ request }) => {
+    const missing = await request.post(`${API}/public/job-links/${jobLinkToken}/apply`, {
+      multipart: { full_name: `S78 Job No Phone ${stamp}`, email: `s78.jobnophone.${stamp}@qatest.example`, consent_given: 'true' },
+    });
+    expect(missing.status()).toBe(400);
+    const short = await request.post(`${API}/public/job-links/${jobLinkToken}/apply`, {
+      multipart: { full_name: `S78 Job Short Phone ${stamp}`, email: `s78.jobshortphone.${stamp}@qatest.example`, phone: '123', consent_given: 'true' },
+    });
+    expect(short.status()).toBe(400);
+  });
+
+  test('FEATURE: a valid 12-digit phone (91 country code) is accepted, and an uploaded "other" document lands in candidate_documents, downloadable through the real internal endpoint', async ({ request }) => {
+    const email = `s78.personaldoc.${stamp}@qatest.example`;
+    cleanupEmails.push(email);
+    const applyR = await request.post(`${API}/public/personal-links/${personalLinkToken}/apply`, {
+      multipart: {
+        full_name: `S78 Personal Doc Test ${stamp}`, email, phone: `9198765${String(stamp).slice(-5)}`, consent_given: 'true',
+        other_documents: { name: 'offer_letter.txt', mimeType: 'text/plain', buffer: Buffer.from('S78 fake offer letter content') },
+      },
+    });
+    expect(applyR.status()).toBe(200);
+    expect((await applyR.json()).applied).toBe(true);
+
+    const listR = await request.get(`${API}/candidates?search=${encodeURIComponent(email)}&limit=5`, { headers: authAdmin() });
+    const found = (await listR.json()).items.find((c: any) => c.email === email);
+    expect(found).toBeTruthy();
+    expect(found.phone.replace(/\D/g, '').length).toBeGreaterThanOrEqual(10);
+
+    const docsR = await request.get(`${API}/candidates/${found.id}/documents`, { headers: authAdmin() });
+    expect(docsR.status()).toBe(200);
+    const docs = (await docsR.json()).documents;
+    const otherDoc = docs.find((d: any) => d.document_type === 'other' && d.file_name === 'offer_letter.txt');
+    expect(otherDoc).toBeTruthy();
+
+    const dlR = await request.get(`${API}/candidates/documents/${otherDoc.id}/download`, { headers: authAdmin() });
+    expect(dlR.status()).toBe(200);
+    expect(await dlR.text()).toContain('S78 fake offer letter content');
+  });
+
+  test('FEATURE: job-specific link accepts a document upload too, alongside the real application it creates', async ({ request }) => {
+    const email = `s78.jobdoc.${stamp}@qatest.example`;
+    cleanupEmails.push(email);
+    const applyR = await request.post(`${API}/public/job-links/${jobLinkToken}/apply`, {
+      multipart: {
+        full_name: `S78 Job Doc Test ${stamp}`, email, phone: `9876${String(stamp).slice(-6)}`, consent_given: 'true',
+        other_documents: { name: 'relieving_letter.txt', mimeType: 'text/plain', buffer: Buffer.from('S78 fake relieving letter content') },
+      },
+    });
+    expect(applyR.status()).toBe(200);
+
+    const listR = await request.get(`${API}/candidates?search=${encodeURIComponent(email)}&limit=5`, { headers: authAdmin() });
+    const found = (await listR.json()).items.find((c: any) => c.email === email);
+    expect(found).toBeTruthy();
+
+    const docsR = await request.get(`${API}/candidates/${found.id}/documents`, { headers: authAdmin() });
+    const docs = (await docsR.json()).documents;
+    expect(docs.some((d: any) => d.document_type === 'other' && d.file_name === 'relieving_letter.txt')).toBe(true);
+
+    // Confirm the real application on the target requisition also landed
+    // — the piece that distinguishes the job link from the job-less one.
+    // The pipeline endpoint returns { stage_key: [applications...] },
+    // not a flat list — flatten across every stage before searching.
+    const pipelineR = await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: authAdmin() });
+    const pipeline = await pipelineR.json();
+    const allApps = Object.values(pipeline).flat() as any[];
+    expect(allApps.some((a: any) => a.candidate_id === found.id)).toBe(true);
+  });
+
+  test('real headless UI: both public forms mark Phone mandatory and render a real multi-file "Additional Documents" section naming the requested document types', async ({ page }) => {
+    for (const [url, waitText] of [[`/link/${personalLinkToken}`, 'Send your resume'], [`/apply/${jobLinkToken}`, 'Apply for']] as const) {
+      await page.goto(`${BASE}${url}`);
+      await expect(page.locator('body')).not.toContainText('Loading…', { timeout: 15000 });
+      await page.waitForSelector(`text=${waitText}`, { timeout: 15000 });
+      const bodyText = (await page.locator('body').innerText()).toLowerCase();
+      expect(bodyText).toContain('phone *');
+      expect(bodyText).toContain('additional documents');
+      expect(bodyText).toContain('offer letter');
+      expect(bodyText).toContain('relieving letter');
+      expect(bodyText).toContain('notice period screenshot');
+      expect(bodyText).toContain('salary slips');
+      const fileInput = page.locator('input[type="file"][multiple]');
+      expect(await fileInput.count()).toBeGreaterThan(0);
+      expect(await fileInput.first().getAttribute('multiple')).not.toBeNull();
+
+      // A short/invalid phone must keep Submit disabled on both forms.
+      const phoneInput = page.locator('input[placeholder="10-digit mobile number"]');
+      await phoneInput.fill('12345');
+      const submitBtn = page.getByRole('button', { name: /Submit Resume/i });
+      expect(await submitBtn.isDisabled()).toBe(true);
+    }
+  });
+});
