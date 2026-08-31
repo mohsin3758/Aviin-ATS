@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 import db
 import events
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 from schemas import RequisitionCreate, RequisitionUpdate
 from routers.job_sharing import auto_distribute_on_open
 from services.candidate_rediscovery import scan_requisition_for_rediscovery
@@ -162,7 +162,20 @@ async def list_requisitions(
 
 
 @router.post("")
-async def create_requisition(body: RequisitionCreate, actor: Actor = Depends(require_permission("requisitions", "create"))):
+async def create_requisition(
+    body: RequisitionCreate,
+    # REAL, hard role gate (2026-09-01, explicit ask): "recruiter should not
+    # have option or permission to add the requirement... only for KAE,KAM
+    # or admin only". require_permission("requisitions","create") alone is
+    # the soft-launch/log-only system (permission_enforcement_enabled is
+    # currently false for this tenant, per an earlier decision) — real
+    # enforcement here needs the same always-on require_role() pattern used
+    # elsewhere for genuinely consequential, real restrictions (e.g. the
+    # Submit-to-Client endpoints). Kept alongside require_permission below
+    # (not replaced) so the soft-launch audit trail stays populated too.
+    actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
+    _perm: Actor = Depends(require_permission("requisitions", "create")),
+):
     # Real multi-select (2026-08-24): employment_types/work_modes are the
     # new source of truth when given; the legacy scalar employment_type/
     # work_mode columns (still read by several existing display sites -

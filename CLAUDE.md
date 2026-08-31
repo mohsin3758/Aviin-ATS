@@ -17655,3 +17655,64 @@ tests) passed 94/94 — zero regressions. Zero-token audit: `CONFIRMED
 CLEAN` (430 files, 0 external API refs). All throwaway test data
 (candidates, requisitions, users) cleaned up via real APIs after every
 check, confirmed zero residue.
+
+## Requisition creation restricted to admin/manager/KAE/KAM, 2026-09-01
+User's explicit ask, one of 3 items in the same message: "recruiter
+should not have option or permission to add the requirement and add
+requirement features only for KAE,KAM or admin only not for others."
+Built as a real, non-bypassable server-side restriction, matching the
+same layered pattern this project already uses for genuinely
+consequential actions (e.g. Submit to Client) — never just a hidden
+frontend button.
+
+`requisitions.py`'s `create_requisition()` gained
+`Depends(require_role("admin","super_admin","manager","kae","kam"))`
+as its primary actor dependency, kept alongside the existing
+`require_permission("requisitions","create")` (the soft-launch/log-only
+system, currently non-blocking for this tenant) as a secondary `_perm`
+dependency so the audit-log trail stays populated regardless.
+"Manager" was included alongside the user's named KAE/KAM/admin —
+disclosed as my own interpretive extension, matching this same
+session's own precedent (the stage-move-limit fix) of folding manager
+into every genuinely consequential role gate on this codebase.
+`require_role_or_trusted_internal` was deliberately NOT used here — this
+is a real, deliberate human action with no legitimate internal/
+automated caller (confirmed via grep — no scheduler job or webhook
+creates requisitions).
+
+Frontend (`requisitions/page.tsx`): both real "+ Add Requirement"
+occurrences (the main toolbar button and the empty-state prompt) are
+now wrapped in a `canCreateReq` check — a new state, defaulting to
+`false` (hidden) and set true only after mount once the real role is
+read from the JWT, matching this project's own established SSR-safe
+deferred-`getTokenPayload()` convention (avoids a flash of the button
+for a recruiter, and avoids a hydration mismatch between server and
+client first paint). The empty-state's copy also changes for a
+non-privileged role — "Ask an admin, KAE, or KAM to add a client
+requirement..." instead of an unusable "Add your first..." prompt.
+
+Verified for real end-to-end, not code review: a real throwaway
+recruiter's `POST /requisitions` call cleanly 403s with a specific
+error naming the required role set, while a real throwaway KAE and
+admin both succeed — confirmed via direct API calls, cleanup via the
+real DELETE/deactivate/purge endpoints after (the KAE correctly stayed
+deactivated-not-purged by the existing force-purge safety net once it
+had genuine activity — one real created requisition — on record,
+matching established precedent throughout this project). A real
+headless-browser pass confirmed the actual live page: admin sees the
+toolbar button (screenshot-confirmed), the same throwaway recruiter
+sees zero "Add Requirement" buttons anywhere on the page (0 in the DOM,
+not just hidden via CSS) with the corrected empty-state copy and zero
+console errors — and, incidentally, correctly sees 0 open requisitions
+at all, confirming the separate, pre-existing `job_visibility_scope`
+feature (2026-08-09) is independently still working correctly for a
+recruiter with no assignments.
+
+New permanent "S81 Requisition creation restricted to admin/manager/
+KAE/KAM" suite (3 tests) added to `qa_automation.spec.ts`, passed 3/3
+clean. Broader regression sweep across every suite touching
+`requisitions.py`/`requisitions/page.tsx`
+(S1/S22/S47/S48/S60/S80/S81, 31 tests) passed 30/31 — 1 pre-existing
+skip (Ollama check, unrelated), 0 failed. Zero-token audit: `CONFIRMED
+CLEAN` (431 files, 0 external API refs). All throwaway test data
+(2 users, 2 requisitions) cleaned up via real APIs after every check.

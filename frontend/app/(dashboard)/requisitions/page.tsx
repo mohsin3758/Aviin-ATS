@@ -2,6 +2,7 @@
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { getTokenPayload } from '@/lib/auth';
 import { Modal, FormField, FormRow, SectionDivider, FormActions } from '@/components/ui/Modal';
 import { Plus, Search, Briefcase, MapPin, Users, Eye, Edit, Trash2, Calendar, DollarSign, Clock , Link2, Copy, LayoutGrid, Grid2x2, List, Table2, X, ArrowLeft, Download, Mail, Phone, ExternalLink, Star, CheckCircle } from 'lucide-react';
 
@@ -1355,6 +1356,21 @@ function ViewSwitcher({ mode, onChange }: { mode: ViewMode; onChange: (m: ViewMo
 }
 
 function RequisitionsPageInner() {
+  // Real, hard restriction (2026-09-01, explicit ask): "recruiter should
+  // not have option or permission to add the requirement... only for
+  // KAE, KAM or admin only". Real enforcement is server-side
+  // (backend/routers/requisitions.py's create_requisition now requires
+  // this exact role set) — this is purely the matching client-side UX,
+  // hiding the button rather than showing one that would only 403.
+  // getTokenPayload() reads localStorage, unavailable during SSR —
+  // defaults to false (hidden) so a recruiter never sees a flash of a
+  // button that's about to disappear, matching this file's own
+  // deferred-role-read convention used elsewhere (canManage, isRecruiter
+  // in pipeline/page.tsx).
+  const [canCreateReq, setCanCreateReq] = useState(false);
+  useEffect(() => {
+    setCanCreateReq(['admin', 'super_admin', 'manager', 'kae', 'kam'].includes(getTokenPayload()?.role || ''));
+  }, []);
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editId, setEditId] = useState<string | null>(null);
@@ -1695,13 +1711,15 @@ function RequisitionsPageInner() {
             </button>
           )}
           <ViewSwitcher mode={viewMode} onChange={setViewMode} />
-          <button onClick={openCreate} style={{
-            display: 'flex', alignItems: 'center', gap: '6px',
-            padding: '9px 18px', background: '#1e40af', color: 'white',
-            border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer',
-          }}>
-            <Plus size={14} /> Add Requirement
-          </button>
+          {canCreateReq && (
+            <button onClick={openCreate} data-testid="add-requirement-btn" style={{
+              display: 'flex', alignItems: 'center', gap: '6px',
+              padding: '9px 18px', background: '#1e40af', color: 'white',
+              border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer',
+            }}>
+              <Plus size={14} /> Add Requirement
+            </button>
+          )}
         </div>
       </div>
 
@@ -1734,14 +1752,18 @@ function RequisitionsPageInner() {
             {search ? `No jobs matching "${search}"` : 'No requirements yet'}
           </h3>
           <p style={{ fontSize: '13px', color: '#9ca3af', marginBottom: '24px', maxWidth: '320px', margin: '0 auto 24px' }}>
-            Add your first client requirement to start sourcing candidates
+            {canCreateReq
+              ? 'Add your first client requirement to start sourcing candidates'
+              : 'Ask an admin, KAE, or KAM to add a client requirement to start sourcing candidates'}
           </p>
-          <button onClick={openCreate} style={{
-            padding: '10px 24px', background: '#1e40af', color: 'white',
-            border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer',
-          }}>
-            + Add Requirement
-          </button>
+          {canCreateReq && (
+            <button onClick={openCreate} data-testid="add-requirement-btn-empty" style={{
+              padding: '10px 24px', background: '#1e40af', color: 'white',
+              border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer',
+            }}>
+              + Add Requirement
+            </button>
+          )}
         </div>
       ) : viewMode === 'table' ? (
         <div data-testid="req-view-content">

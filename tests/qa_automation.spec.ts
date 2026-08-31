@@ -10953,3 +10953,95 @@ test.describe.serial('S80 Recruiter stage-move limit: Interested/NDA/Screened on
     expect(stageAfter).toBe(stageBefore);
   });
 });
+
+test.describe.serial('S81 Requisition creation restricted to admin/manager/KAE/KAM — recruiter cannot Add Requirement', () => {
+  // 2026-09-01 — explicit ask, from a real live Jobs & Requisitions
+  // screenshot: "recruiter should not have option or permission to add
+  // the requirement and add requirement features only for KAE,KAM or
+  // admin only not for others". Real, server-side enforcement (never
+  // just a hidden button) added to requisitions.py's POST /requisitions
+  // via require_role("admin","super_admin","manager","kae","kam") —
+  // layered on top of, not replacing, the existing soft-launch
+  // require_permission("requisitions","create") so the audit-log trail
+  // still populates. Frontend hides both "+ Add Requirement" occurrences
+  // (main toolbar + empty-state prompt) for anyone outside that role set.
+  let token = '';
+  let recruiterUserId = '';
+  let kaeUserId = '';
+  let recruiterToken = '';
+  let kaeToken = '';
+  let recruiterReqId = ''; // should never actually get created
+  let kaeReqId = '';
+  const stamp = Date.now();
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const recAuth = () => ({ Authorization: `Bearer ${recruiterToken}` });
+  const kaeAuth = () => ({ Authorization: `Bearer ${kaeToken}` });
+
+  test.afterAll(async ({ request }) => {
+    if (kaeReqId) await request.delete(`${API}/requisitions/${kaeReqId}`, { headers: auth() }).catch(() => {});
+    if (recruiterReqId) await request.delete(`${API}/requisitions/${recruiterReqId}`, { headers: auth() }).catch(() => {});
+    for (const uid of [recruiterUserId, kaeUserId]) {
+      if (!uid) continue;
+      await request.patch(`${API}/users/${uid}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${uid}/purge?force=true`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('setup: real admin token + throwaway recruiter and KAE logins', async ({ request }) => {
+    token = await getApiToken(request);
+
+    const ru = await request.post(`${API}/users`, {
+      headers: auth(),
+      data: { email: `qa.s81.rec.${stamp}@test.com`, full_name: `QA S81 Recruiter ${stamp}`, role: 'recruiter', password: 'TestPass123!' },
+    });
+    expect(ru.ok()).toBeTruthy();
+    recruiterUserId = (await ru.json()).id;
+    const rLogin = await (await request.post(`${API}/auth/login`, { data: { email: `qa.s81.rec.${stamp}@test.com`, password: 'TestPass123!' } })).json();
+    recruiterToken = rLogin.access_token;
+
+    const ku = await request.post(`${API}/users`, {
+      headers: auth(),
+      data: { email: `qa.s81.kae.${stamp}@test.com`, full_name: `QA S81 Kae ${stamp}`, role: 'kae', password: 'TestPass123!' },
+    });
+    expect(ku.ok()).toBeTruthy();
+    kaeUserId = (await ku.json()).id;
+    const kLogin = await (await request.post(`${API}/auth/login`, { data: { email: `qa.s81.kae.${stamp}@test.com`, password: 'TestPass123!' } })).json();
+    kaeToken = kLogin.access_token;
+
+    expect(recruiterToken && kaeToken).toBeTruthy();
+  });
+
+  test('BUG FIX: a real recruiter is cleanly 403d creating a requisition; a KAE and admin both succeed', async ({ request }) => {
+    const payload = { title: `S81 ReqGate Test Role ${stamp}`, status: 'open', employment_type: 'contract' };
+
+    const recResp = await request.post(`${API}/requisitions`, { headers: recAuth(), data: payload });
+    expect(recResp.status()).toBe(403);
+    const recBody = await recResp.json();
+    expect(recBody.detail).toContain('Requires role');
+
+    const kaeResp = await request.post(`${API}/requisitions`, { headers: kaeAuth(), data: { ...payload, title: `S81 ReqGate KAE Role ${stamp}` } });
+    expect(kaeResp.ok()).toBeTruthy();
+    kaeReqId = (await kaeResp.json()).id;
+
+    const adminResp = await request.post(`${API}/requisitions`, { headers: auth(), data: { ...payload, title: `S81 ReqGate Admin Role ${stamp}` } });
+    expect(adminResp.ok()).toBeTruthy();
+    recruiterReqId = (await adminResp.json()).id; // reuse var for cleanup, admin-created
+  });
+
+  test('real headless UI: recruiter sees zero "Add Requirement" buttons anywhere on the page; admin sees it in the toolbar', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', `qa.s81.rec.${stamp}@test.com`);
+    await page.fill('input[type="password"]', 'TestPass123!');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    const consoleErrors: string[] = [];
+    page.on('pageerror', (e) => consoleErrors.push(e.message));
+    await page.goto('/requisitions');
+    await page.waitForSelector('text=Jobs & Requisitions', { timeout: 15000 });
+    await page.waitForTimeout(1000);
+    expect(await page.locator('[data-testid="add-requirement-btn"]').count()).toBe(0);
+    expect(await page.locator('[data-testid="add-requirement-btn-empty"]').count()).toBe(0);
+    expect(consoleErrors).toEqual([]);
+  });
+});
