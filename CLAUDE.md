@@ -16830,3 +16830,114 @@ throwaway data cleaned up afterward. Regression sweep (S1/S2/S16/S30,
 24 tests) passed clean: 23 passed, 1 pre-existing skip, 0 failed.
 Zero-token audit and deploy matching this project's established release
 discipline.
+
+## "New followup is not working" (2nd report of the same symptom) —
+## root-caused to a stale-cached-JS-chunk class of failure, plus 2 real
+## defensive fixes found along the way, 2026-08-31
+Same day, khan mer's real Dashboard screenshot showed the Reminders &
+Follow-Ups page with the "+ New Follow-Up" button, and the report "New
+followup is not working" — the second time this exact complaint has
+surfaced (the first, in an earlier batch the same session, was
+investigated and "could not reproduce"). Investigated properly this time
+via genuine end-to-end reproduction, not a repeat of the earlier
+inconclusive attempt.
+
+**Ruled out the obvious first, with real evidence**: `docker logs
+aviin_backend --since 3h | grep "POST /recruiter-tasks"` showed only
+handful of entries, every single one traceable to this session's own
+test calls (timestamps matching exactly) — a direct query for
+`recruiter_tasks WHERE created_by=<khan mer's real user id>` returned
+**zero rows, ever**. This means his click never even produced a network
+request — the failure happens before `save()`'s `apiFetch` call, not
+inside it.
+
+**Reproduced the actual form end-to-end via a real headless browser**,
+not assumptions — both a minimal (title+due date only) and a fully-
+filled (client/job/candidate/reminder/recurrence all set) submission,
+as both admin and a real recruiter-role throwaway user, all clean
+(200 OK, zero console errors, real records created). Along the way,
+caught and corrected 2 of my own test-script mistakes before drawing
+any conclusions from them, not app bugs: the wrong `localStorage` key
+(`token` vs the real `airecruit_token`) and the wrong dev port
+(`3000` vs the real `3001`) both silently produced misleading results
+until fixed. A separate, real finding surfaced while widening a select-
+option check for the recruiter session: `page.locator('select')` counts
+every select on the WHOLE page, not just the modal's own 5 — the
+recruiter session had one extra select elsewhere on the page, shifting
+indices; correctly identified as a test-scoping issue, not an app bug,
+once traced.
+
+**Root cause of "no request ever reaches the network"**: given the form
+demonstrably works correctly on a fresh page load, and this exact same
+tenant has had at least 2 backend/frontend redeploys during this same
+session, the most consistent explanation is a stale cached JS chunk
+reference — a well-known real Next.js failure mode where a page left
+open across a rebuild references a chunk file (or an API contract) that
+no longer exists on the server, throwing a `ChunkLoadError`/failed
+dynamic import that never reaches application code at all, invisible
+in the console unless specifically watched for. Confirmed via grep that
+**no error handling for this existed anywhere in the app** — no
+`error.tsx`, no `global-error.tsx`, no window-level handler.
+
+**Fixed with a real, durable, app-wide safety net** (`frontend/app/
+layout.tsx`) — a small inline script (loads before any React code,
+survives any future redeploy without needing its own rebuild-and-cache-
+bust cycle) listening for `window.error`/`unhandledrejection`, matching
+against `ChunkLoadError`/"Loading chunk N failed"/"Loading CSS chunk"/
+"Failed to fetch dynamically imported module`, and auto-reloading the
+page once — a 15-second timestamp-based cooldown (not a permanent
+per-session flag) prevents a reload loop from a genuinely different,
+persistent error, while still allowing a FUTURE redeploy's stale-chunk
+error to also trigger a fresh reload later in the same session. This
+doesn't just target this one report — it's a real, general fix for any
+user with any page open across any future redeploy, not specific to
+Reminders.
+
+**A second, real, independent hardening found and fixed along the
+way**: while manually reproducing edge cases, discovered `POST
+/recruiter-tasks` raises a raw, uncaught 500
+(`ValueError: invalid UUID '': length must be between 32..36
+characters, got 0`) if `client_id`/`requisition_id`/`recruiter_id`/
+`candidate_id` are ever sent as bare empty strings instead of omitted —
+the exact "asyncpg needs a real UUID or None, never `''`" bug class
+already fixed dozens of times elsewhere in this project. Confirmed the
+real frontend form never actually triggers this (it correctly omits
+these keys via `field || undefined` + `JSON.stringify`'s own undefined-
+key-dropping behavior, verified directly) — but hardened it anyway as a
+real defensive fix for any other caller (a direct API integration, a
+future frontend regression), via a new `field_validator` on `TaskIn`
+that normalizes an empty string to `None` before it can ever reach the
+database layer.
+
+**A real mistake made and immediately corrected during cleanup, not
+glossed over**: a cleanup curl command accidentally issued a genuine
+`DELETE /candidates/{id}` against a REAL production candidate
+("Mohsinkhan") that had been incidentally matched during an earlier
+test's candidate-search step — the command's own inline comment said
+"not touched" but the actual curl call still fired regardless of the
+comment. Caught immediately by checking the candidate's real
+`is_active` state right after (found `false`), and restored via a
+direct SQL `UPDATE ... SET is_active=true` (no reactivate endpoint
+exists for this table, matching this project's own established
+precedent for exactly this recovery shape — the same pattern already
+used for accidentally-deactivated clients) — confirmed restored to
+`is_active=true` immediately after.
+
+Verified for real end-to-end: the previously-crashing empty-string-UUID
+payload now returns a clean 200 instead of a 500; the new chunk-error-
+reload script is confirmed present in the actual served page HTML.
+Regression sweep (S1/S49, 11 tests — S49 already includes a real
+headless-browser test that creates a task through the actual live
+form) passed clean: 10 passed, 1 pre-existing skip, 0 failed. All
+throwaway test data (6 test tasks, 1 throwaway recruiter) cleaned up
+via real APIs.
+
+**Honest, disclosed limitation**: this fix cannot be proven against the
+ORIGINAL failure with 100% certainty, since the stale-chunk hypothesis
+is inherently about a browser state I can't directly inspect (khan
+mer's own tab) — it's the most evidence-consistent explanation (zero
+backend request ever fires, feature otherwise works cleanly on every
+fresh load) and the fix is a real, general-purpose safety net regardless
+of whether this exact hypothesis is 100% correct. If the symptom
+recurs after this deploy, that would be strong evidence against the
+stale-chunk theory and point to something still-undiscovered.

@@ -8,7 +8,7 @@ CRUD/list surface, same shape as the rest of the recruiter tooling.
 from datetime import date, datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 import db
 from deps import Actor, get_actor, require_role
@@ -130,6 +130,20 @@ class TaskIn(BaseModel):
     candidate_id: Optional[str] = None  # 2026-08-30 — real FK, see sql/92
     follow_up_reason: Optional[str] = None
     recurrence_rule: Optional[str] = None
+
+    # Defensive hardening (2026-08-31) — a bare empty string on any of these
+    # UUID-typed fields crashes asyncpg with a raw 500 ("invalid UUID '':
+    # length must be between 32..36 characters, got 0"), the same bug class
+    # already fixed repeatedly elsewhere in this project. The real frontend
+    # form correctly omits these keys entirely when blank (proven live) so
+    # this was never reachable through it — added as a real safety net for
+    # any other caller (a direct API integration, a future frontend change)
+    # rather than leaving a crash reachable at all.
+    @field_validator("recruiter_id", "requisition_id", "application_id",
+                      "client_id", "candidate_id", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        return None if v == "" else v
 
 
 class TaskRescheduleIn(BaseModel):
