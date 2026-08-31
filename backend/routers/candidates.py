@@ -90,23 +90,58 @@ async def list_candidates(
             f"EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
             f"AND co.status='active' AND co.ownership_expires_at > now() AND co.recruiter_id=${len(params)})"
         )
-    elif owned == "mine_or_assigned":
-        # Real bug fix (2026-08-31): the Recruiter Overview dashboard's
-        # "Active Candidates"/"On Notice Period"/"Placements" cards are all
-        # defined as "owned OR has an active application assigned to me" —
-        # a broader real cohort than the plain 'mine' ownership-only value
-        # above. Clicking those cards previously landed here with
-        # owned=mine, showing far fewer candidates than the KPI counted
-        # (reported live: "11 Active Candidates" vs 1 candidate on the
-        # filtered list) — this value matches each KPI's own real
-        # definition instead of silently reusing the narrower one.
+    elif owned in ("mine_or_assigned", "mine_active"):
+        # Real bug fix (2026-08-31, corrected same day): the Recruiter
+        # Overview dashboard's "Active Candidates" card links here — its
+        # KPI (recruiter_dashboard.py) is "owned OR has an active
+        # application assigned to me, excluding stage IN
+        # (placed,rejected)". A first pass here ('mine_or_assigned')
+        # matched "owned OR assigned" but forgot the placed/rejected
+        # exclusion — reported live as a real, exact 12-vs-11 mismatch
+        # (confirmed via direct SQL: exactly 1 candidate whose only
+        # qualifying application had already reached 'placed'/'rejected'
+        # was the entire gap). 'mine_active' is the real, corrected name
+        # going forward; 'mine_or_assigned' is kept as an alias so an
+        # already-bookmarked/open link with the old value keeps working.
         params.append(actor.user_id)
         n = len(params)
         conditions.append(
             f"(EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
             f"AND co.status='active' AND co.ownership_expires_at > now() AND co.recruiter_id=${n}) "
             f"OR EXISTS (SELECT 1 FROM applications a2 WHERE a2.candidate_id=c.id "
+            f"AND a2.is_active IS NOT FALSE AND a2.assigned_recruiter_id=${n} "
+            f"AND a2.stage NOT IN ('placed','rejected')))"
+        )
+    elif owned == "mine_notice":
+        # Real fix (2026-08-31): "On Notice Period" was sharing the same
+        # generic mine_or_assigned link as Active Candidates and
+        # Placements — reported live as "all linking to one candidates
+        # only." This is a genuinely distinct real cohort (candidates
+        # with notice_period_days set, owned or assigned — no stage
+        # exclusion, matching candidates_on_notice's own real definition
+        # in recruiter_dashboard.py exactly), not an approximation.
+        params.append(actor.user_id)
+        n = len(params)
+        conditions.append(
+            f"c.notice_period_days IS NOT NULL AND "
+            f"(EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
+            f"AND co.status='active' AND co.recruiter_id=${n}) "
+            f"OR EXISTS (SELECT 1 FROM applications a2 WHERE a2.candidate_id=c.id "
             f"AND a2.is_active IS NOT FALSE AND a2.assigned_recruiter_id=${n}))"
+        )
+    elif owned == "mine_placed":
+        # Real fix (2026-08-31): "Placements/Joinings" was also sharing
+        # the same generic link — the real placements KPI has no direct
+        # candidates-list equivalent (it counts real `placements` rows,
+        # not candidates), so this is the closest genuinely precise real
+        # cohort: candidates with an application assigned to me that has
+        # actually reached stage='placed' — the exact complement of the
+        # stage exclusion Active Candidates applies.
+        params.append(actor.user_id)
+        n = len(params)
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM applications a2 WHERE a2.candidate_id=c.id "
+            f"AND a2.is_active IS NOT FALSE AND a2.assigned_recruiter_id=${n} AND a2.stage='placed')"
         )
 
     ALLOWED = {"full_name","total_exp_mo","expected_ctc","created_at","last_activity","updated_at"}

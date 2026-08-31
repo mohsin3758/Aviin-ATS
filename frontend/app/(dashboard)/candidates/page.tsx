@@ -1428,7 +1428,9 @@ export default function CandidatesPage() {
               <select data-testid="owned-filter" value={ownedFilter} onChange={e=>setOwnedFilter(e.target.value)} style={{width:'100%',padding:'7px 10px',border:'1px solid #e2e8f0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}>
                 <option value="">All candidates</option>
                 <option value="mine">My Candidates (owned by me)</option>
-                <option value="mine_or_assigned">My Candidates (owned or assigned to me)</option>
+                <option value="mine_active">My Active Candidates (owned or assigned, excl. placed/rejected)</option>
+                <option value="mine_placed">My Placed Candidates</option>
+                <option value="mine_notice">My Candidates on Notice Period</option>
                 <option value="unowned">Unowned</option>
                 <option value="active">Actively owned (by anyone)</option>
               </select></div>

@@ -16780,3 +16780,53 @@ clean after the cooldown window given the real end-to-end proof already
 gathered above via direct data verification, and given none of today's
 changes touch any code path S48/S53 exercise beyond the already-proven
 `candidates.py` filter.
+
+## Same-day follow-up: the dashboard fix above was still off by 1, plus 2
+## KPIs were both quietly linking to the wrong destination, 2026-08-31
+User re-reported, with fresh screenshots, that "Active Candidates" showed
+11 on the Dashboard but 12 on the linked Candidates page, and that
+Placements/On Notice Period both landed on the exact same "my candidates"
+view as Active Candidates — pointing out these are 3 different real
+numbers all funneling into one generic destination.
+
+**Root-caused the 11-vs-12 gap precisely, not guessed**: the real
+`active_candidates` KPI (`recruiter_dashboard.py`) excludes any candidate
+whose only qualifying application has already reached `stage IN
+('placed','rejected')` — the `mine_or_assigned` candidates-list filter
+built the day before never replicated that exclusion. Confirmed via
+direct SQL against khan mer's real data: exactly 1 candidate accounted
+for the entire 12-vs-11 gap (their one assigned application was already
+`placed`). Fixed `owned=mine_or_assigned` (renamed `mine_active`, old
+name kept as an alias) to add the same `stage NOT IN ('placed',
+'rejected')` exclusion, making it byte-exact with the KPI.
+
+**Built 2 more genuinely distinct, precise filters** rather than
+continuing to share one generic destination across 3 different KPIs:
+`owned=mine_notice` (candidates with `notice_period_days` set, owned or
+assigned — matches `candidates_on_notice`'s real definition exactly, no
+stage exclusion) and `owned=mine_placed` (candidates with an application
+assigned to me that's actually reached `stage='placed'` — the closest
+real candidate-list proxy for the Placements KPI, which itself counts
+real `placements` table rows rather than a stage value, so this is
+disclosed as the closest precise cohort rather than a byte-exact
+`placements` count). Wired into `RecruiterOverview.tsx`: Active
+Candidates/Candidates in Pipeline/Total Submissions → `mine_active`;
+On Notice Period → `mine_notice`; Placements → `mine_placed`. Added
+both new values to the Candidates page's OWNERSHIP dropdown too.
+
+Verified for real end-to-end, not code review: re-confirmed the exact
+1-candidate gap via direct SQL before touching any code. Built a fresh
+throwaway recruiter with 3 deliberately distinct real candidates — one
+active-assigned, one assigned-but-already-placed, one assigned-with-a-
+real-notice-period — and confirmed all 3 new filters return exactly the
+right, non-overlapping sets: `mine_active` returned the active + notice
+candidates (2) and correctly excluded the placed one; `mine_placed`
+returned exactly the placed one; `mine_notice` returned exactly the
+notice-period one — each cross-checked directly against
+`/recruiter/my-overview`'s own live numbers (2/0/1, matching exactly;
+`placements: 0` was correctly honest too, since no real `placements`
+table row was created in this test, only an application stage). All
+throwaway data cleaned up afterward. Regression sweep (S1/S2/S16/S30,
+24 tests) passed clean: 23 passed, 1 pre-existing skip, 0 failed.
+Zero-token audit and deploy matching this project's established release
+discipline.
