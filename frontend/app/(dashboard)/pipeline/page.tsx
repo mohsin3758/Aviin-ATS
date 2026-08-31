@@ -12,7 +12,7 @@ import {
   Activity, Download, ExternalLink, ArrowRight, Inbox, LayoutGrid,
   KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
   FileSignature, Upload, ShieldCheck, Copy, CheckSquare, Printer,
-  Columns3, GripVertical, Trash2, Building2, Eye, EyeOff,
+  Columns3, GripVertical, Trash2, Building2, Eye, EyeOff, ArrowLeft,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -2467,7 +2467,15 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [targetStage, setTargetStage] = useState(defaultStage || '');
-  const { data: matchData, loading } = useFetch<any>(`/requisitions/${jobId}/match-candidates?limit=50`);
+  // 2026-09-01 — reported live (this exact modal, compared against the
+  // already-fixed Requisitions-page "AI Matched Candidates" modal, which
+  // has View Profile + matched(blue)/missing(red) skill chips + bulk
+  // select-all): those same 3 features were missing here. limit bumped
+  // 50 -> 300 to match that modal's own real ranking-pool ceiling —
+  // total_matches was always available from this same endpoint, this
+  // modal just never asked for more than the first 50.
+  const [previewCandidateId, setPreviewCandidateId] = useState<string | null>(null);
+  const { data: matchData, loading } = useFetch<any>(`/requisitions/${jobId}/match-candidates?limit=300`);
   const matches: any[] = Array.isArray(matchData?.matches) ? matchData.matches : [];
 
   const alreadyIn = new Set<string>(
@@ -2482,6 +2490,7 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
     c.current_employer?.toLowerCase().includes(q) ||
     c.skills?.some((s: string) => s.toLowerCase().includes(q))
   );
+  const selectableItems = items.filter((c: any) => !alreadyIn.has(c.candidate_id));
 
   function toggle(id: string) {
     setSelected(prev => {
@@ -2518,6 +2527,16 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
           </div>
           <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8' }}><X size={14} /></button>
         </div>
+        {previewCandidateId ? (
+          <AddCandidatePreviewPanel
+            candidateId={previewCandidateId}
+            isIn={alreadyIn.has(previewCandidateId)}
+            isSelected={selected.has(previewCandidateId)}
+            onToggle={() => toggle(previewCandidateId)}
+            onBack={() => setPreviewCandidateId(null)}
+          />
+        ) : (
+        <>
         <div style={{ padding: '12px 18px 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: '7px 10px' }}>
             <Search size={13} color="#94A3B8" />
@@ -2532,22 +2551,48 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
               {(stages || []).map((s: any) => <option key={s.key} value={s.key}>{s.label}</option>)}
             </select>
           </div>
+          {/* Select-all-visible (excludes candidates already in the
+              pipeline, which can never be selected here) — same
+              real bulk-selection convention already established on the
+              Requisitions-page AI Match modal. */}
+          {selectableItems.length > 0 && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, cursor: 'pointer', fontSize: 11, fontWeight: 600, color: '#64748B' }}>
+              <input type="checkbox"
+                checked={selectableItems.every((c: any) => selected.has(c.candidate_id))}
+                onChange={e => {
+                  setSelected(prev => {
+                    const next = new Set(prev);
+                    selectableItems.forEach((c: any) => e.target.checked ? next.add(c.candidate_id) : next.delete(c.candidate_id));
+                    return next;
+                  });
+                }} />
+              Select all {selectableItems.length} shown{search ? ' (matching filter)' : ''}
+            </label>
+          )}
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '10px 18px' }}>
           {loading && <div style={{ textAlign: 'center', color: '#94A3B8', fontSize: 12, padding: 20 }}>Scoring candidates against this JD…</div>}
           {!loading && items.length === 0 && <div style={{ textAlign: 'center', color: '#CBD5E1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>No matching candidates found</div>}
-          {items.map((c: any) => {
+          {items.map((c: any, idx: number) => {
             const isIn = alreadyIn.has(c.candidate_id);
             const isSelected = selected.has(c.candidate_id);
             return (
-              <label key={c.candidate_id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 8px', borderRadius: 10, cursor: isIn ? 'default' : 'pointer', background: isSelected ? '#EFF6FF' : 'transparent', opacity: isIn ? 0.55 : 1, marginBottom: 2 }}>
-                <input type="checkbox" checked={isSelected} disabled={isIn} onChange={() => toggle(c.candidate_id)} style={{ marginTop: 3 }} />
+              <div key={c.candidate_id} onClick={() => !isIn && toggle(c.candidate_id)}
+                data-testid={isIn ? 'addcand-row-in-pipeline' : 'addcand-row-addable'}
+                style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 8px', borderRadius: 10, cursor: isIn ? 'default' : 'pointer', background: isSelected ? '#EFF6FF' : 'transparent', opacity: isIn ? 0.55 : 1, marginBottom: 2 }}>
+                <div style={{ width: 18, flexShrink: 0, textAlign: 'right', fontSize: 10, fontWeight: 700, color: '#94A3B8', marginTop: 12 }}>{idx + 1}</div>
+                <input type="checkbox" checked={isSelected} disabled={isIn} onChange={() => toggle(c.candidate_id)} onClick={e => e.stopPropagation()} style={{ marginTop: 3 }} />
                 <div style={{ width: 40, height: 40, borderRadius: '50%', border: `2px solid ${scoreColor(c.fit_score)}`, background: scoreBg(c.fit_score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 900, color: scoreColor(c.fit_score), flexShrink: 0 }}>
                   {Math.round(c.fit_score)}%
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{c.full_name}</span>
+                    <button onClick={e => { e.stopPropagation(); setPreviewCandidateId(c.candidate_id); }}
+                      title="Preview full profile & resume before adding — stays on this list"
+                      style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontWeight: 700, color: '#2563EB', cursor: 'pointer', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 999, padding: '1px 7px' }}>
+                      <Eye size={9} /> View Profile
+                    </button>
                     {isIn && (
                       <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>already in pipeline</span>
                     )}
@@ -2557,7 +2602,17 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
                     {c.total_exp_mo > 0 && ` · ${gx(c.total_exp_mo)} exp`}
                     {c.location && ` · ${c.location}`}
                   </div>
-                  {c.skills?.length > 0 && (
+                  {c.missing_skills?.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
+                      {(c.matched_skills?.length ? c.matched_skills : (c.skills || [])).slice(0, 4).map((sk: string) => (
+                        <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>
+                      ))}
+                      {c.missing_skills.slice(0, 3).map((sk: string) => (
+                        <span key={'m-' + sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#FEF2F2', color: '#B91C1C', border: '1px solid #FECACA' }}>✕ {sk}</span>
+                      ))}
+                    </div>
+                  )}
+                  {!(c.missing_skills?.length > 0) && c.skills?.length > 0 && (
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
                       {c.skills.slice(0, 5).map((sk: string) => (
                         <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>
@@ -2566,20 +2621,104 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
                     </div>
                   )}
                 </div>
-              </label>
+              </div>
             );
           })}
         </div>
+        </>
+        )}
         <div style={{ padding: '12px 18px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: '#94A3B8' }}>
             {selected.size} selected{selected.size > 0 && !targetStage ? ' — choose a stage above' : ''}
           </span>
           <button onClick={submit} disabled={selected.size === 0 || !targetStage || saving}
             style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || !targetStage || saving ? '#94A3B8' : '#2563EB', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || !targetStage || saving ? 'not-allowed' : 'pointer' }}>
-            {saving ? 'Adding…' : targetStage ? `Add to ${stages?.find((s: any) => s.key === targetStage)?.label || 'Pipeline'}` : 'Add to Pipeline'}
+            {saving ? 'Adding…' : targetStage ? `Add ${selected.size || ''} to ${stages?.find((s: any) => s.key === targetStage)?.label || 'Pipeline'}` : 'Add to Pipeline'}
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Inline candidate preview inside AddCandidateModal — same real pattern
+// as requisitions/page.tsx's CandidatePreviewPanel (kept as a separate,
+// page-local component rather than cross-page-imported, since this one
+// is coupled to this modal's own local `board`/`alreadyIn` state).
+// Fetched on demand only when a recruiter actually clicks "View Profile"
+// on one candidate, not eagerly for every ranked match.
+function AddCandidatePreviewPanel({ candidateId, isIn, isSelected, onToggle, onBack }: {
+  candidateId: string; isIn: boolean; isSelected: boolean; onToggle: () => void; onBack: () => void;
+}) {
+  const { data: c, loading } = useFetch<any>(`/candidates/${candidateId}`);
+  if (loading || !c) {
+    return <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: 12 }}>Loading profile…</div>;
+  }
+  const skills: string[] = Array.isArray(c.skills) ? c.skills : [];
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '12px 18px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: '#64748B', fontSize: 12, fontWeight: 600, padding: 0 }}>
+          <ArrowLeft size={13} /> Back to list
+        </button>
+        <a href={`/candidates/${candidateId}`} target="_blank" rel="noreferrer"
+          style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#2563EB', textDecoration: 'none' }}>
+          Open Full Profile <ExternalLink size={11} />
+        </a>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+        <div style={{ width: 48, height: 48, borderRadius: '50%', background: '#1E40AF', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+          {(c.full_name || '?').charAt(0).toUpperCase()}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>{c.full_name}</div>
+          <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>
+            {[c.current_designation, c.current_employer].filter(Boolean).join(' @ ') || '—'}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6, fontSize: 11, color: '#64748B' }}>
+            {c.total_exp_mo > 0 && <span>{gx(c.total_exp_mo)} experience</span>}
+            {c.location && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><MapPin size={11} /> {c.location}</span>}
+            {c.email && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Mail size={11} /> {c.email}</span>}
+            {c.phone && <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Phone size={11} /> {c.phone}</span>}
+          </div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+        {isIn ? (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#F8FAFC', fontSize: 12, fontWeight: 700, color: '#64748B' }}>
+            Already in this pipeline
+          </span>
+        ) : (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #BFDBFE', background: isSelected ? '#EFF6FF' : '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#1E40AF' }}>
+            <input type="checkbox" checked={isSelected} onChange={onToggle} />
+            {isSelected ? 'Selected for pipeline' : 'Select for pipeline'}
+          </label>
+        )}
+        {c.latest_resume_file_id && (
+          <button onClick={() => downloadResume(c.latest_resume_file_id, c.latest_resume_file_name)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#F8FAFC', cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+            <Download size={12} /> Download Resume
+          </button>
+        )}
+      </div>
+      {skills.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Skills</div>
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+            {skills.map((sk: string) => (
+              <span key={sk} style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 5, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      {c.resume_text && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Resume Extract</div>
+          <div style={{ fontSize: 11.5, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-wrap', maxHeight: 220, overflowY: 'auto', background: '#F8FAFC', border: '1px solid #F1F5F9', borderRadius: 8, padding: 10 }}>
+            {c.resume_text.slice(0, 3000)}{c.resume_text.length > 3000 ? '…' : ''}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

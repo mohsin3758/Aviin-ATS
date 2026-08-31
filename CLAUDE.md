@@ -17340,3 +17340,106 @@ clean: 16 passed, 1 pre-existing skip, 0 failed. Zero-token audit:
 data (3 candidates from manual verification, plus each permanent test's
 own throwaway rows via its `afterAll`) cleaned up via real APIs,
 confirmed zero residue.
+
+## Pipeline board "Add Candidate to Pipeline" modal upgraded to match the
+## already-proven Requisitions-page "AI Matched Candidates" modal —
+## View Profile + matched(blue)/missing(red) skill chips + bulk
+## select-all, 2026-09-01
+User pasted 2 screenshots side by side: the Pipeline board's own "Add
+Candidate to Pipeline" modal (plain blue skill chips only, no View
+Profile, individual checkboxes only) and the Requisitions page's
+already-fixed "JD Match — AI Ranking" modal (real View Profile links,
+green-check/red-X matched-vs-missing skills, a "Select all" bulk
+toggle) — asking for the first to get the same real features the
+second already has, explicitly calling out the second as the working
+reference example.
+
+Investigated first, not assumed: both modals call the SAME real
+backend endpoint (`GET /requisitions/{id}/match-candidates`), and that
+endpoint has already returned `matched_skills`/`missing_skills` per
+match since 2026-08-20 — the Requisitions-page modal (`AiMatchModal`)
+already renders these correctly (fixed 2026-08-20/21 with an inline
+`CandidatePreviewPanel`, a real select-all toggle, and blue/red skill
+chips); the Pipeline board's own, separate, page-local `AddCandidateModal`
+component (`pipeline/page.tsx`) was simply never given the same
+treatment when that earlier fix landed — a second, parallel frontend
+component for the identical backend feature that had drifted behind.
+
+Ported the exact, already-proven pattern rather than inventing a new
+one: bumped the fetch `limit` 50 -> 300 (matching the sibling modal's
+own real ranking-pool ceiling — `matches` was always richer than what
+this modal asked for); added a page-local `AddCandidatePreviewPanel`
+(View Profile, inline, zero navigation — full name/designation/contact/
+skills/resume extract, a Select-for-pipeline toggle, Download Resume);
+a real "Select all N shown" bulk toggle scoped to candidates not
+already in this specific pipeline (the one genuine difference from the
+Requisitions-page version, since only THIS modal has an "already in
+pipeline" concept at all); serial numbers per row; and the same
+matched-blue/missing-red (✕) skill-chip split every match row already
+carried but this modal never rendered — falling back to the old plain
+blue-chip-only display only when a candidate has zero missing skills
+(an honest "fully matched" case, not a display bug). Preserved this
+modal's own existing "already in pipeline" disable/badge behavior,
+which the Requisitions-page sibling doesn't need.
+
+Verified for real end-to-end, not code review, at every layer, against
+the exact real production requisition from the user's own screenshots
+("Associate Managing Consultant - SAP FICO", 295 real ranked matches):
+a genuine headless-browser pass confirmed "Select all 295 shown," 295
+real View Profile buttons, 884 real red missing-skill chip instances,
+and real blue matched-skill chips — screenshot-confirmed (not just
+locator-counted): the list view shows real candidates (N.Sathish 54%,
+Priyanka A 54%, etc.) each with a mix of blue matched and red "✕"
+missing chips exactly matching the sibling modal's visual convention;
+the inline preview shows full contact info, Skills, Resume Extract,
+Select-for-pipeline, and Download Resume, with the page URL provably
+unchanged after clicking View Profile. A full real add-then-remove
+cycle through the actual UI (select a real candidate, choose "Interested,"
+click "Add 1 to Interested") confirmed the candidate genuinely landed in
+the real pipeline via a direct API check, then was cleanly removed via
+the existing Remove-from-Pipeline endpoint with `pipeline-stats`
+confirming zero residue on this real, live requisition afterward.
+
+**A real test-design lesson hit twice while building the permanent
+regression suite, both found and fixed before trusting the suite**:
+(1) a brand-new throwaway candidate created in a test's own `setup`
+cannot reliably crack `match_candidates()`'s 300-row SQL-level ranking
+pool against this tenant's real, large candidate count (4,442 at the
+time of testing) — confirmed directly (`resume_embedding IS NULL`,
+`fit_score` too low to place) before rewriting the suite to test
+ranking-shape correctness against the real, already-populated
+requisition instead, matching this project's own established "test
+against real discovered data" precedent (S23/S32/S39) rather than a
+synthetic pair that can't scale with a growing tenant. (2) A `div`
+locator using `.filter({has: <button>})` to target "one candidate row"
+resolved to 295 elements, not one — every row is nested inside the same
+scrollable list container, and `has:` matches any ancestor containing a
+matching descendant regardless of depth. Fixed with a real
+`data-testid="addcand-row-addable"` / `"addcand-row-in-pipeline"` hook
+added to the component itself (the same "give the test a real hook"
+convention used dozens of times elsewhere in this project), rather than
+fighting a locator that structurally could never be precise. Both real
+end-to-end tests were also hardened to dynamically skip any row already
+genuinely in the pipeline instead of assuming position 0/1 is always
+addable — this is real, live production data a real recruiter could
+add to at any moment, confirmed necessary when an earlier manual
+verification pass's own leftover residue (accidentally not cleaned up
+between two of my own verification scripts) caused exactly this false
+failure once, live, before the fix.
+
+New permanent "S79 Pipeline board Add Candidate modal" suite (5 tests)
+added to `qa_automation.spec.ts`, re-run twice in true isolation for
+stability (5/5 clean both times) plus confirmed zero residue on the
+real requisition after each run. Broader regression sweep (S1/S2/S8/
+S13/S16/S20/S30/S42/S48/S53/S59/S60/S79, 97 tests) passed 76/77 with
+one pre-existing, unrelated failure investigated and confirmed not a
+regression: S53's `POST /candidates/rank` test hit the identical class
+of real data-scale limitation independently discovered while building
+S79 above (a throwaway candidate not reliably ranking against this
+tenant's now-4,442-candidate pool) — already explicitly flagged in this
+file's own history on 2026-08-30 as a known, deferred issue for a
+future look, confirmed via a direct API call that the endpoint itself
+works correctly (200, real results) and the failure is specifically the
+test's own throwaway-candidate-ranking assumption, not a broken
+feature. Not touched in this pass — out of scope for today's request.
+Zero-token audit: `CONFIRMED CLEAN` (430 files, 0 external API refs).

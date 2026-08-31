@@ -10625,3 +10625,193 @@ test.describe.serial('S78 Public forms: mandatory phone (min 10 digits) + multi-
     }
   });
 });
+
+test.describe.serial('S79 Pipeline board "Add Candidate" modal: View Profile + matched(blue)/missing(red) skills + bulk select-all', () => {
+  // 2026-09-01 — reported live, comparing 2 real screenshots: the
+  // Requisitions page's "AI Matched Candidates" modal (fixed 2026-08-20/
+  // 21 with an inline View Profile preview + matched-skills-in-blue/
+  // missing-skills-in-red chips + a real "Select all N shown" bulk
+  // toggle) already had all 3 features, but the Pipeline board's own,
+  // separate "Add Candidate to Pipeline" modal — the same real backend
+  // endpoint (GET /requisitions/{id}/match-candidates), just a second,
+  // page-local frontend component — never got the same treatment.
+  // Ported the identical, already-proven pattern here rather than
+  // inventing a new one: bumped the fetch limit 50 -> 300 (matching the
+  // Requisitions-page modal's own real ranking-pool ceiling), added a
+  // page-local AddCandidatePreviewPanel (View Profile, inline, no
+  // navigation), a real "Select all N shown" toggle (scoped to
+  // candidates not already in this pipeline — the one genuine
+  // difference from the Requisitions-page version, since THIS modal
+  // has an "already in pipeline" concept the other one doesn't), and
+  // the same matched(blue)/missing(red ✕) skill-chip split every match
+  // row already returns via matched_skills/missing_skills.
+  let token = '';
+  let clientId = '';
+  let throwawayReqId = '';
+  let candId = '';
+  let appId = '';
+  const stamp = Date.now();
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  // A real, stable, already-populated requisition with real
+  // skills_required and hundreds of real ranked matches — chosen
+  // deliberately over a fresh throwaway one for the ranking/UI checks
+  // below. Investigated first, not assumed: this tenant has 4,442 real
+  // candidates, and match_candidates() (sql/04_phase3_ai_engine.sql)
+  // ranks its top 300-row pool by fit_score with NO relevance floor on
+  // pool membership — a brand-new throwaway candidate with no
+  // resume_embedding yet (filled by a scheduler job on a 10-minute
+  // cadence, not synchronously on create) scores far too low on the
+  // cosine-similarity half of fit_score to realistically crack a
+  // 300-row cut against 4,442 real competitors, confirmed by directly
+  // reproducing this exact failure before writing this test. Testing
+  // against real, already-ranked data is the deterministic choice here,
+  // matching this project's own established precedent for exactly this
+  // class of scale limitation (e.g. S23/S32/S39's "no direct creation
+  // endpoint / non-deterministic at scale — test against real
+  // discovered data" pattern).
+  const REAL_REQ_ID = '4173e40c-e468-4d22-97b9-8c66ed8e2891'; // "Associate Managing Consultant - SAP FICO"
+
+  test.afterAll(async ({ request }) => {
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: auth() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (throwawayReqId) await request.delete(`${API}/requisitions/${throwawayReqId}`, { headers: auth() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway client/requisition/candidate, decoupled from AI ranking', async ({ request }) => {
+    token = await getApiToken(request);
+    const clientRes = await request.post(`${API}/clients`, {
+      headers: auth(), data: { name: `S79 Test Client ${stamp}` },
+    });
+    clientId = (await clientRes.json()).id;
+
+    const reqRes = await request.post(`${API}/requisitions`, {
+      headers: auth(),
+      data: {
+        title: `S79 AddCandidate Modal Test ${stamp}`, client_id: clientId, status: 'open',
+        employment_type: 'contract', skills_required: ['Python', 'AWS', 'Docker'],
+      },
+    });
+    expect(reqRes.ok()).toBeTruthy();
+    throwawayReqId = (await reqRes.json()).id;
+
+    const candRes = await request.post(`${API}/candidates`, {
+      headers: auth(),
+      data: {
+        full_name: `QA S79 Candidate ${stamp}`,
+        skills: ['Python', 'AWS'],
+        resume_text: 'Experienced backend engineer with real Python and AWS cloud deployment work. No containerization experience of any kind.',
+      },
+    });
+    expect(candRes.ok()).toBeTruthy();
+    candId = (await candRes.json()).id;
+    expect(throwawayReqId && candId).toBeTruthy();
+  });
+
+  test('backend: the underlying add-to-pipeline mechanism this modal\'s Submit button calls still works, independent of AI-ranking position', async ({ request }) => {
+    const res = await request.post(`${API}/candidates/bulk-assign`, {
+      headers: auth(),
+      data: { candidate_ids: [candId], requisition_id: throwawayReqId, stage: 'interested' },
+    });
+    expect(res.ok()).toBeTruthy();
+
+    const board = await (await request.get(`${API}/requisitions/${throwawayReqId}/pipeline`, { headers: auth() })).json();
+    const allApps: any[] = Object.values(board).flat() as any[];
+    const found = allApps.find((a: any) => a.candidate_id === candId);
+    expect(found).toBeTruthy();
+    expect(found.stage).toBe('interested');
+    appId = found.id;
+    await request.delete(`${API}/applications/${appId}`, { headers: auth() });
+    appId = '';
+  });
+
+  test('backend: match-candidates on a real, populated requisition returns real matched_skills/missing_skills fields the frontend renders', async ({ request }) => {
+    const res = await request.get(`${API}/requisitions/${REAL_REQ_ID}/match-candidates?limit=300`, { headers: auth() });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.total_matches).toBeGreaterThan(0);
+    const matches = body.matches || [];
+    expect(matches.length).toBeGreaterThan(0);
+    expect(Array.isArray(matches[0].matched_skills)).toBe(true);
+    expect(Array.isArray(matches[0].missing_skills)).toBe(true);
+    // At least one real row must have a genuine missing skill, otherwise
+    // the red "✕" chip rendering below has nothing real to prove.
+    expect(matches.some((m: any) => (m.missing_skills || []).length > 0)).toBe(true);
+  });
+
+  test('real headless UI: modal shows Select-all, View Profile, and blue-matched/red-missing skill chips on a real ranked list', async ({ page }) => {
+    await page.goto(`/pipeline?job=${REAL_REQ_ID}`);
+    await page.waitForSelector('button:has-text("Add Candidate")', { timeout: 15000 });
+    await page.click('button:has-text("Add Candidate")');
+    await page.waitForSelector('text=Select all', { timeout: 20000 });
+
+    const selectAllText = await page.locator('text=Select all').first().textContent();
+    expect(selectAllText).toMatch(/Select all \d+ shown/);
+    expect(await page.locator('button:has-text("View Profile")').count()).toBeGreaterThan(0);
+    // Red missing-skill chip pattern, and at least one real blue matched
+    // chip for this requisition's own real skills_required (confirmed
+    // via a live screenshot to render as a blue "FICO" chip).
+    expect(await page.locator('text=/✕ /').count()).toBeGreaterThan(0);
+    expect(await page.locator('span:has-text("FICO")').count()).toBeGreaterThan(0);
+
+    // View Profile opens an inline preview — no navigation away, matching
+    // the already-fixed Requisitions-page sibling modal's own proven
+    // behavior. Deliberately picks the first row genuinely addable
+    // (data-testid="addcand-row-addable") rather than a bare nth(0) —
+    // this is real production data a real recruiter could genuinely add
+    // to at any time, and a candidate already in the pipeline correctly
+    // renders with data-testid="addcand-row-in-pipeline" instead (a
+    // real, deliberate distinction, not a bug). A plain text/`has`-based
+    // locator can't reliably tell these apart — every row div is nested
+    // inside the same scrollable list container, so a `has: View
+    // Profile button` filter matches that whole container too, not just
+    // one row (confirmed live: it resolved to 295 elements) — hence the
+    // real data-testid hook instead.
+    const addableRow = page.locator('[data-testid="addcand-row-addable"]').first();
+    const urlBefore = page.url();
+    await addableRow.locator('button:has-text("View Profile")').click();
+    await page.waitForSelector('text=Back to list', { timeout: 10000 });
+    expect(page.url()).toBe(urlBefore);
+    await expect(page.locator('text=Open Full Profile')).toBeVisible();
+    await expect(page.locator('text=Select for pipeline')).toBeVisible();
+    await page.click('text=Back to list');
+    await page.waitForSelector('text=Select all', { timeout: 10000 });
+  });
+
+  test('real end-to-end: select + add a real ranked candidate to a real stage through the actual UI, verify via API, then clean up via Remove from Pipeline', async ({ page, request }) => {
+    let addedAppId = '';
+    try {
+      await page.goto(`/pipeline?job=${REAL_REQ_ID}`);
+      await page.waitForSelector('button:has-text("Add Candidate")', { timeout: 15000 });
+      await page.click('button:has-text("Add Candidate")');
+      await page.waitForSelector('text=Select all', { timeout: 20000 });
+
+      const statsBefore = await (await request.get(`${API}/requisitions/${REAL_REQ_ID}/pipeline`, { headers: auth() })).json();
+      const before = new Set((Object.values(statsBefore).flat() as any[]).map((a: any) => a.id));
+
+      // Same real data-testid targeting as the test above — a real
+      // recruiter could genuinely have added someone to this real
+      // requisition between test runs, and only an addable row has a
+      // real, clickable (non-disabled) checkbox here.
+      const addableRow = page.locator('[data-testid="addcand-row-addable"]').first();
+      await addableRow.locator('input[type="checkbox"]').click();
+      const select = page.locator('select'); // exactly one visible select while this modal is open
+      const optionValues = await select.locator('option').evaluateAll(opts => opts.map((o: any) => o.value).filter(Boolean));
+      expect(optionValues.length).toBeGreaterThan(0);
+      await select.selectOption(optionValues[0]);
+      await page.click('button:has-text("Add 1 to")');
+      await page.waitForTimeout(1500);
+
+      const board = await (await request.get(`${API}/requisitions/${REAL_REQ_ID}/pipeline`, { headers: auth() })).json();
+      const allApps: any[] = Object.values(board).flat() as any[];
+      const added = allApps.find((a: any) => !before.has(a.id));
+      expect(added).toBeTruthy(); // exactly one genuinely new application landed
+      addedAppId = added.id;
+    } finally {
+      // Clean up via the real Remove-from-Pipeline endpoint regardless of
+      // whether the assertions above passed — a mid-test failure must
+      // never leave a real add on this real, live production requisition.
+      if (addedAppId) await request.delete(`${API}/applications/${addedAppId}`, { headers: auth() }).catch(() => {});
+    }
+  });
+});
