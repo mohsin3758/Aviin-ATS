@@ -16404,3 +16404,37 @@ showed the identical symptom in the same window, and S75 had already
 passed clean in isolation moments before this combined run. Re-
 confirmed both suites clean in isolation once the window cleared.
 Zero-token audit: `CONFIRMED CLEAN`.
+
+**A real CRLF/LF deploy-process gotcha caught and fixed before it could
+cause harm, same class as 2026-08-26/27's.** Post-commit, `backend/
+routers/communications.py`'s working copy and the file already scp'd to
+the VPS had both been silently flipped to 100% CRLF by this local
+machine's `core.autocrlf=true` — but the actual git-committed/pushed
+blob was correctly normalized back to LF by the same autocrlf setting,
+so GitHub/local git history were never wrong, only the on-disk working
+copy and the VPS's deployed file were momentarily out of sync with it
+(purely cosmetic to Python's own execution — CRLF vs LF makes zero
+functional difference to the interpreter — but a real risk for the
+NEXT edit/diff on this file). **A real, useful correction to how this
+was checked**: the standard `awk '/\r$/{c++}'` one-liner used
+throughout this project's history to detect this class of bug is
+UNRELIABLE through an SSH heredoc/bash-tool pipe — it wrongly reported
+`CRLF=0` for this exact 100%-CRLF file, on both the local working copy
+and the VPS copy, and was what let this slip past the first round of
+verification. A precise Python byte-count (`data.count(b'\r\n')`) is
+what actually caught it. Also discovered, useful to know going
+forward: `CLAUDE.md` and `tests/qa_automation.spec.ts` are genuinely,
+consistently CRLF in this repo's own established convention (confirmed
+via `git show origin/main:<file>` byte-checked with Python, not awk) —
+only `communications.py`, a `.py` file, is LF; this is a real,
+pre-existing per-file convention split in this repo, not a bug to
+"fix" uniformly. Restored both the local working copy and the VPS
+deployed file to pure LF via the same one-line `data.replace(b'\r\n',
+b'\n')` fix already established for this bug class, confirmed a genuine
+zero-diff match against `origin/main` afterward (not just re-trusting
+awk), rebuilt the backend container from the corrected file, and
+re-ran the full 34-test combined sweep (S43/S52/S54/S67/S75) clean —
+34/34, confirming both that the CRLF fix broke nothing and that the
+earlier 429-driven failures really were transient. No new commit was
+needed — the git-committed content was already correct throughout;
+only the working-directory and deployed copies needed correcting.
