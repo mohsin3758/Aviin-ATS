@@ -1118,20 +1118,36 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   const canAssignInitial = ['admin', 'super_admin', 'manager', 'kae'].includes(role);
   const canReassignOnly = ['admin', 'super_admin', 'manager'].includes(role);
   const userMap = Object.fromEntries((users || []).map((u: any) => [u.id, u]));
-  const active = (assignments || []).find((a: any) => a.status === 'active');
-  const recruiter = active ? userMap[active.recruiter_id] : null;
-  const canReassign = recruiter ? canReassignOnly : canAssignInitial;
+  // REAL FEATURE ADD (2026-08-31): "not able to assign both recruiter to
+  // same job requisition... 2 to more recruiter" - reported live. This
+  // used to take only the FIRST active assignment via .find() and had no
+  // way to add a second - every "Assign" click either created the one
+  // allowed assignment or replaced it. sql/98 relaxed the real DB
+  // constraint from one-active-per-requisition to one-active-per-
+  // (requisition, recruiter), so multiple genuinely different recruiters
+  // can now each hold their own real active assignment on the same job.
+  // This card now lists ALL of them, each with its own Reassign action,
+  // plus a real "+ Add Recruiter" that's never conflated with reassign.
+  const activeList = (assignments || []).filter((a: any) => a.status === 'active');
+  const canReassign = activeList.length > 0 ? canReassignOnly : canAssignInitial;
+  // reassignTarget: the specific assignment being replaced (Reassign on
+  // one row), or null when the form is adding a genuinely NEW recruiter
+  // (+ Add Recruiter) - these are two different real actions now, never
+  // inferred from "is anyone already assigned" the way the old binary
+  // if/else used to.
+  const [reassignTarget, setReassignTarget] = useState<any>(null);
+  const alreadyAssignedIds = new Set(activeList.map((a: any) => a.recruiter_id));
 
   async function submit() {
     if (!newRecruiterId) { setErr('Select a recruiter'); return; }
     setSaving(true); setErr('');
     try {
-      if (active) {
-        await apiFetch(`/assignments/${active.id}/reassign`, { method: 'POST', body: JSON.stringify({ new_recruiter_id: newRecruiterId, reason }) });
+      if (reassignTarget) {
+        await apiFetch(`/assignments/${reassignTarget.id}/reassign`, { method: 'POST', body: JSON.stringify({ new_recruiter_id: newRecruiterId, reason }) });
       } else {
         await apiFetch('/assignments', { method: 'POST', body: JSON.stringify({ requisition_id: reqId, recruiter_id: newRecruiterId }) });
       }
-      setShowForm(false); setNewRecruiterId(''); setReason(''); refetch();
+      setShowForm(false); setNewRecruiterId(''); setReason(''); setReassignTarget(null); refetch();
     } catch (e: any) { setErr(e?.message || 'Failed'); } finally { setSaving(false); }
   }
 
@@ -1144,55 +1160,73 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
     } catch (e: any) { setAutoErr(e?.message || 'Auto-assign failed'); } finally { setAutoAssigning(false); }
   }
 
-  async function autoReassign() {
-    if (!active) return;
+  async function autoReassign(target: any) {
     setAutoAssigning(true); setAutoErr(''); setAutoResult(null);
     try {
-      const result = await apiFetch(`/assignments/${active.id}/reassign`, { method: 'POST', body: JSON.stringify({ reason: 'Auto-picked next-best match' }) });
+      const result = await apiFetch(`/assignments/${target.id}/reassign`, { method: 'POST', body: JSON.stringify({ reason: 'Auto-picked next-best match' }) });
       setAutoResult({ recruiter_name: result.new_recruiter_name, match_score: result.match_score });
       refetch();
     } catch (e: any) { setAutoErr(e?.message || 'Auto-reassign failed'); } finally { setAutoAssigning(false); }
   }
 
   return (
-    <Card title="Assigned Recruiter">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        {recruiter ? (
-          <>
+    <Card title={activeList.length > 1 ? `Assigned Recruiters (${activeList.length})` : 'Assigned Recruiter'}>
+      {activeList.length === 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ flex: 1, fontSize: 12, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <UserCog size={14} /> No recruiter assigned yet
+          </div>
+          {canAssignInitial && !showForm && (
+            <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+              {autoAssignEnabled && (
+                <button onClick={autoAssign} disabled={autoAssigning}
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
+                  <Sparkles size={12} /> {autoAssigning ? 'Assigning…' : 'Auto-Assign (AI)'}
+                </button>
+              )}
+              <button onClick={() => { setShowForm(true); setReassignTarget(null); setNewRecruiterId(''); setErr(''); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', fontSize: 11, fontWeight: 700, color: '#374151', cursor: 'pointer' }}>
+                <Repeat size={12} /> Assign
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {activeList.map((a: any) => {
+        const recruiter = userMap[a.recruiter_id];
+        if (!recruiter) return null;
+        return (
+          <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, paddingBottom: 8, borderBottom: '1px solid #F8FAFC' }}>
             <div style={{ width: 36, height: 36, borderRadius: '50%', background: avatarColor(recruiter.full_name), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
               {initials(recruiter.full_name)}
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: '#1E293B' }}>{recruiter.full_name}</div>
-              <div style={{ fontSize: 11, color: '#64748B' }}>{recruiter.role_name || recruiter.role} · assigned {ago(active.assigned_at)}</div>
+              <div style={{ fontSize: 11, color: '#64748B' }}>{recruiter.role_name || recruiter.role} · assigned {ago(a.assigned_at)}</div>
             </div>
-          </>
-        ) : (
-          <div style={{ flex: 1, fontSize: 12, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 6 }}>
-            <UserCog size={14} /> No recruiter assigned yet
-          </div>
-        )}
-        {canReassign && !showForm && (
-          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-            {!recruiter && autoAssignEnabled && (
-              <button onClick={autoAssign} disabled={autoAssigning}
-                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
-                <Sparkles size={12} /> {autoAssigning ? 'Assigning…' : 'Auto-Assign (AI)'}
-              </button>
+            {canReassignOnly && !showForm && (
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                {autoAssignEnabled && (
+                  <button onClick={() => autoReassign(a)} disabled={autoAssigning} title="Auto-pick the next-best alternative recruiter"
+                    style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
+                    <Sparkles size={12} /> {autoAssigning ? 'Reassigning…' : 'Auto-Reassign (AI)'}
+                  </button>
+                )}
+                <button onClick={() => { setShowForm(true); setReassignTarget(a); setNewRecruiterId(''); setErr(''); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', fontSize: 11, fontWeight: 700, color: '#374151', cursor: 'pointer' }}>
+                  <Repeat size={12} /> Reassign
+                </button>
+              </div>
             )}
-            {recruiter && autoAssignEnabled && (
-              <button onClick={autoReassign} disabled={autoAssigning} title="Auto-pick the next-best alternative recruiter"
-                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #C7D2FE', background: '#EEF2FF', fontSize: 11, fontWeight: 700, color: '#4338CA', cursor: autoAssigning ? 'default' : 'pointer' }}>
-                <Sparkles size={12} /> {autoAssigning ? 'Reassigning…' : 'Auto-Reassign (AI)'}
-              </button>
-            )}
-            <button onClick={() => { setShowForm(true); setNewRecruiterId(''); setErr(''); }}
-              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', fontSize: 11, fontWeight: 700, color: '#374151', cursor: 'pointer' }}>
-              <Repeat size={12} /> {recruiter ? 'Reassign' : 'Assign'}
-            </button>
           </div>
-        )}
-      </div>
+        );
+      })}
+      {activeList.length > 0 && canAssignInitial && !showForm && (
+        <button onClick={() => { setShowForm(true); setReassignTarget(null); setNewRecruiterId(''); setErr(''); }}
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, border: '1px dashed #CBD5E1', background: '#fff', fontSize: 11, fontWeight: 700, color: '#2563EB', cursor: 'pointer' }}>
+          <Plus size={12} /> Add Another Recruiter
+        </button>
+      )}
       {autoErr && (
         <div style={{ marginTop: 10, fontSize: 11, color: '#DC2626', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '8px 10px' }}>{autoErr}</div>
       )}
@@ -1208,10 +1242,15 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
       {showForm && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9' }}>
           <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>
-            NEW RECRUITER — hover a name for full availability / priority / workload detail
+            {reassignTarget ? `REPLACE ${userMap[reassignTarget.recruiter_id]?.full_name || 'this recruiter'} WITH` : 'NEW RECRUITER'} — hover a name for full availability / priority / workload detail
           </label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8, maxHeight: 260, overflowY: 'auto' }}>
-            {(users || []).filter((u: any) => u.id !== active?.recruiter_id).map((u: any) => {
+            {/* Excludes every recruiter already actively assigned to this
+                requisition (not just the one being reassigned) - picking
+                one of them here would just hit the real duplicate-
+                assignment 409 the backend now enforces per (req,
+                recruiter) instead of per req. */}
+            {(users || []).filter((u: any) => !alreadyAssignedIds.has(u.id)).map((u: any) => {
               const m = matchMap[u.id];
               const wl = WORKLOAD_BADGE[m?.workload_label] || WORKLOAD_BADGE.Medium;
               const isSelected = newRecruiterId === u.id;
@@ -1241,11 +1280,11 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
                 </div>
               );
             })}
-            {!(users || []).filter((u: any) => u.id !== active?.recruiter_id).length && (
+            {!(users || []).filter((u: any) => !alreadyAssignedIds.has(u.id)).length && (
               <div style={{ fontSize: 12, color: '#94A3B8' }}>No other active recruiters available.</div>
             )}
           </div>
-          {active && (
+          {reassignTarget && (
             <>
               <label style={{ fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 }}>REASON</label>
               <input value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Recruiter went on leave"
@@ -1255,7 +1294,7 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
           {err && <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 8 }}>{err}</div>}
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={submit} disabled={saving} style={{ padding: '7px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{saving ? 'Saving…' : 'Confirm'}</button>
-            <button onClick={() => setShowForm(false)} style={{ padding: '7px 12px', background: '#F1F5F9', color: '#64748B', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+            <button onClick={() => { setShowForm(false); setReassignTarget(null); }} style={{ padding: '7px 12px', background: '#F1F5F9', color: '#64748B', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
           </div>
         </div>
       )}

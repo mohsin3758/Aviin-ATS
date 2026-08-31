@@ -99,13 +99,28 @@ async def reminder_dashboard(team_view: bool = False, actor: Actor = Depends(get
 
 
 @dashboard_router.get("/reports")
-async def reminder_reports(days: int = 30, actor: Actor = Depends(get_actor),
+async def reminder_reports(days: int = 30, team_view: bool = False, actor: Actor = Depends(get_actor),
                             _perm: Actor = Depends(require_permission("reminders", "read"))):
     """Follow-Up Completion Rate / Overdue Tasks / Team Productivity /
-    Reminder Response Time — plain SQL aggregates, zero-token."""
+    Reminder Response Time — plain SQL aggregates, zero-token.
+
+    REAL BUG FIX (2026-08-31): this endpoint had NO role scoping at all —
+    unlike its own sibling /reminders/dashboard (team_view-gated,
+    correctly restricted to admin/manager/kae/kam), every number here was
+    always tenant-wide regardless of who asked. Reported live: a plain
+    recruiter's own Reports tab showed the WHOLE team's totals and a
+    "Team Productivity by Recruiter" breakdown of everyone, not just
+    themselves. Now mirrors /reminders/dashboard's exact convention —
+    `team_view=true` only takes effect for a manager-class role; anyone
+    else always sees their own numbers regardless of what they pass."""
+    is_manager_role = actor.role in ("admin", "manager", "kae", "kam", "sales_manager", "hr_manager") or actor.role is None
+    scope_team = team_view and is_manager_role
+
     async with db.tenant_conn(actor.tenant_id) as conn:
+        own_cond = "" if scope_team else "AND recruiter_id=$3"
+        params = [actor.tenant_id, str(days)] + ([] if scope_team else [actor.user_id])
         summary = await conn.fetchrow(
-            """SELECT
+            f"""SELECT
                  count(*) AS total,
                  count(*) FILTER (WHERE status='completed') AS completed,
                  count(*) FILTER (WHERE status IN ('pending','in_progress') AND due_at < now()) AS overdue,
@@ -113,27 +128,33 @@ async def reminder_reports(days: int = 30, actor: Actor = Depends(get_actor),
                  round(avg(EXTRACT(EPOCH FROM (completed_at - created_at)) / 3600)
                        FILTER (WHERE status='completed' AND completed_at IS NOT NULL), 1) AS avg_response_hours
                FROM recruiter_tasks
-               WHERE tenant_id=$1 AND created_at >= now() - ($2::text || ' days')::interval""",
-            actor.tenant_id, str(days))
+               WHERE tenant_id=$1 AND created_at >= now() - ($2::text || ' days')::interval {own_cond}""",
+            *params)
         # REAL BUG FIX (2026-08-24): no u.is_active filter at all -- every
         # deactivated/QA-test recruiter who ever had a task stayed in this
         # report forever, indistinguishable from real active recruiters.
         # Same "missing is_active on a joined users table" class documented
         # repeatedly elsewhere in this project (Team Leaderboard, Incentives
         # scorecard list, KPI export, owner_json subquery, etc.).
-        by_recruiter = await conn.fetch(
-            """SELECT u.full_name, u.id AS recruiter_id,
-                      count(*) AS total,
-                      count(*) FILTER (WHERE t.status='completed') AS completed,
-                      count(*) FILTER (WHERE t.status IN ('pending','in_progress') AND t.due_at < now()) AS overdue
-               FROM recruiter_tasks t
-               JOIN users u ON u.id = t.recruiter_id AND u.is_active IS NOT FALSE
-               WHERE t.tenant_id=$1 AND t.created_at >= now() - ($2::text || ' days')::interval
-               GROUP BY u.id, u.full_name ORDER BY total DESC""",
-            actor.tenant_id, str(days))
+        #
+        # Only fetched at all in team scope — a self-scoped "by recruiter"
+        # breakdown of exactly one recruiter (yourself) is meaningless.
+        by_recruiter = []
+        if scope_team:
+            by_recruiter = await conn.fetch(
+                """SELECT u.full_name, u.id AS recruiter_id,
+                          count(*) AS total,
+                          count(*) FILTER (WHERE t.status='completed') AS completed,
+                          count(*) FILTER (WHERE t.status IN ('pending','in_progress') AND t.due_at < now()) AS overdue
+                   FROM recruiter_tasks t
+                   JOIN users u ON u.id = t.recruiter_id AND u.is_active IS NOT FALSE
+                   WHERE t.tenant_id=$1 AND t.created_at >= now() - ($2::text || ' days')::interval
+                   GROUP BY u.id, u.full_name ORDER BY total DESC""",
+                actor.tenant_id, str(days))
     total = summary["total"] or 0
     completion_rate = round((summary["completed"] or 0) / total * 100, 1) if total else 0.0
     return {
+        "scope": "team" if scope_team else "personal",
         "period_days": days,
         "total_tasks": total,
         "completed": summary["completed"] or 0,

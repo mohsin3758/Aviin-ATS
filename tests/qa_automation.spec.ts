@@ -2201,7 +2201,14 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
     // error. Fixed by raising BulkAssignModal's (and BulkResumeGenModal's) own
     // overlay z-index above Modal.tsx's. This step is the one that must
     // actually exercise the click, not just confirm the modal opened.
-    const reqSelect = page.locator('select').last();
+    // REAL BEHAVIOR CHANGE (2026-08-31): BulkAssignModal gained a 2nd,
+    // required "Add into stage" select right after the requisition one
+    // (previously it had none at all and silently used the tenant's
+    // default — reported live as a real contributor to 1,333 real
+    // applications piling into "Interested"). `.last()` now grabs the
+    // STAGE select, not the requisition one - using `.nth(-2)` for the
+    // requisition select instead, matching its real DOM order.
+    const reqSelect = page.locator('select').nth(-2);
     // The dropdown's real option text is "{title} ({department})" (see
     // BulkAssignModal in candidates/page.tsx) - an exact-label match against
     // the bare title alone doesn't match, confirmed live. Find the real
@@ -2212,6 +2219,9 @@ test('S20 JD Match: ranked-candidate link opens profile, select + Add to Pipelin
     );
     expect(throwawayOptValue).toBeTruthy();
     await reqSelect.selectOption(throwawayOptValue);
+    const stageSelect = page.locator('select').last();
+    const firstRealStageValue = await stageSelect.locator('option').nth(1).getAttribute('value');
+    await stageSelect.selectOption(firstRealStageValue || '');
     const assignBtn = page.getByRole('button', { name: /Assign to Pipeline/i });
     await expect(assignBtn).toBeEnabled();
     await assignBtn.click({ timeout: 8000 }); // would previously hang ~30s on pointer-event interception
@@ -5922,13 +5932,19 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     if (await firstCheckbox.count() === 0) return;
     // Real fetch settle time for the modal's own /settings/pipeline-stages call
     await page.waitForTimeout(1500);
+    // REAL BEHAVIOR CHANGE (2026-08-31): this used to assert the stage
+    // picker silently pre-filled the tenant's configured default — that
+    // exact silent default was reported live as the direct cause of
+    // 1,333 real applications piling into "Interested" over ~10 days.
+    // The picker now starts genuinely blank and REQUIRES an explicit
+    // choice every time; asserting that instead.
     const modalSelect = page.locator('select').last();
-    const selectValue = await modalSelect.inputValue();
-    // Fetch the tenant's real configured default directly, independent of the UI
+    expect(await modalSelect.inputValue()).toBe('');
     const stagesRes = await request.get(`${API}/settings/pipeline-stages`, { headers: { Authorization: `Bearer ${token}` } });
     const stages = await stagesRes.json();
     const realDefault = stages.find((s: any) => s.is_default_add)?.stage_key;
-    expect(selectValue).toBe(realDefault);
+    await modalSelect.selectOption(realDefault);
+    expect(await modalSelect.inputValue()).toBe(realDefault);
 
     await firstCheckbox.check();
     await page.waitForTimeout(300);

@@ -349,7 +349,13 @@ function StageBreakdown({ counts }: { counts?: any }) {
 }
 
 function InboxBadge({ reqId, count, iconOnly }: { reqId: string; count: number; iconOnly?: boolean }) {
-  if (!count) return null;
+  // REAL FIX (2026-08-31): used to hide entirely at count=0 - reported
+  // live, a brand-new/future job showed NO inbox indicator at all,
+  // inconsistent with an existing job showing a real count (e.g. "294
+  // Inbox"). Always renders now (a genuine "0 Inbox" is still useful
+  // information — confirms nothing has arrived yet, not that the
+  // feature is missing), matching AiMatchFinder's own always-on
+  // convention right next to it.
   return (
     <a href={`/resume-inbox?req=${reqId}`} title="Resumes auto-matched to this JD from inbox" style={{ textDecoration: 'none' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: iconOnly ? '3px 8px' : '3px 10px', borderRadius: 20, background: '#7c3aed', cursor: 'pointer' }}>
@@ -390,7 +396,12 @@ function AiMatchFinder({ reqId, reqTitle, onAdded }: { reqId: string; reqTitle?:
     if (state === 'loading') return;
     setState('loading');
     try {
-      const data = await apiFetch(`/requisitions/${reqId}/match-candidates?limit=50`);
+      // REAL BUG FIX (2026-08-31): the badge showed the honest total_matches
+      // (e.g. "295") but only ever fetched limit=50 rows into the modal - a
+      // recruiter opening it saw far fewer profiles than the number that
+      // was flashed on screen. Fetches up to the backend's own real ranking
+      // ceiling now so the badge count and the modal's actual list agree.
+      const data = await apiFetch(`/requisitions/${reqId}/match-candidates?limit=300`);
       setMatches(Array.isArray(data?.matches) ? data.matches : []);
       setTotalMatches(typeof data?.total_matches === 'number' ? data.total_matches : 0);
       setState('done');
@@ -492,23 +503,16 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
   const visibleStages = (stageConfig || []).filter((s: any) => s.is_visible)
     .sort((a: any, b: any) => a.display_order - b.display_order);
-  const defaultAddStageKey = (stageConfig || []).find((s: any) => s.is_default_add)?.stage_key || 'sourced';
+  // REAL BUG FIX (2026-08-31): this used to silently pre-fill the stage
+  // picker with the tenant's configured default-add stage the instant
+  // pipeline-stages loaded - reported live: 1,333 real applications had
+  // piled up into "Interested" across 3 real open requisitions over ~10
+  // days from repeated real use of this exact "select candidates -> Add
+  // to Pipeline" flow, entirely because the stage was already filled in
+  // and easy to not notice/change. No default at all now - the picker
+  // starts genuinely blank and the Add button stays disabled until a
+  // recruiter actively chooses a stage themselves, every single time.
   const [targetStage, setTargetStage] = useState('');
-  // REAL BUG FOUND 2026-08-20: firing this the instant defaultAddStageKey
-  // is truthy locked in the 'sourced' fallback on the very first render
-  // (stageConfig is still null/[] then, so defaultAddStageKey falls back
-  // to the literal 'sourced' before the real /settings/pipeline-stages
-  // fetch ever resolves) - and since the guard only checks `!targetStage`,
-  // it never re-fired once the real tenant default (e.g. 'interested')
-  // loaded. Confirmed live via a real network-request interception: the
-  // dropdown visually showed "Interested" (a <select> with an unmatched
-  // value silently falls back to displaying the first real <option>) while
-  // the actual submitted stage was "sourced" - a hidden stage - the whole
-  // time. Gated on stageConfig actually having loaded, not just on the
-  // (always-truthy) fallback-masked defaultAddStageKey.
-  useEffect(() => {
-    if (!targetStage && stageConfig && stageConfig.length > 0) setTargetStage(defaultAddStageKey);
-  }, [stageConfig, defaultAddStageKey, targetStage]);
 
   const q = search.trim().toLowerCase();
   const items = (matches || []).filter((c: any) =>
@@ -528,12 +532,12 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
   }
 
   async function submit() {
-    if (selected.size === 0) return;
+    if (selected.size === 0 || !targetStage) return;
     setSaving(true);
     try {
       await apiFetch('/candidates/bulk-assign', {
         method: 'POST',
-        body: JSON.stringify({ candidate_ids: Array.from(selected), requisition_id: reqId, stage: targetStage || undefined }),
+        body: JSON.stringify({ candidate_ids: Array.from(selected), requisition_id: reqId, stage: targetStage }),
       });
       onAdded();
     } catch (e: any) {
@@ -571,14 +575,33 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: '#64748b', flexShrink: 0 }}>Add into stage:</span>
             <select value={targetStage} onChange={e => setTargetStage(e.target.value)}
-              style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 6, padding: '5px 8px', fontSize: 12, fontWeight: 600, color: '#1e293b', background: '#fff' }}>
+              style={{ flex: 1, border: `1px solid ${targetStage ? '#e2e8f0' : '#fca5a5'}`, borderRadius: 6, padding: '5px 8px', fontSize: 12, fontWeight: 600, color: targetStage ? '#1e293b' : '#94a3b8', background: '#fff' }}>
+              <option value="">— Choose a stage —</option>
               {visibleStages.map((s: any) => <option key={s.stage_key} value={s.stage_key}>{s.label}</option>)}
             </select>
           </div>
+          {/* Select-all-visible — reported live: no way to bulk-select
+              while keeping the search filter narrowed down. Toggles only
+              the rows currently matching `search`, leaving selections on
+              rows outside the current filter untouched either way. */}
+          {items.length > 0 && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, cursor: 'pointer', fontSize: 11, fontWeight: 600, color: '#64748b' }}>
+              <input type="checkbox"
+                checked={items.every((c: any) => selected.has(c.candidate_id))}
+                onChange={e => {
+                  setSelected(prev => {
+                    const next = new Set(prev);
+                    items.forEach((c: any) => e.target.checked ? next.add(c.candidate_id) : next.delete(c.candidate_id));
+                    return next;
+                  });
+                }} />
+              Select all {items.length} shown{search ? ' (matching filter)' : ''}
+            </label>
+          )}
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '10px 18px' }}>
           {items.length === 0 && <div style={{ textAlign: 'center', color: '#cbd5e1', fontSize: 12, padding: 20, fontStyle: 'italic' }}>No matching candidates found</div>}
-          {items.map((c: any) => {
+          {items.map((c: any, idx: number) => {
             const isSelected = selected.has(c.candidate_id);
             // REAL FIX (2026-08-20): this row used to be a <label> wrapping
             // the checkbox, so there was no way to add a "View Profile"
@@ -593,6 +616,11 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
             return (
               <div key={c.candidate_id} onClick={() => toggle(c.candidate_id)}
                 style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 8px', borderRadius: 10, cursor: 'pointer', background: isSelected ? '#eff6ff' : 'transparent', marginBottom: 2 }}>
+                {/* Serial number — reported live: no way to tell candidates
+                    apart by rank at a glance once the list is long.
+                    Reflects the currently-visible (search-filtered) order,
+                    matching what the recruiter is actually looking at. */}
+                <div style={{ width: 20, flexShrink: 0, textAlign: 'right', fontSize: 10, fontWeight: 700, color: '#94a3b8', marginTop: 12 }}>{idx + 1}</div>
                 <input type="checkbox" checked={isSelected} onChange={() => toggle(c.candidate_id)} onClick={e => e.stopPropagation()} style={{ marginTop: 3 }} />
                 <div style={{ width: 40, height: 40, borderRadius: '50%', border: `2px solid ${aiScoreColor(c.fit_score)}`, background: aiScoreBg(c.fit_score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 900, color: aiScoreColor(c.fit_score), flexShrink: 0 }}>
                   {Math.round(c.fit_score || 0)}%
@@ -636,10 +664,12 @@ function AiMatchModal({ reqId, reqTitle, matches, onClose, onAdded }: {
         </>
         )}
         <div style={{ padding: '12px 18px', borderTop: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: '#94a3b8' }}>{selected.size} selected</span>
-          <button onClick={submit} disabled={selected.size === 0 || saving}
-            style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || saving ? '#94a3b8' : '#2563eb', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || saving ? 'not-allowed' : 'pointer' }}>
-            {saving ? 'Adding…' : `Add ${selected.size || ''} to ${visibleStages.find((s: any) => s.stage_key === targetStage)?.label || 'Pipeline'}`}
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>
+            {selected.size} selected{selected.size > 0 && !targetStage ? ' — choose a stage above' : ''}
+          </span>
+          <button onClick={submit} disabled={selected.size === 0 || !targetStage || saving}
+            style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || !targetStage || saving ? '#94a3b8' : '#2563eb', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || !targetStage || saving ? 'not-allowed' : 'pointer' }}>
+            {saving ? 'Adding…' : targetStage ? `Add ${selected.size || ''} to ${visibleStages.find((s: any) => s.stage_key === targetStage)?.label || 'Pipeline'}` : 'Add to Pipeline'}
           </button>
         </div>
       </div>
@@ -952,8 +982,13 @@ function JobCard({ req, onEdit, onDelete, counts, onCandidatesAdded }: { req: an
         </p>
       )}
 
-      {/* Mini Pipeline Bar — inbox matches + pipeline stages */}
-      {counts && (counts.inbox_count > 0 || counts.total > 0) && (() => {
+      {/* Mini Pipeline Bar — inbox matches + pipeline stages.
+          REAL FIX (2026-08-31): used to hide entirely for a brand-new/
+          future job with zero inbox matches and zero pipeline candidates
+          - reported live, wanted consistently visible on every job,
+          existing or future. Now shows once counts have loaded at all,
+          even genuinely at 0/0. */}
+      {counts && (() => {
         const stages: {key:string;label:string;color:string;count:number}[] = counts.stages || [];
         const active = stages.filter((s:any) => s.count > 0);
         return (

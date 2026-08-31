@@ -143,22 +143,32 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
                       priority: Optional[str] = None, client_id: Optional[str] = None,
                       overdue_only: bool = False,
                       actor: Actor = Depends(get_actor)):
-    conditions = ["tenant_id = $1"]
+    # REAL BUG FIX (2026-08-31): every column reference here was
+    # unqualified (bare "tenant_id"/"status"/etc.) while the query below
+    # unconditionally LEFT JOINs clients, which ALSO has a tenant_id
+    # column - a genuine asyncpg.exceptions.AmbiguousColumnError on
+    # every single call, filtered or not. Found live while verifying an
+    # unrelated fix: this is the exact query behind the real "Follow-Ups"
+    # tab (reminders/page.tsx's FollowUpsTab) - the whole tab has been
+    # silently 500ing since this endpoint was built. Every reference now
+    # explicitly qualified to rt. (recruiter_tasks), matching the query's
+    # own rt./cl. aliasing convention.
+    conditions = ["rt.tenant_id = $1"]
     params: list = [actor.tenant_id]
     if recruiter_id:
         params.append(recruiter_id)
-        conditions.append(f"recruiter_id = ${len(params)}")
+        conditions.append(f"rt.recruiter_id = ${len(params)}")
     if status:
         params.append(status)
-        conditions.append(f"status = ${len(params)}")
+        conditions.append(f"rt.status = ${len(params)}")
     if priority:
         params.append(priority)
-        conditions.append(f"priority = ${len(params)}")
+        conditions.append(f"rt.priority = ${len(params)}")
     if client_id:
         params.append(client_id)
-        conditions.append(f"client_id = ${len(params)}")
+        conditions.append(f"rt.client_id = ${len(params)}")
     if overdue_only:
-        conditions.append("status IN ('pending','in_progress') AND due_at < now()")
+        conditions.append("rt.status IN ('pending','in_progress') AND rt.due_at < now()")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(

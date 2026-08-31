@@ -4,7 +4,7 @@ import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
 import {
   Bell, Sun, CalendarDays, AlertTriangle, Flame, Video, FileWarning,
-  BarChart3, Settings, Plus, X, CheckCircle2, RotateCcw,
+  BarChart3, Settings, Plus, X, CheckCircle2, RotateCcw, MessageCircle,
 } from 'lucide-react';
 
 // Same style-constant + hand-rolled-CSS-bar-chart conventions already
@@ -243,12 +243,35 @@ function TaskRow({ t, onChanged }: { t: any; onChanged: () => void }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 600, color: t.status === 'completed' ? '#94A3B8' : '#1E293B', textDecoration: t.status === 'completed' ? 'line-through' : 'none' }}>{t.title}</div>
         <div style={{ fontSize: 10.5, color: '#94A3B8' }}>
-          {t.client_name ? `${t.client_name} · ` : ''}{t.req_title ? `${t.req_title} · ` : ''}Due {fmtDT(t.due_at)}
+          {t.candidate_name ? `${t.candidate_name} · ` : ''}{t.client_name ? `${t.client_name} · ` : ''}{t.req_title ? `${t.req_title} · ` : ''}Due {fmtDT(t.due_at)}
           {t.is_overdue && <span style={{ color: '#DC2626', fontWeight: 700 }}> · OVERDUE</span>}
           {t.reschedule_count > 0 && <span> · rescheduled ×{t.reschedule_count}</span>}
         </div>
+        {/* REAL GAP FIX (2026-08-31): follow_up_reason (and description)
+            were always returned by the backend but never shown anywhere
+            on this row - reported live, wanted "reason and other
+            details" visible without opening anything. */}
+        {(t.follow_up_reason || t.description) && (
+          <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 2, fontStyle: 'italic' }}>
+            {t.follow_up_reason && <>Reason: {t.follow_up_reason}</>}
+            {t.follow_up_reason && t.description ? ' · ' : ''}
+            {t.description}
+          </div>
+        )}
       </div>
       <PriorityBadge p={t.priority} />
+      {/* REAL FEATURE ADD (2026-08-31): "add the option for followup
+          message and connect with all followup dashboard" - reported
+          live. Only shown when this follow-up is actually linked to a
+          candidate (a client-only or general task has nobody to message).
+          Opens the real Conversations composer, pre-addressed - not a
+          second, parallel messaging surface. */}
+      {t.candidate_id && (
+        <a href={`/conversations?compose_candidate=${t.candidate_id}&compose_subject=${encodeURIComponent('Follow-up: ' + t.title)}`}
+          title="Send a message about this follow-up" style={{ background: 'none', border: '1px solid #E2E8F0', borderRadius: 6, padding: 5, cursor: 'pointer', color: '#2563EB', display: 'flex' }}>
+          <MessageCircle size={12} />
+        </a>
+      )}
       <select value={t.status} onChange={e => setStatus(e.target.value)} style={{ fontSize: 11, padding: '4px 6px', borderRadius: 6, border: '1px solid #E2E8F0' }}>
         <option value="pending">Pending</option><option value="in_progress">In Progress</option>
         <option value="completed">Completed</option><option value="rescheduled">Rescheduled</option>
@@ -473,19 +496,34 @@ function DocumentExpiryTab() {
 }
 
 // ── Reports tab ───────────────────────────────────────────────────────────
-function ReportsTab() {
+function ReportsTab({ canTeamView }: { canTeamView: boolean }) {
   const [days, setDays] = useState(30);
-  const { data } = useFetch<any>(`/reminders/reports?days=${days}`);
+  // REAL BUG FIX (2026-08-31): this tab had no role scoping at all —
+  // reported live, a plain recruiter's Reports tab showed the WHOLE
+  // team's totals and a "by Recruiter" breakdown of everyone, not just
+  // themselves. Mirrors the Dashboard tab's own already-correct
+  // My/Team toggle exactly (/reminders/dashboard's team_view param).
+  const [teamView, setTeamView] = useState(false);
+  const { data } = useFetch<any>(`/reminders/reports?days=${days}&team_view=${teamView && canTeamView}`);
+  const scopeLabel = data?.scope === 'team' ? 'Team' : 'My';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <select value={days} onChange={e => setDays(Number(e.target.value))} style={{ ...input, width: 160, marginBottom: 0 }}>
-        <option value={7}>Last 7 days</option><option value={30}>Last 30 days</option>
-        <option value={90}>Last 90 days</option>
-      </select>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+        <select value={days} onChange={e => setDays(Number(e.target.value))} style={{ ...input, width: 160, marginBottom: 0 }}>
+          <option value={7}>Last 7 days</option><option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+        </select>
+        {canTeamView && (
+          <div style={{ display: 'flex', border: '1px solid #E2E8F0', borderRadius: 8, overflow: 'hidden' }}>
+            <button onClick={() => setTeamView(false)} style={{ padding: '6px 12px', fontSize: 11, fontWeight: 700, border: 'none', cursor: 'pointer', background: !teamView ? '#2563EB' : '#fff', color: !teamView ? '#fff' : '#64748B' }}>My Reports</button>
+            <button onClick={() => setTeamView(true)} style={{ padding: '6px 12px', fontSize: 11, fontWeight: 700, border: 'none', cursor: 'pointer', background: teamView ? '#2563EB' : '#fff', color: teamView ? '#fff' : '#64748B' }}>Team Reports</button>
+          </div>
+        )}
+      </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: 10 }}>
         <div style={{ ...card, textAlign: 'center' }}>
           <div style={{ fontSize: 22, fontWeight: 800, color: '#16A34A' }}>{data?.completion_rate_pct ?? '—'}%</div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: '#64748B' }}>COMPLETION RATE</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#64748B' }}>{scopeLabel.toUpperCase()} COMPLETION RATE</div>
         </div>
         <div style={{ ...card, textAlign: 'center' }}>
           <div style={{ fontSize: 22, fontWeight: 800, color: '#1E293B' }}>{data?.total_tasks ?? '—'}</div>
@@ -500,30 +538,34 @@ function ReportsTab() {
           <div style={{ fontSize: 10, fontWeight: 700, color: '#64748B' }}>AVG RESPONSE TIME</div>
         </div>
       </div>
-      <div style={card}>
-        <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 10 }}>Team Productivity — Follow-Ups by Recruiter</div>
-        <BarChart rows={data?.by_recruiter || []} keyX="full_name" keyY="total" />
-      </div>
-      <div style={card}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <thead>
-            <tr style={{ borderBottom: '1px solid #E2E8F0', textAlign: 'left' }}>
-              <th style={{ padding: '6px 8px' }}>Recruiter</th><th style={{ padding: '6px 8px' }}>Total</th>
-              <th style={{ padding: '6px 8px' }}>Completed</th><th style={{ padding: '6px 8px' }}>Overdue</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data?.by_recruiter || []).map((r: any) => (
-              <tr key={r.recruiter_id} style={{ borderBottom: '1px solid #F1F5F9' }}>
-                <td style={{ padding: '6px 8px' }}>{r.full_name}</td>
-                <td style={{ padding: '6px 8px' }}>{r.total}</td>
-                <td style={{ padding: '6px 8px', color: '#16A34A' }}>{r.completed}</td>
-                <td style={{ padding: '6px 8px', color: r.overdue > 0 ? '#DC2626' : '#64748B' }}>{r.overdue}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {data?.scope === 'team' && (
+        <>
+          <div style={card}>
+            <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 10 }}>Team Productivity — Follow-Ups by Recruiter</div>
+            <BarChart rows={data?.by_recruiter || []} keyX="full_name" keyY="total" />
+          </div>
+          <div style={card}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #E2E8F0', textAlign: 'left' }}>
+                  <th style={{ padding: '6px 8px' }}>Recruiter</th><th style={{ padding: '6px 8px' }}>Total</th>
+                  <th style={{ padding: '6px 8px' }}>Completed</th><th style={{ padding: '6px 8px' }}>Overdue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.by_recruiter || []).map((r: any) => (
+                  <tr key={r.recruiter_id} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                    <td style={{ padding: '6px 8px' }}>{r.full_name}</td>
+                    <td style={{ padding: '6px 8px' }}>{r.total}</td>
+                    <td style={{ padding: '6px 8px', color: '#16A34A' }}>{r.completed}</td>
+                    <td style={{ padding: '6px 8px', color: r.overdue > 0 ? '#DC2626' : '#64748B' }}>{r.overdue}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -745,7 +787,7 @@ export default function RemindersPage() {
       {tab === 'dashboard' && <DashboardTab canTeamView={isManager} />}
       {tab === 'followups' && <FollowUpsTab />}
       {tab === 'documents' && <DocumentExpiryTab />}
-      {tab === 'reports' && <ReportsTab />}
+      {tab === 'reports' && <ReportsTab canTeamView={isManager} />}
       {tab === 'settings' && isManager && <SettingsTab />}
     </div>
   );

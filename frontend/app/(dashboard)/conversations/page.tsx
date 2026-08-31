@@ -895,6 +895,29 @@ export default function MailboxPage() {
   const [selectedId, setSelectedId] = useState<string|null>(null);
   const [composing, setComposing] = useState(false);
   const [composeInitial, setComposeInitial] = useState<Partial<Draft>>({});
+
+  // REAL FEATURE ADD (2026-08-31): "add the option for followup message
+  // and connect with all followup dashboard" - reported live. A Follow-Up
+  // row now links here with ?compose_candidate=<id>&compose_subject=...
+  // Fetches the candidate directly (not the local, only-500-deep
+  // `candidates` list used for the To-autocomplete elsewhere on this
+  // page - a deep-linked candidate may not be in that recent-500 window)
+  // so the composer opens pre-addressed and ready to send, not just
+  // pre-filled with an ID the composer can't resolve to an email.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const candId = params.get('compose_candidate');
+    if (!candId) return;
+    const subject = params.get('compose_subject') || '';
+    (async () => {
+      try {
+        const c = await apiFetch(`/candidates/${candId}`);
+        setComposeInitial({ candidate_id: candId, candidate_name: c?.full_name, email: c?.email, subject } as any);
+        setComposing(true);
+      } catch { /* candidate no longer reachable — leave composer closed */ }
+    })();
+    window.history.replaceState(null, '', window.location.pathname);
+  }, []);
   const [search, setSearch] = useState('');
   const [showSearchFilters, setShowSearchFilters] = useState(false);
   const [searchFrom, setSearchFrom] = useState('');

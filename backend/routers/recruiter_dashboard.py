@@ -309,10 +309,13 @@ async def my_day(actor: Actor = Depends(get_actor)):
     as a typical ATS "today" home screen (Bullhorn/CEIPAL/JobDiva)."""
     uid = actor.user_id
     if uid is None:
-        return {"tasks_due": [], "interviews_today": [], "candidates_needing_action": []}
+        return {"tasks_due": [], "interviews_today": [], "interviews_tomorrow": [],
+                "interviews_this_week": [], "candidates_needing_action": []}
 
     today_start = _start_of_day_utc()
     today_end = today_start + timedelta(days=1)
+    tomorrow_end = today_end + timedelta(days=1)
+    week_end = today_start + timedelta(days=7)
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         # REAL BUG FIX (2026-08-17): recruiter_tasks has no direct
@@ -342,7 +345,15 @@ async def my_day(actor: Actor = Depends(get_actor)):
         # had the same missing is_active filter as tasks_due above — a
         # soft-deleted candidate's interview or stale-application card
         # kept showing on My Day indefinitely.
-        interviews_today = await conn.fetch(
+        #
+        # REAL FEATURE ADD (2026-08-31): reported live — the Dashboard's
+        # "Interviews Today" card only ever showed today, with no way to
+        # see what's coming tomorrow or later this week. Fetches the
+        # whole 7-day forward window in ONE query (not 3 separate ones —
+        # guarantees a candidate can never show in "today" but be
+        # missing from "this week" due to a race between calls) and
+        # slices it in Python by scheduled_at.
+        interviews_week = await conn.fetch(
             """SELECT i.id, i.scheduled_at, i.duration_mins, i.mode, i.status, i.interview_type,
                       c.full_name AS candidate_name, r.title AS req_title,
                       (i.interviewer_id = $1) AS im_interviewer
@@ -355,8 +366,11 @@ async def my_day(actor: Actor = Depends(get_actor)):
                  AND i.scheduled_at >= $3 AND i.scheduled_at < $4
                  AND i.status NOT IN ('cancelled', 'completed')
                ORDER BY i.scheduled_at ASC""",
-            uid, actor.tenant_id, today_start, today_end,
+            uid, actor.tenant_id, today_start, week_end,
         )
+        interviews_today = [r for r in interviews_week if today_start <= r["scheduled_at"] < today_end]
+        interviews_tomorrow = [r for r in interviews_week if today_end <= r["scheduled_at"] < tomorrow_end]
+        interviews_rest_of_week = [r for r in interviews_week if r["scheduled_at"] >= tomorrow_end]
 
         # "Needs action" = assigned to me, not in a terminal stage, and
         # nobody has touched it in 3+ days - the ones quietly going stale.
@@ -377,6 +391,12 @@ async def my_day(actor: Actor = Depends(get_actor)):
     return {
         "tasks_due": [dict(r) for r in tasks_due],
         "interviews_today": [dict(r) for r in interviews_today],
+        # "Tomorrow" and "this week" are disjoint from interviews_today and
+        # each other (this week = day 2 through day 7) so a UI rendering
+        # all three sections shows each interview exactly once, not
+        # duplicated across buckets.
+        "interviews_tomorrow": [dict(r) for r in interviews_tomorrow],
+        "interviews_this_week": [dict(r) for r in interviews_rest_of_week],
         "candidates_needing_action": [dict(r) for r in stale],
     }
 

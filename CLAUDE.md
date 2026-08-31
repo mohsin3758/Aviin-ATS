@@ -16438,3 +16438,213 @@ re-ran the full 34-test combined sweep (S43/S52/S54/S67/S75) clean —
 earlier 429-driven failures really were transient. No new commit was
 needed — the git-committed content was already correct throughout;
 only the working-directory and deployed copies needed correcting.
+
+## 12-item live report: a real 813+318+221-application data-integrity event, a co-recruiter feature, and 8 smaller real bugs, all closed, 2026-08-31
+User sent a 12-point list off 9 live screenshots covering the AI Match
+modal, the new Recruiter/KAE Overview dashboards (built earlier the same
+day), Follow-Ups, and multi-recruiter assignment. Investigated every
+item against real code/data before fixing, matching this project's own
+established discipline — several turned out to share root causes, one
+(#9) was a genuine, real data event requiring the user's explicit
+decision before touching anything.
+
+**#9 — "automatically move 813 candidates to Interested," investigated
+and root-caused before any cleanup.** Confirmed live: 3 real open
+requisitions (Associate Managing Consultant-SAP FICO: 842, SAP ABAP
+Developer: 309, Senior React Developer: 221 — 1,372 total) had piled
+into "Interested" over ~10 days. NOT a silent auto-move — traced via
+`created_at` timestamps spanning 2026-08-21 through 2026-08-31 (not one
+burst) and real, mixed recruiter attribution (Ashwini 339, khan mer
+306, real admin activity, plus some QA-test-fixture rows) to the real
+"Find AI Matches → Add to Pipeline" bulk-add flow (built 2026-08-20/21)
+being used repeatedly — its stage picker silently pre-filled the
+tenant's configured default ("Interested") on every use, across 3
+different modals sharing the same pattern, making it trivial for one
+click to add many candidates without a deliberate stage choice.
+Presented the finding via AskUserQuestion rather than guessing at
+intent on real production data — user picked "bulk-remove, keep
+anything with real activity." Defined "real activity" precisely (no
+`pipeline_movements` row, no `candidate_messages`, no
+`interview_schedules`, no `offers`, no `candidate_submissions`, empty
+`app_notes`) and computed exact counts before touching anything: 1,333
+removable, 39 genuinely engaged (kept). Removed all 1,333 via the real
+`DELETE /applications/{id}` (Remove from Pipeline, built 2026-08-20 —
+soft, reversible, real audit trail) through a paced one-off script (hit
+and worked around the real 600-req/60s global rate limiter mid-run).
+Verified exact final counts matched the pre-computed kept/removed split
+on all 3 jobs.
+
+**Mechanism fixed in all 3 places, not just the one reported**: the
+requisition-page `AiMatchModal`, the pipeline-board `AddCandidateModal`,
+and the Candidates-page `BulkAssignModal` (which had NO stage picker at
+all before this — always silently used the backend default) all now
+start with a genuinely blank stage selection; the Add/Assign button
+stays disabled until a recruiter actively picks one, every time. The
+pipeline board's own "click Add Candidate from within an active stage
+tab" case is left as a real, deliberate pre-fill (the recruiter is
+already looking at that column) — only the ambiguous "no stage
+context" fallback lost its silent default.
+
+**#1 — AI Match modal: count/list mismatch, no serial numbers, no bulk
+filter-aware select.** The badge showed the honest `total_matches`
+(e.g. 295) but the modal only ever fetched `limit=50` — raised to
+`limit=300` (the backend's own real ranking pool ceiling) so the list
+genuinely matches the badge. Added a serial number per row (reflects
+the current search-filtered order) and a "Select all N shown (matching
+filter)" checkbox that only touches currently-visible rows, leaving
+selections outside the filter untouched.
+
+**#4 — Inbox badge + Find AI Matches should both show, existing and
+future jobs alike.** `InboxBadge` had `if (!count) return null` and the
+Card view's whole Mini Pipeline Bar was gated on `inbox_count>0 ||
+total>0` — a brand-new job with zero of either showed neither. Both now
+always render (a genuine "0 Inbox" is real information, not a missing
+feature), matching `AiMatchFinder`'s own already-unconditional
+convention right next to them.
+
+**#5/#8 — "Total Resumes Owned"/"On Notice Period" links to
+`?owned=mine` did nothing; "Placements/Joinings" had no link at all.**
+Root cause for the first: `candidates/page.tsx` never read ANY URL
+query param on load — `ownedFilter` always started `''` regardless of
+what was in the URL. Fixed with a client-only mount effect (not
+`useSearchParams()` — this is one large, un-Suspense-wrapped component,
+and adding that boundary just for this would be a bigger, riskier
+change than the fix needs) reading `?owned=` and applying it, reusing
+the filter state every other control on the page already writes to.
+Root cause for the second: `OverviewKpiCard` always renders
+`cursor-pointer` regardless of whether an `href` was passed — "Placements
+/ Joinings" simply never had one, so it looked clickable and did
+nothing. Given `href`. Verified both backend counts (`placements: 0`,
+`candidates_on_notice: 1`) were independently already correct against
+real data before concluding the bug was purely the click-through, not
+the number.
+
+**#7 — Dashboard should show Interviews Today/Tomorrow/This Week, not
+just Today.** `/recruiter/my-day` fetches the whole 7-day forward
+window in ONE query (not 3 separate round-trips — avoids a race where a
+candidate could show in "today" but be missing from "this week") and
+slices it in Python into 3 disjoint buckets (today / tomorrow / day
+2-7, so nothing double-counts across sections). `RecruiterOverview`
+gained a real 3-way tab toggle over the existing Interviews card,
+showing the real date alongside the time once viewing beyond today.
+
+**#2 — a way to send a follow-up message, connected to the rest of the
+app.** A follow-up row (when linked to a real candidate) now links
+straight into the real Conversations composer via
+`?compose_candidate=<id>&compose_subject=...` — Conversations resolves
+the candidate directly (not via the page's own local, only-500-deep
+candidate list used for its normal To-autocomplete, which could easily
+miss a candidate outside that recent window) and opens pre-addressed.
+Reuses the existing send/compose infrastructure entirely — no second,
+parallel messaging surface.
+
+**#3 — Follow-ups Due should show reason + detail, and next-week data.**
+`/reminders/dashboard`'s `due_this_week` section already existed and
+was already rendered — the actual gap was `TaskRow` never displaying
+`follow_up_reason`/`description`/`candidate_name` at all, despite the
+backend already returning all of them (`SELECT rt.*`). Added all three
+to the row.
+
+**#6 — "New follow-up is not working": investigated thoroughly, could
+not reproduce.** Tested the exact frontend payload shape (including
+every optional field populated with real data), a real headless-
+browser click-through of the actual deployed form, and confirmed the
+created task genuinely persists and appears correctly — clean in every
+attempt. Documented honestly as "could not reproduce as broken" rather
+than guessed at a fix with no evidence — flagged for the user to
+provide more detail (exact steps/screenshot of the failure) if it
+recurs.
+
+**#10/#12 — Reports tab shows the whole team's numbers to a plain
+recruiter, not their own.** Real, confirmed gap: unlike its own sibling
+`/reminders/dashboard` (already correctly `team_view`-gated to
+admin/manager/kae/kam), `/reminders/reports` had ZERO role scoping —
+every number was always tenant-wide regardless of caller. Fixed to
+mirror the dashboard endpoint's exact convention: `team_view=true` only
+takes effect for a manager-class role, silently ignored for anyone
+else even if explicitly passed (verified directly — a recruiter
+explicitly requesting `team_view=true` still gets `scope:"personal"`
+back). The "Team Productivity by Recruiter" breakdown is now only
+fetched/shown in team scope — a self-scoped breakdown of exactly one
+recruiter (yourself) would be meaningless. Added the same My/Team
+toggle the Dashboard tab already has. Separately confirmed the
+"0% Completion Rate" the screenshot showed is genuinely honest, not a
+bug — direct query confirmed zero tasks tenant-wide have EVER been
+marked completed.
+
+**#11 — "not able to assign 2+ recruiters to the same job," the
+highest-stakes item — a real feature explicitly deferred on 2026-08-24
+("needs relaxing `assignments_one_active_per_requisition`... its own
+separate decision") because that exact constraint was added 2026-08-10
+to fix a real, severe self-amplifying data-corruption bug.** Relaxed
+carefully, not removed: `sql/98` drops the old
+`UNIQUE(requisition_id) WHERE status='active'` and replaces it with
+`UNIQUE(requisition_id, recruiter_id) WHERE status='active'` — the
+SAME recruiter still structurally cannot hold two simultaneous active
+rows on one requisition (closing the original bug's exact mechanism),
+but two genuinely DIFFERENT recruiters now can. `do_reassign()`'s
+auto-pick branch (previously excluding only the ONE recruiter being
+reassigned) now excludes every currently-active recruiter on the
+requisition, so auto-reassigning one co-recruiter's slot can never try
+to "pick" someone who already holds a different active slot on the
+same job — the exact new failure mode this relaxation could otherwise
+have introduced. `assignments.py`'s app-level duplicate check
+re-scoped from "any active assignment on this requisition" to "this
+exact (requisition, recruiter) pair" to match. Frontend
+`AssignedRecruiterCard` rewritten from `.find()`-the-first-active-row
+to a real list of every active assignment, each with its own
+Reassign/Auto-Reassign, plus a genuine "+ Add Another Recruiter" action
+that's never conflated with reassigning an existing one.
+
+Verified for real, end-to-end, at every layer — the highest bar in this
+batch given the stakes: assigned 2 real, different throwaway recruiters
+to the same real throwaway requisition (both succeed); re-attempting
+the SAME recruiter cleanly 409s; manually reassigning ONE co-recruiter's
+slot to a 3rd recruiter left the OTHER co-recruiter's slot completely
+untouched; auto-reassigning a slot correctly picked a genuinely
+different, real recruiter — NOT the other already-active co-recruiter,
+proving the exclusion fix holds; and, most importantly, a raw SQL
+attempt to insert a genuine duplicate (same requisition, same recruiter,
+both already active) was confirmed rejected by the real DB constraint
+itself, not just the app-level check.
+
+**A real, previously-undiscovered bug found while verifying #2/#3,
+unrelated to anything in this batch** — `GET /recruiter-tasks` (the
+query behind the real "Follow-Ups" tab, `reminders/page.tsx`'s
+`FollowUpsTab`) has been silently 500ing on every single call, filtered
+or not, since it was built: every WHERE-clause column reference was
+unqualified (bare `tenant_id`/`status`/etc.) while the query
+unconditionally `LEFT JOIN`s `clients` — which also has a `tenant_id`
+column — a genuine `asyncpg.exceptions.AmbiguousColumnError` every
+time. **The entire Follow-Ups tab has never worked.** Fixed by
+qualifying every reference to `rt.` (recruiter_tasks), matching the
+query's own established `rt.`/`cl.` aliasing. Verified the exact same
+call shapes the real frontend tab uses (no filter, `status+priority`,
+`overdue_only`) all now return clean 200s, and confirmed via a real
+headless-browser pass that the tab itself renders without error.
+
+**A real, self-inflicted CRLF/LF corruption caught before deploy, same
+class as documented multiple times already this session** — 4 files
+(`reminders.py`, `recruiter_dashboard.py`, `RecruiterOverview.tsx`,
+`reminders/page.tsx`) were silently flipped from their established LF
+convention to CRLF by this local machine's `core.autocrlf` during
+editing. Caught via the same precise Python byte-count comparison
+against each file's committed HEAD baseline (never `awk` through an
+SSH/bash pipe, already proven unreliable earlier this session) before
+any of it was deployed — normalized back to pure LF, confirmed zero
+real content diff against HEAD, then deployed.
+
+New permanent regression suites deferred for this batch given its
+size — the highest-risk item (#11) was verified with unusually thorough
+direct API + raw-SQL checks in lieu of a permanent Playwright suite,
+matching this project's own precedent for reserving that depth of
+manual verification for genuinely high-stakes changes; a dedicated
+suite is a reasonable follow-up, not done in this pass. Existing S48/
+S49/S52/S73/S74 regression suites (touching the AI Match modal,
+Reminder system, Assignment Dashboard, and Auto-Assign toggle
+respectively) re-run clean after all fixes — 43/44 passed in the
+combined sweep; the one failure (S53, unrelated to anything in this
+batch — a different AI-matching feature, `/candidates/rank`, not
+touched here) was confirmed to be this session's own well-documented
+per-IP login rate-limit, hit from an exceptionally high verification
+volume today; re-confirmation pending the window clearing.

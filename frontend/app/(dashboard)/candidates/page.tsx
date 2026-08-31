@@ -117,15 +117,26 @@ const PAGE_SIZE = 50;
 // ── Bulk Assign Modal ─────────────────────────────────────────────────────────
 function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];onClose:()=>void;onDone:()=>void}) {
   const {data:reqData} = useFetch<any>('/requisitions?limit=100&status=open');
+  const {data:stageConfig} = useFetch<any[]>('/settings/pipeline-stages');
   const [reqId,setReqId] = useState('');
+  // REAL BUG FIX (2026-08-31): this modal never surfaced a stage choice at
+  // all - every "Add to Pipeline" click silently used the backend's own
+  // tenant-configured default (e.g. "Interested"). Reported live: 1,333
+  // real applications had piled into "Interested" across 3 real open jobs
+  // over ~10 days, largely from repeated real use of exactly this flow
+  // (the JD-Match/Candidates-page "Add N to Pipeline" action). Now a real,
+  // required choice, same convention as the sibling AI-match modals.
+  const [stage,setStage] = useState('');
   const [saving,setSaving] = useState(false);
   const [result,setResult] = useState<any>(null);
   const reqs = Array.isArray(reqData?.data)?reqData.data:Array.isArray(reqData)?reqData:[];
+  const visibleStages = (stageConfig||[]).filter((s:any)=>s.is_visible).sort((a:any,b:any)=>a.display_order-b.display_order);
   async function assign() {
     if (!reqId) {alert('Select a requisition');return;}
+    if (!stage) {alert('Choose a stage');return;}
     setSaving(true);
     try {
-      const r = await apiFetch('/candidates/bulk-assign',{method:'POST',body:JSON.stringify({candidate_ids:candidateIds,requisition_id:reqId})});
+      const r = await apiFetch('/candidates/bulk-assign',{method:'POST',body:JSON.stringify({candidate_ids:candidateIds,requisition_id:reqId,stage})});
       setResult(r); setTimeout(()=>{onDone();onClose();},1800);
     } catch(e:any){alert(e?.message||'Failed');setSaving(false);}
   }
@@ -149,13 +160,18 @@ function BulkAssignModal({candidateIds,onClose,onDone}:{candidateIds:string[];on
         ):(
           <>
             <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Select Requisition</label>
-            <select value={reqId} onChange={e=>setReqId(e.target.value)} style={{width:'100%',padding:'10px 12px',borderRadius:'8px',border:'1px solid #e2e8f0',fontSize:'13px',outline:'none',marginBottom:'20px'}}>
+            <select value={reqId} onChange={e=>setReqId(e.target.value)} style={{width:'100%',padding:'10px 12px',borderRadius:'8px',border:'1px solid #e2e8f0',fontSize:'13px',outline:'none',marginBottom:'14px'}}>
               <option value="">-- Choose a requisition --</option>
               {reqs.map((r:any)=><option key={r.id} value={r.id}>{r.title} ({r.department||'No dept'})</option>)}
             </select>
+            <label style={{fontSize:'12px',fontWeight:'600',color:'#374151',display:'block',marginBottom:'6px'}}>Add into stage</label>
+            <select value={stage} onChange={e=>setStage(e.target.value)} style={{width:'100%',padding:'10px 12px',borderRadius:'8px',border:`1px solid ${stage?'#e2e8f0':'#fca5a5'}`,fontSize:'13px',outline:'none',marginBottom:'20px',color:stage?'#374151':'#94a3b8'}}>
+              <option value="">-- Choose a stage --</option>
+              {visibleStages.map((s:any)=><option key={s.stage_key} value={s.stage_key}>{s.label}</option>)}
+            </select>
             <div style={{display:'flex',justifyContent:'flex-end',gap:'10px'}}>
               <button onClick={onClose} style={{padding:'9px 18px',borderRadius:'8px',border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151'}}>Cancel</button>
-              <button onClick={assign} disabled={saving||!reqId} style={{padding:'9px 18px',borderRadius:'8px',border:'none',background:saving||!reqId?'#94a3b8':'#1e40af',color:'white',cursor:saving||!reqId?'not-allowed':'pointer',fontSize:'13px',fontWeight:'600'}}>{saving?'Assigning...':'Assign to Pipeline'}</button>
+              <button onClick={assign} disabled={saving||!reqId||!stage} style={{padding:'9px 18px',borderRadius:'8px',border:'none',background:saving||!reqId||!stage?'#94a3b8':'#1e40af',color:'white',cursor:saving||!reqId||!stage?'not-allowed':'pointer',fontSize:'13px',fontWeight:'600'}}>{saving?'Assigning...':'Assign to Pipeline'}</button>
             </div>
           </>
         )}
@@ -967,6 +983,18 @@ export default function CandidatesPage() {
   const [maxExpYr,setMaxExpYr] = useState('');
   const [tagFilter,setTagFilter] = useState('');
   const [ownedFilter,setOwnedFilter] = useState(''); // '' | 'unowned' | 'active' — 2026-08-11 ownership filter
+  // REAL BUG FIX (2026-08-31): this page never read any URL query param on
+  // load - "Total Resumes Owned"/"On Notice Period" (RecruiterOverview.tsx)
+  // link here with ?owned=mine, but landed on the unfiltered "All
+  // Candidates" view every time, reported live as "directing to all
+  // candidates." A client-only effect (not useSearchParams — this page is
+  // one large component with no existing Suspense boundary, and adding one
+  // just for this would be a much bigger, riskier restructure than the fix
+  // itself needs) picks up ?owned=mine/unowned/active on first paint.
+  useEffect(()=>{
+    const owned = new URLSearchParams(window.location.search).get('owned');
+    if (owned) setOwnedFilter(owned);
+  },[]);
   const [showFilters,setShowFilters] = useState(false);
   // SSR-safe deferred localStorage read (established pattern elsewhere in
   // this app) — avoids a hydration mismatch between the server's first

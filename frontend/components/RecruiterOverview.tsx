@@ -1,4 +1,5 @@
 'use client';
+import { useState } from 'react';
 import { useFetch } from '@/lib/useFetch';
 import OverviewKpiCard from './OverviewKpiCard';
 import Link from 'next/link';
@@ -20,7 +21,23 @@ export default function RecruiterOverview() {
   const d = data || {};
 
   const tasksDue = (myDay?.tasks_due || []).slice(0, 5);
-  const interviewsToday = (myDay?.interviews_today || []).slice(0, 5);
+  // REAL FEATURE ADD (2026-08-31): reported live — this card only ever
+  // showed today's interviews. /recruiter/my-day now also returns
+  // interviews_tomorrow + interviews_this_week (day 2-7, disjoint from
+  // today/tomorrow so nothing double-counts) — a simple 3-way toggle
+  // surfaces all three without needing 3 separate cards.
+  const [ivTab, setIvTab] = useState<'today' | 'tomorrow' | 'week'>('today');
+  const ivMap: Record<string, any[]> = {
+    today: myDay?.interviews_today || [],
+    tomorrow: myDay?.interviews_tomorrow || [],
+    week: myDay?.interviews_this_week || [],
+  };
+  const interviewsShown = ivMap[ivTab].slice(0, 5);
+  const ivEmptyText: Record<string, string> = {
+    today: 'No interviews scheduled today.',
+    tomorrow: 'No interviews scheduled tomorrow.',
+    week: 'No more interviews scheduled later this week.',
+  };
 
   return (
     <>
@@ -32,7 +49,13 @@ export default function RecruiterOverview() {
         <OverviewKpiCard icon="📤" label="Total Submissions" value={loading ? '…' : d.total_submissions ?? 0} color="#9a3412" bg="#ffedd5" href="/pipeline" />
         <OverviewKpiCard icon="🗓️" label="Interviews Scheduled" value={loading ? '…' : d.interviews_scheduled ?? 0} color="#0f766e" bg="#ccfbf1" href="/interviews" />
         <OverviewKpiCard icon="📝" label="Offers Released" value={loading ? '…' : d.offers_released ?? 0} color="#b45309" bg="#fef3c7" href="/offers" />
-        <OverviewKpiCard icon="🎉" label="Placements / Joinings" value={loading ? '…' : d.placements ?? 0} color="#065f46" bg="#d1fae5" />
+        {/* REAL BUG FIX (2026-08-31): this card never had an href at all -
+            it visually looked clickable (OverviewKpiCard always applies
+            cursor-pointer regardless of href) but did nothing, reported
+            live as "Placements is not working." Links to the recruiter's
+            own candidates, same destination "On Notice Period" already
+            uses, since there's no dedicated placements-only view yet. */}
+        <OverviewKpiCard icon="🎉" label="Placements / Joinings" value={loading ? '…' : d.placements ?? 0} color="#065f46" bg="#d1fae5" href="/candidates?owned=mine" />
         <OverviewKpiCard icon="💰" label="Revenue Generated" value={loading ? '…' : fmtRupee(d.revenue_generated || 0)} color="#1e3a5f" bg="#dbeafe" href="/incentives" sub="This month, best-effort attribution" />
         <OverviewKpiCard icon="⏰" label="Pending Follow-ups" value={loading ? '…' : d.pending_followups ?? 0} color="#dc2626" bg="#fee2e2" href="/reminders" />
         <OverviewKpiCard icon="🔔" label="On Notice Period" value={loading ? '…' : d.candidates_on_notice ?? 0} color="#92400e" bg="#fef3c7" href="/candidates?owned=mine" />
@@ -60,19 +83,37 @@ export default function RecruiterOverview() {
           </div>
         </div>
         <div className="card">
-          <div className="card-header">
-            <h3 className="flex items-center gap-2"><Video size={16} style={{ color: 'var(--primary)' }} /> Interviews Today</h3>
-            <Link href="/interviews" className="btn btn-ghost btn-sm">All <ArrowRight size={13} /></Link>
+          <div className="card-header" style={{ flexWrap: 'wrap', gap: 8 }}>
+            <h3 className="flex items-center gap-2"><Video size={16} style={{ color: 'var(--primary)' }} /> Interviews</h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <div style={{ display: 'inline-flex', background: '#f1f5f9', borderRadius: 7, padding: 2, gap: 1 }}>
+                {(['today', 'tomorrow', 'week'] as const).map(tab => (
+                  <button key={tab} onClick={() => setIvTab(tab)}
+                    data-testid={`iv-tab-${tab}`}
+                    style={{
+                      padding: '4px 10px', borderRadius: 5, border: 'none', cursor: 'pointer',
+                      fontSize: 11, fontWeight: 700,
+                      background: ivTab === tab ? 'white' : 'transparent',
+                      color: ivTab === tab ? '#1e40af' : '#64748b',
+                      boxShadow: ivTab === tab ? '0 1px 2px rgba(0,0,0,0.08)' : 'none',
+                    }}>
+                    {tab === 'today' ? 'Today' : tab === 'tomorrow' ? 'Tomorrow' : 'This Week'}
+                  </button>
+                ))}
+              </div>
+              <Link href="/interviews" className="btn btn-ghost btn-sm">All <ArrowRight size={13} /></Link>
+            </div>
           </div>
-          <div className="divide-y" style={{ borderColor: 'var(--gray-100)' }}>
-            {interviewsToday.length === 0 && (
-              <p style={{ color: '#94a3b8', fontSize: 13, padding: '16px 20px' }}>No interviews scheduled today.</p>
+          <div className="divide-y" style={{ borderColor: 'var(--gray-100)' }} data-testid="recruiter-overview-interviews-list">
+            {interviewsShown.length === 0 && (
+              <p style={{ color: '#94a3b8', fontSize: 13, padding: '16px 20px' }}>{ivEmptyText[ivTab]}</p>
             )}
-            {interviewsToday.map((iv: any) => (
+            {interviewsShown.map((iv: any) => (
               <div key={iv.id} style={{ padding: '10px 20px' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: '#0f172a' }}>{iv.candidate_name}</div>
                 <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
-                  {iv.req_title || ''} · {new Date(iv.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                  {iv.req_title || ''} · {ivTab === 'week' ? new Date(iv.scheduled_at).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }) + ' ' : ''}
+                  {new Date(iv.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                   {iv.im_interviewer ? ' · you are interviewing' : ''}
                 </div>
               </div>

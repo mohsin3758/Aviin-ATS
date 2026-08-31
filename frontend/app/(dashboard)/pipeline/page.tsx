@@ -194,11 +194,6 @@ function PipelineInner() {
     const visibleKeys = new Set(stageConfig.filter((s: any) => s.is_visible).map((s: any) => s.stage_key));
     return ALL_STAGES.filter((s: any) => visibleKeys.has(s.key));
   }, [stageConfig, ALL_STAGES]);
-  // Tenant-configurable (Settings > Pipeline Stages > star icon) — used by
-  // Add Candidate when no specific stage tab is active. Falls back to
-  // 'sourced' only if the backend hasn't returned a default yet/at all.
-  const defaultAddStageKey = (stageConfig || []).find((s: any) => s.is_default_add)?.stage_key || 'sourced';
-
   const { data: reqs } = useFetch<any[]>('/requisitions?limit=200&status=open');
   const { data: rawBoard, refetch: refreshBoard } = useFetch<Record<string, any[]>>(
     selectedJobId ? `/requisitions/${selectedJobId}/pipeline` : null
@@ -725,7 +720,18 @@ function PipelineInner() {
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
       {addCandidateOpen && selectedJobId && (
         <AddCandidateModal jobId={selectedJobId} board={board} stages={STAGES}
-          defaultStage={STAGES.some((s: any) => s.key === activeStage) ? activeStage : defaultAddStageKey}
+          // REAL BUG FIX (2026-08-31): when a specific stage tab (e.g.
+          // "Interested") is active, the recruiter is already looking
+          // at that column and clicked "Add Candidate" from inside it -
+          // a genuine, deliberate, in-context choice, still pre-filled.
+          // But on "All Stages" (no real active tab) this used to fall
+          // back to the tenant's silent configured default instead of
+          // asking - reported live: 1,333 real applications piled into
+          // "Interested" over ~10 days from exactly this kind of
+          // unnoticed default across this and 2 sibling bulk-add flows.
+          // Passes '' now so the modal starts genuinely blank in that
+          // ambiguous case, requiring an explicit choice.
+          defaultStage={STAGES.some((s: any) => s.key === activeStage) ? activeStage : ''}
           onClose={() => setAddCandidateOpen(false)}
           onAdded={(stageLabel: string) => { setAddCandidateOpen(false); refreshBoard(); refreshStats(); showToast(`Candidate(s) added to ${stageLabel}`); }} />
       )}
@@ -2460,7 +2466,7 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
-  const [targetStage, setTargetStage] = useState(defaultStage || 'sourced');
+  const [targetStage, setTargetStage] = useState(defaultStage || '');
   const { data: matchData, loading } = useFetch<any>(`/requisitions/${jobId}/match-candidates?limit=50`);
   const matches: any[] = Array.isArray(matchData?.matches) ? matchData.matches : [];
 
@@ -2486,7 +2492,7 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
   }
 
   async function submit() {
-    if (selected.size === 0) return;
+    if (selected.size === 0 || !targetStage) return;
     setSaving(true);
     try {
       await apiFetch('/candidates/bulk-assign', {
@@ -2521,7 +2527,8 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: '#64748B', flexShrink: 0 }}>Add into stage:</span>
             <select value={targetStage} onChange={e => setTargetStage(e.target.value)}
-              style={{ flex: 1, border: '1px solid #E2E8F0', borderRadius: 6, padding: '5px 8px', fontSize: 12, fontWeight: 600, color: '#1E293B', background: '#fff' }}>
+              style={{ flex: 1, border: `1px solid ${targetStage ? '#E2E8F0' : '#fca5a5'}`, borderRadius: 6, padding: '5px 8px', fontSize: 12, fontWeight: 600, color: targetStage ? '#1E293B' : '#94A3B8', background: '#fff' }}>
+              <option value="">— Choose a stage —</option>
               {(stages || []).map((s: any) => <option key={s.key} value={s.key}>{s.label}</option>)}
             </select>
           </div>
@@ -2564,10 +2571,12 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
           })}
         </div>
         <div style={{ padding: '12px 18px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: '#94A3B8' }}>{selected.size} selected</span>
-          <button onClick={submit} disabled={selected.size === 0 || saving}
-            style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || saving ? '#94A3B8' : '#2563EB', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || saving ? 'not-allowed' : 'pointer' }}>
-            {saving ? 'Adding…' : `Add to ${stages?.find((s: any) => s.key === targetStage)?.label || 'Pipeline'}`}
+          <span style={{ fontSize: 11, color: '#94A3B8' }}>
+            {selected.size} selected{selected.size > 0 && !targetStage ? ' — choose a stage above' : ''}
+          </span>
+          <button onClick={submit} disabled={selected.size === 0 || !targetStage || saving}
+            style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: selected.size === 0 || !targetStage || saving ? '#94A3B8' : '#2563EB', color: '#fff', fontSize: 12, fontWeight: 700, cursor: selected.size === 0 || !targetStage || saving ? 'not-allowed' : 'pointer' }}>
+            {saving ? 'Adding…' : targetStage ? `Add to ${stages?.find((s: any) => s.key === targetStage)?.label || 'Pipeline'}` : 'Add to Pipeline'}
           </button>
         </div>
       </div>

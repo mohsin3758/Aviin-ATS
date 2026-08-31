@@ -86,16 +86,27 @@ async def create_assignment(
     the response now carries the same real availability/priority/workload
     breakdown Auto-Assign already surfaces — reusing match_recruiters(),
     not a second scoring path — so the manual picker's tooltip can show
-    "full message all details" identically to the auto-assign one."""
+    "full message all details" identically to the auto-assign one.
+
+    2026-08-31: reported live — "not able to assign both recruiter to
+    same job requisition... 2 to more recruiter." This check used to
+    block ANY second assignment on an already-assigned requisition,
+    regardless of recruiter — the real DB constraint backing it
+    (assignments_one_active_per_requisition) was relaxed the same day to
+    (requisition_id, recruiter_id) (sql/98) specifically so 2+ DIFFERENT
+    recruiters can each hold their own real, distinct active assignment
+    on the same job. This app-level check now matches that exact scope —
+    still cleanly blocks a genuine duplicate (the SAME recruiter assigned
+    twice), never a second, different recruiter."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         existing = await conn.fetchval(
-            "SELECT id FROM assignments WHERE requisition_id=$1 AND status='active'",
-            body.requisition_id,
+            "SELECT id FROM assignments WHERE requisition_id=$1 AND recruiter_id=$2 AND status='active'",
+            body.requisition_id, body.recruiter_id,
         )
         if existing:
             raise HTTPException(
                 status_code=409,
-                detail="This requisition already has an active assignment — use /reassign instead",
+                detail="This recruiter is already actively assigned to this requisition",
             )
 
         detail = await _recruiter_match_detail(conn, body.requisition_id, body.recruiter_id)
