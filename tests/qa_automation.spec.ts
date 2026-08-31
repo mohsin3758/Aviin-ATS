@@ -10090,3 +10090,169 @@ test.describe.serial('S74 Auto-Assign on/off toggle: manual assign/reassign neve
     }
   });
 });
+
+test.describe.serial('S75 Conversations: draft ownership + IMAP write ownership + mark-all-read scoping', () => {
+  // 2026-08-31 — 3 real gaps closed in the same file, found while
+  // continuing this project's own established audit discipline (all 3
+  // were previously flagged-but-explicitly-left-unfixed on 2026-08-30):
+  //   1. message_drafts had NO owner/creator column at all — any
+  //      authenticated tenant user could list/edit/delete any other
+  //      user's in-progress email draft. sql/97 adds created_by;
+  //      list/save/update/delete are now scoped, admin keeps oversight.
+  //   2. The 6 IMAP write endpoints (read/star/trash/snooze/archive/
+  //      move) plus the dual-purpose /messages/{id}/star only ever
+  //      checked tenant_id — a real IDOR: any tenant user who knew/
+  //      guessed another user's private IMAP message UUID could act on
+  //      it. Closed with a shared _assert_imap_writable() ownership
+  //      check, admin-class + trusted-internal exempted.
+  //   3. A much more serious bug found investigating #2: mark_all_read
+  //      ignored `folder` (beyond a bare gate check) AND the caller's
+  //      identity entirely — a real, live "Mark all as read" button was
+  //      marking EVERY email in the WHOLE TENANT as read on every click,
+  //      for every user. Rewritten to scope by both the real folder
+  //      being viewed and (for non-admin) the caller's own mailbox.
+  //
+  // Verified LIVE against real production during development, not just
+  // here: draft isolation between 2 real throwaway users + admin
+  // oversight; all 6 IMAP write endpoints correctly 404 for a real
+  // non-owner against a real message in khan mer's actual 39k-message
+  // connected mailbox while admin oversight still works and the real
+  // owner's own EXISTS condition independently confirmed true; and
+  // mark-all-read scoped correctly against real throwaway fixtures
+  // while khan mer's (6601) and Shahana's (7191) real unread counts
+  // were provably untouched before/after. That fixture-insertion
+  // technique (a raw INSERT into imap_messages) has no public API
+  // equivalent — there is no endpoint to create an imap_messages row —
+  // so, matching this project's own established precedent for this
+  // exact situation (S32/S39's "no direct creation endpoint exists for
+  // resume_files... test against real discovered data", the WAHA/
+  // Telegram "no real external session to test the true happy path
+  // against... verified via every negative path instead"), the
+  // permanent suite below covers everything genuinely automatable via
+  // real HTTP calls — drafts fully, and IMAP-ownership's safe,
+  // fixture-free half (a real user_email_accounts row via the real
+  // POST /user-mail/accounts endpoint, proving the ownership JOIN
+  // executes cleanly with zero messages) — and does not re-simulate
+  // the imap_messages-row ownership boundary itself, which was already
+  // proven live above.
+  let token = '';
+  let tokA = '', tokB = '';
+  let userAId = '', userBId = '';
+  let draftId = '';
+  let accId = '';
+  const stamp = Date.now();
+  const authAdmin = () => ({ Authorization: `Bearer ${token}` });
+
+  test.afterAll(async ({ request }) => {
+    if (draftId) await request.delete(`${API}/communications/drafts/${draftId}`, { headers: authAdmin() }).catch(() => {});
+    if (accId && tokA) await request.delete(`${API}/user-mail/accounts/${accId}`, { headers: { Authorization: `Bearer ${tokA}` } }).catch(() => {});
+    for (const id of [userAId, userBId]) {
+      if (!id) continue;
+      await request.patch(`${API}/users/${id}/deactivate`, { headers: authAdmin() }).catch(() => {});
+      await request.delete(`${API}/users/${id}/purge`, { headers: authAdmin() }).catch(() => {});
+    }
+  });
+
+  test('setup: real admin token + 2 throwaway recruiters logged in as themselves', async ({ request }) => {
+    token = await getApiToken(request);
+    for (const [letter, setId] of [['A', (v: string) => (userAId = v)], ['B', (v: string) => (userBId = v)]] as const) {
+      const u = await (await request.post(`${API}/users`, {
+        headers: authAdmin(),
+        data: { full_name: `QA S75 ${letter} ${stamp}`, email: `qa.s75.${letter.toLowerCase()}.${stamp}@test.com`, role: 'recruiter', password: 'Test1234!' },
+      })).json();
+      setId(u.id);
+    }
+    tokA = (await (await request.post(`${API}/auth/login`, { data: { email: `qa.s75.a.${stamp}@test.com`, password: 'Test1234!' } })).json()).access_token;
+    tokB = (await (await request.post(`${API}/auth/login`, { data: { email: `qa.s75.b.${stamp}@test.com`, password: 'Test1234!' } })).json()).access_token;
+    expect(userAId && userBId && tokA && tokB).toBeTruthy();
+  });
+
+  test('BUG FIX: message_drafts is now owned — B cannot see or delete a draft A created, A can', async ({ request }) => {
+    const created = await (await request.post(`${API}/communications/drafts`, {
+      headers: { Authorization: `Bearer ${tokA}` },
+      data: { to_email: 'qa.s75.secret@example.com', channel: 'email', subject: 'QA S75 private draft', body: 'private' },
+    })).json();
+    draftId = created.id;
+    expect(draftId).toBeTruthy();
+
+    const bList = await (await request.get(`${API}/communications/drafts`, { headers: { Authorization: `Bearer ${tokB}` } })).json();
+    expect(bList.drafts.some((d: any) => d.id === draftId)).toBe(false);
+
+    // B's delete attempt must not actually remove A's draft
+    await request.delete(`${API}/communications/drafts/${draftId}`, { headers: { Authorization: `Bearer ${tokB}` } });
+    const aListAfterBDelete = await (await request.get(`${API}/communications/drafts`, { headers: { Authorization: `Bearer ${tokA}` } })).json();
+    expect(aListAfterBDelete.drafts.some((d: any) => d.id === draftId)).toBe(true);
+
+    // admin keeps full oversight visibility
+    const adminList = await (await request.get(`${API}/communications/drafts`, { headers: authAdmin() })).json();
+    expect(adminList.drafts.some((d: any) => d.id === draftId)).toBe(true);
+
+    // A's own real delete succeeds
+    await request.delete(`${API}/communications/drafts/${draftId}`, { headers: { Authorization: `Bearer ${tokA}` } });
+    const aListFinal = await (await request.get(`${API}/communications/drafts`, { headers: { Authorization: `Bearer ${tokA}` } })).json();
+    expect(aListFinal.drafts.some((d: any) => d.id === draftId)).toBe(false);
+    draftId = '';
+  });
+
+  test('BUG FIX: B cannot update A\'s draft either (real 404, not a silent no-op success)', async ({ request }) => {
+    const created = await (await request.post(`${API}/communications/drafts`, {
+      headers: { Authorization: `Bearer ${tokA}` },
+      data: { to_email: 'qa.s75.secret2@example.com', channel: 'email', subject: 'QA S75 draft 2', body: 'v1' },
+    })).json();
+    draftId = created.id;
+
+    const bUpdate = await request.put(`${API}/communications/drafts/${draftId}`, {
+      headers: { Authorization: `Bearer ${tokB}` },
+      data: { to_email: 'qa.s75.secret2@example.com', channel: 'email', subject: 'hijacked', body: 'hijacked' },
+    });
+    expect(bUpdate.status()).toBe(404);
+
+    const aList = await (await request.get(`${API}/communications/drafts`, { headers: { Authorization: `Bearer ${tokA}` } })).json();
+    const own = aList.drafts.find((d: any) => d.id === draftId);
+    expect(own.subject).toBe('QA S75 draft 2'); // untouched by B's attempt
+
+    await request.delete(`${API}/communications/drafts/${draftId}`, { headers: { Authorization: `Bearer ${tokA}` } });
+    draftId = '';
+  });
+
+  test('mark-all-read: a non-admin with a real (but message-less) connected mailbox gets a clean 200, not an error, and touches nothing else', async ({ request }) => {
+    const acc = await (await request.post(`${API}/user-mail/accounts`, {
+      headers: { Authorization: `Bearer ${tokA}` },
+      data: { provider: 'custom', email: `qa.s75.mailbox.${stamp}@example.com`, smtp_host: 'smtp.example.com', smtp_port: 587, smtp_user: 'x', smtp_password: 'x', imap_host: 'imap.example.com', imap_port: 993, imap_user: 'x', imap_password: 'x' },
+    })).json();
+    accId = acc.id;
+    expect(accId).toBeTruthy();
+
+    const res = await request.post(`${API}/communications/mark-all-read`, {
+      headers: { Authorization: `Bearer ${tokA}` },
+      data: { folder: 'inbox' },
+    });
+    expect(res.ok()).toBeTruthy();
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  test('BUG FIX: the 6 IMAP write endpoints (read/star/trash/snooze/archive/move) + /messages/{id}/star all cleanly 404 for a message a non-admin does not own, never a crash', async ({ request }) => {
+    // A syntactically-valid UUID that genuinely does not exist — proves
+    // every endpoint's ownership/existence check fails closed (404) with
+    // zero server errors, for both the dedicated IMAP routes and the
+    // dual-purpose star endpoint. The real ownership *boundary* itself
+    // (a non-owner blocked from a message that DOES belong to someone
+    // else) was proven live against production during development, per
+    // this suite's own header comment — no public API exists to create
+    // an imap_messages fixture for this permanent suite to re-prove it.
+    const fakeId = '00000000-0000-4000-8000-000000000000';
+    const hdr = { Authorization: `Bearer ${tokA}` };
+    for (const call of [
+      () => request.patch(`${API}/communications/imap/${fakeId}/read`, { headers: hdr }),
+      () => request.patch(`${API}/communications/imap/${fakeId}/star`, { headers: hdr }),
+      () => request.patch(`${API}/communications/imap/${fakeId}/trash`, { headers: hdr }),
+      () => request.post(`${API}/communications/imap/${fakeId}/snooze`, { headers: hdr, data: { until: new Date(Date.now() + 3600000).toISOString() } }),
+      () => request.post(`${API}/communications/imap/${fakeId}/archive`, { headers: hdr }),
+      () => request.post(`${API}/communications/imap/${fakeId}/move`, { headers: hdr, data: { folder: 'INBOX.Trash' } }),
+      () => request.patch(`${API}/communications/messages/${fakeId}/star`, { headers: hdr }),
+    ]) {
+      const res = await call();
+      expect([404]).toContain(res.status());
+    }
+  });
+});

@@ -78,6 +78,34 @@ def _own_ats_message_filter(user_param_idx: int) -> str:
     )"""
 
 
+async def _assert_imap_writable(conn, msg_id: str, actor) -> None:
+    """Real IDOR-class gap fix (2026-08-31): the IMAP write endpoints
+    (read/star/trash/snooze/archive/move) only ever checked tenant_id -
+    any authenticated tenant user who knew/guessed another user's private
+    IMAP message UUID could mark it read, star/trash/archive/move it, even
+    though every read-side endpoint in this file (get_imap_messages,
+    search_emails, archive_list, junk_list) already correctly scopes a
+    non-admin to their own connected mailbox via user_email_accounts.
+    user_id. Flagged but explicitly left unfixed on 2026-08-30 when that
+    read-side scoping was built ("a lower-severity IDOR-class gap...not
+    touched here"); closed now. Same admin-role exemption as every read
+    endpoint in this file (_INBOX_ADMIN_ROLES), plus the standard
+    actor.role is None exemption for the trusted-internal/automation path
+    used throughout this project. Raises a clean 404 (not 403) so this can
+    never confirm a guessed UUID's existence to an unauthorized caller."""
+    if actor.role in _INBOX_ADMIN_ROLES or actor.role is None:
+        row = await conn.fetchrow(
+            "SELECT id FROM imap_messages WHERE id=$1 AND tenant_id=$2", msg_id, actor.tenant_id)
+    else:
+        row = await conn.fetchrow(
+            """SELECT im.id FROM imap_messages im
+               JOIN user_email_accounts ua ON ua.id = im.account_id
+               WHERE im.id=$1 AND im.tenant_id=$2 AND ua.user_id=$3""",
+            msg_id, actor.tenant_id, actor.user_id)
+    if not row:
+        raise HTTPException(404, "Message not found")
+
+
 async def _get_smtp(conn, tenant_id: str):
     return await conn.fetchrow(
         "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls "
@@ -578,29 +606,66 @@ async def mark_unread(msg_id: str, actor: Actor = Depends(get_actor)):
 
 @router.patch("/messages/{msg_id}/star")
 async def toggle_star(msg_id: str, actor: Actor = Depends(get_actor)):
+    """Real IDOR-class gap fix (2026-08-31, same root cause as
+    _assert_imap_writable): this dual-purpose endpoint updated either
+    table with no ownership scoping at all — the imap_messages fallback
+    branch is dead from the current frontend (which routes IMAP stars
+    through the dedicated, now-fixed star_imap_ep instead), but stayed
+    live, reachable code with zero protection. Scoped both branches to
+    match this file's established convention: admin-class roles keep
+    full tenant visibility, everyone else is restricted to messages
+    they personally sent/own (_own_ats_message_filter) or IMAP messages
+    in a mailbox they personally connected."""
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
     async with db.tenant_conn(actor.tenant_id) as conn:
-        r = await conn.fetchrow("UPDATE candidate_messages SET is_starred=NOT COALESCE(is_starred,FALSE) WHERE id=$1 AND tenant_id=$2 RETURNING is_starred", msg_id, actor.tenant_id)
+        if is_admin:
+            r = await conn.fetchrow("UPDATE candidate_messages SET is_starred=NOT COALESCE(is_starred,FALSE) WHERE id=$1 AND tenant_id=$2 RETURNING is_starred", msg_id, actor.tenant_id)
+        else:
+            r = await conn.fetchrow(
+                f"UPDATE candidate_messages cm SET is_starred=NOT COALESCE(is_starred,FALSE) "
+                f"WHERE id=$1 AND tenant_id=$2 AND {_own_ats_message_filter(3)} RETURNING is_starred",
+                msg_id, actor.tenant_id, actor.user_id)
         if not r:
-            r = await conn.fetchrow("UPDATE imap_messages SET is_starred=NOT COALESCE(is_starred,FALSE) WHERE id=$1 AND tenant_id=$2 RETURNING is_starred", msg_id, actor.tenant_id)
+            if is_admin:
+                r = await conn.fetchrow("UPDATE imap_messages SET is_starred=NOT COALESCE(is_starred,FALSE) WHERE id=$1 AND tenant_id=$2 RETURNING is_starred", msg_id, actor.tenant_id)
+            else:
+                r = await conn.fetchrow(
+                    """UPDATE imap_messages im SET is_starred=NOT COALESCE(is_starred,FALSE)
+                       WHERE im.id=$1 AND im.tenant_id=$2
+                         AND EXISTS (SELECT 1 FROM user_email_accounts ua WHERE ua.id=im.account_id AND ua.user_id=$3)
+                       RETURNING is_starred""",
+                    msg_id, actor.tenant_id, actor.user_id)
         if not r: raise HTTPException(404, "Not found")
         return {"starred": r["is_starred"]}
 
 
 # ── Drafts ─────────────────────────────────────────────────────────────────────
+# Real gap fix (2026-08-31): message_drafts had no owner/creator column at
+# all - every recruiter's in-progress draft was tenant-shared, listable/
+# editable/deletable by any other authenticated user. sql/97 adds
+# created_by; scoped here the same way every other personal-mailbox
+# surface in this file already is - admin-class roles keep full
+# tenant-wide oversight visibility, everyone else sees only their own
+# drafts. A pre-existing draft saved before this fix (created_by IS
+# NULL) is claimed by whoever next edits/saves it, matching this
+# project's established "never fabricate a historical author" discipline.
 
 @router.get("/drafts")
 async def list_drafts(actor: Actor = Depends(get_actor)):
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
+    scope = "" if is_admin else " AND (d.created_by=$2 OR d.created_by IS NULL)"
+    params = [actor.tenant_id] if is_admin else [actor.tenant_id, actor.user_id]
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(f"""
             SELECT d.id, d.candidate_id, c.full_name AS candidate_name,
                    COALESCE(c.email, d.to_email) AS email,
                    d.to_email, d.channel, d.subject, d.body, d.cc,
-                   d.created_at, d.updated_at
+                   d.created_at, d.updated_at, d.created_by
             FROM message_drafts d
             LEFT JOIN candidates c ON c.id=d.candidate_id
-            WHERE d.tenant_id=$1 ORDER BY d.updated_at DESC""", actor.tenant_id)
+            WHERE d.tenant_id=$1 {scope} ORDER BY d.updated_at DESC""", *params)
         cnt = await conn.fetchval(
-            "SELECT COUNT(*) FROM message_drafts WHERE tenant_id=$1", actor.tenant_id)
+            f"SELECT COUNT(*) FROM message_drafts d WHERE d.tenant_id=$1 {scope}", *params)
         return {"drafts": [dict(r) for r in rows], "count": cnt}
 
 
@@ -608,31 +673,38 @@ async def list_drafts(actor: Actor = Depends(get_actor)):
 async def save_draft(body: DraftBody, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
-            INSERT INTO message_drafts (tenant_id,candidate_id,to_email,channel,subject,body,cc)
-            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id""",
+            INSERT INTO message_drafts (tenant_id,candidate_id,to_email,channel,subject,body,cc,created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id""",
             actor.tenant_id, body.candidate_id or None, body.to_email,
-            body.channel, body.subject, body.body, body.cc)
+            body.channel, body.subject, body.body, body.cc, actor.user_id)
         return {"id": str(row["id"]), "saved": True}
 
 
 @router.put("/drafts/{draft_id}")
 async def update_draft(draft_id: str, body: DraftBody, actor: Actor = Depends(get_actor)):
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
+    scope = "" if is_admin else " AND (created_by=$9 OR created_by IS NULL)"
     async with db.tenant_conn(actor.tenant_id) as conn:
-        r = await conn.fetchrow("""
+        r = await conn.fetchrow(f"""
             UPDATE message_drafts
-            SET candidate_id=$1,to_email=$2,channel=$3,subject=$4,body=$5,cc=$6,updated_at=NOW()
-            WHERE id=$7 AND tenant_id=$8 RETURNING id""",
+            SET candidate_id=$1,to_email=$2,channel=$3,subject=$4,body=$5,cc=$6,
+                updated_at=NOW(), created_by=COALESCE(created_by,$9)
+            WHERE id=$7 AND tenant_id=$8 {scope} RETURNING id""",
             body.candidate_id or None, body.to_email, body.channel,
-            body.subject, body.body, body.cc, draft_id, actor.tenant_id)
+            body.subject, body.body, body.cc, draft_id, actor.tenant_id,
+            actor.user_id)
         if not r: raise HTTPException(404, "Draft not found")
         return {"id": draft_id, "saved": True}
 
 
 @router.delete("/drafts/{draft_id}")
 async def delete_draft(draft_id: str, actor: Actor = Depends(get_actor)):
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
+    scope = "" if is_admin else " AND (created_by=$3 OR created_by IS NULL)"
+    params = [draft_id, actor.tenant_id] if is_admin else [draft_id, actor.tenant_id, actor.user_id]
     async with db.tenant_conn(actor.tenant_id) as conn:
         await conn.execute(
-            "DELETE FROM message_drafts WHERE id=$1 AND tenant_id=$2", draft_id, actor.tenant_id)
+            f"DELETE FROM message_drafts WHERE id=$1 AND tenant_id=$2 {scope}", *params)
         return {"deleted": True}
 
 
@@ -886,18 +958,21 @@ async def wa_start(actor: Actor = Depends(get_actor)):
 @router.patch("/imap/{msg_id}/read")
 async def mark_imap_read_ep(msg_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        await _assert_imap_writable(conn, msg_id, actor)
         await conn.execute("UPDATE imap_messages SET is_read=TRUE WHERE id=$1 AND tenant_id=$2", msg_id, actor.tenant_id)
         return {"ok": True}
 
 @router.patch("/imap/{msg_id}/star")
 async def star_imap_ep(msg_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        await _assert_imap_writable(conn, msg_id, actor)
         r = await conn.fetchrow("UPDATE imap_messages SET is_starred=NOT COALESCE(is_starred,FALSE) WHERE id=$1 AND tenant_id=$2 RETURNING is_starred", msg_id, actor.tenant_id)
         return {"starred": r["is_starred"] if r else False}
 
 @router.patch("/imap/{msg_id}/trash")
 async def trash_imap_ep(msg_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        await _assert_imap_writable(conn, msg_id, actor)
         await conn.execute("UPDATE imap_messages SET is_deleted=TRUE WHERE id=$1 AND tenant_id=$2", msg_id, actor.tenant_id)
         return {"ok": True}
 
@@ -1032,16 +1107,87 @@ async def list_nurture(actor: Actor = Depends(get_actor)):
 
 @router.post("/mark-all-read")
 async def mark_all_read(body: dict = None, actor: Actor = Depends(get_actor)):
-    """Mark all emails as read in a folder"""
+    """Mark all emails as read in a folder.
+
+    Real bug fix (2026-08-31, found while closing the IMAP write-endpoint
+    ownership gap in this same file): this previously ignored `folder`
+    entirely beyond a bare gate check, and ignored the caller's own
+    identity entirely — every click, from any real user, in any real
+    folder, marked EVERY imap_messages row AND EVERY candidate_messages
+    row in the WHOLE TENANT as read, tenant-wide, regardless of which
+    mailbox owned them. A real, live "Mark all as read" button was
+    silently wiping every other user's unread state on every click.
+    Rewritten to scope by both: non-admin roles only ever touch their own
+    connected mailbox (matching _INBOX_ADMIN_ROLES/_own_ats_message_filter,
+    the same convention every read-side folder endpoint in this file
+    already uses), and only the real folder actually being viewed — the
+    exact WHERE clauses mirror each folder's own dedicated GET endpoint
+    (inbox/`/inbox`, sent/`/sent`, archive/`/archive`, junk/`/junk`,
+    starred/`/starred`, snoozed via snoozed_until, whatsapp via
+    channel='whatsapp'). `drafts` has no is_read column at all — correctly
+    a no-op, matching prior behavior for any other unrecognized folder."""
     folder = (body or {}).get('folder', 'inbox')
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
     async with db.tenant_conn(actor.tenant_id) as conn:
-        if folder in ('inbox', 'starred', 'archive', 'junk', 'snoozed'):
+        own_imap = "" if is_admin else " AND EXISTS (SELECT 1 FROM user_email_accounts ua WHERE ua.id=im.account_id AND ua.user_id=$2)"
+        imap_params = [actor.tenant_id] if is_admin else [actor.tenant_id, actor.user_id]
+
+        if folder in ('inbox', 'ats_inbox'):
             await conn.execute(
-                "UPDATE imap_messages SET is_read=TRUE WHERE tenant_id=$1 AND is_deleted IS NOT TRUE",
-                actor.tenant_id)
-        await conn.execute(
-            "UPDATE candidate_messages SET is_read=TRUE WHERE tenant_id=$1 AND is_deleted IS NOT TRUE",
-            actor.tenant_id)
+                f"UPDATE imap_messages im SET is_read=TRUE WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE AND im.folder='INBOX'{own_imap}",
+                *imap_params)
+        elif folder == 'sent':
+            await conn.execute(
+                f"UPDATE imap_messages im SET is_read=TRUE WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE AND im.folder LIKE '%Sent%'{own_imap}",
+                *imap_params)
+        elif folder == 'starred':
+            await conn.execute(
+                f"UPDATE imap_messages im SET is_read=TRUE WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE AND im.is_starred=TRUE{own_imap}",
+                *imap_params)
+        elif folder == 'archive':
+            await conn.execute(
+                f"UPDATE imap_messages im SET is_read=TRUE WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE AND im.folder ILIKE '%archive%'{own_imap}",
+                *imap_params)
+        elif folder == 'junk':
+            await conn.execute(
+                f"UPDATE imap_messages im SET is_read=TRUE WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE AND (im.folder ILIKE '%junk%' OR im.folder ILIKE '%spam%'){own_imap}",
+                *imap_params)
+        elif folder == 'snoozed':
+            await conn.execute(
+                f"UPDATE imap_messages im SET is_read=TRUE WHERE im.tenant_id=$1 AND im.is_deleted IS NOT TRUE AND im.snoozed_until IS NOT NULL{own_imap}",
+                *imap_params)
+        elif folder == 'trash':
+            await conn.execute(
+                f"UPDATE imap_messages im SET is_read=TRUE WHERE im.tenant_id=$1 AND im.is_deleted=TRUE{own_imap}",
+                *imap_params)
+
+        if folder in ('inbox', 'ats_inbox'):
+            if is_admin:
+                await conn.execute(
+                    "UPDATE candidate_messages SET is_read=TRUE WHERE tenant_id=$1 AND is_deleted IS NOT TRUE",
+                    actor.tenant_id)
+            else:
+                await conn.execute(
+                    f"UPDATE candidate_messages cm SET is_read=TRUE WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE AND {_own_ats_message_filter(2)}",
+                    actor.tenant_id, actor.user_id)
+        elif folder == 'whatsapp':
+            if is_admin:
+                await conn.execute(
+                    "UPDATE candidate_messages SET is_read=TRUE WHERE tenant_id=$1 AND channel='whatsapp' AND is_deleted IS NOT TRUE",
+                    actor.tenant_id)
+            else:
+                await conn.execute(
+                    f"UPDATE candidate_messages cm SET is_read=TRUE WHERE cm.tenant_id=$1 AND cm.channel='whatsapp' AND cm.is_deleted IS NOT TRUE AND {_own_ats_message_filter(2)}",
+                    actor.tenant_id, actor.user_id)
+        elif folder == 'starred':
+            if is_admin:
+                await conn.execute(
+                    "UPDATE candidate_messages SET is_read=TRUE WHERE tenant_id=$1 AND is_starred=TRUE AND is_deleted IS NOT TRUE",
+                    actor.tenant_id)
+            else:
+                await conn.execute(
+                    f"UPDATE candidate_messages cm SET is_read=TRUE WHERE cm.tenant_id=$1 AND cm.is_starred=TRUE AND cm.is_deleted IS NOT TRUE AND {_own_ats_message_filter(2)}",
+                    actor.tenant_id, actor.user_id)
     return {"ok": True}
 
 
@@ -1132,6 +1278,7 @@ async def snooze_imap(msg_id: str, body: dict = None, actor: Actor = Depends(get
         raise HTTPException(400, "Invalid message ID")
     until_str = (body or {}).get('until', '')
     async with db.tenant_conn(actor.tenant_id) as conn:
+        await _assert_imap_writable(conn, msg_id, actor)
         if until_str:
             try:
                 until_dt = datetime.fromisoformat(until_str.replace('Z', '+00:00'))
@@ -1156,11 +1303,7 @@ async def archive_imap(msg_id: str, actor: Actor = Depends(get_actor)):
     already use.
     """
     async with db.tenant_conn(actor.tenant_id) as conn:
-        row = await conn.fetchrow(
-            "SELECT id FROM imap_messages WHERE id=$1 AND tenant_id=$2",
-            msg_id, actor.tenant_id)
-        if not row:
-            raise HTTPException(404, "Message not found")
+        await _assert_imap_writable(conn, msg_id, actor)
         await conn.execute(
             "UPDATE imap_messages SET folder='INBOX.Outlook.Archive' WHERE id=$1 AND tenant_id=$2",
             msg_id, actor.tenant_id)
@@ -1249,11 +1392,7 @@ async def move_imap_message(msg_id: str, body: dict = None, actor: Actor = Depen
         raise HTTPException(400, "Invalid message ID")
     target_folder = (body or {}).get('folder', 'INBOX.Outlook.Archive')
     async with db.tenant_conn(actor.tenant_id) as conn:
-        row = await conn.fetchrow(
-            "SELECT id, folder FROM imap_messages WHERE id=$1 AND tenant_id=$2",
-            msg_id, actor.tenant_id)
-        if not row:
-            raise HTTPException(404, "Message not found")
+        await _assert_imap_writable(conn, msg_id, actor)
         # Update folder in DB (visual move — IMAP server move requires open connection)
         await conn.execute(
             "UPDATE imap_messages SET folder=$1 WHERE id=$2 AND tenant_id=$3",

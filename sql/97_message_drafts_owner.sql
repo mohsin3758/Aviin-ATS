@@ -1,0 +1,22 @@
+-- 97_message_drafts_owner.sql
+-- Real gap fix (2026-08-31): message_drafts has never had any owner/
+-- creator column at all - every recruiter's in-progress email drafts
+-- were fully tenant-shared, listable/editable/deletable by any other
+-- authenticated user in the tenant. Flagged but explicitly left unfixed
+-- on 2026-08-30 ("would need a real migration, not just a query change").
+--
+-- Backfilled to NULL for every existing draft (there is no reliable way
+-- to reconstruct who actually wrote a historical draft - candidate_id/
+-- to_email don't identify the author) - an existing draft with no owner
+-- stays visible to everyone until it's next edited/resaved, at which
+-- point it's correctly attributed. This mirrors this project's own
+-- established "never fabricate a historical value that can't be known"
+-- discipline (e.g. the offer-HITL audit-trail backfill, the duplicate-
+-- assignments cleanup) rather than guessing an author.
+--
+-- MUST be run as postgres - message_drafts is owned by postgres, not
+-- app_user (confirmed live: "ERROR: must be owner of table
+-- message_drafts" when first attempted as app_user), same schema-drift
+-- pattern documented repeatedly elsewhere in this project.
+
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id) ON DELETE SET NULL;

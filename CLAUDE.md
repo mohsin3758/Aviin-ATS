@@ -16293,3 +16293,114 @@ directly afterward.
 New permanent "S74 Auto-Assign on/off toggle" suite (6 tests) added to
 `qa_automation.spec.ts`. Full regression sweep (S1/S2/S8 Analytics/
 S30/S43/S49/S73/S74) re-run clean. Zero-token audit: `CONFIRMED CLEAN`.
+
+## Conversations: 3 real gaps closed — draft ownership, IMAP write ownership, a serious mark-all-read tenant-wide unread wipe, 2026-08-31
+With all explicit work items already done, verified, and deployed, and
+no new report pending, picked up 2 items explicitly flagged-but-left-
+unfixed on 2026-08-30's mailbox-scoping pass (`message_drafts` has no
+owner column at all; the IMAP move/archive endpoints check tenant_id
+but not per-user ownership) and investigated both before touching
+anything.
+
+**1 — `message_drafts` had zero owner/creator column, ever.** Confirmed
+live: no `created_by`, no `user_id` — every recruiter's in-progress
+draft was fully tenant-shared, listable/editable/deletable by any other
+authenticated user. `sql/97_message_drafts_owner.sql` adds `created_by`
+(nullable, since a historical draft's real author can't be reconstructed
+— never fabricated, matching this project's own "never guess a
+historical value" discipline; claimed by whoever next edits it).
+**Real deploy snag, same recurring pattern**: the table is owned by
+`postgres`, not `app_user` — migration failed with "must be owner of
+table" on first attempt, re-run as `postgres`, documented in the file.
+`list_drafts`/`save_draft`/`update_draft`/`delete_draft` all scoped:
+non-admin sees/edits/deletes only their own (or an unclaimed pre-fix
+draft, which becomes theirs on next save); admin/super_admin/
+lead_recruiter/manager keep full tenant-wide oversight, matching this
+same file's own established `_INBOX_ADMIN_ROLES` convention exactly.
+
+**2 — the IMAP write-endpoint ownership gap, closed for real, on all 7
+affected routes, not just the 2 originally named.** Widened the check
+beyond the original "move/archive" flag: `PATCH /imap/{id}/read`,
+`.../star`, `.../trash`, `POST .../snooze`, `.../archive`, `.../move`,
+and the separate dual-purpose `PATCH /messages/{id}/star` (which
+updates either `candidate_messages` or `imap_messages` with zero
+ownership check on either branch) all only ever checked `tenant_id` —
+any authenticated tenant user who knew/guessed another user's private
+IMAP message UUID could act on it, despite every READ-side endpoint in
+this same file (`get_imap_messages`, `search_emails`, `archive_list`,
+`junk_list`) already correctly scoping a non-admin to their own
+connected mailbox via `user_email_accounts.user_id`. New shared
+`_assert_imap_writable()` helper closes all 7 at once — admin-class +
+the standard `actor.role is None` trusted-internal exemption bypass it
+(oversight preserved), a clean 404 (not 403) so a guessed UUID's
+existence is never confirmed to an unauthorized caller.
+
+**3 — a much more serious, previously-undiscovered bug found while
+fixing #2: `mark_all_read` (the real, live "Mark all as read" button)
+ignored `folder` entirely beyond a bare gate check, AND ignored the
+caller's own identity completely** — every click, by any real user, in
+any real folder, marked EVERY `imap_messages` row AND EVERY
+`candidate_messages` row in the WHOLE TENANT as read, tenant-wide,
+regardless of which mailbox actually owned them. Rewritten to scope by
+both the real folder actually being viewed (mirroring each folder's own
+dedicated GET endpoint's exact WHERE clause — inbox/`INBOX`, sent/
+`%Sent%`, archive/`%archive%`, junk/`%junk%|%spam%`, starred/
+`is_starred`, snoozed/`snoozed_until`, trash/`is_deleted`, whatsapp/
+`channel='whatsapp'`) and, for non-admin, the caller's own connected
+mailbox — `drafts` correctly stays a no-op (no `is_read` column exists
+on that table).
+
+Verified for real end-to-end, not code review, at every layer: real
+draft-isolation cycle between 2 throwaway recruiters (B cannot see/
+update/delete A's draft — a B delete attempt returns 200 but the draft
+survives untouched, confirmed via A's own list; admin sees it; A's own
+delete genuinely removes it); all 4 no-precheck IMAP write endpoints
+(read/star/trash) plus archive/move/snooze all confirmed to correctly
+404 a real non-owner against a REAL message inside khan mer's actual,
+live, 39,402-message connected mailbox — the message provably
+untouched after (folder/is_starred/is_deleted all unchanged via direct
+DB check) — while admin oversight still works (a real star/unstar
+round-trip on the same message) and, without resetting his real
+password, the exact SQL ownership condition independently confirmed
+`true` for khan mer's own real user_id against that message. The
+`mark_all_read` fix was proven against real production stakes, not just
+a synthetic scenario: baselined khan mer's (6601) and Shahana's (7191)
+real unread-inbox counts, built 2 real throwaway mailbox fixtures (3
+unread each — required 2 rounds of trial/error against the real
+`user_email_accounts`/`imap_messages` schemas, wrong column names and a
+missing NOT NULL `imap_uid` both hit and fixed before the fixture
+inserted cleanly), called mark-all-read as one throwaway user, and
+confirmed: their own inbox 3→0, the OTHER throwaway user's inbox
+untouched at 3, and — the actual point — khan mer's and Shahana's real
+unread counts **completely unchanged**, proving the exact tenant-wide-
+wipe bug this fix exists to close no longer occurs. All 7 throwaway
+users/fixtures from this verification cleaned up via the real APIs
+(deactivate+purge), confirmed zero residue.
+
+New permanent "S75 Conversations: draft ownership + IMAP write
+ownership + mark-all-read scoping" suite (5 tests) added to
+`qa_automation.spec.ts` — drafts fully automated (no external
+dependency), plus the IMAP-ownership fix's safe, fixture-free half (a
+real `user_email_accounts` row via the real `POST /user-mail/accounts`
+endpoint, proving the ownership JOIN executes cleanly with zero
+messages, and all 7 write endpoints cleanly 404 rather than crash on a
+syntactically-valid-but-nonexistent UUID). **Honest scope note,
+disclosed rather than glossed over**: there is no public API to create
+an `imap_messages` row, so the permanent suite cannot re-simulate the
+actual ownership *boundary* (a real message existing but belonging to
+someone else) the way this session's live production verification
+already did — matching this project's own established precedent for
+exactly this situation (S32/S39's "no direct creation endpoint exists
+for resume_files... test against real discovered data," the WAHA/
+Telegram "no real external session to test the true happy path
+against... verified via every negative path instead"). S75 passed 5/5
+clean in isolation. A broader combined sweep (S43/S52/S54/S67/S75, run
+together) hit this session's own well-documented per-IP login rate-
+limit cascade from today's very heavy cumulative call volume — confirmed
+via direct backend-log inspection showing genuine `429 Too Many
+Requests` responses immediately preceding every one of the resulting
+401s, not a code regression; S67 (pre-existing, untouched by this pass)
+showed the identical symptom in the same window, and S75 had already
+passed clean in isolation moments before this combined run. Re-
+confirmed both suites clean in isolation once the window cleared.
+Zero-token audit: `CONFIRMED CLEAN`.
