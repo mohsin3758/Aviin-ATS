@@ -861,7 +861,28 @@ live-verification pass this phase's checklist items still need.)
       plainly rather than assuming it's resolved: if the credential was
       NOT actually rotated, or was reverted since, this is a real, live
       risk sitting in public git history right now.
-- [ ] Rate limiting/abuse on public endpoints
+- [x] Rate limiting/abuse on public endpoints — confirmed via
+      `RateLimitMiddleware`'s real implementation (already read this
+      sweep for the login-bucket mechanics finding) that its ONLY
+      path-specific branch is the login-specific tighter limit; every
+      other path — including every real public/anonymous endpoint
+      (`/public/jobs`, `/public/apply`, NDA/offer e-sign links, field
+      attendance check-in, etc.) — falls through to the global 600-
+      requests-per-60s-per-IP limiter with no exemption list. Confirmed
+      by direct code read (no gap or bypass path found), not load-
+      tested against production (deliberately — sending hundreds of
+      real requests just to trigger a 429 against a live server has
+      real, unnecessary resource cost, especially given this session's
+      own earlier real VPS-resource-contention incident today). A real,
+      moderate, disclosed observation: 600/min is a uniform, generous
+      ceiling with no additional, stricter protection specifically on
+      high-risk WRITE endpoints (e.g. the public candidate-apply form,
+      which creates real DB records) — a genuinely malicious actor
+      could still spam a meaningful volume of fake applications within
+      that budget. Matches the realistic threat model for a small
+      business ATS (not a high-value target needing enterprise bot/
+      DDoS protection) — not flagged as urgent, but a real, honest gap
+      if this product's threat model ever changes.
 
 ## PHASE 6 — Final regression pass & sign-off
 - [ ] Full S1–S(final) suite, rate-limit-paced batches, clean
