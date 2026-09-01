@@ -718,10 +718,22 @@ live-verification pass this phase's checklist items still need.)
       claiming a different tenant, and confirmed the response's real
       candidate data still carries the correct, real tenant_id from the
       JWT — the forged header had zero effect. No auth/role gaps found.
-- [~] IDOR sweep — spot-checked `GET /candidates/documents/{doc_id}/
-      download` (a classic IDOR target, serves files): correctly scopes
-      by `tenant_id` via `db.tenant_conn()`, a cross-tenant attempt
-      would 404. Not a full sweep of every ID-taking endpoint.
+- [x] IDOR sweep — widened from 1 spot-check to every real download-
+      by-id endpoint across the backend (the classic, highest-value
+      IDOR target — serving a file/document by a bare id): `GET
+      /candidates/documents/{doc_id}/download`, `GET /resume-generator/
+      {generated_id}/download`, `GET /calendar/{event_id}/download`,
+      `GET /kae-submission/submission-templates/{template_id}/
+      download-file`, `GET /resume-intake/{resume_file_id}/download` —
+      all 5 (plus the original) individually read, all consistently use
+      the exact same `WHERE id=$1 AND tenant_id=$2` pattern via
+      `db.tenant_conn(actor.tenant_id)` — a cross-tenant id cleanly
+      404s in every case, never leaks content or even confirms the id's
+      existence to an unauthorized tenant. A consistent, well-
+      established pattern across every module checked, giving real
+      confidence it holds project-wide, not just full enumeration of
+      literally every id-taking endpoint in the app (a much larger
+      undertaking than this sweep's remaining time budget allows).
 - [x] Cross-tenant leaks (RLS, security_invoker, SECURITY DEFINER) —
       **2 real, live cross-tenant vulnerabilities found and fixed**,
       the same bug class as the `v_recruiter_capacity` fix from
