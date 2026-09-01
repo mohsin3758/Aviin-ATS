@@ -69,6 +69,16 @@ export function GlobalSearch() {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  // Real mobile-responsiveness fix (2026-09-02) — Ctrl+K is unusable on
+  // a touchscreen, so the Topbar's own mobile search icon dispatches
+  // this custom event as a second, tap-friendly way to open the exact
+  // same, already-working search modal.
+  useEffect(() => {
+    function openFromEvent() { setOpen(true); }
+    window.addEventListener('open-global-search', openFromEvent);
+    return () => window.removeEventListener('open-global-search', openFromEvent);
+  }, []);
+
   useEffect(() => {
     if (open) { setTimeout(() => inputRef.current?.focus(), 50); setQ(''); setResults([]); setIdx(0); }
   }, [open]);

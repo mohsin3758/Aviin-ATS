@@ -924,6 +924,112 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       CVE-upgrade and JWT_SECRET-rotation findings disclosed earlier
       this same sweep) — reported honestly, not silently patched or
       silently ignored.
+
+      **FIXED, 2026-09-02, per explicit user approval** ("complete
+      Mobile responsiveness gaps and issue"). Went through plan mode
+      given the real, cross-cutting scope; a Plan agent pressure-tested
+      the design against the real codebase before implementation and
+      caught 2 real issues in the first draft before any code was
+      written: a `useEffect`-based `window.innerWidth` check would have
+      caused a real first-paint flash of the broken desktop sidebar on
+      an actual phone (JS can't run before first paint); and reusing
+      the existing `sm:` (640px) Tailwind breakpoint for the new mobile
+      hides would have created a dead band between 640-767px where the
+      drawer's own CSS mode was active but the hides hadn't kicked in
+      yet.
+
+      **Real fix**: CSS `@media (max-width: 767px)` is the authoritative
+      positioning mechanism, not JS state — the drawer's closed-by-
+      default off-screen position is baked into the very first paint
+      with zero JS timing dependency; the one new piece of JS state
+      (`mobileMenuOpen: boolean`, lifted to `layout.tsx`) only tracks
+      whether it's been explicitly pulled open. `Sidebar.tsx` gained 2
+      new optional props (`mobileOpen`, `onClose`), a scoped `<style>`
+      block (matching the exact pattern already established in
+      `GlobalSearch.tsx`'s own inline spin-keyframes — not a new idiom
+      for this codebase) making the panel `position:fixed` + `transform:
+      translateX(-100%)` below 767px with a `.mobile-open` class
+      sliding it in, a conditional backdrop, a body-scroll-lock effect
+      mirroring `Modal.tsx`'s own already-established pattern exactly,
+      and an auto-close-on-navigate effect. `Topbar.tsx` gained a
+      hamburger button (`md:hidden`), the existing (already non-
+      functional — typed text was captured into local state but never
+      submitted/read anywhere, a pre-existing, unrelated bug) desktop
+      search bar hidden below 768px in favor of a new mobile search-icon
+      button dispatching a `open-global-search` custom event, and the
+      Compose/New button TEXT labels (not icons) hidden below 768px.
+      `GlobalSearch.tsx` gained one listener for that event, giving
+      mobile users a real, working path to search for the first time
+      (Ctrl+K itself is unusable on a touchscreen). `layout.tsx`'s own
+      `<main>` padding was also made responsive (24px→14px below 767px)
+      since it's squarely part of the same shared shell.
+
+      **A real deploy-process bug caught before it shipped, not after**:
+      the established CRLF/LF integrity check (comparing each file's own
+      HEAD line-ending convention against the working copy) found the
+      Edit tool had silently flipped `Topbar.tsx` from its established
+      100%-LF convention to 100%-CRLF mid-edit — the same recurring bug
+      class documented dozens of times elsewhere in this file. Caught
+      and fixed via the same `data.replace(b'\r\n', b'\n')` pass before
+      deploying; `Sidebar.tsx` (100% CRLF), `layout.tsx`/`GlobalSearch.tsx`
+      (100% LF) were all independently confirmed to already match their
+      own real HEAD conventions.
+
+      **Verified for real, not code review, at every layer**: a real
+      local `tsc --noEmit` (clean) then a real local `npm run build`
+      (100+ pages compiled clean — this project's own established
+      discipline that `tsc` alone has previously missed real build-time-
+      only failures); deployed via the established scp→sha256-hash-
+      verify→`docker compose up -d --build frontend`→health-check cycle,
+      all 4 file hashes confirmed byte-identical between the local
+      working copy and the deployed VPS copy before rebuilding; all 7
+      containers confirmed healthy post-deploy. A real headless-browser
+      script (not assumed from the code) at 3 real viewport widths:
+      **375px** — sidebar closed by default at `x:-220` (fully off-
+      screen), hamburger visible, **zero horizontal overflow on both
+      Dashboard AND Requisitions**, Compose/desktop-search-bar text
+      correctly hidden, mobile search button visible and genuinely
+      opens GlobalSearch (confirmed via a real input becoming visible,
+      not just the click firing), drawer opens to `x:0` on hamburger
+      click with a real visible backdrop, backdrop tap closes it back
+      to `x:-220`, navigating via a real drawer link auto-closes it
+      (`x:-220` again) after the route change, body scroll genuinely
+      locks (`overflow:hidden`) while open and restores (`overflow:''`)
+      on close, zero console errors throughout. **768px (tablet
+      regression)** — sidebar at `x:0, width:220` (full desktop
+      position, completely unchanged), hamburger correctly hidden,
+      desktop search bar correctly visible, zero overflow, zero console
+      errors. **1600px (desktop regression)** — sidebar unchanged,
+      hamburger hidden, and the pre-existing manual collapse-toggle
+      button still works correctly (52px collapsed width confirmed via
+      a real click), zero console errors. Real screenshots pulled and
+      visually compared against the original broken 375px screenshots —
+      "Good Morning, Admin!" now renders on one clean line with a
+      readable 2-column KPI grid (was truncating mid-word with numbers
+      wrapping across many lines); Candidates' toolbar buttons now wrap
+      into a clean, fully-readable 2-column grid with every label intact
+      (was a cramped, partially-cut-off single column); Requisitions'
+      filter row and job cards render fully readable with zero cutoff.
+      A scoped Playwright regression sweep (S1 API Health + S3 Frontend
+      Pages, covering 6 real page-load checks across T1-T6 plus an
+      explicit "Sidebar has all nav items" assertion) passed clean: 9
+      passed, 2 pre-existing skips (Ollama check, Cmd+K — both
+      environment-gated, unrelated), 0 failed. Zero-token audit:
+      `CONFIRMED CLEAN` (436 files, 0 external API refs).
+
+      **One real, small finding flagged but deliberately NOT fixed in
+      this pass, matching the plan's own explicit scope boundary**: the
+      Pipeline board's job-picker landing page (a page-internal layout,
+      not the shared shell) shows a real, minor visual artifact at
+      375px — a partially-clipped "n jobs" label and a stray dark
+      rectangle in its own recent-jobs panel header, unrelated to the
+      sidebar/topbar/backdrop fix and pre-existing on that one specific
+      page's own internal flex layout. The approved plan explicitly
+      scoped individual pages' own internal toolbar/table layouts as
+      out of this pass ("flag, not silently fix... rather than
+      preemptively rewriting 70+ pages' layouts in this same pass") —
+      disclosed here rather than either silently fixed beyond the
+      approved scope or silently ignored.
       **A real, small, tangential finding cleaned up along the way**:
       3 leftover "QA S82"-named test users plus 1 "Verify StageLimit
       KAE2" test user were spotted still genuinely active in the real
@@ -1634,9 +1740,14 @@ journey from intake through a computed, correct payslip.
 
 **What this sweep found and deliberately did NOT fix — disclosed, not
 hidden, each with a stated reason:**
-- A real mobile-viewport usability gap (no collapsible sidebar) — a
-  genuine, cross-cutting UI redesign, not a targeted bug fix; needs the
-  user's own decision on scope and timing.
+- ~~A real mobile-viewport usability gap (no collapsible sidebar)~~ —
+  **FIXED 2026-09-02** per explicit user approval ("complete Mobile
+  responsiveness gaps and issue"). Real, working off-canvas drawer +
+  hamburger + adaptive topbar, CSS-media-query-driven to avoid a first-
+  paint flash; verified across 375px/768px/1600px with zero horizontal
+  overflow, zero console errors, and real screenshots confirming
+  concrete visual improvement (not just "no overflow"). Full detail in
+  the Responsive/narrow-viewport check entry above.
 - 33+ known Next.js 14.2.5 CVEs surfaced via `npm audit` — a real,
   separate, materially riskier upgrade than this sweep's scope.
 - A production `JWT_SECRET` below the RFC-recommended length —

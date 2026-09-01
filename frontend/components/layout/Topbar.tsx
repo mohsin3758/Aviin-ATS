@@ -1,13 +1,13 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { Search, Bell, Plus, ChevronDown, Settings, LogOut,
-         User, HelpCircle, Briefcase, Users, Building2, Keyboard, Mail, PenSquare } from 'lucide-react';
+         User, HelpCircle, Briefcase, Users, Building2, Keyboard, Mail, PenSquare, Menu } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { clearToken, getToken, getTokenPayload } from '@/lib/auth';
 import { useFetch } from '@/lib/useFetch';
 import Link from 'next/link';
 
-export function Topbar() {
+export function Topbar({ onOpenMobileMenu }: { onOpenMobileMenu?: () => void } = {}) {
   const router = useRouter();
   const [showProfile, setShowProfile] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -42,23 +42,49 @@ export function Topbar() {
       borderBottom:'1px solid var(--gray-200)',
       boxShadow:'0 1px 0 var(--gray-100)',
     }}>
-      {/* Global search */}
-      <div className="search-bar flex-1" suppressHydrationWarning style={{ maxWidth:'480px' }}>
-        <Search size={14} className="search-icon" />
-        <input
-          className="input"
-          suppressHydrationWarning
-          placeholder="Search candidates, jobs, companies, emails, LinkedIn URL..."
-          value={search}
-          onChange={e=>setSearch(e.target.value)}
-          style={{ paddingLeft:'36px', borderRadius:'20px', background:'var(--gray-100)', border:'1px solid transparent' }}
-        />
-        {search && (
-          <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs px-1.5 py-0.5 rounded border" style={{ color:'var(--gray-400)', borderColor:'var(--gray-300)', fontSize:'10px' }}>
-            ESC
-          </div>
-        )}
+      {/* Hamburger — mobile only. Real mobile-responsiveness fix
+          (2026-09-02): the shared drawer's own JS state lives one level
+          up in layout.tsx; this is just the trigger for it. */}
+      <button onClick={onOpenMobileMenu} className="md:hidden btn btn-ghost btn-icon" title="Menu">
+        <Menu size={18} style={{ color:'var(--gray-500)' }} />
+      </button>
+
+      {/* Global search — hidden below 768px (no room for it); a
+          dedicated mobile search-icon button below opens the real,
+          working GlobalSearch modal instead of exposing this input,
+          which was already non-functional even on desktop (typed text
+          is captured into local state but never submitted/read
+          anywhere — a pre-existing, unrelated bug, not something this
+          pass is fixing). */}
+      <div className="hidden md:flex flex-1" style={{ maxWidth:'480px' }}>
+        <div className="search-bar" suppressHydrationWarning style={{ width:'100%' }}>
+          <Search size={14} className="search-icon" />
+          <input
+            className="input"
+            suppressHydrationWarning
+            placeholder="Search candidates, jobs, companies, emails, LinkedIn URL..."
+            value={search}
+            onChange={e=>setSearch(e.target.value)}
+            style={{ paddingLeft:'36px', borderRadius:'20px', background:'var(--gray-100)', border:'1px solid transparent' }}
+          />
+          {search && (
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs px-1.5 py-0.5 rounded border" style={{ color:'var(--gray-400)', borderColor:'var(--gray-300)', fontSize:'10px' }}>
+              ESC
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Mobile search trigger — opens the real, working GlobalSearch
+          (Ctrl+K) modal via a custom event, since Ctrl+K itself is
+          unusable on a touchscreen. */}
+      <button
+        onClick={() => window.dispatchEvent(new CustomEvent('open-global-search'))}
+        className="md:hidden btn btn-ghost btn-icon"
+        title="Search"
+      >
+        <Search size={18} style={{ color:'var(--gray-500)' }} />
+      </button>
 
       <div className="flex items-center gap-2 ml-auto">
         {/* Compose email */}
@@ -67,13 +93,13 @@ export function Topbar() {
           style={{display:'flex',alignItems:'center',gap:'6px',padding:'6px 12px',
             background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px',
             color:'#1e40af',fontSize:'12px',fontWeight:'600',textDecoration:'none',cursor:'pointer'}}>
-          <PenSquare size={13}/> <span style={{whiteSpace:'nowrap'}}>Compose</span>
+          <PenSquare size={13}/> <span className="hidden md:inline" style={{whiteSpace:'nowrap'}}>Compose</span>
         </a>
         {/* Quick add */}
         <div className="relative">
           <button onClick={()=>setShowAdd(!showAdd)}
             className="btn btn-primary btn-sm gap-1.5">
-            <Plus size={14} /> New <ChevronDown size={12} />
+            <Plus size={14} /> <span className="hidden md:inline">New</span> <ChevronDown size={12} />
           </button>
           {showAdd && (
             <div className="absolute right-0 top-full mt-2 w-48 bg-white rounded-xl shadow-xl border z-50 py-1 anim-scale-in" style={{ borderColor:'var(--gray-200)' }}>

@@ -138,7 +138,18 @@ const NAV_GROUPS = [
   ]},
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  // Real mobile-responsiveness fix (2026-09-02) — see the media-query
+  // block below for why this is CSS-driven rather than JS-viewport-
+  // driven (avoids a first-paint flash of the full desktop sidebar on
+  // a real phone). `mobileOpen` only controls whether the drawer is
+  // currently pulled into view; the closed-by-default position itself
+  // is a plain CSS rule that applies before any JS runs.
+  mobileOpen?: boolean;
+  onClose?: () => void;
+}
+
+export function Sidebar({ mobileOpen = false, onClose }: SidebarProps = {}) {
   // usePathname auto-updates on every navigation change
   const pathname = usePathname() || '';
 
@@ -206,6 +217,22 @@ export function Sidebar() {
     });
   }, [pathname]);
 
+  // Mobile drawer: auto-close on navigation. Unconditional and harmless
+  // on desktop — setting an already-false `mobileOpen` back to false via
+  // onClose() is a React no-op, so no separate viewport check is needed
+  // here either (matches the same "let CSS gate the visual effect, keep
+  // JS state simple" principle used throughout this fix).
+  useEffect(() => { onClose?.(); }, [pathname]);
+
+  // Mobile drawer: lock background scroll while open — mirrors the
+  // exact, already-established pattern from Modal.tsx (document.body.
+  // style.overflow toggled, restored on unmount/close).
+  useEffect(() => {
+    if (mobileOpen) document.body.style.overflow = 'hidden';
+    else document.body.style.overflow = '';
+    return () => { document.body.style.overflow = ''; };
+  }, [mobileOpen]);
+
   const toggleGroup = (id: string) => {
     if (collapsed) return;
     setOpenGroups(prev => ({ ...prev, [id]: !prev[id] }));
@@ -218,8 +245,17 @@ export function Sidebar() {
       flexShrink: 0,
       position: 'relative',
     }}>
+      {/* ── Mobile backdrop — only ever visually appears below the
+          767px media-query breakpoint (see the <style> block below);
+          harmless on desktop even in an unexpected state, since it
+          carries no position/background of its own outside that
+          media query. ── */}
+      {mobileOpen && (
+        <div className="aviin-sidebar-backdrop" onClick={onClose} />
+      )}
+
       {/* ── Main sidebar panel ── */}
-      <div style={{
+      <div className={`aviin-sidebar-panel${mobileOpen ? ' mobile-open' : ''}`} style={{
         width: collapsed ? '52px' : '220px',
         background: '#0f172a',
         minHeight: '100vh',
@@ -391,8 +427,13 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* ── Toggle tab — ALWAYS VISIBLE on the right edge ── */}
+      {/* ── Toggle tab — visible on the right edge on desktop; hidden
+          below the 767px breakpoint via the aviin-sidebar-collapse-
+          toggle class (the mobile drawer is opened/closed via the
+          hamburger + backdrop instead, not this manual collapse
+          toggle). ── */}
       <button
+        className="aviin-sidebar-collapse-toggle"
         onClick={() => setCollapsed(prev => !prev)}
         title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         style={{
@@ -422,6 +463,45 @@ export function Sidebar() {
           : <ChevronLeft  size={10} style={{ color: 'rgba(255,255,255,0.6)' }} />
         }
       </button>
+
+      {/* Real mobile-responsiveness fix (2026-09-02) — CSS media query
+          is the authoritative responsive mechanism here, not JS viewport
+          detection, specifically to avoid a first-paint flash: a
+          useEffect-based window.innerWidth check can't run before the
+          browser's first paint, so on a real phone that would mean one
+          visible frame of the full, un-drawered desktop sidebar before
+          JS "snaps" it closed. This rule applies before any JS runs at
+          all, so the drawer is correctly closed-by-default from the very
+          first paint. Matches the established inline <style> pattern
+          already used in GlobalSearch.tsx for its own spin-keyframes -
+          not a new idiom for this codebase. */}
+      <style>{`
+        @media (max-width: 767px) {
+          .aviin-sidebar-panel {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 100vh;
+            width: 220px !important;
+            z-index: 200;
+            transform: translateX(-100%);
+            transition: transform 0.25s ease;
+            box-shadow: 4px 0 24px rgba(0,0,0,0.25);
+          }
+          .aviin-sidebar-panel.mobile-open {
+            transform: translateX(0);
+          }
+          .aviin-sidebar-collapse-toggle {
+            display: none;
+          }
+          .aviin-sidebar-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 199;
+            background: rgba(15,23,42,0.5);
+          }
+        }
+      `}</style>
     </div>
   );
 }
