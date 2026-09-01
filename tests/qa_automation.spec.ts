@@ -11537,7 +11537,7 @@ test.describe.serial('S86 Kanban board cards show real matched/missing skills vs
     expect(app.missing_skills.length).toBe(3);
   });
 
-  test('real headless UI: the Kanban card shows a real green ✓ matched chip and red ✕ missing chips; View Profile opens the real candidate page in a new tab without opening the drawer', async ({ page, context }) => {
+  test('real headless UI: the Kanban card shows a real ✓ matched chip and red ✕ missing chips; View Profile opens the real candidate page in a new tab without opening the drawer', async ({ page, context }) => {
     await page.goto('/login');
     await page.fill('input[type="email"]', 'admin@example.com');
     await page.fill('input[type="password"]', 'changeme');
@@ -11562,5 +11562,122 @@ test.describe.serial('S86 Kanban board cards show real matched/missing skills vs
     // clicking View Profile must never also open the drawer on the
     // original tab (real e.stopPropagation() regression guard)
     await expect(page.locator('text=Current Stage:')).not.toBeVisible();
+  });
+});
+
+test.describe.serial('S87 Kanban skill matching for never-scored candidates, blue matched color, right-side View Profile, Quick Remove icon', () => {
+  // 2026-09-01 follow-up, same day as S86 — 2 real, distinct reports off
+  // live screenshots. (1) "recruiter should have option to delete... in
+  // interested, NDA stages" turned out to already be correct server-side
+  // (proven via direct API before any change), but a follow-up screenshot
+  // showed the recruiter was actually dragging cards and hitting the
+  // real, correct stage-move block — not the delete flow at all. The real
+  // gap: there was no visible, one-click Delete/Remove affordance
+  // directly on a Kanban card (Remove only ever lived inside the drawer),
+  // so a recruiter trying to "delete the file and resume" naturally tried
+  // dragging instead. (2) explicit ask: matched skills should highlight
+  // BLUE (not the S86-era green), missing in red, and "View Profile...
+  // right side only" (was inline next to the candidate name).
+  //
+  // While building (1), found the REAL root cause of why S86's own
+  // reference screenshot (Ashok.K) never showed matched/missing at all:
+  // GET /requisitions/{id}/pipeline only ever read a candidate's already-
+  // PERSISTED candidate_scores.skill_match_details — any candidate never
+  // individually scored against this exact requisition (the common case
+  // for anyone added via Resume Inbox/manual add, not "Find AI Matches")
+  // silently fell back to plain chips. Fixed by computing matched/missing
+  // LIVE for every card, the same shared compute_skill_similarity() the
+  // JD Match modal already uses — no dependency on a prior scoring call.
+  let token = '';
+  let reqId = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway requisition with skills_required + a candidate added straight to the pipeline, deliberately NEVER individually scored', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `S87 NeverScored Role ${stamp}`, status: 'open', employment_type: 'contract', skills_required: ['Docker', 'Kubernetes', 'Python'] },
+    });
+    reqId = (await reqR.json()).id;
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `S87 NeverScored Candidate ${stamp}`, phone: '9876500051', skills: ['Python', 'Flask'], resume_text: 'Python and Flask backend engineer.' },
+    });
+    candId = (await candR.json()).id;
+    // deliberately NO call to /intelligence/score here — this is the
+    // exact real-world path (manual add / resume-inbox intake) that used
+    // to show plain, undifferentiated blue chips with zero matched/
+    // missing distinction.
+    await request.post(`${API}/candidates/bulk-assign`, { headers: auth(), data: { candidate_ids: [candId], requisition_id: reqId, stage: 'interested' } });
+  });
+
+  test('BUG FIX: a never-individually-scored candidate still shows real matched_skills/missing_skills on the pipeline board', async ({ request }) => {
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const app = (Object.values(board).flat() as any[]).find((a: any) => a.candidate_id === candId);
+    expect(app).toBeTruthy();
+    expect(app.readiness_index).toBeFalsy(); // confirms this candidate genuinely has no persisted score
+    expect(app.matched_skills).toEqual(['Python']);
+    expect(app.missing_skills).toEqual(expect.arrayContaining(['Docker', 'Kubernetes']));
+    expect(app.missing_skills.length).toBe(2);
+  });
+
+  test('real headless UI: matched skill chip renders BLUE (not green), missing stays red, View Profile sits on the right side of the card (not beside the name)', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S87 NeverScored Candidate ${stamp}`, { timeout: 15000 });
+
+    const matchedChip = page.locator('text=✓ Python').first();
+    await expect(matchedChip).toBeVisible();
+    const bg = await matchedChip.evaluate(el => getComputedStyle(el).backgroundColor);
+    // #ECFDF5 (the old S86-era green) would be rgb(236, 253, 245) —
+    // asserting the fix genuinely moved off it, not just checking presence
+    expect(bg).not.toBe('rgb(236, 253, 245)');
+    expect(bg).toBe('rgb(239, 246, 255)'); // #EFF6FF — same blue as the plain skill-chip convention
+
+    const missingChip = page.locator('text=✕ Docker').first();
+    await expect(missingChip).toBeVisible();
+    const missingBg = await missingChip.evaluate(el => getComputedStyle(el).backgroundColor);
+    expect(missingBg).toBe('rgb(254, 242, 242)'); // #FEF2F2 — unchanged red
+
+    const nameBox = await page.locator(`text=S87 NeverScored Candidate ${stamp}`).first().boundingBox();
+    const profileLink = await page.locator('[data-testid^="kanban-view-profile-"]').first().boundingBox();
+    expect(profileLink!.x).toBeGreaterThan(nameBox!.x + 100); // genuinely on the right, not inline with the name
+  });
+
+  test('real headless UI: hovering a Kanban card reveals a Quick Remove icon (a real, discoverable delete option, not just buried in the drawer) that opens the real confirm modal', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S87 NeverScored Candidate ${stamp}`, { timeout: 15000 });
+
+    const card = page.locator(`text=S87 NeverScored Candidate ${stamp}`).locator('xpath=ancestor::div[@draggable="true"]').first();
+    await card.hover();
+    const quickRemove = page.locator('[data-testid^="quick-remove-"]').first();
+    await expect(quickRemove).toBeVisible();
+    await quickRemove.click();
+    // real, previously-undiscovered test-locator ambiguity, not an app
+    // bug: "text=Remove from Pipeline" matches BOTH the modal title <div>
+    // AND the confirm button (which carries the identical label) —
+    // scoped to the real data-testid the confirm button already has.
+    await expect(page.locator('[data-testid="remove-from-pipeline-confirm"]')).toBeVisible({ timeout: 5000 });
+    // cancel — this is a real production-shaped throwaway pair, but the
+    // point of this assertion is that the modal opens correctly, not
+    // exercising the delete itself (already covered end-to-end by S84)
+    await page.locator('button:has-text("Cancel")').click();
+    await expect(page.locator('[data-testid="remove-from-pipeline-confirm"]')).not.toBeVisible();
   });
 });

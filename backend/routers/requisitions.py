@@ -397,6 +397,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
     # rendering forever with a "ghost" candidate. Found via a live
     # screenshot showing QA test candidates still on a real client's
     # board weeks after being soft-deleted.
+    from routers.ner import compute_skill_similarity
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             """SELECT a.id, a.candidate_id, c.full_name AS candidate_name,
@@ -404,7 +405,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                       c.current_designation, c.current_employer, c.location,
                       c.resume_path, c.expected_ctc, c.notice_period_days,
                       c.jd_match_score, c.ai_match_score,
-                      cs.readiness_index, cs.readiness_grade, cs.skill_match_details,
+                      cs.readiness_index, cs.readiness_grade,
                       rf.id AS resume_file_id, rf.file_name AS resume_file_name,
                       a.stage, a.fit_score, a.app_notes, a.app_tags,
                       a.rejected_reason, a.assigned_recruiter_id, a.board_rank,
@@ -420,7 +421,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                    ORDER BY rf.created_at DESC LIMIT 1
                ) rf ON true
                LEFT JOIN LATERAL (
-                   SELECT readiness_index, readiness_grade, skill_match_details FROM candidate_scores cs
+                   SELECT readiness_index, readiness_grade FROM candidate_scores cs
                    WHERE cs.candidate_id = c.id AND cs.tenant_id = a.tenant_id
                      AND cs.requisition_id = a.requisition_id
                    ORDER BY cs.scored_at DESC LIMIT 1
@@ -429,6 +430,31 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                ORDER BY a.board_rank ASC NULLS LAST, a.updated_at DESC""",
             requisition_id,
         )
+        # Real feature (2026-09-01, explicit ask): "it should highlight
+        # skills are there in resume and missing skills as per JD... in
+        # the pipeline kanban". The FIRST version of this (same day)
+        # only ever read a candidate's already-PERSISTED
+        # candidate_scores.skill_match_details — meaning any candidate
+        # never formally scored against this exact requisition (the
+        # common case for anyone added straight from Resume Inbox/manual
+        # add rather than "Find AI Matches") fell back to plain skill
+        # chips with no matched/missing distinction at all, confirmed
+        # live via a real screenshot. Fixed by computing matched/missing
+        # LIVE for every card, the same way the "Find AI Matches"/JD
+        # Match modal already does (reusing the identical shared
+        # compute_skill_similarity(), against the requisition's real
+        # skills_required, checking both structured skills and resume
+        # text) — so a card is never blank just because nobody happened
+        # to click "score" first.
+        req_skills = await conn.fetchval(
+            "SELECT skills_required FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            requisition_id, actor.tenant_id) or []
+        cand_ids = [r["candidate_id"] for r in rows]
+        resume_text_by_id = {}
+        if cand_ids and req_skills:
+            text_rows = await conn.fetch(
+                "SELECT id, resume_text FROM candidates WHERE id = ANY($1::uuid[])", cand_ids)
+            resume_text_by_id = {r["id"]: r["resume_text"] for r in text_rows}
 
     board: dict[str, list] = {stage: [] for stage in PIPELINE_STAGES}
     for row in rows:
@@ -436,20 +462,16 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
         for key in ("app_notes", "app_tags"):
             if isinstance(app.get(key), str):
                 app[key] = json.loads(app[key])
-        # Real feature (2026-09-01, explicit ask): "it should highlight
-        # skills are there in resume and missing skills as per JD... in
-        # the pipeline kanban". skill_match_details is already computed
-        # and stored by score_candidate_core (intelligence.py) — reused
-        # here as-is, no new scoring engine or endpoint. asyncpg has no
-        # jsonb codec registered in this app (the same recurring gap
-        # documented elsewhere in this project, e.g. role_definitions.
-        # permissions), so this comes back as a raw JSON string, not a
-        # dict, and needs an explicit json.loads.
-        smd = app.pop("skill_match_details", None)
-        if isinstance(smd, str):
-            smd = json.loads(smd)
-        app["matched_skills"] = (smd or {}).get("keyword_matched_skills") or []
-        app["missing_skills"] = (smd or {}).get("keyword_missing_skills") or []
+        if req_skills:
+            _, matched, missing = compute_skill_similarity(
+                candidate_skills=app.get("skills"), required_skills=req_skills,
+                resume_text=resume_text_by_id.get(app["candidate_id"]),
+            )
+            app["matched_skills"] = matched
+            app["missing_skills"] = missing
+        else:
+            app["matched_skills"] = []
+            app["missing_skills"] = []
         board.setdefault(row["stage"], []).append(app)
     return board
 

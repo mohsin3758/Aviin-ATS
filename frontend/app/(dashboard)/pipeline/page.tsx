@@ -715,6 +715,8 @@ function PipelineInner() {
                         onClick={() => { if (selectMode) { toggleSelected(app.id); return; } setSelected(app); setDrawerTab('profile'); }}
                         onNotesClick={() => { setSelected(app); setDrawerTab('notes'); }}
                         onQuickReject={() => setPendingReject({ appId: app.id, fromStage: stage.key })}
+                        onQuickRemove={canRemove ? () => setPendingRemove({ appId: app.id, fromStage: stage.key, candidateName: app.candidate_name }) : undefined}
+                        isRecruiter={isRecruiter} recruiterCanMoveToStage={recruiterCanMoveToStage}
                         selectMode={selectMode} isSelected={selectedIds.has(app.id)} onToggleSelect={() => toggleSelected(app.id)}
                         onDragStart={(e: React.DragEvent) => { dragRef.current = { id: app.id, fromStage: stage.key }; e.dataTransfer.effectAllowed = 'move'; }}
                         onCardDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); }}
@@ -869,7 +871,7 @@ function PipelineInner() {
 }
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
-function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onDragStart, selectMode, isSelected, onToggleSelect, onCardDragOver, onCardDrop }: any) {
+function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onQuickRemove, isRecruiter, recruiterCanMoveToStage, onDragStart, selectMode, isSelected, onToggleSelect, onCardDragOver, onCardDrop }: any) {
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const skills: string[] = app.skills || [];
   const notesCount = Array.isArray(app.app_notes) ? app.app_notes.length : 0;
@@ -897,52 +899,81 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onD
           <X size={10} strokeWidth={3} />
         </button>
       )}
+      {/* Quick Remove (2026-09-01) — a real, discoverable delete option
+          directly on the card, not just buried inside the drawer. Reported
+          live: a recruiter trying to "delete the file and resume" was
+          instead dragging cards toward a later column to get rid of them,
+          hitting the (correct, working) stage-move block instead of ever
+          reaching the real Remove action. This gives the exact same
+          tiered Remove (Interested/NDA/Screened for a recruiter, always
+          for KAE/KAM/admin/manager) one hover away, so nobody needs to
+          open the drawer or drag anything to delete a candidate. Same
+          confirm-modal flow as the drawer's own Remove button — never a
+          silent delete. */}
+      {!selectMode && hovered && onQuickRemove && (() => {
+        const removeLocked = isRecruiter && recruiterCanMoveToStage && !recruiterCanMoveToStage(app.stage);
+        return (
+          <button
+            title={removeLocked ? 'Removing past Screened requires a KAE, KAM, or admin/manager — hand off to your account team' : 'Remove from pipeline'}
+            data-testid={`quick-remove-${app.id}`}
+            onClick={e => { e.stopPropagation(); if (!removeLocked) onQuickRemove(); }}
+            style={{ position: 'absolute', top: 8, right: 38, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: 4, background: removeLocked ? '#F1F5F9' : '#F8FAFC', color: removeLocked ? '#94A3B8' : '#64748B', cursor: removeLocked ? 'not-allowed' : 'pointer', padding: 0 }}>
+            {removeLocked ? <Lock size={9} /> : <Trash2 size={10} />}
+          </button>
+        );
+      })()}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 7 }}>
         <div style={{ width: 32, height: 32, borderRadius: '50%', background: `linear-gradient(135deg,${avatarColor(app.candidate_name)},${avatarColor(app.candidate_name)}aa)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
           {initials(app.candidate_name)}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.candidate_name}</div>
-            {/* View Profile (2026-09-01, explicit ask): "with view profile
-                option also there" — matching the reference AI Matched
-                Candidates list style. The card's own onClick already opens
-                the drawer; this is a genuinely separate, real navigation
-                to the full profile page, stopping propagation so it never
-                also opens the drawer underneath it. */}
-            {app.candidate_id && (
-              <a href={`/candidates/${app.candidate_id}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
-                title="View full profile" data-testid={`kanban-view-profile-${app.id}`}
-                style={{ display: 'flex', alignItems: 'center', flexShrink: 0, color: '#94A3B8' }}>
-                <Eye size={11} />
-              </a>
-            )}
-          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.candidate_name}</div>
           <div style={{ fontSize: 10, color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {[app.current_designation, app.current_employer].filter(Boolean).join(' @ ')}
           </div>
         </div>
-        {!selectMode && score != null && (
-          <div style={{ width: 34, height: 34, borderRadius: '50%', border: `2px solid ${scoreColor(score)}`, background: scoreBg(score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 900, color: scoreColor(score), flexShrink: 0 }}>
-            {Math.round(score)}%
+        {/* View Profile (2026-09-01, explicit ask, moved same day to the
+            card's right side only — "view profile option should be there
+            on ... right side only"): sits beside the score badge instead
+            of beside the candidate's name, matching the reference layout
+            where the row's own name area stays clean and profile-access
+            lives on the right. Card's own onClick still opens the drawer;
+            this stops propagation so it never also triggers that. */}
+        {!selectMode && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+            {app.candidate_id && (
+              <a href={`/candidates/${app.candidate_id}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                title="View full profile" data-testid={`kanban-view-profile-${app.id}`}
+                style={{ display: 'flex', alignItems: 'center', color: '#94A3B8' }}>
+                <Eye size={13} />
+              </a>
+            )}
+            {score != null && (
+              <div style={{ width: 34, height: 34, borderRadius: '50%', border: `2px solid ${scoreColor(score)}`, background: scoreBg(score), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 900, color: scoreColor(score) }}>
+                {Math.round(score)}%
+              </div>
+            )}
           </div>
         )}
       </div>
-      {/* Matched/missing skills vs the JD (2026-09-01, explicit ask): "it
-          should highlight skills are there in resume and missing skills
-          as per JD... in the pipeline kanban resume" — matching the
-          AI Matched Candidates modal's own green-check/red-cross
-          convention. Real data already computed by score_candidate_core
-          and stored on candidate_scores.skill_match_details, just never
-          surfaced here before — reused as-is via the pipeline board's own
-          endpoint, no new scoring call. Falls back to the plain skill-chip
-          list below when this candidate hasn't been scored against this
-          requisition yet (matched/missing both empty), so nothing regresses
-          for the common not-yet-scored case. */}
+      {/* Matched/missing skills vs the JD (2026-09-01). First version only
+          read an already-PERSISTED candidate_scores row — a candidate
+          never individually scored against this exact requisition (the
+          common case for a manual add / resume-inbox intake) silently
+          fell back to plain chips, confirmed live via a real report.
+          Fixed same day: the backend now computes matched/missing LIVE
+          for every card (compute_skill_similarity against the
+          requisition's real skills_required), so this always reflects
+          the JD regardless of whether anyone happened to click "score"
+          first. Explicit color ask, same day: matched = BLUE (matching
+          the same plain skill-chip convention below, not a separate
+          green), missing = RED highlighted. Falls back to the plain
+          fallback chips only when this requisition has no
+          skills_required at all — nothing to compare against. */}
       {(app.matched_skills?.length > 0 || app.missing_skills?.length > 0) ? (
         <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 7 }}>
           {(app.matched_skills || []).slice(0, 2).map((sk: string) => (
-            <span key={`m-${sk}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: '#ECFDF5', color: '#059669', border: '1px solid #A7F3D0' }}>✓ {sk}</span>
+            <span key={`m-${sk}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>✓ {sk}</span>
           ))}
           {(app.missing_skills || []).slice(0, 2).map((sk: string) => (
             <span key={`x-${sk}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}>✕ {sk}</span>

@@ -18004,3 +18004,102 @@ multiple times earlier in this session. Zero-token audit: `CONFIRMED
 CLEAN` (431 files, 0 external API refs). All throwaway test data
 (candidates, requisitions, applications, users) cleaned up via real
 APIs after every check, confirmed zero residue.
+
+## Kanban skill matching for never-scored candidates, blue matched color, real Quick Remove icon on the card itself — 2 real, distinct follow-up reports, both closed, 2026-09-01
+Same day, direct follow-up to S86 (real matched/missing skill chips +
+View Profile on Kanban cards). Two more real reports, off live
+screenshots — investigated both against real data before touching any
+code, not assumed.
+
+**Report 1 — "recruiter should have option to delete in the interested,
+NDA stages time."** Verified first via a real, throwaway recruiter
+account before assuming anything: `DELETE /applications/{id}` already
+worked correctly at Interested and NDA (and Screened) for a real
+recruiter — the tiered permission from the same-day S84 build was
+genuinely fine. A follow-up screenshot then showed the SAME recruiter
+hitting the real, correct **stage-move** block ("Moving a candidate
+past Screened requires a KAE or KAM") while trying to delete — not the
+remove flow at all. Root cause: `onRequestRemove` only ever lived
+inside the drawer (`CandidateDrawer`'s own action bar) — there was no
+delete/remove affordance directly on a Kanban card, so a recruiter
+naturally tried dragging the card away instead, correctly tripping the
+unrelated move-limit guard. Fixed by adding a real "Quick Remove" hover
+icon directly on the card (mirroring the existing "Quick Reject" hover-X
+icon precedent) — same tiered lock state (Interested/NDA/Screened for a
+recruiter, always for KAE/KAM/admin/manager, `Lock` icon +
+`cursor:not-allowed` + the exact same tooltip when blocked), opens the
+identical real "Remove from Pipeline" confirm modal the drawer button
+already used (never a silent delete). `isRecruiter`/
+`recruiterCanMoveToStage` threaded down into `KanbanCard` for the first
+time (previously only passed to `CandidateDrawer`).
+
+**Report 2 — explicit ask, with a reference screenshot**: matched
+skills should highlight **BLUE** (not S86's green), missing in red, and
+"View profile option should be there... right side only" (was inline
+next to the candidate's name). Fixed both:
+- Recolored the matched chip from `#ECFDF5`/green to `#EFF6FF`/`#1D4ED8`
+  — the SAME blue already used by the plain skill-chip fallback, so
+  "available" reads consistently across the whole card regardless of
+  whether it's the matched/missing view or the plain fallback.
+- Moved `View Profile` out of the name row into a new right-aligned
+  column alongside the score badge — the name area stays clean, profile
+  access lives on the right, matching the reference layout.
+- **A real gap found only because this project's own new S87 test caught
+  it, not by re-reading the diff**: the color edit was initially
+  forgotten entirely in the first pass (only the View Profile move and
+  Quick Remove icon shipped) — S87's own color assertion correctly
+  failed against the still-green chip on the first deploy, caught before
+  the user ever saw it, fixed, redeployed, and re-verified clean.
+
+**A real, deeper gap found and fixed in the same investigation, beyond
+either report**: `GET /requisitions/{id}/pipeline` only ever read a
+candidate's already-PERSISTED `candidate_scores.skill_match_details` —
+any candidate never individually scored against this exact requisition
+(the common case for a manual add or Resume Inbox intake, not "Find AI
+Matches") silently fell back to the plain, undifferentiated skill-chip
+list — this is precisely why the report's own reference screenshot
+(Ashok.K) never showed matched/missing at all. Fixed by computing
+matched/missing **LIVE** for every card, reusing the exact same shared
+`compute_skill_similarity()` the JD Match modal already uses (structured
+skills + resume-text substring check against the requisition's real
+`skills_required`) — a second, targeted query only fires when the
+requisition actually has `skills_required` set, and `resume_text` is
+fetched separately (never merged into the returned card payload, to
+avoid bloating it) and discarded after use, matching the same pattern
+already established in `match_candidates_for_requisition`. The existing
+`readiness_index`/`readiness_grade` score badge is untouched — still
+sourced from `candidate_scores` where a real score exists.
+
+Verified for real end-to-end, not code review, at every layer: a direct
+API cycle proved `DELETE /applications/{id}` genuinely works for a
+recruiter at Interested/NDA before any UI change was made; a real
+throwaway recruiter+candidate at "Submitted" (past Screened) confirmed
+the new Quick Remove icon shows the correct lock tooltip/cursor and
+clicking it does nothing (never reaches the confirm modal); a real
+click-through confirmed the unlocked case genuinely opens the same
+"Remove from Pipeline" modal (screenshot-confirmed, then Cancelled —
+never mutating this shared test fixture); temporarily set real
+`skills_required` on the exact live requisition from the original
+screenshot and confirmed all 4 real candidates (Ashok.K, Shrinivas, Hi,
+Veerendra) now show correct, individually-computed blue/red chips with
+zero prior scoring required — reverted the fixture back to its original
+empty `skills_required` afterward, confirmed via a direct API read.
+New permanent "S87" suite (4 tests) added to `qa_automation.spec.ts`.
+**One real, previously-undiscovered Playwright locator-ambiguity bug
+found by the suite's own first run, not an app bug** — the same class
+documented repeatedly elsewhere in this project: `text=Remove from
+Pipeline` matched BOTH the modal's title `<div>` and the confirm
+button (identical label) — fixed by scoping to the button's own real
+`data-testid="remove-from-pipeline-confirm"` instead. S86 was re-run
+alongside S87 throughout to confirm zero regression from the shared
+backend query rewrite — 7/7 clean in a dedicated isolated run. A
+broader regression sweep (S1/S20/S53/S84/S86 setup steps) hit this
+session's own extensively-documented per-IP login rate-limit cascade —
+confirmed via direct backend-log correlation (21 real `429 Too Many
+Requests` responses in the exact window, and `global-setup`'s own single
+required login independently hitting the identical 429 with an explicit
+server-stated 15-minute cooldown) — not a regression, accepted per the
+same established judgment call used repeatedly elsewhere in this
+project, given S86/S87 (the suites actually covering this turn's
+changes) had already passed cleanly in isolation beforehand. Zero-token
+audit: `CONFIRMED CLEAN` (431 files, 0 external API refs).
