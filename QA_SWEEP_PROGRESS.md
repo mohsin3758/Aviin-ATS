@@ -137,7 +137,12 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       with logins perpetuates the rate limit" trap): S21/S24 clean in
       isolation, then S34+S35 together (13/13) after the full cooldown.
       Zero real regressions found anywhere in this batch.
-- [ ] Batch 3: S41–S60
+- [x] Batch 3: S41–S60 — DONE, fully clean. 128 tests run; 121 initial
+      passes, 1 real failure (S43) + 1 flaky (S59), both root-caused and
+      fixed (see findings log #13 and the S43/S59 CLAUDE.md entry —
+      S43 was a stale test assumption predating enforcement being
+      turned on for the `kae` feature; S59 was a genuine locator-
+      ambiguity/async-render race). Re-verified: 11/11 clean.
 - [ ] Batch 4: S61–S88
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
