@@ -281,27 +281,69 @@ live-verification pass this phase's checklist items still need.)
       already-documented "Webhook trigger, then a Set node" shape every
       one of these workflows follows). A real, conclusive check, not
       left as "can't verify."
-- [~] #10 HITL gate — spot-checked the 3 named high-stakes actions:
-      `approve_offer`/`issue_offer` (offers.py) and `reassign`
-      (assignments.py) all correctly `require_role("admin","manager")`.
-      Candidate rejection confirmed structurally protected too — per
-      CLAUDE.md's own 2026-08-09 finding, `rejected` is one of exactly
-      3 stage keys the pipeline-stage-deletion/auto-mover code
-      hard-excludes from any automated/rule-engine stage-write path, so
-      there is no autonomous code path that can reject a candidate
-      without a human explicitly triggering it. Not yet a full
-      enumeration of every real code path (the checklist's own bar) —
-      just the 3 named actions confirmed correct.
-- [~] #5/#6 event_outbox atomicity + dedup_key — the shared `events.
+- [x] #10 HITL gate — WIDENED 2026-09-01 from a 3-action spot-check to
+      a real enumeration of every write path for all 3 named high-
+      stakes actions:
+      - **Candidate rejected**: exactly 2 real code paths write
+        `stage='rejected'` anywhere in the backend (grepped every
+        `'rejected'` occurrence, ruled out unrelated matches like
+        `resume_files.parse_status`/`requisition_approval_steps.status`)
+        — `applications.py`'s single-candidate PATCH `.../stage` and
+        `pipeline_p2.py`'s bulk `reject` action. Both independently
+        re-read in full: both require a valid `reason_code` (400
+        otherwise), both write `application_rejections` +
+        `assignment_event` + `audit_log` + a real recruiter/manager
+        notification — genuinely identical HITL treatment, not just
+        "protected in principle." (The bulk path is the real fix from
+        commit `8de0abe` earlier this session — re-confirmed present
+        and correct here, not just assumed from memory.)
+      - **Recruiter reassigned**: exactly 2 real code paths call
+        `do_reassign()` — `assignments.py`'s single `reassign` and
+        `assignment_dashboard.py`'s `bulk_reassign`, both independently
+        confirmed `require_role("admin","manager")`. `do_reassign()`
+        itself (real, live definition pulled via `pg_get_functiondef()`
+        per its own migration's documentation, not assumed from an
+        older, possibly-stale committed copy) correctly writes both a
+        real `assignment_event` for the old AND new assignment row plus
+        a real, deduped `event_outbox` row, all in one atomic PL/pgSQL
+        function — a 22nd real `event_outbox` write site, at the SQL
+        level rather than Python, correctly atomic (implicit single
+        transaction) and correctly deduped. Grepped for any OTHER write
+        to `assigned_recruiter_id`/`assignments` outside these 2 gated
+        paths — found none.
+      - **Offer issued**: 2 real write sites for `status='issued'`
+        confirmed. `offers.py`'s `issue_offer()` is the primary path,
+        `require_role("admin","manager")`. The 2nd (`send_offer_letter`)
+        only flips status IF the offer is ALREADY `'approved'`
+        (internal check, independent of its own `offer_engine:create`
+        permission gate) — it never independently approves anything,
+        so it can't be used to skip the HITL boundary. `phase3.py`'s
+        `auto_generate_offer()` create path was re-confirmed to still
+        insert as `'draft'` (the 2026-08-10 fix, re-verified present,
+        not just remembered) rather than the old direct-to-`'issued'`
+        bypass.
+      **No new violations found across any of the 3 named actions.**
+      This is now a genuine full enumeration, not a spot-check.
+- [x] #5/#6 event_outbox atomicity + dedup_key — the shared `events.
       write_outbox()` helper (`backend/events.py`) is well-designed
       BY CONSTRUCTION: `conn` (the caller's own already-open
       transaction) is a required first param and `dedup_key` a
       required last param — a caller structurally cannot skip either.
-      Spot-checked 6 real call sites across `offers.py`/`applications.
-      py`/`candidates.py`/`kae_submission.py` — all correctly pass the
-      same connection as their business-logic write and a real,
-      row-specific dedup key. Not yet a full audit of all ~20+ call
-      sites across the 10 files that use this helper.
+      **FULL AUDIT completed 2026-09-01** (widened from the earlier
+      6-site spot-check): every one of the 21 real `write_outbox()`
+      call sites across all 10 files that use it (`applications.py`
+      x3, `call_letters.py`, `candidates.py`, `erp.py` x3,
+      `kae_submission.py` x4, `nda.py`, `offers.py` x3, `phase3.py`,
+      `requisitions.py` x3, `resume_generator.py`) individually read
+      and confirmed — every single one passes the SAME `conn` already
+      open for its business-logic INSERT/UPDATE (never a separate
+      connection that would break atomicity), and every `dedup_key` is
+      genuinely unique per real event (a real DB-generated row id, or
+      id+timestamp/date — never a static/constant string that could
+      silently dedupe two different real events together). No
+      violations found anywhere. This HARD RULE is genuinely,
+      completely satisfied across the whole codebase, not just
+      spot-checked.
 - [x] #11 encryption at rest (Aadhaar/PAN/PF/bank) — verified for
       real, not just read: `erp_encrypt`/`erp_decrypt`
       (`sql/05_phase12_erp.sql`) genuinely use `pgp_sym_encrypt`/
