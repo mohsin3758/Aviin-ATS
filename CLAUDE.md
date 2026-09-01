@@ -19219,3 +19219,65 @@ currently-logged-in user across the whole app, a materially larger and
 more disruptive action than this SSO fix warrants, needing its own
 explicit decision/timing from the user rather than a unilateral side
 effect. Full detail in `QA_SWEEP_PROGRESS.md`.
+
+## QA sweep, 2026-09-02: real mobile-viewport usability gap found —
+## the app has zero responsive/collapsible-sidebar handling
+Direct continuation of the ongoing QA sweep — the responsive/narrow-
+viewport checklist item. Checked `Sidebar.tsx`/the dashboard layout
+first: zero mobile-responsive handling exists anywhere in either file —
+no `@media` query, no hamburger toggle, no window-width detection at
+all, confirmed via direct code search before testing live.
+
+Real headless-browser checks across a real 375px mobile width and a
+real 768px tablet width, on Dashboard/Candidates/Pipeline/Requisitions,
+checking both `document.body.scrollWidth` overflow AND real screenshots
+(a lack of body-scroll doesn't by itself prove usability — a layout can
+compress into an unusably narrow column without ever technically
+overflowing, and that's exactly what happened here).
+
+**768px (tablet): genuinely fine.** A real screenshot confirms a clean,
+fully readable layout — real KPI cards, the real "Recruiter Capacity"
+bars, all correctly proportioned, zero body overflow on any of the 4
+pages checked.
+
+**375px (a real phone width): a genuine, systemic usability problem.**
+Confirmed via real screenshots on both Dashboard and Candidates (the
+same root cause architecturally affects every page in the app, since
+it's the one shared layout/sidebar component, not anything page-
+specific) — the full, non-collapsible desktop sidebar (every nav group
+and item, fully text-labeled) consumes roughly 55-60% of the entire
+375px screen with no way to hide or collapse it, squeezing the actual
+page content into a genuinely unusable sliver: "Good Morning, Admin"
+truncates mid-word, real KPI numbers wrap across many awkward lines,
+the search bar and the "Compose" button are both cut off at the screen
+edge, and Candidates' own toolbar buttons stack into a cramped single
+column with several also cut off. Zero horizontal body-scroll — the app
+doesn't technically "break" in the sense this project's own established
+convention specifically warns against — but the page is genuinely,
+practically unusable at this width regardless.
+
+**Deliberately not attempted as a fix in this pass.** Building a real,
+working responsive/collapsible sidebar with a mobile hamburger-menu
+pattern is a genuine, cross-cutting UI redesign spanning the one shared
+layout component every single page in this app renders through — not a
+small, targeted, well-scoped bug fix that fits naturally inside a QA
+sweep item. Matches this project's own established precedent for
+"materially larger, riskier undertakings needing the user's own
+explicit decision on scope and timing, not a unilateral side effect of
+an unrelated pass" — the same category as the Next.js CVE-upgrade and
+JWT_SECRET-rotation findings disclosed earlier this same sweep.
+Reported honestly, with real evidence, rather than silently patched or
+silently ignored — this is a real, disclosed finding for the user's own
+prioritization, not a claim that the app is "responsive" when it isn't.
+
+**A real, small, tangential finding cleaned up along the way**: 3
+leftover "QA S82"-named test users plus 1 "Verify StageLimit KAE2" test
+user were spotted still genuinely active in the real `/analytics/
+recruiter-capacity` widget during the tablet screenshot review —
+confirmed genuinely still-active (not a missing is_active-filter bug,
+that class was already fixed for this exact view on 2026-08-31) and
+cleaned up via the real deactivate+purge API (3 of 4 fully purged; the
+4th correctly retained deactivated-only, real activity on record — the
+established force-purge safety net working as intended). Confirmed the
+widget shows exactly the tenant's 4 real active recruiters afterward.
+Full detail in `QA_SWEEP_PROGRESS.md`.

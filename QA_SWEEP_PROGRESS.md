@@ -880,7 +880,62 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       could show a tracking-sheet template pinned to a now-inactive
       client as a selectable option — a UX nicety, not a leak (it's a
       `LEFT JOIN`, degrades gracefully either way).
-- [ ] Responsive/narrow-viewport check
+- [x] Responsive/narrow-viewport check — DONE (real finding, not fixed
+      — see reasoning below), 2026-09-02. Checked `Sidebar.tsx`/the
+      dashboard layout first: zero mobile-responsive handling exists
+      anywhere (no `@media` query, no hamburger toggle, no window-
+      width detection at all) — confirmed by direct code search before
+      testing live. Real headless-browser check across 2 viewport
+      widths (375px real mobile, 768px real tablet) x 4 representative
+      pages (Dashboard, Candidates, Pipeline, Requisitions), checking
+      both `document.body.scrollWidth` overflow AND real screenshots
+      (a lack of body-scroll doesn't by itself prove usability — a
+      layout can compress into an unusably narrow, cramped column
+      without ever technically overflowing).
+      **768px (tablet)**: genuinely fine — real screenshot confirms a
+      clean, fully readable layout (KPI cards, the real "Recruiter
+      Capacity" bars, all correctly proportioned) with zero body
+      overflow on any of the 4 pages.
+      **375px (real mobile phone width)**: a real, systemic usability
+      problem, confirmed via screenshots on both Dashboard and
+      Candidates (the same root cause architecturally affects every
+      page, since it's the shared layout/sidebar, not a page-specific
+      issue) — the full, non-collapsible desktop sidebar (every group/
+      item, fully text-labeled) consumes roughly 55-60% of the entire
+      375px screen width with no way to hide/collapse it, squeezing
+      the actual page content into a narrow, genuinely unusable sliver:
+      "Good Morning, Admin" truncates mid-word, real KPI numbers wrap
+      across many awkward lines, the search bar and "Compose" button
+      are both cut off at the screen edge, and Candidates' own toolbar
+      buttons stack into a cramped single column with several also
+      cut off. Zero horizontal body-scroll (the app doesn't technically
+      "break" in the sense CLAUDE.md's own established convention
+      warns against) — but the page is genuinely, practically unusable
+      at this width regardless.
+      **Deliberately NOT attempted as a fix in this pass** — building a
+      real, working responsive/collapsible sidebar with a mobile
+      hamburger-menu pattern is a genuine, cross-cutting UI redesign
+      spanning the ONE shared layout component every single page in
+      this app renders through, not a small, targeted, well-scoped bug
+      fix. Matches this project's own established precedent for
+      "materially larger, riskier undertakings needing the user's own
+      explicit decision on scope and timing, not a unilateral side
+      effect of an unrelated pass" (the same category as the Next.js
+      CVE-upgrade and JWT_SECRET-rotation findings disclosed earlier
+      this same sweep) — reported honestly, not silently patched or
+      silently ignored.
+      **A real, small, tangential finding cleaned up along the way**:
+      3 leftover "QA S82"-named test users plus 1 "Verify StageLimit
+      KAE2" test user were spotted still genuinely active in the real
+      `/analytics/recruiter-capacity` widget during the tablet
+      screenshot review — confirmed genuinely still-active (not a
+      missing is_active-filter bug, that class was already fixed for
+      this exact view on 2026-08-31) and cleaned up via the real
+      deactivate+purge API (3 of 4 fully purged; the 4th correctly
+      retained deactivated-only, real activity on record — the
+      established force-purge safety net working as intended).
+      Confirmed the widget shows exactly the tenant's 4 real active
+      recruiters afterward.
 - [ ] UX/comprehension pass
 
 ## PHASE 4 — HARD RULE compliance & financial integrity
