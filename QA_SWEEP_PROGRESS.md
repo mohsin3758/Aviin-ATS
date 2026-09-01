@@ -1163,24 +1163,36 @@ live-verification pass this phase's checklist items still need.)
       system) — `require_role("admin","super_admin")`, deliberately
       even tighter than the user-management endpoints (excludes
       `manager`). No escalation path found across any of the 3.
-- [~] Injection/XSS spot-check — a real, useful SQL-injection static
-      pass (done opportunistically during a Batch-4 background run, no
-      live verification needed for this kind of check): grepped every
-      dynamic-SQL-construction pattern across `backend/routers/*.py`
-      (dynamic `ORDER BY` columns, dynamic `WHERE`-clause assembly,
-      dynamic table/column names). Found and checked the one genuinely
-      real-looking risk pattern — `candidates.py`'s dynamic `ORDER BY
-      c.{sort_by}` — and confirmed it's correctly guarded by a real,
-      hardcoded `ALLOWED` column-name set checked BEFORE interpolation,
-      not a live vulnerability. Every `WHERE`-clause-building pattern
-      found (5 files) always parameterizes actual values via `$N`, only
-      the surrounding SQL structure is built dynamically. The one
-      dynamic `UPDATE {table} SET {col}=...` pattern found
-      (`users.py`'s force-purge endpoint) iterates a hardcoded, code-
-      reviewed Python constant (`_FORCE_NULLIFY`), never user input —
-      the one genuinely request-derived value (`user_id`) is correctly
-      parameterized via `$1`. No real SQL injection found in this pass.
-      Not yet a full sweep of every dynamic-SQL site in the codebase.
+- [x] Injection/XSS spot-check — DONE.
+      **SQL injection, widened from an opportunistic spot-check to a
+      full, systematic, whole-backend sweep, 2026-09-02**: a real
+      Python-regex scan (not fragile line-grep) found every real
+      dynamic-SQL-construction site across the ENTIRE backend — 29
+      files, ~130 individual matches (dynamic `ORDER BY` columns,
+      dynamic `WHERE`/`SET`-clause assembly, one dynamic table name).
+      Every single one individually read and confirmed one of 3 safe
+      shapes: (1) a constant `{FIELDS}` column-list interpolation
+      (hardcoded Python string, never request-derived); (2) a
+      dynamically-built `WHERE`/`SET` clause whose actual VALUES always
+      go through a real `$N` parameter placeholder, with the COLUMN
+      NAMES restricted to either a hardcoded Python allowlist
+      (`candidates.py`'s `ORDER BY` sort guard, `pipeline_p2.py`'s
+      stage-rule updater, `users.py`'s force-purge `_FORCE_NULLIFY`
+      constant and its own already-audited `/users/me` 5-field
+      allowlist) or a Pydantic model's own declared field names
+      (`email_settings.py`, `requisitions.py`, `dedup_service.py` —
+      the client cannot smuggle in an arbitrary column name here since
+      Pydantic validates strictly against the model schema, silently
+      dropping anything not declared); (3) the one genuinely dynamic
+      TABLE name (`gap_features.py`'s Report Builder,
+      `f'SELECT ... FROM "{table}"'`) is correctly, explicitly guarded
+      by a hardcoded `ALLOWED_ENTITIES` allowlist, with the selected
+      COLUMNS independently re-checked against a live
+      `information_schema.columns` query before being interpolated —
+      a genuinely well-defended pattern, not an accidental gap. **No
+      real SQL injection found anywhere in this complete sweep.**
+      **XSS — a real, HIGH-SEVERITY, live, exploitable stored XSS
+      vulnerability found and FIXED, 2026-09-01.** Found by
       **XSS — a real, HIGH-SEVERITY, live, exploitable stored XSS
       vulnerability found and FIXED, 2026-09-01.** Found by
       systematically enumerating every real `dangerouslySetInnerHTML`
