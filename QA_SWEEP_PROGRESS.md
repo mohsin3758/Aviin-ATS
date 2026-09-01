@@ -125,7 +125,16 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
         (p23_p27.py) read from the confirmed-dead `audit_logs` (plural)
         table — a real, broken, zero-caller duplicate of the already-
         working `/audit` endpoint. Retired.
-- [ ] Batch 2: S21–S40
+- [~] Batch 2: S21–S40 — 81/86 real passes. 4 failed + 1 flaky, all
+      confirmed (via direct backend-log inspection, not assumed) to be
+      this session's own well-documented per-IP login rate-limit
+      artifact from today's unusually heavy cumulative test-run volume
+      — every single failure traced to a real `429` on that specific
+      test's own `POST /auth/login` call, immediately followed by the
+      expected `401` on its next request (S21/S24 already re-confirmed
+      clean in isolation; S34/S35 pending a final clean re-run once the
+      rate-limit window genuinely clears, not just retried immediately).
+      Zero real regressions found in this batch.
 - [ ] Batch 3: S41–S60
 - [ ] Batch 4: S61–S88
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
@@ -180,10 +189,57 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 - [ ] UX/comprehension pass
 
 ## PHASE 4 — HARD RULE compliance & financial integrity
-- [ ] #10 HITL gate — every real code path enumerated
-- [ ] #5/#6 event_outbox atomicity + dedup_key
-- [ ] #11 encryption at rest (Aadhaar/PAN/PF/bank)
-- [ ] #7/#12 DPDP consent — every current candidate-creation path
+(Preliminary static-analysis pass started opportunistically during a
+Phase-1 rate-limit cooldown wait — real code-reading, not yet the full
+live-verification pass this phase's checklist items still need.)
+- [~] #10 HITL gate — spot-checked the 3 named high-stakes actions:
+      `approve_offer`/`issue_offer` (offers.py) and `reassign`
+      (assignments.py) all correctly `require_role("admin","manager")`.
+      Candidate rejection confirmed structurally protected too — per
+      CLAUDE.md's own 2026-08-09 finding, `rejected` is one of exactly
+      3 stage keys the pipeline-stage-deletion/auto-mover code
+      hard-excludes from any automated/rule-engine stage-write path, so
+      there is no autonomous code path that can reject a candidate
+      without a human explicitly triggering it. Not yet a full
+      enumeration of every real code path (the checklist's own bar) —
+      just the 3 named actions confirmed correct.
+- [~] #5/#6 event_outbox atomicity + dedup_key — the shared `events.
+      write_outbox()` helper (`backend/events.py`) is well-designed
+      BY CONSTRUCTION: `conn` (the caller's own already-open
+      transaction) is a required first param and `dedup_key` a
+      required last param — a caller structurally cannot skip either.
+      Spot-checked 6 real call sites across `offers.py`/`applications.
+      py`/`candidates.py`/`kae_submission.py` — all correctly pass the
+      same connection as their business-logic write and a real,
+      row-specific dedup key. Not yet a full audit of all ~20+ call
+      sites across the 10 files that use this helper.
+- [x] #11 encryption at rest (Aadhaar/PAN/PF/bank) — verified for
+      real, not just read: `erp_encrypt`/`erp_decrypt`
+      (`sql/05_phase12_erp.sql`) genuinely use `pgp_sym_encrypt`/
+      `pgp_sym_decrypt` reading `current_setting('app.encrypt_key')`.
+      `erp.py`'s Python fallback (`ERP_ENCRYPT_KEY` env var, defaulting
+      to a weak, publicly-visible-in-source string if unset) was a real
+      concern worth checking, not assumed safe — confirmed directly on
+      the live VPS: a real, 64-character, non-default key IS configured
+      in `.env` and passed through via `docker-compose.yml`. `bank_ifsc`/
+      `bank_name` are deliberately stored unencrypted (identifying
+      metadata, not a financial credential the way the account NUMBER
+      is) — a reasonable scope boundary, not a violation.
+- [x] #7/#12 DPDP consent — enumerated every real `INSERT INTO
+      candidates` across the whole backend (7 distinct code paths, not
+      assumed complete from memory of the 2026-08-09 fix alone):
+      `candidates.py` (manual add), `resume_intake_service.py`'s shared
+      `upsert_candidate()` (email intake — also reused as-is by
+      `whatsapp_bot.py`'s WhatsApp intake, so both correctly inherit the
+      same consent-write logic with no separate code needed),
+      `import_router.py` (CSV+Excel bulk import), `ops_gaps.py` (agency-
+      portal), `gap_features.py` (browser-extension capture),
+      `p28_p32.py` (public job-board apply), and `personal_links.py`
+      (the recruiter personal-link/job-share-link public forms, built
+      2026-08-25 — AFTER the 2026-08-09 consent audit, so genuinely not
+      previously verified rather than just re-confirmed). All 7 confirmed
+      to write a real `consent_records` row on genuine candidate
+      creation. No new, unaudited gap found.
 - [ ] Financial correctness (incentives, retention bank, loyalty,
       account P&L, collections, payroll) — hand-verified arithmetic
 
