@@ -11537,7 +11537,15 @@ test.describe.serial('S86 Kanban board cards show real matched/missing skills vs
     expect(app.missing_skills.length).toBe(3);
   });
 
-  test('real headless UI: the Kanban card shows a real ✓ matched chip and red ✕ missing chips; View Profile opens the real candidate page in a new tab without opening the drawer', async ({ page, context }) => {
+  test('real headless UI: the Kanban card shows a real ✓ matched chip and red ✕ missing chips; View Profile navigates to the real candidate page in the SAME tab without opening the drawer', async ({ page, context }) => {
+    // Real behavior change, same day (2026-09-01, follow-up report): View
+    // Profile used to open in a new tab by design - reported live as
+    // "opening a new window every time" (3 accumulated tabs from repeated
+    // clicks), the exact same complaint class already fixed once for the
+    // Candidates page's own AI Match modal (2026-08-20). Switched to
+    // real same-tab navigation - covered end-to-end (including the "Back"
+    // return path) by the dedicated S88 suite; this assertion updated to
+    // match the new, intentional behavior instead of the old new-tab one.
     await page.goto('/login');
     await page.fill('input[type="email"]', 'admin@example.com');
     await page.fill('input[type="password"]', 'changeme');
@@ -11551,17 +11559,10 @@ test.describe.serial('S86 Kanban board cards show real matched/missing skills vs
     await expect(page.locator('text=✕ Kubernetes')).toBeVisible();
     await expect(page.locator('text=✕ Terraform')).toBeVisible();
 
-    const [newPage] = await Promise.all([
-      context.waitForEvent('page'),
-      page.locator('[data-testid^="kanban-view-profile-"]').first().click(),
-    ]);
-    await newPage.waitForLoadState('networkidle');
-    expect(newPage.url()).toContain(`/candidates/${candId}`);
-    await newPage.close();
-
-    // clicking View Profile must never also open the drawer on the
-    // original tab (real e.stopPropagation() regression guard)
-    await expect(page.locator('text=Current Stage:')).not.toBeVisible();
+    const pagesBefore = context.pages().length;
+    await page.locator('[data-testid^="kanban-view-profile-"]').first().click();
+    await page.waitForURL(`**/candidates/${candId}`, { timeout: 15000 });
+    expect(context.pages().length).toBe(pagesBefore); // no new tab opened
   });
 });
 
@@ -11679,5 +11680,104 @@ test.describe.serial('S87 Kanban skill matching for never-scored candidates, blu
     // exercising the delete itself (already covered end-to-end by S84)
     await page.locator('button:has-text("Cancel")').click();
     await expect(page.locator('[data-testid="remove-from-pipeline-confirm"]')).not.toBeVisible();
+  });
+});
+
+test.describe.serial('S88 Candidate 360 AI Match Score for never-scored candidates + Kanban View Profile same-tab navigation', () => {
+  // 2026-09-01, same day, direct follow-up to S86/S87 - real report off a
+  // live screenshot of the Candidate 360 profile page reached via a
+  // Kanban card's "View Profile" link: no AI Match Score card at all,
+  // despite the candidate having a real, active application. Root cause,
+  // the exact same class already fixed same day on the Kanban board
+  // itself: GET /candidates/{id}'s ai_scores only ever read an already-
+  // PERSISTED candidate_scores row - a candidate never individually
+  // scored (the common case) showed nothing at all. Fixed by adding a
+  // "live_only" entry (readiness_index null) for every real application
+  // whose requisition hasn't been formally scored yet, computed via the
+  // same shared compute_skill_similarity() the Kanban board's own fix
+  // already uses.
+  //
+  // Second real report in the same message: "View Profile" opened a NEW
+  // TAB (confirmed live via a screenshot showing 3 accumulated tabs), and
+  // clicking Back landed on the generic Candidates list, not the specific
+  // pipeline board the user came from. Fixed by switching to real same-
+  // tab client-side navigation (router.push) - since it's now genuine
+  // browser history, the profile page's own already-existing goBack()
+  // (built 2026-08-21, router.back() when real history exists) correctly
+  // returns to the exact originating pipeline board with no new context-
+  // passing plumbing needed.
+  let token = '';
+  let reqId = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway requisition with skills_required + a candidate added to the pipeline, deliberately NEVER individually scored', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `S88 ProfileAiScore Role ${stamp}`, status: 'open', employment_type: 'contract', skills_required: ['React', 'GraphQL', 'AWS'] },
+    });
+    reqId = (await reqR.json()).id;
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `S88 ProfileAiScore Candidate ${stamp}`, phone: '9876500061', skills: ['React', 'Redux'], resume_text: 'React and Redux frontend developer.' },
+    });
+    candId = (await candR.json()).id;
+    await request.post(`${API}/candidates/bulk-assign`, { headers: auth(), data: { candidate_ids: [candId], requisition_id: reqId, stage: 'interested' } });
+  });
+
+  test('BUG FIX: GET /candidates/{id} shows a real live_only AI Match Score entry for a never-scored application, with both matched and missing skills', async ({ request }) => {
+    const cand = await (await request.get(`${API}/candidates/${candId}`, { headers: auth() })).json();
+    expect(cand.ai_scores?.length).toBeGreaterThan(0);
+    const entry = cand.ai_scores.find((s: any) => s.requisition_id === reqId);
+    expect(entry).toBeTruthy();
+    expect(entry.readiness_index).toBeFalsy();
+    expect(entry.live_only).toBe(true);
+    expect(entry.matched_skills).toEqual(['React']);
+    expect(entry.missing_skills).toEqual(expect.arrayContaining(['GraphQL', 'AWS']));
+  });
+
+  test('real headless UI: clicking Kanban "View Profile" does NOT open a new tab, and the profile page shows the real AI Match Score panel with blue matched + red missing chips', async ({ page, context }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    const pagesBefore = context.pages().length;
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S88 ProfileAiScore Candidate ${stamp}`, { timeout: 15000 });
+    await page.locator('[data-testid^="kanban-view-profile-"]').first().click();
+    await page.waitForURL(`**/candidates/${candId}`, { timeout: 15000 });
+
+    expect(context.pages().length).toBe(pagesBefore); // no new tab opened
+
+    const panel = page.locator('[data-testid="ai-score-panel"]');
+    await panel.scrollIntoViewIfNeeded();
+    await expect(panel.locator('text=✓ React')).toBeVisible();
+    await expect(panel.locator('text=✕ GraphQL')).toBeVisible();
+    await expect(panel.locator('text=✕ AWS')).toBeVisible();
+  });
+
+  test('real headless UI: "Back to Candidates" from a profile reached via the Kanban board returns to the SAME pipeline board (real browser history), not the generic Candidates list', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S88 ProfileAiScore Candidate ${stamp}`, { timeout: 15000 });
+    await page.locator('[data-testid^="kanban-view-profile-"]').first().click();
+    await page.waitForURL(`**/candidates/${candId}`, { timeout: 15000 });
+
+    await page.locator('button:has-text("Back to Candidates")').first().click();
+    await page.waitForTimeout(1000);
+    expect(page.url()).toContain('/pipeline');
+    expect(page.url()).toContain(reqId);
   });
 });

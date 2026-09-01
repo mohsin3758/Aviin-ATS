@@ -1140,6 +1140,23 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
             " FROM applications a JOIN requisitions r ON r.id=a.requisition_id"
             " WHERE a.candidate_id=$1 ORDER BY a.updated_at DESC LIMIT 1",
             candidate_id)
+        # REAL GAP FIX (2026-09-01), same root cause already found and
+        # fixed the same day on the Kanban board: ai_scores only ever read
+        # already-PERSISTED candidate_scores rows — a candidate never
+        # individually scored (the common case for a manual add/resume-
+        # inbox intake, not "Find AI Matches") showed no AI Match Score
+        # card at all, confirmed live via a real screenshot with zero
+        # matched/missing anywhere on the profile page. Fetches every real
+        # application's requisition this candidate has that ISN'T already
+        # covered by a persisted score, so a live entry can be computed
+        # for it below — same shared compute_skill_similarity(), no
+        # second scoring engine.
+        already_scored_req_ids = {sr["requisition_id"] for sr in score_rows if sr["requisition_id"]}
+        live_req_rows = await conn.fetch(
+            "SELECT DISTINCT r.id, r.title, r.skills_required"
+            " FROM applications a JOIN requisitions r ON r.id=a.requisition_id"
+            " WHERE a.candidate_id=$1 AND a.tenant_id=$2 AND a.is_active IS NOT FALSE",
+            candidate_id, actor.tenant_id)
     d = dict(row)
     if rf:
         d['latest_resume_file_id'] = str(rf['id'])
@@ -1157,6 +1174,23 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
         s['missing_skills'] = missing
         s['matched_skills'] = matched
         scores_out.append(s)
+    for lr in live_req_rows:
+        if lr["id"] in already_scored_req_ids:
+            continue
+        req_skills = lr["skills_required"] or []
+        if not req_skills:
+            continue  # nothing real to compare against — matches the Kanban board's own gate
+        _, matched, missing = compute_skill_similarity(
+            candidate_skills=d.get('skills'), required_skills=req_skills, resume_text=d.get('resume_text'),
+        )
+        if not matched and not missing:
+            continue
+        scores_out.append({
+            "readiness_index": None, "readiness_grade": None, "skill_match_score": None,
+            "experience_score": None, "stability_score": None, "education_score": None,
+            "scored_at": None, "requisition_id": lr["id"], "requisition_title": lr["title"],
+            "matched_skills": matched, "missing_skills": missing, "live_only": True,
+        })
     d['ai_scores'] = scores_out
     return d
 

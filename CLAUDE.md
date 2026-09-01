@@ -18103,3 +18103,80 @@ same established judgment call used repeatedly elsewhere in this
 project, given S86/S87 (the suites actually covering this turn's
 changes) had already passed cleanly in isolation beforehand. Zero-token
 audit: `CONFIRMED CLEAN` (431 files, 0 external API refs).
+
+## Same-day follow-up: Candidate 360's AI Match Score never showed for a never-scored candidate, and Kanban "View Profile" opened a new tab every time, 2026-09-01
+Direct follow-up to the same-day S86/S87 work — 5 more screenshots, 2 real
+reports off a real candidate (Ashok.K) reached via a Kanban card's View
+Profile link. "where is matched and missing skills" — the Candidate 360
+profile page (`candidates/[id]/page.tsx`, a genuinely different page from
+the Candidates-LIST drawer already enriched in Segment E Part 3) showed no
+AI Match Score card at all. "if click back on the profile its should go
+back same path from where i view the profile not to candidate folder and
+opeining new tab all back click" — View Profile opened a new tab every
+click (confirmed via a screenshot showing 3 accumulated "AVIIN ATS" tabs),
+and there was no way back to the exact pipeline board.
+
+**Root cause of the missing AI Match Score card — the exact same
+architectural gap already found and fixed earlier the same day on the
+Kanban board, just in a second, independent place.** `GET /candidates/
+{id}`'s `ai_scores` only ever read already-PERSISTED `candidate_scores`
+rows — Ashok.K has a real, active application but was never individually
+scored, so `ai_scores` came back `[]` and the whole card never rendered.
+Fixed the same way: for every real application whose requisition has no
+persisted score yet (and has real `skills_required` to compare against —
+same honest gate as the Kanban fix, nothing to show when a JD has no
+skills defined), a new "live_only" entry (`readiness_index: null`) is
+computed via the same shared `compute_skill_similarity()`, no second
+scoring engine. **A second, real gap fixed in the same card**: it only
+ever rendered `missing_skills` (red), never `matched_skills` at all — the
+user's literal ask was "matched AND missing" — added matched chips (blue,
+same convention as the Kanban board's own color fix), and a graceful
+"Not yet scored" label (instead of a numeric readiness circle) for a
+live-only entry that has no persisted readiness formula behind it.
+
+**Root cause of the new-tab/no-way-back problem — much simpler than it
+looked.** The Kanban card's View Profile link used `target="_blank"
+rel="noreferrer"`. Switched to real same-tab client-side navigation
+(`router.push`, `useRouter()` added to `KanbanCard` — it's a plain React
+component in the same file, no prop-threading needed). Because this
+became genuine same-tab browser history, the profile page's own already-
+existing `goBack()` (built 2026-08-21 specifically to use real
+`router.back()` history rather than a hardcoded destination) now
+correctly returns to the exact originating pipeline board with zero new
+code — no localStorage return-context plumbing needed this time, unlike
+the earlier AI-Match-modal fix that genuinely required one (that flow
+deliberately opens in a new tab by design; this one doesn't need to).
+
+Verified for real end-to-end, not code review, at every layer: a direct
+API call against Ashok.K's own real profile (temporarily setting real
+`skills_required` on the shared S20 test fixture, reverted immediately
+after) confirmed `ai_scores` now returns a real `live_only` entry with
+correct `matched_skills`/`missing_skills`; a real headless-browser script
+confirmed clicking View Profile opens ZERO new tabs (`context.pages()`
+count unchanged) and clicking "Back to Candidates" lands back on
+`/pipeline?job={the exact same id}`, not the generic `/candidates` list;
+a full-page screenshot (the card sits below an inner-scrollable fold, not
+missing — confirmed via `scrollIntoViewIfNeeded`) visually confirmed the
+"AI Match Score" panel rendering "Not yet scored," the requisition title,
+"Matched N of M required skills," and the real blue ✓ / red ✕ chips.
+New permanent "S88" suite (4 tests) added to `qa_automation.spec.ts`.
+**One real, expected test-obsolescence found and fixed while re-running
+the suite together with S86/S87, not a regression**: S86's own UI test
+still asserted the OLD new-tab-opening behavior (`context.waitForEvent
+('page')`) — genuinely stale the moment the new-tab behavior was
+deliberately replaced; updated to assert the new same-tab navigation
+instead, matching this project's own established practice of updating a
+test when a real, deliberate behavior change makes an old assertion
+stale (same class as the 2026-08-20 "Open Full Profile" fix). S88 itself
+passed cleanly 4/4 on its own first, dedicated isolated run; a later
+re-run (after S86/S87/S88 combined, and a further isolated re-run) hit
+this session's own well-documented per-IP login rate-limit artifact —
+confirmed via direct backend-log correlation (6 real `429 Too Many
+Requests` responses in the exact failure window) from this session's own
+very high cumulative test-run volume today, not a code regression —
+accepted per the same established judgment call used repeatedly
+elsewhere in this project, given the feature was already independently
+proven correct via 4 separate methods (direct API call, a standalone
+non-suite Playwright script, real screenshots, and S88's own clean first
+run) before the rate limit was hit. Zero-token audit: `CONFIRMED CLEAN`
+(431 files, 0 external API refs).

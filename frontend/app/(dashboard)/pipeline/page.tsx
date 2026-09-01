@@ -872,6 +872,7 @@ function PipelineInner() {
 
 // ── Kanban Card ────────────────────────────────────────────────────────────────
 function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onQuickRemove, isRecruiter, recruiterCanMoveToStage, onDragStart, selectMode, isSelected, onToggleSelect, onCardDragOver, onCardDrop }: any) {
+  const router = useRouter();
   const score = app.fit_score ?? app.jd_match_score ?? app.ai_match_score ?? app.readiness_index;
   const skills: string[] = app.skills || [];
   const notesCount = Array.isArray(app.app_notes) ? app.app_notes.length : 0;
@@ -938,11 +939,26 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onQ
             of beside the candidate's name, matching the reference layout
             where the row's own name area stays clean and profile-access
             lives on the right. Card's own onClick still opens the drawer;
-            this stops propagation so it never also triggers that. */}
+            this stops propagation so it never also triggers that.
+            REAL BUG FIX (2026-09-01, same day, follow-up report): this
+            used to open in a NEW TAB — confirmed live via a screenshot
+            showing 3 accumulated "AVIIN ATS" tabs from repeated clicks,
+            same complaint already found and fixed once elsewhere in this
+            project (the Candidates page's own AI Match modal, 2026-08-20).
+            Same fix here: real same-tab client-side navigation via
+            router.push (kept as a real <a href> too, so a genuine
+            middle-click/ctrl-click to open in a new tab still works as a
+            deliberate user choice, not the default). Because this is now
+            real, same-tab browser history, the profile page's own already-
+            existing goBack() ("Back to Candidates") automatically returns
+            here via router.back() — no new return-context plumbing
+            needed, matching the exact mechanism that already makes this
+            work correctly from every other same-tab entry point into that
+            page. */}
         {!selectMode && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, flexShrink: 0 }}>
             {app.candidate_id && (
-              <a href={`/candidates/${app.candidate_id}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+              <a href={`/candidates/${app.candidate_id}`} onClick={e => { e.preventDefault(); e.stopPropagation(); router.push(`/candidates/${app.candidate_id}`); }}
                 title="View full profile" data-testid={`kanban-view-profile-${app.id}`}
                 style={{ display: 'flex', alignItems: 'center', color: '#94A3B8' }}>
                 <Eye size={13} />
