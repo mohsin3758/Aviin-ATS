@@ -278,7 +278,20 @@ live-verification pass this phase's checklist items still need.)
       by `tenant_id` via `db.tenant_conn()`, a cross-tenant attempt
       would 404. Not a full sweep of every ID-taking endpoint.
 - [ ] Cross-tenant leaks (RLS, security_invoker, SECURITY DEFINER)
-- [ ] Forgeable/guessable token audit
+- [~] Forgeable/guessable token audit — grepped every real token-
+      generation call site across the backend (18 found). All
+      consistently use Python's `secrets` module (cryptographically
+      secure), never a weak/predictable scheme (no sequential IDs, no
+      timestamp-based generation, no plain `random`). Lengths vary
+      appropriately by use case: long-lived public links (personal
+      resume-drop, NDA/offer e-sign, field attendance, calendar feed)
+      use 12-32 bytes (96-256 bits); the one shorter one checked
+      (`device_monitoring.py`'s 4-byte enrollment code) is correctly a
+      short-lived (15-min), single-use, manually-typed code — not a
+      long-lived credential, matching a reasonable, standard UX pattern
+      for that specific case. No real weakness found. Not yet a check
+      of whether every token-CONSUMING endpoint properly single-uses/
+      expires them (the generation side is what was checked here).
 - [ ] Privilege escalation checks
 - [~] Injection/XSS spot-check — a real, useful SQL-injection static
       pass (done opportunistically during a Batch-4 background run, no
