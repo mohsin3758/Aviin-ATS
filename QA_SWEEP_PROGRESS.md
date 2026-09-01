@@ -282,7 +282,35 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 - [ ] Admin/reporting/analytics
 - [ ] Sub-module/variant coverage sweep (per-feature, as areas are hit)
 - [ ] Scale check (real 2,700+ candidate dataset)
-- [ ] Concurrency & idempotency checks
+- [~] Concurrency & idempotency checks — 2 real, targeted checks done.
+      (1) `candidate_ownership.py`'s 30-day FCFS claim mechanism —
+      confirmed the real `SELECT ... FOR UPDATE` row lock (documented
+      2026-08-11) is still present at both call sites, genuinely
+      preventing a concurrent-claim race. (2) `create_application()`'s
+      per-recruiter submission-limit check (`applications.py`) —
+      confirmed the previously-fixed value-consistency bug (CLAUDE.md
+      2026-08-08: the count-check and the actually-stored
+      `assigned_recruiter_id` used to disagree) is genuinely still
+      fixed, both now derived from the same `recruiter_for_limit`.
+      **A real, new, LOW-severity finding, not fixed**: this same limit
+      check is a classic, textbook TOCTOU race — `SELECT count(*)`
+      then, if under the limit, `INSERT`, with no DB-level constraint
+      backing it. Two genuinely simultaneous requests for the same
+      recruiter+requisition, both arriving right at the limit boundary,
+      could both pass the check and both insert, landing 1 over the
+      configured cap. Disclosed rather than silently fixed: this is a
+      soft, manager-configured business rule (not a security boundary,
+      not financial data, not a HARD RULE), the race window is narrow
+      in practice (needs genuinely concurrent requests, not just
+      back-to-back human clicks through a form), and a proper fix
+      (a real DB-level enforcement mechanism) is disproportionate
+      engineering effort relative to the low real-world severity —
+      matching this same sweep's own established precedent for the
+      70/30 incentive-split rounding finding (documented, not chased).
+      Not yet checked: idempotency of the resume-intake/embedding
+      background jobs under a genuine concurrent-retry scenario, or a
+      broader sweep for the same check-then-write race pattern
+      elsewhere in the codebase beyond this one instance.
 - [ ] Background/scheduled jobs — direct invocation
 - [x] Silent-failure hunt (`except Exception: pass` grep + log check) —
       ran a real Python-regex scan (not a fragile line-based grep) across
