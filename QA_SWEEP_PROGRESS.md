@@ -1070,20 +1070,84 @@ live-verification pass this phase's checklist items still need.)
       for_tenant(p_tenant_id)` (built earlier this same session) —
       confirmed all 3 real call sites pass `actor.tenant_id`, never
       client input. No SECURITY DEFINER vulnerabilities found.
-- [~] Forgeable/guessable token audit — grepped every real token-
-      generation call site across the backend (18 found). All
-      consistently use Python's `secrets` module (cryptographically
-      secure), never a weak/predictable scheme (no sequential IDs, no
-      timestamp-based generation, no plain `random`). Lengths vary
-      appropriately by use case: long-lived public links (personal
-      resume-drop, NDA/offer e-sign, field attendance, calendar feed)
-      use 12-32 bytes (96-256 bits); the one shorter one checked
-      (`device_monitoring.py`'s 4-byte enrollment code) is correctly a
-      short-lived (15-min), single-use, manually-typed code — not a
-      long-lived credential, matching a reasonable, standard UX pattern
-      for that specific case. No real weakness found. Not yet a check
-      of whether every token-CONSUMING endpoint properly single-uses/
-      expires them (the generation side is what was checked here).
+- [x] Forgeable/guessable token audit — DONE.
+      **Generation strength**: grepped every real token-generation call
+      site across the backend (13 files, 18 sites). All consistently
+      use Python's `secrets` module (cryptographically secure), never a
+      weak/predictable scheme (no sequential IDs, no timestamp-based
+      generation, no plain `random`). Lengths vary appropriately by use
+      case: long-lived public links (personal resume-drop, NDA/offer
+      e-sign, field attendance, calendar feed) use 12-32 bytes (96-256
+      bits); the one shorter one checked (`device_monitoring.py`'s
+      4-byte enrollment code) is correctly a short-lived (15-min),
+      single-use, manually-typed code — not a long-lived credential,
+      matching a reasonable, standard UX pattern for that specific
+      case. No real weakness found here.
+      **Single-use/expiry enforcement on the CONSUMING side** — spot-
+      checked a representative sample across genuinely different
+      security postures: 2FA backup codes (`two_fa.py::verify()`) —
+      confirmed a used code is genuinely REMOVED from the stored list
+      and the shorter list written back, correctly single-use per
+      code, not just checked-but-reusable. Device enrollment tokens
+      (`sql/26_device_monitoring.sql::redeem_device_enrollment`) —
+      confirmed the real SQL (`WHERE token=$1 AND used_at IS NULL AND
+      expires_at > now()`, then `SET used_at=now()` on redemption) is
+      correctly, atomically single-use + time-expiring. NDA/offer
+      e-sign tokens — already fixed 2026-08-23 (the "already_signed"
+      dead-code bug), confirmed still holding via the `status='sent'`
+      WHERE-clause guard pattern.
+      **A real, genuine gap found and FIXED, 2026-09-02**: Google SSO's
+      OAuth2 `state` CSRF-protection parameter (`sso.py`) was generated
+      on `/auth/sso/google` but NEVER VALIDATED on `/auth/sso/google/
+      callback` — nowhere to check it against, since it was never
+      stored anywhere. This is a genuine, not-merely-textbook login-
+      CSRF: the callback both auto-creates a user AND issues a real JWT
+      session token directly, so an attacker capturing a real, unused
+      authorization code for their OWN Google account could get a
+      victim to click a crafted link and end up silently logged into
+      the ATTACKER's account, unknowingly entering real data into it.
+      Confirmed via the real, live `.env` that Google SSO is currently
+      UNCONFIGURED in production (`GOOGLE_CLIENT_ID` absent — the whole
+      router 503s immediately on the entry point, confirmed live) — not
+      currently exploitable, but a real, foreseeable gap the moment SSO
+      is ever turned on. Fixed with the standard, stateless pattern: the
+      state value is now embedded in a short-lived (10 min), signed JWT
+      set as an httponly cookie on the login redirect, verified against
+      the query-param state the callback receives back from Google —
+      reusing this app's own existing `JWT_SECRET`/pyjwt infrastructure,
+      no new dependency or session store. A real FastAPI gotcha caught
+      and correctly handled during the fix: a path operation that
+      returns its own `Response` object directly (this one returns a
+      `RedirectResponse`) bypasses any header/cookie change made via a
+      separately-injected `response: Response` dependency parameter —
+      the cookie-clearing call had to be made on the actual object
+      being returned, not the injected one.
+      **Verified for real, not code review**: confirmed the still-
+      unconfigured `503` behavior is unchanged via a live request.
+      Since the full HTTP flow can't be exercised end-to-end without
+      real Google credentials (matching this project's own established
+      "no real external session to test the true happy path against"
+      precedent — WAHA, Telegram), ran the exact real state-JWT encode/
+      decode/compare logic directly inside the backend container using
+      the REAL production `JWT_SECRET` — confirmed all 5 real cases:
+      a matching state validates, a mismatched state is correctly
+      detected as non-matching, an expired JWT raises
+      `ExpiredSignatureError`, a JWT forged with a wrong secret raises
+      `InvalidSignatureError`, and a garbage/malformed cookie value
+      raises `DecodeError` — every real rejection path proven, not
+      assumed. Deployed via the established scp -> hash-verify ->
+      rebuild -> health-check cycle. Zero-token audit: `CONFIRMED
+      CLEAN` (436 files).
+      **A real, separate, disclosed finding surfaced incidentally, NOT
+      acted on**: the verification script's own output included a real
+      `InsecureKeyLengthWarning` — this tenant's actual production
+      `JWT_SECRET` is only 23 bytes, below the RFC 7518-recommended
+      32-byte minimum for HS256. Deliberately NOT rotated as part of
+      this fix — doing so would invalidate every currently-issued JWT
+      for every real, currently-logged-in user across the whole app, a
+      materially larger and more disruptive action than this SSO fix
+      warrants, and needs its own explicit decision/timing from the
+      user, not a unilateral side effect.
 - [x] Privilege escalation checks — 3 real, distinct vectors checked:
       (1) `create_user`/`update_user` (`users.py`) — the only endpoints
       that can set a user's `role` field — both `require_role("admin",

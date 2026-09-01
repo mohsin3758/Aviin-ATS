@@ -19150,3 +19150,72 @@ project's history against malformed real-world documents, and the size-
 check fix above already closes the most direct, highest-value gap (raw
 memory exhaustion via a giant file) on the most exposed surface. Full
 detail in `QA_SWEEP_PROGRESS.md`.
+
+## QA sweep, 2026-09-02: a real login-CSRF gap in Google SSO found and
+## fixed — currently dead in production, closed before it can matter
+Direct continuation of the ongoing QA sweep, closing out the forgeable/
+guessable token audit. Checking whether every token-CONSUMING endpoint
+properly enforces single-use/expiry (the generation side was already
+checked and confirmed clean earlier this sweep) surfaced a real, genuine
+gap in `sso.py`'s Google OAuth2 login: a real `state` value was
+generated for the standard CSRF-protection parameter on `/auth/sso/
+google`, but `/auth/sso/google/callback` never validated it against
+anything — there was nowhere to check it against, since it was never
+stored anywhere in the first place.
+
+This is a genuine, not-merely-textbook login-CSRF, not a low-severity
+theoretical gap: the callback both auto-creates a user AND issues a real
+JWT session token directly in its response. Without state validation, an
+attacker can capture a real, unused authorization code for THEIR OWN
+Google account, get a victim to click a crafted callback link carrying
+that code, and the victim's browser would complete the exchange and
+receive a real JWT — silently logging the victim in AS THE ATTACKER's
+account. Any real data the victim then enters while unknowingly using
+that session (candidate PII, sensitive notes, connected accounts) would
+be attributed to and visible from the attacker's account instead of
+their own.
+
+Confirmed via the real, live `.env` that Google SSO is currently
+UNCONFIGURED in production (`GOOGLE_CLIENT_ID` absent — the whole router
+503s immediately, confirmed live) — not currently exploitable, but a
+real, foreseeable gap the instant SSO is ever turned on, fixed now
+rather than left for that day.
+
+Fixed with the standard, stateless pattern: the state value is now
+embedded in a short-lived (10 min), signed JWT set as an httponly cookie
+on the login redirect, then verified against the query-param state the
+callback receives back from Google — reusing this app's own existing
+`JWT_SECRET`/pyjwt infrastructure, no new dependency or server-side
+session store needed. A real FastAPI gotcha caught and correctly handled
+mid-fix: a path operation that returns its own `Response` object
+directly (this one returns a `RedirectResponse`) bypasses any header/
+cookie change made via a separately-injected `response: Response`
+dependency parameter — the cookie-clearing call had to be made on the
+actual object being returned, not the injected one, or it would have
+silently done nothing.
+
+**Verified for real, not code review**: confirmed the still-unconfigured
+`503` behavior is genuinely unchanged via a live request. Since the full
+HTTP flow can't be exercised end-to-end without real Google credentials
+(matching this project's own established "no real external session to
+test the true happy path against" precedent — WAHA, Telegram), ran the
+exact real state-JWT encode/decode/compare logic directly inside the
+backend container using the REAL production `JWT_SECRET` — confirmed
+all 5 real cases: a matching state validates, a mismatched state is
+correctly detected, an expired JWT raises `ExpiredSignatureError`, a JWT
+forged with a wrong secret raises `InvalidSignatureError`, and a
+garbage/malformed cookie value raises `DecodeError` — every real
+rejection path proven, not assumed. Deployed via the established scp ->
+hash-verify -> rebuild -> health-check cycle. Zero-token audit:
+`CONFIRMED CLEAN` (436 files).
+
+**A real, separate, disclosed finding surfaced incidentally, NOT acted
+on**: the verification script's own output included a real
+`InsecureKeyLengthWarning` — this tenant's actual production
+`JWT_SECRET` is only 23 bytes, below the RFC 7518-recommended 32-byte
+minimum for HS256. Deliberately not rotated as part of this fix —
+doing so would invalidate every currently-issued JWT for every real,
+currently-logged-in user across the whole app, a materially larger and
+more disruptive action than this SSO fix warrants, needing its own
+explicit decision/timing from the user rather than a unilateral side
+effect. Full detail in `QA_SWEEP_PROGRESS.md`.
