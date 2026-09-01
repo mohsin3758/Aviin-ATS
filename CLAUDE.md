@@ -19369,3 +19369,69 @@ The approved plan explicitly scoped individual pages' own internal
 toolbar/table layouts as out of this pass - disclosed rather than
 either silently fixed beyond scope or silently ignored. Full detail in
 `QA_SWEEP_PROGRESS.md`.
+
+## "Recruiter can't tell how to Remove instead of Move" — the same real discoverability gap recurring, closed with a message fix + always-visible icon, 2026-09-02
+User reported, off a fresh live screenshot: a recruiter dragging a
+candidate card past "Screened" hit the real, correctly-working stage-
+move-block toast ("Moving a candidate past Screened requires a KAE or
+KAM...") and asked for recruiter delete/remove at Interested/NDA/
+Screened without needing KAE/KAM. Investigated before touching
+anything, since this exact capability was already built and deployed
+the day before (2026-09-01, "Remove from Pipeline tiered by stage") -
+confirmed via a real API cycle with a genuine throwaway recruiter that
+removal at Interested/NDA/Screened already worked correctly (200,
+`removed:true`) and was correctly still blocked past Screened (403).
+The feature was never broken - the recruiter was hitting the MOVE
+block (from dragging forward) instead of ever finding the Remove
+action, the exact same underlying pattern already fixed once for a
+different report the day before (S87 - "recruiter trying to delete
+was instead dragging cards toward a later column"). Confirmed via the
+deployed JS bundle this earlier fix was genuinely live in production,
+not reverted.
+
+**Real fix, closing the recurrence properly this time, not just
+re-confirming the old one**: (1) the blocked-move toast's message
+(both the main `/pipeline` board's client-side copy and the backend's
+own `403` detail text that the `requisitions/[id]` embedded board
+surfaces directly) now explicitly names Remove as the real alternative
+- "...hand off to your account team. To remove this candidate
+instead, use the trash icon on the card or Remove in the candidate
+panel." Kept both copies in sync deliberately, since the main board
+relies on its own pre-check string 99% of the time while the embedded
+board relies on the real API response. (2) The Kanban card's Quick
+Remove icon (built 2026-09-01) was hover-only - which is exactly why
+it kept going unfound: a recruiter's first instinct was to drag the
+card away, not hover over a small corner of it, and hover has no
+equivalent on a touch device at all, which now genuinely matters given
+this app got real mobile support earlier the same day. Made it always
+visible (not gated on `hovered`) - a small, low-risk visual change
+(subtle gray background, matches the icon's existing styling) that
+fixes both desktop discoverability and touch usability in one motion.
+
+Verified for real end-to-end, not code review: a full real API cycle
+with a genuine throwaway recruiter proved all 5 real cases - remove at
+Interested/NDA/Screened all succeed (200), remove correctly still
+blocked past Screened at L1 Interview (403, real message), the
+blocked-MOVE 403 detail text is genuinely the new, improved copy live
+in production, and a real KAE can still remove past Screened (the
+exact counterpart the tier exists for). A real headless-browser check
+confirmed the Quick Remove icon renders visibly with ZERO hover event
+ever fired (not just "becomes visible after hovering"), and that
+clicking it opens the real confirm modal. A second real headless-
+browser check confirmed the exact new toast text renders fully and
+correctly on the live board (screenshot-confirmed, 2 clean lines, not
+truncated or garbled) - "Moving a candidate past Screened requires a
+KAE or KAM — hand off to your account team. To remove this candidate
+instead, use the 🗑 icon on the card or Remove in the candidate panel."
+The existing S87 test asserting "hovering...reveals" the icon was
+updated (not left stale) to prove the stronger, now-true guarantee
+directly - visible with no hover at all. New permanent "S89" suite (3
+tests) added to `qa_automation.spec.ts` covering the improved message
+at both the API and UI layer. Full regression sweep (S1/S42/S80/S87/
+S89, 20 tests) passed clean: 19 passed, 1 pre-existing skip, 0 failed
+- zero regressions in the tiered Remove/stage-move-limit logic itself,
+confirming this was purely a discoverability fix layered on top of an
+already-correct system. Zero-token audit: `CONFIRMED CLEAN` (436
+files, 0 external API refs). All throwaway test data (candidates,
+requisitions, recruiters, a KAE) cleaned up via real APIs after every
+check, confirmed zero residue.

@@ -837,9 +837,19 @@ async def update_stage(
         # why this reads real display_order, not a hardcoded stage list,
         # and why 'hold'/'rejected' need no special-casing here.
         if actor.role == "recruiter" and not await recruiter_can_move_to_stage(conn, actor.tenant_id, body.stage):
+            # Real UX finding (2026-09-02): this exact message reaches the
+            # user in 2 ways - the main /pipeline board's own client-side
+            # pre-check copies this string before ever calling the API
+            # (kept in sync by hand), and the requisitions/[id] embedded
+            # board (which has no such pre-check) surfaces this real detail
+            # text directly - so it's the one place that needs updating to
+            # cover both. Names the real Remove option (already available
+            # up through Screened) as an explicit alternative, since a
+            # recruiter trying to get rid of a candidate would otherwise
+            # keep dragging it forward and re-hitting this same block.
             raise HTTPException(
                 status_code=403,
-                detail="Moving a candidate past Screened requires a KAE or KAM — hand off to your account team")
+                detail="Moving a candidate past Screened requires a KAE or KAM — hand off to your account team. To remove this candidate instead, use the trash icon on the card or Remove in the candidate panel.")
 
         # board_rank is a per-column drag-reorder position — moving to a
         # different stage always lands at the top of that column (matches

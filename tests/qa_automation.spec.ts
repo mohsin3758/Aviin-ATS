@@ -11827,7 +11827,18 @@ test.describe.serial('S87 Kanban skill matching for never-scored candidates, blu
     expect(profileLink!.x).toBeGreaterThan(nameBox!.x + 100); // genuinely on the right, not inline with the name
   });
 
-  test('real headless UI: hovering a Kanban card reveals a Quick Remove icon (a real, discoverable delete option, not just buried in the drawer) that opens the real confirm modal', async ({ page }) => {
+  test('real headless UI: the Quick Remove icon on a Kanban card is genuinely visible without hovering (a real, discoverable delete option, not just buried in the drawer) and opens the real confirm modal', async ({ page }) => {
+    // REAL FIX (2026-09-02): this was hover-only until now — reported
+    // live via a real recruiter's screenshot, this was exactly why the
+    // icon kept going unfound: a recruiter's first instinct was to drag
+    // the card toward a later column instead, hitting the (correct)
+    // stage-move block over and over rather than ever finding this. Made
+    // always-visible (not hover-gated) both for real discoverability on
+    // desktop AND because hover has no equivalent on a touch device at
+    // all, which now matters given this app is genuinely mobile-
+    // accessible. This test now proves the STRONGER guarantee directly —
+    // visible with zero hover event ever fired — not the weaker
+    // "becomes visible after hovering" the old title described.
     await page.goto('/login');
     await page.fill('input[type="email"]', 'admin@example.com');
     await page.fill('input[type="password"]', 'changeme');
@@ -11837,9 +11848,9 @@ test.describe.serial('S87 Kanban skill matching for never-scored candidates, blu
     await page.goto(`/pipeline?job=${reqId}`);
     await page.waitForSelector(`text=S87 NeverScored Candidate ${stamp}`, { timeout: 15000 });
 
-    const card = page.locator(`text=S87 NeverScored Candidate ${stamp}`).locator('xpath=ancestor::div[@draggable="true"]').first();
-    await card.hover();
     const quickRemove = page.locator('[data-testid^="quick-remove-"]').first();
+    // Deliberately never hover the card — proves the icon is visible on
+    // its own, not merely "visible after hovering."
     await expect(quickRemove).toBeVisible();
     await quickRemove.click();
     // real, previously-undiscovered test-locator ambiguity, not an app
@@ -11951,5 +11962,102 @@ test.describe.serial('S88 Candidate 360 AI Match Score for never-scored candidat
     await page.waitForTimeout(1000);
     expect(page.url()).toContain('/pipeline');
     expect(page.url()).toContain(reqId);
+  });
+});
+
+test.describe.serial('S89 Recruiter stage-move-blocked message now points to the real Remove option', () => {
+  // 2026-09-02, real report off a live screenshot: a recruiter kept
+  // hitting "Moving a candidate past Screened requires a KAE or KAM"
+  // while dragging a card forward — the exact same underlying pattern
+  // S87 already fixed once (recruiter trying to get rid of a candidate
+  // by dragging it away, never finding the always-available Remove
+  // action). Confirmed via direct verification the tiered Remove system
+  // itself was already correct (a recruiter genuinely can remove their
+  // own candidate at Interested/NDA/Screened, blocked past that — see
+  // S42/S80/S87) — the real, remaining gap was purely the message never
+  // telling the recruiter Remove was the actual answer. Fixed at the ONE
+  // real source both surfaces read from: the backend's own 403 detail
+  // text (applications.py), which the main /pipeline board's client-side
+  // pre-check copies verbatim and the requisitions/[id] embedded board
+  // surfaces directly from the raw API error.
+  let admin = '';
+  let recToken = '';
+  let recruiterId = '';
+  let reqId = '';
+  const authA = () => ({ Authorization: `Bearer ${admin}` });
+  const authR = () => ({ Authorization: `Bearer ${recToken}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: authA() }).catch(() => {});
+    if (recruiterId) {
+      await request.patch(`${API}/users/${recruiterId}`, { headers: authA(), data: { is_active: false } }).catch(() => {});
+      await request.delete(`${API}/users/${recruiterId}/purge`, { headers: authA() }).catch(() => {});
+    }
+  });
+
+  test('setup: real admin token + a throwaway open requisition + a throwaway recruiter login', async ({ request }) => {
+    admin = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: authA(), data: { title: `S89 MsgFix Role ${stamp}`, client_name: 'S89 MsgFix Client', status: 'open', employment_type: 'fte', work_mode: 'remote', positions: 1 },
+    });
+    reqId = (await reqR.json()).id;
+    const email = `qa.s89.rec.${stamp}@test.com`;
+    const userR = await request.post(`${API}/users`, { headers: authA(), data: { full_name: 'S89 MsgFix Recruiter', email, password: 'QaVerify#2026', role: 'recruiter' } });
+    recruiterId = (await userR.json()).id;
+    const loginR = await request.post(`${API}/auth/login`, { data: { email, password: 'QaVerify#2026' } });
+    recToken = (await loginR.json()).access_token;
+  });
+
+  test('BUG FIX: the real 403 detail on a blocked stage-move now names the Remove option explicitly', async ({ request }) => {
+    const candR = await request.post(`${API}/candidates`, {
+      headers: authR(), data: { full_name: `S89 MsgFix Candidate ${stamp}`, email: `qa.s89.cand.${stamp}@test.com`, phone: '9' + String(stamp).slice(-9) },
+    });
+    const candId = (await candR.json()).id;
+    const appR = await request.post(`${API}/applications`, { headers: authR(), data: { candidate_id: candId, requisition_id: reqId, stage: 'interested' } });
+    const appId = (await appR.json()).id;
+
+    const moveR = await request.patch(`${API}/applications/${appId}/stage`, { headers: authR(), data: { stage: 'l1_interview', send_email: false } });
+    expect(moveR.status()).toBe(403);
+    const body = await moveR.json();
+    expect(body.detail).toContain('requires a KAE or KAM');
+    expect(body.detail).toContain('remove this candidate instead');
+    expect(body.detail).toMatch(/trash icon|Remove in the candidate panel/);
+
+    // Real, still-correct tier boundary — Remove itself stays genuinely
+    // available at Interested (this app was never actually moved, so
+    // it's still there), unaffected by the message-only change above.
+    const rmR = await request.delete(`${API}/applications/${appId}`, { headers: authR(), data: {} });
+    expect(rmR.status()).toBe(200);
+    await request.delete(`${API}/candidates/${candId}`, { headers: authA() }).catch(() => {});
+  });
+
+  test('real headless UI: the improved message renders fully and correctly on the live pipeline board, not truncated', async ({ page, request }) => {
+    const candR = await request.post(`${API}/candidates`, {
+      headers: authR(), data: { full_name: `S89 UI Candidate ${stamp}`, email: `qa.s89.ui.${stamp}@test.com`, phone: '8' + String(stamp).slice(-9) },
+    });
+    const candId = (await candR.json()).id;
+    await request.post(`${API}/applications`, { headers: authR(), data: { candidate_id: candId, requisition_id: reqId, stage: 'interested' } });
+
+    await page.goto('/login');
+    await page.fill('input[type="email"]', `qa.s89.rec.${stamp}@test.com`);
+    await page.fill('input[type="password"]', 'QaVerify#2026');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S89 UI Candidate ${stamp}`, { timeout: 15000 });
+    await page.locator(`text=S89 UI Candidate ${stamp}`).first().click();
+    await page.waitForTimeout(500);
+    await page.locator('[data-testid="stage-pill-l1_interview"]').click();
+    await page.waitForTimeout(600);
+
+    const toast = page.locator('div:has-text("hand off to your account team")').last();
+    await expect(toast).toBeVisible();
+    const toastText = await toast.innerText();
+    expect(toastText).toContain('Moving a candidate past Screened requires a KAE or KAM');
+    expect(toastText).toContain('remove this candidate instead');
+
+    await request.delete(`${API}/candidates/${candId}`, { headers: authA() }).catch(() => {});
   });
 });

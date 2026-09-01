@@ -295,7 +295,16 @@ function PipelineInner() {
   const moveStage = useCallback(async (appId: string, fromStage: string, toStage: string, extra: Record<string, any> = {}) => {
     if (fromStage === toStage) return;
     if (isRecruiter && !recruiterCanMoveToStage(toStage)) {
-      showToast('Moving a candidate past Screened requires a KAE or KAM — hand off to your account team', false);
+      // Real UX finding (2026-09-02): reported live, this exact toast kept
+      // firing because a recruiter trying to get rid of a candidate they
+      // no longer wanted would instinctively drag it toward a later
+      // column — hitting this (correct) move-block instead of ever
+      // finding the real Remove action, which is already available at
+      // every stage up through Screened (see canRemove/onQuickRemove
+      // below). Rather than leave them stuck on "no," the message now
+      // names the actual next step for both real intents (hand off, or
+      // remove).
+      showToast('Moving a candidate past Screened requires a KAE or KAM — hand off to your account team. To remove this candidate instead, use the 🗑 icon on the card or Remove in the candidate panel.', false);
       return;
     }
     // Real "Client Submission" wiring (2026-08-25) — this stage's email
@@ -925,11 +934,18 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onQ
           hitting the (correct, working) stage-move block instead of ever
           reaching the real Remove action. This gives the exact same
           tiered Remove (Interested/NDA/Screened for a recruiter, always
-          for KAE/KAM/admin/manager) one hover away, so nobody needs to
-          open the drawer or drag anything to delete a candidate. Same
-          confirm-modal flow as the drawer's own Remove button — never a
-          silent delete. */}
-      {!selectMode && hovered && onQuickRemove && (() => {
+          for KAE/KAM/admin/manager) without needing to open the drawer or
+          drag anything to delete a candidate. Same confirm-modal flow as
+          the drawer's own Remove button — never a silent delete.
+          REAL FIX (2026-09-02, same underlying report recurring): was
+          hover-only, which is exactly why it kept going unfound — a
+          recruiter's first instinct was to drag the card away instead,
+          and hover has no equivalent on a touch device at all, which
+          matters now that this app is genuinely mobile-accessible.
+          Always rendered (not gated on `hovered`) so it's visible without
+          needing to discover a hover state on desktop, and reachable at
+          all on mobile/touch. */}
+      {!selectMode && onQuickRemove && (() => {
         const removeLocked = isRecruiter && recruiterCanMoveToStage && !recruiterCanMoveToStage(app.stage);
         return (
           <button
