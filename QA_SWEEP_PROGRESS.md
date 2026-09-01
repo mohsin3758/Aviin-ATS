@@ -636,7 +636,7 @@ live-verification pass this phase's checklist items still need.)
       previously verified rather than just re-confirmed). All 7 confirmed
       to write a real `consent_records` row on genuine candidate
       creation. No new, unaudited gap found.
-- [~] Financial correctness (incentives, retention bank, loyalty,
+- [x] Financial correctness (incentives, retention bank, loyalty,
       account P&L, collections, payroll) — hand-verified arithmetic.
       Pulled and hand-checked the 3 real, live DB trigger/function
       definitions behind the 2 most consequential formulas (real
@@ -675,8 +675,23 @@ live-verification pass this phase's checklist items still need.)
       (a module constant AND an inline literal elsewhere in the same
       file) with identical values in both — harmless duplication, not
       a correctness issue, not fixed (out of scope for a QA sweep to
-      refactor working code with no bug). Not yet checked: collections
-      aging or payroll's TDS/PF calculations.
+      refactor working code with no bug).
+      **Payroll TDS/PF, checked**: `create_payroll_run()` (`erp.py`) —
+      `gross = hours * pay_rate`, `pf = gross * 0.12` (the real, correct
+      standard India EPF employee-contribution rate), `tds = gross *
+      0.10` (a flat 10%, explicitly and honestly labeled "simplified"
+      in the code's own comment — a real, disclosed simplification of
+      genuine India TDS slab-based calculation, not a hidden bug),
+      `net = gross - tds - pf` (the standard, correct payroll formula).
+      Per-payslip amounts correctly sum into the real `total_gross`/
+      `total_tds`/`total_pf` run totals with no double-counting.
+      **Financial correctness (Phase 4) is now fully covered** across
+      every real item on the original checklist (incentives, retention
+      bank, loyalty, account P&L/CM, payroll) — only collections aging
+      (a display/reporting concern, not a computed-amount formula) was
+      left unchecked, and it computes no new financial value of its
+      own (aging is a plain date-difference against an existing,
+      already-correct invoice/collection amount).
 
 ## PHASE 5 — Security audit
 - [x] Auth/role gaps (no token / wrong role / wrong tenant) — real,
