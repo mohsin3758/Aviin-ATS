@@ -19042,3 +19042,57 @@ shared submission engine. All throwaway reproduction data confirmed
 cleaned up with zero residue. Zero-token audit: `CONFIRMED CLEAN` (436
 files, 0 external API refs). Full detail in `QA_SWEEP_PROGRESS.md` —
 this closes out Batch 4 (S61-S88) of the ongoing QA sweep completely.
+
+## QA sweep, 2026-09-02: Phase 3 core workflow walked end-to-end, real
+## data, zero bugs found — a genuinely clean bill of health
+Direct continuation of the ongoing full-stack QA sweep — the first Phase
+3 check (Phase 0/1/4/5 already closed; Phase 2's automated wiring pass
+done 2026-09-01). Walked one real, throwaway candidate through the
+COMPLETE real chain via direct API calls, verifying real computed data
+at every step rather than just HTTP status codes: real client +
+requisition + candidate → added to pipeline at the tenant's real
+configured default stage → 6 real stage transitions in order (nda →
+screened → client_submission → submitted → l1_interview → l2_interview)
+→ the full real offer HITL chain (create → submit-for-approval →
+approve → issue → respond-accepted) → confirmed the real automatic side
+effects of acceptance (a genuine `placements` row with the correct
+client, a genuine `candidate_onboarding` record auto-populated from the
+tenant's real 10-task template) → real ERP: a 40-hour timesheet →
+submit → approve → invoice generation (subtotal exactly matched
+`40hrs × ₹1000` bill rate) → and, after a real, disclosed methodology
+correction (see below), a real payroll run producing exactly 1 payslip
+with `gross=₹32,000`, `TDS=₹3,200` (10%), `PF=₹3,840` (12%),
+`net=₹24,960` — every figure matching the hand-computed formula to the
+rupee.
+
+**One real finding along the way, investigated and confirmed NOT a
+bug**: generating the invoice correctly flips a timesheet's status to
+`'billed'`, and running payroll against that same already-billed
+timesheet correctly produced 0 payslips — this exactly matches an
+already-documented, established, by-design finding from this project's
+own 2026-08-09 Finance/ERP work. My own first attempt had simply reused
+one timesheet for both checks, which isn't the real intended workflow;
+created a second, dedicated, never-invoiced timesheet to verify payroll
+generation in genuine isolation, which then produced the correct
+result above.
+
+**Conclusion: the entire real, end-to-end core workflow — from a
+candidate's first resume through to a computed, correct payslip — is
+genuinely healthy. Zero real bugs found in this pass.** A meaningfully
+different, positive result from most of this sweep's earlier phases,
+each of which found and fixed real bugs — this is the first phase to
+come back completely clean on its own merits, a real, evidence-based
+confirmation (not an assumption) that this specific chain works
+correctly at the level this project's own extensive prior history of
+feature-by-feature verification hadn't quite covered (the FULL,
+connected, single-candidate journey start to finish, rather than each
+stage verified independently).
+
+Cleaned up via the real DELETE APIs where they exist (candidate,
+requisition, client, all soft-deleted, confirmed). The offer/
+application/placement/onboarding/2 timesheets/1 invoice/2 payroll-runs/
+1 payslip have no delete endpoint in this codebase — left as harmless,
+tenant-isolated, orphaned-from-any-visible-candidate residue, matching
+this project's own established precedent for financial/historical-
+record tables elsewhere (`candidate_submissions`, `generated_resumes`,
+`referral_links`). Full detail in `QA_SWEEP_PROGRESS.md`.

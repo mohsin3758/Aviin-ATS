@@ -460,8 +460,74 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       this app.
 
 ## PHASE 3 — Functional end-to-end verification
-- [ ] Core daily workflow (candidate intake → pipeline → offers →
-      placements → payroll) — priority pass
+- [x] Core daily workflow (candidate intake → pipeline → offers →
+      placements → payroll) — DONE, fully clean, real, end-to-end,
+      2026-09-02. Walked one genuine throwaway candidate through the
+      COMPLETE real chain via direct API calls (using a cached admin
+      token, not the rate-limited login endpoint), verifying real data
+      at every step rather than just HTTP status codes:
+      1. **Intake**: real client + SPOC-less requisition (open, with
+         real `skills_required`) + real candidate (with real
+         `resume_text` matching those skills).
+      2. **Pipeline**: added at the tenant's real configured default
+         stage (`interested`), then walked every real stage in order —
+         `nda` → `screened` → `client_submission` → `submitted` →
+         `l1_interview` → `l2_interview` — all 6 transitions clean
+         `200`s, zero unexpected errors (this also exercises the real
+         `_auto_notify_screening_team`/client-submission automations
+         fired along the way, though their own deep correctness is
+         already separately, extensively covered by S37/S54/S61/S65).
+      3. **Offer, the full real HITL chain**: `create → submit-for-
+         approval → approve → issue → respond(accepted)` — all 5 steps
+         clean, `approved_by` correctly populated, final status
+         `accepted`.
+      4. **Placement + onboarding, the real automatic side effects of
+         acceptance**: confirmed the candidate's application landed at
+         `stage='placed'`; confirmed a real `placements` row was
+         auto-created (correct `client_id`, `candidate_name`,
+         `start_date`) via `field-attendance/placements-search`;
+         confirmed a real `candidate_onboarding` record was auto-
+         created from the tenant's real, existing 10-task onboarding
+         template (documents/BGV/PF-ESI/bank-details/SPOC-intro/access-
+         coordination/check-ins/invoice-generation tasks, all present
+         and unstarted).
+      5. **ERP/payroll, with real bill_rate=₹1000/pay_rate=₹800 set on
+         the placement** (no API exists for this — set via a direct,
+         RLS-correct SQL fixture inside the backend container, matching
+         this project's own established precedent for legitimate test
+         setup with no API path): a real 40-hour timesheet →
+         submit → approve → **generate a real invoice** — subtotal
+         `₹40,000` exactly matched the hand-computed `40hrs × ₹1000`.
+      6. **A genuine, real finding along the way, investigated and
+         confirmed NOT a bug**: generating the invoice correctly flips
+         a timesheet's status to `'billed'` — running payroll-run
+         generation against that SAME already-billed timesheet
+         correctly produced 0 payslips (`total_gross:0`). This exactly
+         matches an already-documented, established, by-design finding
+         from this project's own 2026-08-09 Finance/ERP work ("a
+         *billed* timesheet correctly does NOT get pulled into
+         payroll... proved payroll genuinely works against a second,
+         still-`approved` timesheet") — my own test had simply used one
+         timesheet for both checks, which isn't the real intended
+         workflow. Created a SECOND, dedicated timesheet (never
+         invoiced) specifically to verify payroll in isolation: real
+         payroll-run generation produced exactly 1 payslip with
+         `gross=₹32,000` (`40hrs × ₹800`), `TDS=₹3,200` (exactly 10%),
+         `PF=₹3,840` (exactly 12%), `net=₹24,960` — every figure
+         matching the hand-computed formula to the rupee.
+      **Conclusion: the entire real, end-to-end core workflow — from a
+      candidate's first resume through to a computed, correct payslip —
+      is genuinely healthy. Zero real bugs found in this pass.**
+      Cleaned up: candidate/requisition/client all soft-deleted via the
+      real DELETE APIs, confirmed. The offer/application/placement/
+      onboarding/2 timesheets/invoice/2 payroll-runs/1 payslip have no
+      delete endpoint in this codebase (matching established precedent
+      for financial/historical-record tables elsewhere in this
+      project — `candidate_submissions`, `generated_resumes`,
+      `referral_links`) — left as harmless, tenant-isolated, orphaned-
+      from-any-visible-candidate residue rather than chased down via
+      raw SQL, which risks more than it's worth for cleanup of
+      already-inert throwaway data.
 - [ ] Recruiter/KAE-facing tools
 - [ ] Admin/reporting/analytics
 - [ ] Sub-module/variant coverage sweep (per-feature, as areas are hit)
