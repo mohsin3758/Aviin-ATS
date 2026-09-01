@@ -322,7 +322,24 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       real, representative spot-check across both formats confirms the
       underlying generation machinery is genuinely producing correct
       output, not just returning a 200 with garbage/empty content.
-- [ ] Localization/multi-language honesty check
+- [x] Localization/multi-language honesty check — read `whatsapp.py`'s
+      real `MSG_TEMPLATES` dict in full (the 14-language claim
+      documented throughout CLAUDE.md, including one prior finding that
+      the QA test verifying it was itself checking 4 fake hardcoded
+      strings, since fixed). Confirmed genuine, not the same-English-
+      text-different-code-label pattern this project has explicitly
+      caught once before: all 4 real message templates (job_
+      opportunity, interview_invitation, offer_letter, status_update)
+      have real, DIFFERENT, correctly-scripted text in all 14 real
+      language codes (hi/ta/te/kn/ml/mr/gu/pa/bn/or/as/ur/kok) — genuine
+      Devanagari/Tamil/Telugu/Kannada/Malayalam/Gujarati/Gurmukhi/
+      Bengali/Odia/Arabic-Urdu scripts, not transliterated English or
+      placeholder text. Confirmed real, reachable usage (not dead
+      code): `GET /templates` lists them, `POST /send`/`POST /bulk-send`
+      both accept a real `lang` param with a safe fallback to English
+      on an invalid code (never crashes), and correctly run the HARD
+      RULE #7/#12 consent gate before every send. No dishonesty found —
+      the 14-language claim is genuinely backed by real content.
 - [~] Uploads & malformed input — checked path-traversal risk on the 2
       real file-save helpers used across every upload path in the app
       (`resume_intake_service.py::save_resume_file` — the highest-
