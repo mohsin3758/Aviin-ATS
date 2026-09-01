@@ -968,15 +968,39 @@ async def _do_kae_submission(
             "sent" if email_sent else "failed", email_error, actor.user_id, generated_resume_id, trigger_source,
         )
 
+        # QA sweep (2026-09-01) — real, reproduced race condition, found
+        # while investigating S61's own flaky UI test: `row["stage"]` was
+        # captured once, early, via _app_context() at the very top of this
+        # function - BEFORE the slow, real SMTP send below it. If the
+        # application's REAL stage changed during that window (a genuine,
+        # observed race: the sibling client-submission automation racing
+        # in parallel), this stale in-memory value could still say
+        # "screened" long after the database itself had already moved on -
+        # silently overwriting whatever the OTHER, more-recent transition
+        # had correctly set. Fixed to a single atomic UPDATE...WHERE...
+        # RETURNING that checks and captures the CURRENT database value at
+        # the moment of the write, not an earlier snapshot - both closes
+        # the race and stays correctly race-safe for any future concurrent
+        # caller, not just this one observed case.
         bumped = False
-        if row["stage"] in _PRE_SUBMIT_STAGES and await is_valid_stage(conn, tenant_id, "submitted"):
-            await conn.execute("UPDATE applications SET stage='submitted', updated_at=now() WHERE id=$1", application_id)
-            bumped = True
-            await events.write_outbox(
-                conn, tenant_id, "application.stage_changed",
-                {"application_id": application_id, "from": row["stage"], "to": "submitted", "reason": "submit_to_kae"},
-                f"application.stage_changed:{application_id}:{sub_row['sent_at'].isoformat()}",
+        old_stage_at_bump = None
+        if await is_valid_stage(conn, tenant_id, "submitted"):
+            bump_row = await conn.fetchrow(
+                """WITH prev AS (SELECT stage AS old_stage FROM applications WHERE id=$1)
+                   UPDATE applications a SET stage='submitted', updated_at=now()
+                   FROM prev
+                   WHERE a.id=$1 AND prev.old_stage = ANY($2)
+                   RETURNING prev.old_stage""",
+                application_id, list(_PRE_SUBMIT_STAGES),
             )
+            if bump_row:
+                bumped = True
+                old_stage_at_bump = bump_row["old_stage"]
+                await events.write_outbox(
+                    conn, tenant_id, "application.stage_changed",
+                    {"application_id": application_id, "from": old_stage_at_bump, "to": "submitted", "reason": "submit_to_kae"},
+                    f"application.stage_changed:{application_id}:{sub_row['sent_at'].isoformat()}",
+                )
 
         await events.write_outbox(
             conn, tenant_id, "candidate.submitted_to_kae",
@@ -984,9 +1008,14 @@ async def _do_kae_submission(
              "kae_user_id": str(primary_kae["id"]) if primary_kae else None, "email_sent": email_sent},
             f"candidate.submitted_to_kae:{sub_row['id']}",
         )
+        # Same stale-row["stage"] class fixed above - this audit "before"
+        # snapshot needs the real value regardless of which bump branch
+        # ran, so re-read it fresh here rather than trust the early one.
+        audit_before_stage = old_stage_at_bump if bumped else await conn.fetchval(
+            "SELECT stage FROM applications WHERE id=$1", application_id)
         await events.write_audit(
             conn, tenant_id, actor.user_id, "submit_to_kae", "application", application_id,
-            before={"stage": row["stage"]},
+            before={"stage": audit_before_stage},
             after={"to": to_recipients, "cc": cc_recipients, "resume_style": resume_style,
                    "email_sent": email_sent, "sl_no": sl_no, "trigger_source": trigger_source},
         )
@@ -1502,9 +1531,12 @@ async def _do_client_submission(
              "client_id": str(client_id), "email_sent": email_sent},
             f"candidate.submitted_to_client:{sub_row['id']}",
         )
+        # Same stale-row["stage"] class fixed below (the actual bump
+        # logic) - re-read fresh rather than trust the early snapshot.
+        _audit_before_stage = await conn.fetchval("SELECT stage FROM applications WHERE id=$1", application_id)
         await events.write_audit(
             conn, tenant_id, actor.user_id, "submit_to_client", "application", application_id,
-            before={"stage": row["stage"]},
+            before={"stage": _audit_before_stage},
             after={"to": to_recipients, "cc": cc_recipients, "resume_style": resume_style,
                    "email_sent": email_sent, "sl_no": sl_no, "hidden_columns": hidden_columns,
                    "saved_as_default": bool(save_as_default and columns_override)},
@@ -1520,29 +1552,55 @@ async def _do_client_submission(
         # convention, so this shows up correctly in the Pipeline Audit Log
         # / Activity Timeline / stage-conversion analytics — not just the
         # event outbox.
+        # QA sweep (2026-09-01) — real, reproduced race condition (same
+        # root cause + same fix as _do_kae_submission's own bump above):
+        # `row["stage"]` was captured once, early, before the slow, real
+        # SMTP send in this function — a stale in-memory snapshot that
+        # could silently disagree with the database's real, current value
+        # by the time this UPDATE runs, especially with the sibling
+        # recruiter->KAE automation (_auto_notify_screening_team) racing
+        # in parallel on the exact same application (both fire from real,
+        # legitimate stage transitions). Confirmed live: reproduced this
+        # exact race via the real API — moving an application to
+        # "screened" (firing the KAE automation in the background) then
+        # immediately calling this real submit-to-client flow correctly
+        # bumped to "submitted" at first, but the KAE automation's own
+        # SLOWER, stale-data bump then silently raced in afterward.
+        # Same fix: one atomic UPDATE...WHERE...RETURNING checking and
+        # capturing the CURRENT database value at write time.
         bumped = False
-        if row["stage"] in _PRE_SUBMIT_CLIENT_STAGES and await is_valid_stage(conn, tenant_id, "submitted"):
-            await conn.execute("UPDATE applications SET stage='submitted', updated_at=now() WHERE id=$1", application_id)
-            bumped = True
-            await events.write_outbox(
-                conn, tenant_id, "application.stage_changed",
-                {"application_id": application_id, "from": row["stage"], "to": "submitted", "reason": "submit_to_client"},
-                f"application.stage_changed:{application_id}:{sub_row['sent_at'].isoformat()}",
+        old_stage_at_bump = None
+        if await is_valid_stage(conn, tenant_id, "submitted"):
+            bump_row = await conn.fetchrow(
+                """WITH prev AS (SELECT stage AS old_stage FROM applications WHERE id=$1)
+                   UPDATE applications a SET stage='submitted', updated_at=now()
+                   FROM prev
+                   WHERE a.id=$1 AND prev.old_stage = ANY($2)
+                   RETURNING prev.old_stage""",
+                application_id, list(_PRE_SUBMIT_CLIENT_STAGES),
             )
-            await conn.execute(
-                """INSERT INTO pipeline_movements
-                     (tenant_id, candidate_id, application_id, stage_from, stage_to, reason, triggered_by)
-                   VALUES ($1,$2,$3,$4,'submitted','submit_to_client',$5)""",
-                tenant_id, row["candidate_id"], application_id, row["stage"],
-                str(actor.user_id) if actor.user_id else "system",
-            )
-            await conn.execute(
-                """INSERT INTO candidate_activities
-                     (tenant_id, candidate_id, user_id, activity_type, title, description)
-                   VALUES ($1,$2,$3,'status_change','Stage changed',$4)""",
-                tenant_id, row["candidate_id"], actor.user_id,
-                f"{row['stage'].replace('_',' ').title()} → Submitted",
-            )
+            if bump_row:
+                bumped = True
+                old_stage_at_bump = bump_row["old_stage"]
+                await events.write_outbox(
+                    conn, tenant_id, "application.stage_changed",
+                    {"application_id": application_id, "from": old_stage_at_bump, "to": "submitted", "reason": "submit_to_client"},
+                    f"application.stage_changed:{application_id}:{sub_row['sent_at'].isoformat()}",
+                )
+                await conn.execute(
+                    """INSERT INTO pipeline_movements
+                         (tenant_id, candidate_id, application_id, stage_from, stage_to, reason, triggered_by)
+                       VALUES ($1,$2,$3,$4,'submitted','submit_to_client',$5)""",
+                    tenant_id, row["candidate_id"], application_id, old_stage_at_bump,
+                    str(actor.user_id) if actor.user_id else "system",
+                )
+                await conn.execute(
+                    """INSERT INTO candidate_activities
+                         (tenant_id, candidate_id, user_id, activity_type, title, description)
+                       VALUES ($1,$2,$3,'status_change','Stage changed',$4)""",
+                    tenant_id, row["candidate_id"], actor.user_id,
+                    f"{old_stage_at_bump.replace('_',' ').title()} → Submitted",
+                )
 
     # Unlike the internal recruiter->KAE bump above, THIS transition is
     # genuinely candidate-facing (the candidate really has now been

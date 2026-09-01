@@ -18939,3 +18939,106 @@ sign-off on timing.
 
 Deployed via the established scp → hash-verify → rebuild → health-check
 cycle. Full detail in `QA_SWEEP_PROGRESS.md`.
+
+## QA sweep, 2026-09-01: a real race condition between recruiter→KAE
+## and KAE→client submissions, found via S61's real UI test refusing to
+## stay fixed — 2 bugs, one backend, one it exposed in the frontend
+Direct continuation of the ongoing full-stack QA sweep. S61's own "real
+headless UI" test (drawer stage-pill → Submit-to-Client modal → real
+stage-move-to-submitted) had already been investigated once and
+tentatively written off as tunnel/environmental noise, since a first
+re-run produced a completely different failure signature (a raw socket
+error) than the original (an assertion mismatch). That conclusion was
+explicitly revised — not just accepted — once a 3rd, definitively
+clean re-run (fresh tunnel, every other test in the same batch passing)
+still reproduced the exact same assertion mismatch consistently, on
+both the attempt and its retry. A simplified backend-only reproduction
+(no intervening stage churn) had already come back 100% correct, which
+was itself a real lesson: that reproduction didn't match the actual
+test's real sequence of operations, and a false-negative from an
+over-simplified repro is not the same as a clean bill of health.
+
+**Root cause, in `backend/routers/kae_submission.py`**: both
+`_do_kae_submission()` (recruiter→KAE) and `_do_client_submission()`
+(KAE→client) captured `row["stage"]` once, early, via `_app_context()`
+at function start — then used that STALE, in-memory value later, AFTER
+a slow, real SMTP send (`_send_kae_email()`), to decide whether/how to
+bump `applications.stage` to `'submitted'`. If the application's TRUE
+stage changed during that slow-send window, the stale-data bump could
+silently interfere with whatever the more-recent, correct result should
+have been. Confirmed this is genuinely reachable, not theoretical: the
+UI test's own setup resets a candidate `client_submission` → `screened`
+right before exercising the manual Submit-to-Client flow — and that
+reset itself fires a separate, real, already-existing automation
+(`_auto_notify_screening_team()`, built 2026-08-19, triggered on any
+transition INTO `screened`) that internally calls `_do_kae_submission
+(trigger_source='auto_screened')` in the background, racing the
+manual, UI-driven `_do_client_submission()` call moments later.
+
+**Fix**: replaced the read-then-conditionally-write pattern in both
+functions with one atomic SQL statement — `WITH prev AS (SELECT stage
+AS old_stage FROM applications WHERE id=$1) UPDATE applications a SET
+stage='submitted', updated_at=now() FROM prev WHERE a.id=$1 AND
+prev.old_stage = ANY($2) RETURNING prev.old_stage` — which evaluates
+its WHERE condition against the TRUE current database value at UPDATE
+time, not a stale in-memory read, and is naturally race-safe regardless
+of which of two competing writers reaches it first. Verified the SQL
+pattern itself via real, safe, rolled-back transactional tests directly
+against production (both a negative case — no match, 0 rows — and a
+positive case — match found, `old_stage` correctly returned) before
+applying it to the real code. 3 downstream usages that had depended on
+the old stale value (2 audit-log `before` fields, 1 `pipeline_
+movements.stage_from`, 1 `candidate_activities` description text) were
+corrected to use the freshly-captured `old_stage_at_bump` instead.
+
+**A second, real, previously-invisible bug found only because the
+backend fix made the race genuinely observable end-to-end, not by
+inspection**: after deploying the backend fix, replaying the exact
+multi-step race sequence (screened → client_submission → screened →
+submit-to-client, matching the real test) still returned `stage_
+bumped_to_submitted: false` from the manual call — but the application's
+TRUE final stage, checked after letting the async `auto_screened`
+trigger settle, correctly landed on `submitted` regardless. The atomic
+backend fix was working exactly as intended: whichever of the two
+racing writers wins reports `true`; the loser correctly and honestly
+reports `false` — meaning "not bumped by THIS call," not "the bump
+failed." The real remaining bug was one level up, in the FRONTEND:
+`ClientSubmissionMoveModal`'s `onSent(bumped)` handler
+(`pipeline/page.tsx`) treated `bumped=false` as "definitely didn't
+change, so PATCH it back to `client_submission` myself" — `const
+landingStage = bumped ? 'submitted' : r.toStage; await commitStageMove
+(...)`. With the new atomic-race-safe backend, `bumped=false` can now
+legitimately mean "a racing trigger already correctly bumped it
+elsewhere" — and this blind PATCH was silently UNDOING that correct
+state, landing the card back on `client_submission` exactly as the
+real Playwright test observed (`Expected: "submitted", Received:
+"client_submission"`). Compared directly against the sibling
+`onSubmittedToKae` handler (the drawer's own KAE/Client tabs), which
+already handled this correctly by design — it does NOTHING at all when
+`bumped=false`, never writing a guessed value to the server. Fixed
+`ClientSubmissionMoveModal`'s `onSent` to match that same safe pattern:
+on `bumped=true`, commit the known-true `'submitted'` state directly;
+on `bumped=false`, never guess a landing stage — refetch the real board
+from the server (`refreshBoard()` + `refreshStats()`) instead.
+
+Verified for real end-to-end, not code review, at every step: a direct
+API reproduction of the exact race sequence confirmed the async trigger
+correctly and atomically lands the application on `submitted` on its
+own (via a follow-up `GET /applications/{id}` after an 8s settle wait);
+both fixes deployed via the established scp → hash-verify → rebuild →
+health-check cycle (backend: `docker compose up -d --build backend`,
+confirmed healthy; frontend: a real local `tsc --noEmit` type-check
+passed clean before deploy, `docker compose up -d --build frontend`,
+confirmed healthy); the real, permanent S61 Playwright suite re-run
+twice in full isolation post-deploy — **5/5 passing both times**,
+including the previously-failing "real headless UI" test. A broader
+64-test regression sweep across every suite touching `kae_submission.py`
+(S14 KAE Candidate Submission, S17 Tier-2 Features, S29 AI Resume
+Generator, S37 Screening Auto-Notification, S43 KAE Module, S54 KAE→
+Client Submission, S65 Submit-to-Client auto-advance) — **64/64
+passed, zero failures** — confirming the atomic-UPDATE rewrite in both
+functions introduced no regressions anywhere else that depends on this
+shared submission engine. All throwaway reproduction data confirmed
+cleaned up with zero residue. Zero-token audit: `CONFIRMED CLEAN` (436
+files, 0 external API refs). Full detail in `QA_SWEEP_PROGRESS.md` —
+this closes out Batch 4 (S61-S88) of the ongoing QA sweep completely.

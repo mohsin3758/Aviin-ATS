@@ -837,17 +837,35 @@ function PipelineInner() {
           onSent={async (bumped?: boolean) => {
             const r = pendingClientSubmission;
             setPendingClientSubmission(null);
-            // Real automation (2026-08-26): a real send already moved the
-            // real backend stage straight to "Submitted" (and already sent
-            // the candidate's own "Submitted" notification server-side) —
-            // reflect that real end state on the board instead of re-
-            // patching back to "Submit to Client", which would silently
-            // undo it. send_email stays false either way: a genuine send
-            // already fired its own candidate notification server-side;
-            // "Move Without Sending" (bumped=false) never sent anything at
-            // all, so no notification is appropriate there either.
-            const landingStage = bumped ? 'submitted' : r.toStage;
-            await commitStageMove(r.appId, r.fromStage, landingStage, r.extra, false);
+            if (bumped) {
+              // We know for certain — THIS call's own atomic backend bump
+              // just landed the application on 'submitted' (and already
+              // sent the candidate's own "Submitted" notification server-
+              // side). Reflect that known-true fact directly.
+              await commitStageMove(r.appId, r.fromStage, 'submitted', r.extra, false);
+              return;
+            }
+            // Real, previously-invisible bug (found via S61's own real
+            // headless-browser test, 2026-09-01): `bumped=false` does NOT
+            // mean "nothing changed" — it only means THIS call didn't win
+            // the atomic bump. A racing background trigger (e.g. the
+            // "screened" stage's own auto-notify-screening-team hook,
+            // fired moments earlier by this exact application's own prior
+            // transition into 'screened') can independently, correctly,
+            // atomically bump the SAME application to 'submitted' first —
+            // the backend's own atomic UPDATE...WHERE-current-stage-matches
+            // pattern (fixed the same day, closing a real stale-read race
+            // in _do_client_submission/_do_kae_submission) guarantees that
+            // outcome is safe and consistent, but this frontend previously
+            // had no way to know about it and would blindly PATCH the
+            // stage back to r.toStage ('client_submission') — silently
+            // UNDOING the racing trigger's correct 'submitted' result.
+            // Never guess a landing stage here — refetch the real board
+            // from the server instead, so whatever the true current stage
+            // actually is (client_submission, if genuinely nothing else
+            // raced; submitted, if something else did) is what renders.
+            await refreshBoard();
+            refreshStats();
           }} />
       )}
 
