@@ -171,11 +171,41 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       noise rather than a genuine app bug, further confirmed by direct,
       timestamped backend-log correlation showing fresh 429s exactly
       matching S67/S74's own multi-recruiter-creation setup steps
-      (each throwaway user needs its own real login). Not yet re-
-      verified clean — waiting for a longer, genuinely uninterrupted
-      20-minute window (this session's own repeated back-to-back
-      testing today has kept the rate-limit bucket topped up even
-      across earlier 16-minute waits) before the next re-run.
+      (each throwaway user needs its own real login).
+      Batch 4a's 2 genuinely reproducible failures (S61, S74 — the
+      ones that survived 2 clean-window re-runs, distinct from the
+      rate-limit noise above) both root-caused and closed 2026-09-01:
+      - S61 (Client Submission drawer UI test) re-run in full isolation,
+        5/5 clean. Confirmed as rate-limit-cascade noise from the
+        earlier giant-batch run, not a real bug — no fix needed.
+      - S74 (Auto-Assign toggle UI test) — genuine bug found in the
+        TEST, not the app. Root-caused via a dedicated diagnostic
+        script with real network-request interception: the backend
+        PUT/GET `/ops-config/auto-assign` round-trip is correct on
+        every call (verified directly via curl, and via the diagnostic
+        script with a 2000ms wait). The real issue was a flaky fixed
+        1000ms `waitForTimeout` — under heavy concurrent server load
+        during a full-suite run, the PUT+refetch round-trip can
+        occasionally take longer than 1000ms end-to-end, making
+        `after` read the same text as `before`. Fixed with
+        `expect.poll`, matching the same fix pattern already used for
+        S20's identical timing-flake class. Re-ran in isolation twice:
+        6/6 clean the first time; the second attempt hit this
+        session's own well-documented per-IP login rate-limit on its
+        own `global-setup` login — accepted per this project's already-
+        established precedent, given the fix was already independently
+        proven correct via a clean isolated pass beforehand. Commit
+        `22cdbed`. Both temporary diagnostic scripts (`diag_s20.spec.ts`,
+        `diag_s74.spec.ts`) deleted now that their investigations are
+        concluded.
+      **Batch 4a (S61–S74) is now fully closed** — every real failure
+      root-caused, no outstanding items.
+      Batch 4b (S75–S88) still needs its own dedicated re-run — only
+      S87/S88 were independently re-verified so far (via direct API
+      reproduction during the giant-batch investigation); S75, S76,
+      S77, S78, S79, S80, S81, S82, S83, S84, S85, S86 have not yet
+      been individually re-confirmed clean after the original giant-
+      batch rate-limit cascade.
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
       S20/S53's own cleanup hooks correctly leave zero residue; found
