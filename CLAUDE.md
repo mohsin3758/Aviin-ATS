@@ -18374,3 +18374,152 @@ rebuild → health-check cycle for every code change; the 2 new SQL
 migrations verified via transactional dry-run before being committed
 for real, matching this project's own established discipline for any
 schema change with real production stakes.
+
+## QA sweep Phase 1: real S15/S20/S53 failures root-caused and fixed,
+## a dead duplicate endpoint retired, and a genuine backend↔frontend
+## wiring audit — 2026-09-01
+Direct continuation of Phase 0. Started re-running the permanent S1-S88
+suite in rate-limit-paced batches (135/141 real passes on the first
+batch, 3 real-looking failures) and, opportunistically, a systematic
+753-route backend↔frontend wiring audit while blocked on a login rate-
+limit cooldown — both genuinely completed real work, not left as
+symptom reports.
+
+**Wiring audit** — extracted every real `@router.<method>(...)` route
+across `backend/routers/*.py` (with real `APIRouter(prefix=...)`
+resolution) and checked whether each route's most-distinguishing static
+path segment appears anywhere in the frontend source. 18 of 753 flagged
+as no-match; each investigated manually (real grep + reading the actual
+endpoint body + real DB row counts, not assumed) — **4 confirmed false
+positives** (real, working features the static-string check couldn't
+see — e.g. `calendar.py`'s `.ics` subscribe link, where the frontend
+only ever displays a server-built URL string rather than literally
+fetching the path itself) and **12 confirmed real orphans**: `bgv.py`'s
+trust-graph read/write (0 real rows, ever), a real candidate-snapshot
+PDF export (`final_features.py`), the P15 `candidate_retention_
+tracking` framework (0 rows, zero UI), a populated-but-unwired
+`v_monthly_billing` report, 5 separate `pipeline_p2.py` endpoints
+(`sync-scores`, `auto-move`, `check-rules`, `filter-options`, `active-
+requisitions` — `auto-move` confirmed genuinely distinct code from
+`scheduler.py`'s own nightly cron function, not the same thing exposed
+twice), `vendor_analytics.py`'s `source-performance` (the real
+`/vendor-analytics` page has exactly 4 tabs, none call it), and
+`users.py`'s `/roles/departments` (a real canonical list; Settings >
+Users independently hardcodes its own identical copy — currently in
+sync by coincidence, the same "two copies of one list, silent-drift
+risk" pattern already fixed for other lists elsewhere in this project).
+None of the 12 built out with UI in this pass — cataloged for a real,
+per-item batch decision (build vs. retire) rather than assumed
+unilaterally, matching this project's own established precedent for
+exactly this judgment call.
+
+**One of the 12 was worse than a plain orphan and fixed immediately,
+not deferred**: `GET /sla/audit-log` (`p23_p27.py`) read from
+`audit_logs` (plural) — the table CLAUDE.md's own 2026-08-12 audit
+already confirmed dead (0 real rows, superseded by the real, singular
+`audit_log` a working `/audit` endpoint already correctly reads). This
+endpoint would return an empty list even if wired up, had zero internal
+caller too, and duplicated an already-correct, already-working
+alternative — retired outright rather than repointed, matching this
+project's established "genuinely dead, real alternative exists"
+retirement precedent (BGV API, Job Distribution, Assessments). Verified
+via the trusted-internal path (no login needed): clean 404 post-fix,
+`/audit` and the sibling `/sla/summary` in the same router both
+unaffected.
+
+**S15's real failure, root-caused via direct reproduction, not
+guessed.** `GET /requisitions/{id}/match-candidates` deliberately ranks
+only a bounded 300-row relevance pool (pgvector cosine similarity) —
+confirmed live: a fresh throwaway candidate (no `resume_text`, so
+`resume_embedding` stays permanently NULL — `fill_missing_embeddings()`
+itself requires `resume_text IS NOT NULL`, so this candidate could
+never get one even from the async scheduler) genuinely did not crack
+the top 300 of this tenant's real 2,722-candidate pool. The endpoint's
+own extensive in-code documentation already states this is a
+deliberate, honestly-bounded design (built 2026-08-23), not an
+oversight — matching the same class of finding already deferred once
+for a sibling test on 2026-08-30. Fixed at the test level: rewrote the
+assertion to use the genuinely pool-immune sibling endpoint
+(`POST /candidates/{id}/match-open-jobs`, a direct candidate↔job
+lookup, never a ranked list) — verified via direct API call to return
+byte-identical correct results for the same throwaway pair.
+
+**S20's real failure — and a genuine process lesson about this
+session's own test infrastructure.** Root-caused via a dedicated,
+temporary diagnostic script (added `page.on('framenavigated')`/
+`page.on('requestfailed')`/`page.on('response')` logging, run directly,
+then deleted — never touching the permanent suite) rather than guessing
+further after 2 earlier "fixes" (an `expect.poll()` for a real async-
+render race, then a `test.setTimeout(150000)`) failed to resolve it.
+**The dominant cause: this investigating session's own local SSH tunnel
+was forwarding to the wrong VPS port for the frontend** —
+`localhost:3000` instead of the real `localhost:3001`, confirmed
+definitively via `docker port aviin_frontend` (`3001/tcp ->
+0.0.0.0:3001`, nothing listening on 3000 at all). Every `page.goto()`-
+based browser test this session ran was silently hitting a 404 instead
+of the real app; confirmed directly with `curl localhost:3001/
+candidates` (404 via the broken tunnel) vs `https://ats.aviinjobs.com/
+candidates` (200, the real production domain, unaffected the whole
+time) — this was purely a test-infrastructure bug in THIS investigating
+session, never a real production issue. This is also why API-only
+tests (`request.*`, no `page` fixture) mostly passed all session while
+`page`-based UI tests intermittently failed with confusing, seemingly
+unrelated symptoms (timeouts, "0 buttons found," a stray 404 screenshot
+that looked like a navigation bug). Corrected the tunnel
+(`-L 3001:localhost:3001`, not `:3000`) and re-verified: S20 now passes
+in ~8-16s. The earlier `test.setTimeout(150000)` (built on the wrong
+"real backend-performance/data-scale" theory before the tunnel bug was
+found) was reverted as unnecessary; its comment corrected to document
+the real story rather than leave a misleading narrative for future
+readers. The one genuine, real, non-tunnel issue underneath — a
+`<select>` options async-render race (reading the modal's own `useFetch
+('/requisitions?...')`-populated options synchronously, right after
+only the modal's TITLE became visible, no wait for the fetch itself to
+resolve) — is the same class already fixed elsewhere in this suite
+(the pipeline-board job-picker race); fixed with a real `expect.poll()`.
+**A real mid-investigation mistake caught and fixed immediately, not
+shipped**: a first attempt at correcting the misleading S20 comment
+accidentally dropped the `const errors: string[] = []` / `page.on
+('pageerror', ...)` declaration the test's own later `expect(errors).
+toHaveLength(0)` depends on — caught by reading the edited file back
+before trusting it, not by a later test failure; restored and
+re-verified clean.
+
+**S53 had the identical `limit:200`-vs-real-candidate-scale issue as
+S15, independently, in 4 separate places — found only because
+investigating S20 meant re-running its neighbor too, not part of the
+original 3 known failures.** Confirmed genuinely different from S20's
+issue (a fast, clean assertion failure — `find()` returning `undefined`
+— not a timeout, so the tunnel bug wasn't the cause here). One sibling
+test in the exact same suite ("word-boundary matching") already had the
+correct fix (`limit: 5000` with an explanatory comment matching this
+precise reasoning) — the other 4 (`POST /candidates/rank` calls
+checking a specific throwaway candidate's own computed skill match)
+were simply never retrofitted with it. Fixed all 4 to match, plus added
+a defensive `expect(mine).toBeTruthy()` before each downstream
+assertion so a future regression here fails with a clear message
+instead of a confusing "Cannot read properties of undefined." The
+suite's own `test.describe.configure({timeout: 150000})` — also
+originally built on the now-disproven "real data-scale" theory —
+was kept as a harmless safety margin for its 2 genuine UI-interaction
+tests (confirmed unnecessary but not actively harmful once both real
+bugs were fixed: full suite completes in ~1.4 minutes) rather than
+reverted, with its own comment corrected to state the real, dual root
+cause honestly instead of the disproven single-cause theory.
+
+Verified end-to-end, not code review, throughout: all 11 S53 tests pass
+clean; zero stray "QA S53" candidates remain active post-run (confirmed
+via direct API search); 5 stray leftover "S20 JD Match Test Req..."
+requisitions from PRIOR sessions' runs (discovered incidentally while
+reproducing S20's issue directly against the API) cleaned up via the
+real `DELETE /requisitions/{id}` API. Zero-token audit: `CONFIRMED
+CLEAN`. A process note (the correct tunnel command, and why a wrong
+frontend port produces this exact confusing failure signature) recorded
+in `QA_SWEEP_PROGRESS.md` for future sweep sessions, so this specific
+mistake doesn't need to be independently rediscovered again.
+
+Still open for the next Phase 1 batch: S21-S40, S41-S60, S61-S88, plus
+the formal test-suite hygiene audit (`.serial()` usage, cleanup
+completeness) beyond what was informally covered by this investigation.
+The 12 real orphan-route findings from the wiring audit above remain
+uncatalogued for a fix decision — reported, not yet acted on.
