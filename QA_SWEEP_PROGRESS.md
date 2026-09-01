@@ -143,7 +143,22 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       S43 was a stale test assumption predating enforcement being
       turned on for the `kae` feature; S59 was a genuine locator-
       ambiguity/async-render race). Re-verified: 11/11 clean.
-- [ ] Batch 4: S61–S88
+- [~] Batch 4: S61–S88 — in progress. First attempt (all 28 suites in
+      one Playwright invocation) was too much real login volume for
+      this project's per-IP rate limiter to absorb in one run — 42 real
+      `429`s confirmed directly in backend logs during the run window
+      (not assumed), cascading into 13 failed / 1 flaky / 35 did-not-
+      run from S74 onward. 2 of the failures (S87, S88) had a different-
+      looking error signature (a missing response field, not a bare
+      401/403) so each was independently re-verified via a real,
+      isolated API reproduction (fresh throwaway data, a still-valid
+      cached token — bypassing the rate-limited login endpoint
+      entirely) rather than assumed to be more of the same noise: both
+      confirmed their real, underlying features work correctly
+      (`matched_skills`/`missing_skills`/`live_only` all exactly as
+      expected). Re-running in 2 smaller sub-batches (S61-S74, S75-S88)
+      after a genuine cooldown, to keep each run's own login volume
+      under the rate limiter's threshold this time.
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
       S20/S53's own cleanup hooks correctly leave zero residue; found
