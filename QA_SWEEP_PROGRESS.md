@@ -936,7 +936,59 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       established force-purge safety net working as intended).
       Confirmed the widget shows exactly the tenant's 4 real active
       recruiters afterward.
-- [ ] UX/comprehension pass
+- [x] UX/comprehension pass — DONE, 2026-09-02. The most inherently
+      subjective item in this sweep (unlike everything else, no
+      concrete pass/fail criterion) — scoped to a real, bounded,
+      representative check of 3 concrete UX dimensions this project's
+      own established design discipline names explicitly ("a control
+      says exactly what happens... Errors explain what went wrong and
+      how to fix it — no apologies, no vagueness"), rather than an
+      unbounded re-audit of every page's copy (which this project's
+      extensive prior history already shows has been iterated on
+      heavily, feature by feature, across dozens of dated sessions).
+      **Error message clarity**: a real wrong-password login attempt
+      shows a clean, standard "Invalid email or password" — clear,
+      non-technical, actionable. No finding.
+      **Empty-state quality**: searched the real live Candidates page
+      for a deliberately nonexistent name — real screenshot confirms a
+      genuinely well-designed empty state (a clear icon, "No
+      candidates match these filters" — honest and specific, not a
+      generic void or a blaming message — plus an actionable "Clear
+      Filters" button, and "0 candidates · Page 1/1" honestly
+      reflecting the real, filtered count). No finding.
+      **Loading feedback**: triggered the real JD Match AI-ranking
+      call (already timed at 1.5-2.3s at this tenant's real scale
+      earlier this sweep) and confirmed a real, visible busy state
+      appears immediately (the submit button disables and its label
+      changes) — the UI never looks frozen during a genuinely slow
+      real operation. One tiny, low-priority copy nit noted, not
+      fixed: the busy label reads "Saving…" rather than something
+      ranking-specific (e.g. "Ranking…") — almost certainly a shared,
+      generic busy-state label from a reusable form component rather
+      than a dedicated one for this specific action; harmless (the
+      user still clearly sees something is happening), not worth a
+      one-off special-case fix for this single button.
+      **A real, genuine test-methodology mistake made and caught
+      during this check, not an app bug**: the first attempt at the
+      empty-state check used a broad, generic input locator that
+      matched the GLOBAL header search bar (top-right, "Search
+      candidates, jobs, companies, emails, LinkedIn URL…") instead of
+      the Candidates page's own dedicated, separate search input
+      further down the page — the header search visibly accepted the
+      typed text but never filtered the page's own candidate list
+      (expected — it's a different, cross-entity quick-search
+      mechanism, not a page filter). Caught by reviewing the actual
+      screenshot rather than trusting a pass/fail regex, corrected to
+      target the real page-level search input, and re-verified
+      cleanly. The two search boxes ARE visually and positionally
+      distinct enough that a real human user is unlikely to confuse
+      them the way a generic-placeholder-matching test locator did —
+      not flagged as a real UX ambiguity, just an honest account of
+      how the mistake happened and was corrected.
+      **Net**: no genuine UX defects found in this representative
+      pass — the app's copy/empty-state/loading-feedback quality is
+      consistent with the extensive prior investment already
+      documented throughout this project's history.
 
 ## PHASE 4 — HARD RULE compliance & financial integrity
 (Preliminary static-analysis pass started opportunistically during a
