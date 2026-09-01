@@ -1,5 +1,6 @@
 'use client';
 import { useState, useRef, useEffect, CSSProperties } from 'react';
+import { safeSanitizeHtml } from '@/lib/sanitize';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import {
   Plus, Trash2, CheckCircle, Loader2, Save, Eye, Mail, Reply,
@@ -597,7 +598,12 @@ export default function SignaturesPage() {
             <div style={{ padding: '20px 24px', background: 'white', minHeight: '100px' }}>
               <div style={{ fontSize: '13px', color: '#94a3b8', marginBottom: '10px', fontStyle: 'italic' }}>Hi [Candidate Name],</div>
               <div style={{ fontSize: '13px', color: '#94a3b8', marginBottom: '8px' }}>Thank you for your interest in this position...</div>
-              <div dangerouslySetInnerHTML={{ __html: generateHTML(fields) }} />
+              {/* QA sweep (2026-09-01) defense-in-depth hardening —
+                  generateHTML(fields) is built from this same user's own
+                  typed form fields, so the real risk here is low, but
+                  sanitizing costs nothing and closes off any future
+                  change that might let this render someone else's data. */}
+              <div dangerouslySetInnerHTML={{ __html: safeSanitizeHtml(generateHTML(fields)) }} />
             </div>
           </div>
 

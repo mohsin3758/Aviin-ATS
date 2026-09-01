@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useRef, useCallback, CSSProperties } from 'react';
+import { safeSanitizeHtml } from '@/lib/sanitize';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import {
   Mail, MessageCircle, Send, Trash2, FileText, Inbox, RefreshCw, Search,
@@ -1931,7 +1932,27 @@ export default function MailboxPage() {
                       {m.channel==='whatsapp'?(
                         <div style={{background:'#dcf8c6',borderRadius:'10px',padding:'10px 14px',display:'inline-block',maxWidth:'90%',fontSize:'14px',lineHeight:'1.65',color:'#1e293b'}}>{displayBody}</div>
                       ):isHtml?(
-                        <div dangerouslySetInnerHTML={{__html:displayBody}} style={{fontSize:'14px',lineHeight:'1.75',color:'#1e293b'}}/>
+                        // QA sweep (2026-09-01) — real, previously-exploitable
+                        // stored XSS: displayBody's "is this HTML" detection
+                        // was a naive `includes('<') && includes('>')` check,
+                        // and this body ultimately traces back to real,
+                        // unescaped candidate-supplied data (e.g. full_name,
+                        // substituted into stage-change email bodies via
+                        // applications.py's _apply_placeholders(), which
+                        // never HTML-escapes before candidate_messages.body
+                        // is stored — the value actually EMAILED is escaped,
+                        // but the STORED, later-displayed-here value isn't).
+                        // A malicious `full_name` submitted through any of
+                        // this app's real public/anonymous candidate-
+                        // creation forms could execute arbitrary script in
+                        // any authenticated admin/manager/recruiter's
+                        // browser session the moment they viewed that
+                        // candidate's message thread. Sanitized with
+                        // DOMPurify — strips <script>/event-handler/
+                        // javascript: vectors while preserving legitimate
+                        // formatting (bold, line breaks, the real KAE
+                        // tracking-sheet HTML table this same view renders).
+                        <div dangerouslySetInnerHTML={{__html: safeSanitizeHtml(displayBody)}} style={{fontSize:'14px',lineHeight:'1.75',color:'#1e293b'}}/>
                       ):(
                         <div style={{fontSize:'14px',lineHeight:'1.75',color:'#1e293b',whiteSpace:'pre-wrap'}}>{displayBody}</div>
                       )}

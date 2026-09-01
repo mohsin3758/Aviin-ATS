@@ -841,8 +841,106 @@ live-verification pass this phase's checklist items still need.)
       reviewed Python constant (`_FORCE_NULLIFY`), never user input —
       the one genuinely request-derived value (`user_id`) is correctly
       parameterized via `$1`. No real SQL injection found in this pass.
-      Not yet a full sweep of every dynamic-SQL site in the codebase,
-      and XSS wasn't checked at all yet (frontend-side).
+      Not yet a full sweep of every dynamic-SQL site in the codebase.
+      **XSS — a real, HIGH-SEVERITY, live, exploitable stored XSS
+      vulnerability found and FIXED, 2026-09-01.** Found by
+      systematically enumerating every real `dangerouslySetInnerHTML`
+      usage across the frontend (7 files). 2 confirmed safe by
+      inspection (`app/layout.tsx`'s 2 static, hardcoded `<script>`
+      tags with zero interpolated content; `careers/page.tsx`'s
+      `JSON.stringify()`'d JSON-LD structured data, correctly escaped
+      by `JSON.stringify` itself and rendered as
+      `application/ld+json`, never executable). **1 confirmed real,
+      currently-exploitable cross-user attack** in `conversations/
+      page.tsx` — its "is this HTML" detection was a naive
+      `displayBody.includes('<') && displayBody.includes('>')` string
+      check, and `displayBody` traces back to real, unescaped
+      candidate-supplied data: `applications.py`'s `_apply_
+      placeholders()` (built 2026-08-26 for the stage-email template
+      engine) substitutes a candidate's real `full_name` into a stage-
+      change email body with ZERO HTML-escaping, and the RAW,
+      unescaped result — not the properly-`html.escape()`'d version
+      actually emailed — is what gets stored into `candidate_messages.
+      body` and later displayed. **Full exploit chain independently,
+      empirically proven for real, not assumed**: created a genuine
+      throwaway candidate via the live API with `full_name` set to
+      `QA XSS Repro <img src=x onerror="window.__xssFired=true">`
+      (`candidates.py`'s `full_name: str` schema field has zero input
+      validation — confirmed, any string is accepted, including this
+      one, through the same public-facing schema every candidate-
+      creation path shares); moved it through a real stage change on a
+      real open requisition to trigger `_notify_stage_change_bg`; and
+      confirmed via a direct API read of the real, live `candidate_
+      messages` row that the stored `body` field contained the RAW,
+      completely unescaped payload, exactly as hypothesized — proving
+      an unauthenticated attacker (any of this app's several public,
+      anonymous candidate-creation forms — public apply, personal
+      resume-drop links, etc.) could achieve real script execution in
+      any authenticated admin/manager/recruiter's browser the moment
+      they viewed that candidate's message thread in Conversations.
+      **Fixed** with a new shared `frontend/lib/sanitize.ts`
+      (`safeSanitizeHtml()`, using the industry-standard `dompurify`
+      library) applied to the confirmed-exploitable `conversations/
+      page.tsx` site, plus 2 lower-risk, defense-in-depth hardenings
+      (`settings/mail-accounts/page.tsx`'s signature preview,
+      `settings/signatures/page.tsx`'s signature builder — both
+      genuinely self-reflected/lower-risk on inspection, sanitized
+      anyway since it costs nothing) and `email-templates/page.tsx`'s
+      preview (confirmed its one real frontend caller only ever sends
+      fixed synthetic sample data, not exploitable today, but the
+      backend endpoint itself accepts arbitrary `variables` from ANY
+      caller with the identical unescaped-substitution pattern, so
+      sanitizing at the render layer closes that off regardless of
+      future callers). **2 real build-breaking issues found and fixed
+      along the way, not glossed over**: plain `dompurify` crashes
+      with `sanitize is not a function` during Next.js's server-side
+      static prerendering pass (even for `'use client'` components,
+      which Next.js still renders once server-side to produce initial
+      HTML) since it needs a real browser DOM that doesn't exist
+      there — confirmed via a real local `npm run build` failure
+      before ever attempting to deploy. The natural fix
+      (`isomorphic-dompurify`, a jsdom-backed SSR-safe wrapper) then
+      failed differently, but just as really, INSIDE THE ACTUAL DOCKER
+      BUILD specifically (not locally): `TypeError: webidl.util.
+      markAsUncloneable is not a function` — jsdom's own dependency
+      (`undici`) needs a newer Node.js API than the Docker image's
+      Node.js version ships, a real environment-parity gap between
+      this local dev machine and the actual deploy target, caught only
+      by actually running the real Docker build, not assumed safe from
+      a clean local build alone. Resolved by guarding the plain
+      `dompurify` call on `typeof window !== 'undefined'` (returns `''`
+      during the one harmless server-side prerender pass, real
+      sanitized content once real browser JS hydrates) — avoids
+      needing jsdom in Node entirely. **Verified for real, end to end,
+      not code review**: a genuine local `npm run build` succeeded
+      clean; the real Docker build on the VPS succeeded clean; the
+      deployed frontend container's own served JS chunk confirmed to
+      genuinely bundle `dompurify` (`grep`'d the real `.next/static/
+      chunks/` output inside the running container); and — the
+      definitive proof — ran the EXACT real, captured malicious payload
+      pulled live from the production database through DOMPurify
+      directly (Node.js + a temporary, not-shipped jsdom instance,
+      used only for this one verification script) and confirmed
+      `onerror` and the injected `__xssFired` marker are both
+      completely stripped while the legitimate candidate-name text
+      survives intact. All throwaway test data (1 candidate, 1
+      application, 1 message) cleaned up via the real DELETE APIs
+      afterward, confirmed zero residue on the real requisition's
+      board. **A separate, real, disclosed finding surfaced while
+      installing the fix, NOT acted on** — `npm audit` revealed 33+
+      known CVEs in this project's current Next.js 14.2.5 (plus a few
+      in `nanoid`/`postcss`), including at least 2 that sound
+      potentially serious for an app handling real candidate PII
+      (`GHSA-7gfc-8cq8-jh5f` "Next.js authorization bypass
+      vulnerability", `GHSA-f82v-jwr5-mffw` "Authorization Bypass in
+      Next.js Middleware") alongside many DoS/cache-poisoning/SSRF-
+      class issues. Deliberately NOT attempted as part of this fix —
+      a Next.js version upgrade spanning this many CVEs is a real,
+      separate, materially riskier undertaking (potential App Router
+      behavior changes, broad compatibility surface) than adding one
+      small, well-scoped sanitization library, and deserves its own
+      dedicated, deliberate pass with the user's own sign-off on
+      timing, not a scope-creep side effect of an XSS fix.
 - [~] Secrets sweep (repo + git history) — **current working tree:
       genuinely clean**, no hardcoded passwords/API keys/tokens found
       via a real regex sweep of every `.py`/`.ts`/`.tsx`/`.sh` file.

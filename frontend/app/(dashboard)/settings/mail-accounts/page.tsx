@@ -1,6 +1,7 @@
 'use client';
 import { useState, useRef, useEffect, CSSProperties } from 'react';
 import { useRouter } from 'next/navigation';
+import { safeSanitizeHtml } from '@/lib/sanitize';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import {
   Mail, Plus, Trash2, CheckCircle, XCircle, Loader2, Settings,
@@ -315,7 +316,13 @@ function AccountModal({
                 <div style={{fontSize:'13px',color:'#94a3b8',marginBottom:'8px'}}>Your email body...</div>
                 <div style={{borderTop:'2px solid #e2e8f0',paddingTop:'10px',marginTop:'4px'}}>
                   <div style={{fontSize:'11px',color:'#94a3b8',marginBottom:'6px',fontFamily:'monospace'}}>--</div>
-                  <div dangerouslySetInnerHTML={{__html:sigHtml||'<span style="color:#94a3b8;font-style:italic">Signature will appear here</span>'}}
+                  {/* QA sweep (2026-09-01) defense-in-depth hardening —
+                      sigHtml is normally this same user's own edited
+                      signature, so the real risk here is low, but
+                      sanitizing costs nothing and closes off any future
+                      change that might let this render someone else's
+                      stored content. */}
+                  <div dangerouslySetInnerHTML={{__html:safeSanitizeHtml(sigHtml||'<span style="color:#94a3b8;font-style:italic">Signature will appear here</span>')}}
                     style={{fontSize:'13px',lineHeight:'1.6'}}/>
                 </div>
               </div>

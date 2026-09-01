@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { safeSanitizeHtml } from '@/lib/sanitize';
 import { Mail, Search, Plus, ChevronRight, Copy, Pencil, Lock, Eye } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
@@ -224,7 +225,15 @@ export default function EmailTemplatesPage() {
                     <div className="text-xs text-gray-400 mb-1">Subject (with sample data)</div>
                     <div className="text-sm font-semibold text-gray-800 mb-3">{preview.subject}</div>
                     <div className="text-xs text-gray-400 mb-1">Body</div>
-                    <div className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: preview.body_html }} />
+                    {/* QA sweep (2026-09-01) defense-in-depth — this
+                        specific call site only ever sends fixed sample
+                        data (never real candidate data), so it's not
+                        itself exploitable, but the backend preview
+                        endpoint's substitution has no escaping and
+                        accepts arbitrary variables from any caller;
+                        sanitizing here costs nothing and closes that off
+                        regardless of what future caller might send. */}
+                    <div className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: safeSanitizeHtml(preview.body_html) }} />
                   </div>
                 ) : (
                   <div className="text-sm text-gray-400">Loading preview...</div>
