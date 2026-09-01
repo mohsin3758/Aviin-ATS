@@ -446,8 +446,33 @@ live-verification pass this phase's checklist items still need.)
       previously verified rather than just re-confirmed). All 7 confirmed
       to write a real `consent_records` row on genuine candidate
       creation. No new, unaudited gap found.
-- [ ] Financial correctness (incentives, retention bank, loyalty,
-      account P&L, collections, payroll) — hand-verified arithmetic
+- [~] Financial correctness (incentives, retention bank, loyalty,
+      account P&L, collections, payroll) — hand-verified arithmetic.
+      Pulled and hand-checked the 3 real, live DB trigger/function
+      definitions behind the 2 most consequential formulas (real
+      `pg_get_functiondef()`, not guessed from any committed
+      migration): `trg_account_pl_calc()` — CM = gross_revenue -
+      delivery_cost - total_incentives - operational_cost (matches
+      CLAUDE.md's documented formula exactly), `cm_pct` correctly
+      guards divide-by-zero when `gross_revenue=0`, `delivery_pool` =
+      80% of gross (matches the documented allocation). `trg_kpi_calc()`
+      + `kpi_incentive()` — the tiered incentive formula (`score<60 OR
+      cm<0` -> 0, four score bands 60/70/80/90 each with a distinct
+      base+per-point formula, A+ tier capped at 50000) hand-verified
+      correct and continuous within each tier (no negative-incentive
+      or overflow edge case found); confirmed the documented "incentives
+      capped if CM<0" behavior is real and correctly implemented as a
+      hard zero, not a partial cap. The 70/30 immediate/retention-bank
+      split (`ROUND(inc*0.70,2)`/`ROUND(inc*0.30,2)`, independently
+      rounded) has a real but genuinely trivial edge case: for some
+      values of `inc`, the two independently-rounded halves can sum to
+      ₹0.01 different from what rounding the whole amount once would
+      give (e.g. `inc=33.335` -> 23.33+10.00=33.33 vs a single
+      `round(33.335,2)`=33.34) — a sub-rupee residual with real
+      compensation amounts, not worth a fix, but disclosed rather than
+      silently glossed over. Not yet checked: retention bank release/
+      forfeit arithmetic, loyalty milestone amounts, collections aging,
+      or payroll's TDS/PF calculations.
 
 ## PHASE 5 — Security audit
 - [x] Auth/role gaps (no token / wrong role / wrong tenant) — real,
