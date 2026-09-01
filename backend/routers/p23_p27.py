@@ -743,20 +743,6 @@ async def sla_summary(actor: Actor=Depends(get_actor)):
         """, actor.tenant_id)
     return dict(row)
 
-@sla_router.get("/audit-log")
-async def audit_log(resource: Optional[str]=None, limit: int=50,
-                     actor: Actor=Depends(get_actor)):
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
-            SELECT al.*, u.full_name AS user_name
-            FROM audit_logs al
-            LEFT JOIN users u ON u.id=al.user_id
-            WHERE al.tenant_id=$1
-              AND ($2::text IS NULL OR al.resource=$2)
-            ORDER BY al.created_at DESC LIMIT $3
-        """, actor.tenant_id, resource, limit)
-    return [dict(r) for r in rows]
-
 # ── P26: Activity Timeline ────────────────────────────────────
 activity_router = APIRouter(prefix="/activities", tags=["activities"])
 

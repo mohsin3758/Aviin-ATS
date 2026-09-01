@@ -102,24 +102,37 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 
 ## PHASE 1 — Re-run existing permanent suite (S1–S88)
 - [~] Batch 1 (grep-matched a broad slice, not a strict S1-S20 range):
-      135/141 real passes. 3 failures investigated:
-      - "embeddings return 384 dims" — confirmed MY OWN test-tunnel gap
-        (missing port 8081 for the embed service), not an app bug. Fixed
-        tunnel, re-ran in isolation — now passes.
-      - "S15 missing_skills surfaces on /candidates/rank" — real failure,
-        NOT yet root-caused (re-run attempts have repeatedly hit this
-        session's own login rate-limit before reaching the actual
-        assertion a second time). Re-verify once login access is stable.
-      - "S20 JD Match: ranked-candidate link..." — real failure:
-        `throwawayOptValue` (a `<select>` option matched by the
-        throwaway requisition's own title) came back empty/falsy twice
-        in a row, not a rate-limit artifact. NOT yet root-caused — needs
-        a live look at the actual dropdown state, not just re-running.
+      135/141 real passes initially. All non-rate-limit failures now
+      fully root-caused and fixed — see findings log #8-#10. Summary:
+      - "embeddings return 384 dims" — my own test-tunnel gap (missing
+        port 8081 for the embed service). Fixed, now passes.
+      - S15's "missing_skills surfaces on /requisitions/{id}/match-
+        candidates" — a real, confirmed app-behavior limitation (the
+        endpoint's own deliberate 300-row relevance pool), not a bug.
+        Test rewritten to use the pool-immune sibling endpoint.
+      - S20 — turned out to be caused ENTIRELY by a mistake in my own
+        local SSH tunnel (forwarding to the wrong VPS port for the
+        frontend). Once corrected, the only real, remaining app-level
+        issue was a genuine async-render race (fixed with expect.poll).
+      - S53 (found and fixed while investigating S20's real root cause,
+        not part of the original 3): 4 of its /candidates/rank calls
+        used limit:200 against this tenant's real, now-2,700+-candidate
+        base — a throwaway candidate's own deliberately-partial score
+        isn't guaranteed to crack an arbitrary top-200 cutoff. Fixed by
+        raising to limit:5000, matching a sibling test in the same suite
+        that already had this exact fix.
+      - Also found and fixed while investigating: `GET /sla/audit-log`
+        (p23_p27.py) read from the confirmed-dead `audit_logs` (plural)
+        table — a real, broken, zero-caller duplicate of the already-
+        working `/audit` endpoint. Retired.
 - [ ] Batch 2: S21–S40
 - [ ] Batch 3: S41–S60
 - [ ] Batch 4: S61–S88
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
-      no real-record mutation)
+      no real-record mutation) — informally covered so far: confirmed
+      S20/S53's own cleanup hooks correctly leave zero residue; found
+      and cleaned up 5 stray leftover requisitions from PRIOR sessions'
+      runs of S20 discovered incidentally during this investigation.
 
 ## PHASE 2 — Backend ↔ Frontend wiring audit
 - [x] Systematic first-pass sweep: extracted all 753 real backend routes
@@ -296,6 +309,94 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
      /scheduler/trigger/loyalty)" via direct curl during verification),
      matching the same established pattern as `populate-parsed-data` —
      not a bug.
+8. **`GET /sla/audit-log` (p23_p27.py) retired** — a real, dead-on-
+   arrival duplicate of the already-fixed `GET /audit` (p28_p32.py):
+   read from the confirmed-dead `audit_logs` (plural) table (0 real
+   rows), had zero frontend caller AND zero internal caller anywhere.
+   The real, correct, actively-used equivalent (`/audit`, reading the
+   real `audit_log` singular table) already exists and powers the
+   Audit Trail page — this endpoint would have returned an empty list
+   even if it had ever been wired up. Deleted. Verified via the
+   trusted-internal path (no login needed): 404 post-fix, `/audit` and
+   the sibling `/sla/summary` in the same router both unaffected (200).
+9. **S15's real `/requisitions/{id}/match-candidates` failure,
+   root-caused and fixed at the test level, not a code bug.** This
+   endpoint deliberately ranks only a bounded 300-row relevance pool
+   (pgvector cosine similarity) — confirmed live by direct reproduction:
+   a fresh throwaway candidate (no resume_text, so `resume_embedding`
+   stays NULL — `fill_missing_embeddings()` itself requires resume_text
+   IS NOT NULL, so this candidate could never get one even from the
+   async scheduler) genuinely did not crack the top 300 of this
+   tenant's real 2,722-candidate pool. The endpoint's own extensive
+   in-code documentation already states this is a deliberate, honestly-
+   bounded design, not an oversight. Test rewritten to verify the exact
+   same underlying missing_skills computation via the genuinely pool-
+   immune sibling endpoint (`POST /candidates/{id}/match-open-jobs`,
+   which does a direct candidate<->job lookup, not a ranked list) —
+   confirmed via direct API call to return byte-identical correct
+   results (`matched_skills: [Python, SQL]`, `missing_skills: [Docker,
+   Kubernetes]`) for the same throwaway candidate+requisition pair.
+10. **S20's real failure was two separate things, one test infra, one
+    a genuine (if minor) app-adjacent test fragility — both fixed:**
+    - The dominant cause, found only via a dedicated diagnostic script
+      with full navigation/response logging: **this investigating
+      session's own local SSH tunnel was forwarding to the wrong VPS
+      port for the frontend** (`localhost:3000` instead of the real
+      `localhost:3001`, confirmed definitively via `docker port
+      aviin_frontend`: `3001/tcp -> 0.0.0.0:3001`, nothing on 3000).
+      Every `page.goto()`-based browser test this session ran against
+      the wrong tunnel was silently hitting a 404 instead of the real
+      app — confirmed directly: `curl localhost:3001/candidates` (via
+      the broken tunnel) returned 404; `https://ats.aviinjobs.com/
+      candidates` (the real production domain) returned 200 the whole
+      time. This is why API-only tests (S1/S15/etc.) mostly passed
+      while `page`-based UI tests intermittently failed with confusing,
+      seemingly-unrelated symptoms. Tunnel corrected. **A real process
+      lesson, not an app bug**: two earlier `test.setTimeout`/
+      `describe.configure` "fixes" (S20, S53) were built on this wrong
+      diagnosis before the tunnel bug was found — both corrected with
+      honest comments once the real cause was confirmed (see finding
+      below); the S53 one was kept as a harmless safety margin, S20's
+      was reverted entirely since the test now passes in ~8s.
+    - The one genuine, real (if minor) issue: a bounded-async-render
+      race reading a `<select>`'s `<option>`s immediately after the
+      modal's TITLE became visible, with no wait for the modal's own
+      `useFetch('/requisitions?...')` to actually populate the options
+      — the same "async-render race" class already fixed elsewhere in
+      this suite (the pipeline-board job-picker race). Fixed with a
+      real `expect.poll()` instead of a synchronous read.
+11. **S53 had the identical `limit:200`-vs-real-candidate-scale issue
+    as S15/finding #9, independently, in 4 of its own /candidates/rank
+    calls** — found while investigating S20's real root cause (S53 was
+    genuinely failing too, for a different, non-tunnel reason: a fast,
+    clean assertion failure, `find()` returning undefined, not a
+    timeout). One sibling test in the SAME suite ("word-boundary
+    matching") already had the correct fix (`limit:5000`, with an
+    explanatory comment matching this exact reasoning) — the other 4
+    were simply never retrofitted. Fixed all 4 to match, plus added a
+    defensive `expect(mine).toBeTruthy()` before each downstream
+    assertion so a future regression here fails with a clear message
+    instead of a confusing "Cannot read properties of undefined."
+    Verified: all 11 S53 tests pass, ~1.4 minutes total, comfortably
+    inside the (now largely unnecessary, but harmlessly retained as a
+    safety margin) 150s suite timeout.
+
+**Process note for future sweep sessions**: when re-establishing the
+SSH tunnel for local Playwright runs, the correct mapping is
+`-L 3001:localhost:3001` for the frontend (NOT `localhost:3000` — that
+port has nothing listening on it; confirmed via `docker port
+aviin_frontend`, the container's real internal port 3001 is mapped
+straight to host port 3001, not remapped to 3000 the way the earlier,
+wrong tunnel assumed). The full correct command:
+`ssh -f -N -L 8080:localhost:8080 -L 3001:localhost:3001 -L
+8081:localhost:8081 -o StrictHostKeyChecking=no dev@187.127.179.128`.
+A wrong port here causes every `page.goto()`-based test to silently
+hit a 404 while pure API-level (`request.*`) tests keep passing
+normally — a confusing, misleading failure pattern that looks like a
+real app bug (timeouts, missing elements) rather than what it actually
+is (broken test infrastructure). Verify with
+`curl http://localhost:3001/candidates` (or any real dashboard route)
+returning 200 before trusting any `page`-based test result.
 
 ---
 
