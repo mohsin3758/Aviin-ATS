@@ -225,6 +225,23 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       content — waiting for a much longer (25 min) cooldown, then
       re-attempting ONE suite at a time to keep each individual
       attempt's login volume minimal.
+      3rd attempt after the 25-min wait: still 429 on a single S82
+      login. Read `RateLimitMiddleware`'s real implementation
+      (`backend/app.py`) to understand the exact mechanism rather than
+      guessing further: `_check_rate()` only appends a new timestamp
+      to the bucket ON SUCCESS — a rejected (429) attempt does NOT
+      itself consume a slot or extend the lockout, so repeated retries
+      are not making this worse. It's a genuine rolling 10-per-15-min
+      window; slots open one at a time as each individual successful-
+      login timestamp from earlier in this very long session ages past
+      exactly 15 minutes. A direct curl probe confirmed the window
+      DOES open (got a real 401, not 429, on a wrong-password login
+      attempt) — but that probe itself consumed the one open slot,
+      confirmed by the very next Playwright attempt getting 429 again
+      immediately after. **Real lesson**: any login attempt, including
+      a diagnostic probe, consumes a slot when it succeeds through —
+      stopped all further curl/login probing entirely and switched to
+      a longer, completely untouched wait instead of periodic checks.
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
       S20/S53's own cleanup hooks correctly leave zero residue; found
