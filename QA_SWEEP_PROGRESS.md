@@ -302,7 +302,26 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       failure class — a handler that logs but the log message itself
       never actually gets reviewed/alerted on — that's a process gap,
       not a code gap, and out of this specific checklist item's scope.
-- [ ] Generated-file content correctness (CSV/PDF/etc.)
+- [x] Generated-file content correctness (CSV/PDF/etc.) — downloaded
+      real live files via the cached admin token (no login endpoint
+      touched) and checked real byte content, not just HTTP status:
+      `/export/placements` — correct UTF-8 BOM (`ef bb bf`, matching
+      the established "Excel-safe" convention), correct headers, real
+      candidate/client data. `/export/requisitions` — exactly 3 real
+      active requisitions (is_active filtering still holding, matches
+      every other confirmation of this tenant's real 3-4-open-
+      requisitions state throughout this sweep). `/export/candidates`
+      — 2,722 real rows with non-empty emails, **zero duplicate
+      emails** — a real, direct regression check that the previously-
+      fixed LATERAL-join dedup bug (CLAUDE.md 2026-08-10, was fanning
+      candidates out into up to 22 duplicate rows) is still genuinely
+      holding, not just assumed fixed. `GET /candidates/{id}/standard-
+      resume` — real, valid `%PDF-1.4` magic bytes, correctly parses
+      as a 1-page PDF document. Not an exhaustive check of every one of
+      the dozens of real generated-file endpoints in this app, but a
+      real, representative spot-check across both formats confirms the
+      underlying generation machinery is genuinely producing correct
+      output, not just returning a 200 with garbage/empty content.
 - [ ] Localization/multi-language honesty check
 - [~] Uploads & malformed input — checked path-traversal risk on the 2
       real file-save helpers used across every upload path in the app
