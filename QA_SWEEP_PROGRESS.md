@@ -101,7 +101,20 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       public job board API + the real /careers page both 200).
 
 ## PHASE 1 — Re-run existing permanent suite (S1–S88)
-- [ ] Batch 1: S1–S20
+- [~] Batch 1 (grep-matched a broad slice, not a strict S1-S20 range):
+      135/141 real passes. 3 failures investigated:
+      - "embeddings return 384 dims" — confirmed MY OWN test-tunnel gap
+        (missing port 8081 for the embed service), not an app bug. Fixed
+        tunnel, re-ran in isolation — now passes.
+      - "S15 missing_skills surfaces on /candidates/rank" — real failure,
+        NOT yet root-caused (re-run attempts have repeatedly hit this
+        session's own login rate-limit before reaching the actual
+        assertion a second time). Re-verify once login access is stable.
+      - "S20 JD Match: ranked-candidate link..." — real failure:
+        `throwawayOptValue` (a `<select>` option matched by the
+        throwaway requisition's own title) came back empty/falsy twice
+        in a row, not a rate-limit artifact. NOT yet root-caused — needs
+        a live look at the actual dropdown state, not just re-running.
 - [ ] Batch 2: S21–S40
 - [ ] Batch 3: S41–S60
 - [ ] Batch 4: S61–S88
@@ -109,6 +122,19 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       no real-record mutation)
 
 ## PHASE 2 — Backend ↔ Frontend wiring audit
+- [x] Systematic first-pass sweep: extracted all 753 real backend routes
+      (every `@router.<method>(...)` across `backend/routers/*.py`, with
+      real `APIRouter(prefix=...)` resolution) and checked whether each
+      route's most-distinguishing static path segment appears anywhere
+      in the frontend source. 18 flagged as no-match; each investigated
+      manually (real grep + reading the actual endpoint body + real DB
+      row counts where relevant, not assumed) — not treated as a final
+      verdict on its own. **Result: 4 confirmed false positives, 12
+      confirmed real orphans** (backend built, genuinely zero frontend
+      caller anywhere) — see findings log #5-#7 below. This sweep is a
+      real, useful first pass but not a substitute for the per-group
+      manual click-through still listed below — it only catches "zero
+      textual reference anywhere," not "referenced but subtly broken."
 - [ ] Core group (Dashboard, Candidates, Companies, Jobs/Requisitions,
       Pipeline, Pipeline Velocity, Duplicate Candidates, Recruiter Ops,
       Assignment Dashboard, Device Monitoring, Field Attendance, Shift
@@ -185,6 +211,91 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 4. **WAHA "default" WhatsApp session disconnected** — flagged, NOT
    fixed (needs a physical QR re-scan). All automated WhatsApp sends
    have been silently failing since disconnection. Needs user action.
+5. **`GET /sla/audit-log` (p23_p27.py) reads from the confirmed-dead
+   `audit_logs` (plural) table** (0 real rows tenant-wide — verified
+   directly, not assumed) instead of the real, live `audit_log`
+   (singular, 6,677 real rows for the primary tenant) this whole
+   codebase actually writes to, per the same finding already documented
+   once in CLAUDE.md's own 2026-08-12 audit. This endpoint would return
+   an empty list even if a frontend called it — worse than a plain
+   orphan, it's silently broken on top of being unwired. NOT fixed yet
+   — flagged for a real fix decision (repoint to `audit_log` + wire a
+   UI, or retire, matching this project's own established "genuinely
+   dead, matches a real already-built alternative" retirement pattern).
+6. **11 more confirmed real backend-only orphans**, each individually
+   verified (grep across the whole frontend + reading the endpoint body
+   + real DB row counts, not assumed from the automated signal-match
+   alone):
+   - `bgv.py` `GET`/`POST /bgv/trust-graph`(`/edge`) — real relationship-
+     graph read/write, 0 real rows ever, zero UI (the 2026-08-09 BGV
+     rebuild's own 3 tabs — Overview/Checks/India Verify — never
+     included a trust-graph view).
+   - `final_features.py` `GET /pdf/candidate-profile/{id}` — a real,
+     working, self-contained candidate-snapshot PDF (name/contact/
+     experience/readiness score/recent applications) genuinely distinct
+     from the Resume Generator's Standard Resume — zero UI.
+   - `incentives.py` `retention-tracking` (GET/POST/PATCH, 3 endpoints)
+     — real per-placement retention-credit tracking from the P15
+     compensation framework — 0 real rows, zero UI anywhere.
+   - `p36_p42.py` `GET /reports/monthly-billing` — reads a real,
+     populated view (`v_monthly_billing`, 1 real row) — zero UI.
+   - `pipeline_p2.py` `POST /pipeline/sync-scores` — a real fit_score-
+     from-AI-readiness backfill maintenance op, zero UI.
+   - `pipeline_p2.py` `POST /pipeline/auto-move` — a real, standalone
+     "run the rule engine right now" trigger, genuinely separate code
+     from `scheduler.py`'s own nightly `run_pipeline_auto_move()`
+     function (confirmed via grep — the scheduler calls its own Python
+     function directly, never this HTTP endpoint) — zero UI.
+   - `pipeline_p2.py` `POST /pipeline/check-rules/{application_id}` —
+     docstring says "After a manual move: check if any rules apply" but
+     confirmed via grep it's never actually called from
+     `update_stage()` or anywhere else — the described behavior never
+     happens. Zero UI, zero internal caller either.
+   - `pipeline_p2.py` `GET /pipeline/filter-options` — real distinct-
+     sources + top-100-skills + stage-list endpoint for building a
+     filter UI, zero UI caller.
+   - `pipeline_p2.py` `GET /pipeline/active-requisitions` — a real
+     "most active requisitions by application count" leaderboard query,
+     zero UI.
+   - `vendor_analytics.py` `GET /vendor-analytics/source-performance` —
+     real per-source (job-board attribution) performance analytics; the
+     real `/vendor-analytics` page has exactly 4 tabs (vendors/
+     recruiter-funnel/diversity/summary) and none of them call this.
+   - `users.py` `GET /roles/departments` — returns a real canonical
+     9-department list; the real Settings > Users page has its own,
+     independently-hardcoded `DEPT_LIST` with the identical 9 values
+     (currently in sync by coincidence, not by being fetched from this
+     endpoint) — a real "two copies of the same list, silent-drift
+     risk" pattern already documented and fixed for other lists
+     elsewhere in this project, just not yet actually drifted here.
+   None of these 12 are fixed yet — cataloged for a batch decision
+   (build real UI vs. retire, per item) rather than assumed unilaterally,
+   matching this project's own established precedent for exactly this
+   judgment call (e.g. BGV API, Job Distribution, Assessments — all
+   retired rather than UI'd, on a case-by-case basis, in this project's
+   history).
+7. **4 confirmed FALSE POSITIVES from the automated first pass** (real,
+   working, genuinely wired features that the static-string-matching
+   script couldn't see) — recorded so a future re-run of the same
+   script doesn't re-flag them and waste time re-investigating:
+   - `calendar.py`'s calendar-feed `.ics` subscribe link — the frontend
+     calls `POST /calendar/feed-token`, which returns a server-built
+     `feed_url` string; the frontend only ever displays/copies that
+     string (an external calendar app is what actually fetches it), so
+     the literal path segment never appears as frontend source text —
+     genuinely wired end to end, confirmed via `/calendar/page.tsx`.
+   - `resume_intake.py`'s `POST /resume-intake/populate-parsed-data` —
+     already confirmed deliberate, safe, idempotent admin/ops tooling
+     in CLAUDE.md's 2026-08-20 entry — "correctly not a user-facing
+     feature," not a bug.
+   - `scheduler_router.py`'s `POST /scheduler/trigger/{retention-bank,
+     loyalty,risk-scores}` — the sibling `GET /scheduler/status` IS
+     genuinely wired (Dashboard page, confirmed via grep) but these 3
+     manual-trigger endpoints are real, deliberate admin/ops tooling
+     (per CLAUDE.md's 2026-08-09 entry — "triggered it again (POST
+     /scheduler/trigger/loyalty)" via direct curl during verification),
+     matching the same established pattern as `populate-parsed-data` —
+     not a bug.
 
 ---
 
