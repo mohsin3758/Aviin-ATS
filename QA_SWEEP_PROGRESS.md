@@ -380,7 +380,41 @@ live-verification pass this phase's checklist items still need.)
       download` (a classic IDOR target, serves files): correctly scopes
       by `tenant_id` via `db.tenant_conn()`, a cross-tenant attempt
       would 404. Not a full sweep of every ID-taking endpoint.
-- [ ] Cross-tenant leaks (RLS, security_invoker, SECURITY DEFINER)
+- [x] Cross-tenant leaks (RLS, security_invoker, SECURITY DEFINER) —
+      **2 real, live cross-tenant vulnerabilities found and fixed**,
+      the same bug class as the `v_recruiter_capacity` fix from
+      2026-08-31. Enumerated every real view in the schema (16 in
+      committed migrations + `v_users_with_roles`, a 17th, schema-
+      drifted one found live) and checked each one's real
+      `pg_class.reloptions` directly against the live database, not
+      guessed from any committed migration. Found `v_monthly_billing`
+      and `v_sla_dashboard` both genuinely missing `security_invoker =
+      true`, both confirmed owned by `postgres` (bypasses RLS), both
+      querying real tenant-scoped RLS-protected tables (`placements`/
+      `requisitions`/`applications`/`sla_tracking`). Every real backend
+      caller of both (3 total, grepped across the whole backend)
+      already correctly applies an explicit `WHERE tenant_id=$1` at
+      the app level, so this was not currently being exploited by any
+      live caller today — but it was a real, structural defense-in-
+      depth gap: any future caller that forgot the tenant filter (the
+      exact "missing is_active filter" mistake class this project has
+      hit dozens of times elsewhere) would silently leak every
+      tenant's real billing/SLA data with zero error. Fixed via
+      `sql/101_fix_billing_sla_views_tenant_leak.sql`, deployed with a
+      real transactional dry-run first (BEGIN/ALTER VIEW x2/ROLLBACK,
+      zero errors) then applied for real. Verified for real, not just
+      trusting the ALTER VIEW output: confirmed both views' real
+      `reloptions` now show `security_invoker=true`; confirmed both
+      real, live API endpoints (`GET /sla/summary`, `GET /reports/
+      monthly-billing`) still return correct real data post-fix; and
+      the definitive proof — queried both views directly as `app_user`
+      with a fake/bogus `app.tenant_id` set and confirmed genuinely
+      ZERO rows returned from either, despite real underlying data
+      existing (proven by the endpoint calls moments earlier) — RLS is
+      now actually enforced, not silently bypassed. The other 14
+      real views (all already correctly `security_invoker=true`) were
+      confirmed clean in the same sweep, including re-confirming the
+      earlier `v_recruiter_capacity` fix is still holding.
 - [~] Forgeable/guessable token audit — grepped every real token-
       generation call site across the backend (18 found). All
       consistently use Python's `secrets` module (cryptographically
@@ -395,7 +429,21 @@ live-verification pass this phase's checklist items still need.)
       for that specific case. No real weakness found. Not yet a check
       of whether every token-CONSUMING endpoint properly single-uses/
       expires them (the generation side is what was checked here).
-- [ ] Privilege escalation checks
+- [x] Privilege escalation checks — 3 real, distinct vectors checked:
+      (1) `create_user`/`update_user` (`users.py`) — the only endpoints
+      that can set a user's `role` field — both `require_role("admin",
+      "manager")`; a non-privileged caller can't reach them at all.
+      (2) `PUT /users/me` (the real self-service profile endpoint,
+      found by searching beyond the obvious admin-facing routes) —
+      whitelists exactly `full_name`/`phone`/`department`/`designation`/
+      `location` via a hardcoded `allowed` list before building the
+      SQL UPDATE; `role` is not in the list, so a client sending
+      `{"role":"admin"}` here is silently dropped, never reaching the
+      database. (3) `PUT /roles/{role_id}/permissions` (edits a role's
+      own granted-permissions JSON, the softer/newer permission-matrix
+      system) — `require_role("admin","super_admin")`, deliberately
+      even tighter than the user-management endpoints (excludes
+      `manager`). No escalation path found across any of the 3.
 - [~] Injection/XSS spot-check — a real, useful SQL-injection static
       pass (done opportunistically during a Batch-4 background run, no
       live verification needed for this kind of check): grepped every

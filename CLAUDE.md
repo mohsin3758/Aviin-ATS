@@ -18741,3 +18741,78 @@ for any legitimate trusted-internal caller that might reach it.
 Both fixes deployed via the established scp → hash-verify → rebuild →
 health-check cycle. Zero-token audit: `CONFIRMED CLEAN` throughout.
 Full findings recorded in `QA_SWEEP_PROGRESS.md`.
+
+## QA sweep, 2026-09-01: 2 more real cross-tenant view leaks found and
+## fixed (same bug class as v_recruiter_capacity), Batch 4a fully closed
+Direct continuation of the ongoing full-stack QA sweep. Systematically
+enumerated every real view in the schema (17 total, including one
+schema-drifted view — `v_users_with_roles` — found live with no
+committed `CREATE VIEW`) and checked each one's real `pg_class.
+reloptions` directly against the live database, not guessed from any
+committed migration — matching the exact discipline that found the
+`v_recruiter_capacity` leak on 2026-08-31.
+
+Found `v_monthly_billing` and `v_sla_dashboard` both genuinely missing
+`security_invoker = true`, both confirmed owned by `postgres` (bypasses
+RLS entirely), both querying real, tenant-scoped, RLS-protected tables
+(`placements`/`requisitions`/`applications`/`sla_tracking`). Every real
+backend caller of both (3 total, grepped across the whole backend —
+`GET /sla`, `GET /sla/summary`, `GET /reports/monthly-billing`) already
+correctly applies an explicit `WHERE tenant_id=$1` at the app level, so
+this was not currently being exploited by any live caller today — but
+it was a real, structural defense-in-depth gap, the identical shape as
+the already-fixed `v_recruiter_capacity` bug: any future caller that
+forgot the tenant filter (the exact "missing is_active filter" mistake
+class this project has found and fixed dozens of times elsewhere) would
+silently leak every tenant's real billing/SLA data with zero error.
+
+Fixed via `sql/101_fix_billing_sla_views_tenant_leak.sql` —
+`ALTER VIEW ... SET (security_invoker = true)` on both. Deployed with a
+real transactional dry-run first (BEGIN/ALTER VIEW x2/ROLLBACK inside
+the `aviin_db` container, zero errors) before applying for real.
+Verified for real, not just trusting the `ALTER VIEW` output: confirmed
+both views' real `reloptions` now show `security_invoker=true`;
+confirmed both real, live API endpoints still return correct real data
+post-fix; and the definitive proof — queried both views directly as
+`app_user` with a fake/bogus `app.tenant_id` set and confirmed
+genuinely ZERO rows returned from either, despite real underlying data
+existing (proven by the endpoint calls moments earlier) — RLS is now
+actually enforced on both, not silently bypassed. The other 14 real
+views were confirmed already correctly `security_invoker=true` in the
+same sweep, including re-confirming the earlier `v_recruiter_capacity`
+fix is still holding live.
+
+**Same-day, earlier in this sweep**: root-caused and closed the 2
+remaining Batch 4a Playwright failures from the prior session (S61,
+S74). S61 (Client Submission drawer UI test) re-ran in full isolation,
+5/5 clean — confirmed as rate-limit-cascade noise from an earlier
+giant-batch run, not a real bug. S74 (Auto-Assign toggle UI test) was a
+genuine test bug, not an app bug: root-caused via a dedicated
+diagnostic script with real network-request interception — the backend
+`PUT`/`GET /ops-config/auto-assign` round-trip is correct on every call
+(verified directly via curl and the diagnostic script), but the test's
+own fixed 1000ms `waitForTimeout` was flaky under heavy concurrent
+server load during a full-suite run, occasionally making the "after"
+read match "before" before the state had visually updated. Fixed with
+`expect.poll`, matching the same fix pattern already used for S20's
+identical timing-flake class — re-ran 6/6 clean in isolation. Also
+completed 2 HARD RULE checks that were previously only spot-checked:
+**#5/#6 (event_outbox)** widened from 6 to all 21 real `write_outbox()`
+call sites across every file that uses it — every single one confirmed
+atomic (same connection as its business write) and correctly deduped,
+no violations. **#10 (HITL gate)** widened from 3 spot-checked
+endpoints to a full enumeration of every real write path for
+"candidate rejected" (2 paths — single + bulk reject, both correctly
+gated with a required reason_code and full audit trail),
+"recruiter reassigned" (2 paths — single + bulk reassign, both
+`require_role("admin","manager")`, `do_reassign()` itself confirmed to
+correctly write real, deduped `event_outbox`/`assignment_event` rows
+for both the old and new assignment atomically), and "offer issued" (2
+write sites, the 2nd only ever flips an already-`approved` offer, never
+independently approves anything). No violations found in any of these.
+Also checked 3 real privilege-escalation vectors (self-role-change via
+`update_user`, the `PUT /users/me` self-service profile endpoint's
+field whitelist, and `PUT /roles/{id}/permissions`) — all correctly
+gated, no escalation path found.
+
+All findings recorded in `QA_SWEEP_PROGRESS.md`.
