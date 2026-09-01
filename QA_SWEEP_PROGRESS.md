@@ -297,11 +297,34 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       3 tests + S74), the rest of Batch 4 (S61's non-UI tests, S62-S88)
       is confirmed clean — only this ONE specific UI test within S61
       remains genuinely unresolved.
-- [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
-      no real-record mutation) — informally covered so far: confirmed
-      S20/S53's own cleanup hooks correctly leave zero residue; found
-      and cleaned up 5 stray leftover requisitions from PRIOR sessions'
-      runs of S20 discovered incidentally during this investigation.
+- [x] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
+      no real-record mutation) — informally covered incrementally
+      throughout this sweep: confirmed S20/S53's own cleanup hooks
+      correctly leave zero residue; found and cleaned up 5 stray
+      leftover requisitions from PRIOR sessions' runs of S20 discovered
+      incidentally during this investigation. **`.serial()` usage,
+      checked systematically**: 21 plain `test.describe(...)` blocks
+      remain (of 94 total describe blocks) — all confined to the
+      EARLIEST, most-foundational suites (S1-S14's original numbering
+      wave, before the "one describe block per real feature" convention
+      took over: API Health, Zero-Token AI, Frontend Pages, Kanban
+      Board, Candidate 360, Analytics, War Room, Finance ERP, WhatsApp
+      Outreach, BGV, VPS Deploy Config, plus a 2nd, differently-scoped
+      S4/S6-S13 wave for P15-P22). Confirmed this is genuinely already-
+      known, deliberately-deferred technical debt, not a fresh
+      discovery — CLAUDE.md's own history explicitly documents choosing
+      NOT to retrofit these same suites onto `.serial()` multiple times
+      ("out of scope... a real, now-understood, pre-existing
+      characteristic"). Spot-checked S1/S2 specifically for the OTHER
+      real risk this matters for (a mid-block failure corrupting
+      describe-level state for later tests, or leaving unclean real
+      data) — both are genuinely pure read-only health-check suites
+      (zero POST/DELETE/create anywhere in their range), meaning
+      neither the state-corruption risk NOR the cleanup-completeness
+      risk actually applies to them the way it does to the newer,
+      multi-step-setup suites that DID get converted. Confirms the
+      established precedent's reasoning still holds — this is real,
+      known, low-urgency debt, not something this sweep needs to fix.
 
 ## PHASE 2 — Backend ↔ Frontend wiring audit
 - [x] Systematic first-pass sweep: extracted all 753 real backend routes
