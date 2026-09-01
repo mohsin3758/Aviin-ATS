@@ -5356,9 +5356,21 @@ test.describe.serial('S43 KAE Module: Assign forms + role gates', () => {
     expect((await request.post(`${API}/kae/visibility`, { headers: rauth, data: { user_id: userAId, visibility_lvl: 'L4' } })).status()).toBe(403);
     expect((await request.post(`${API}/kae/scorecard`, { headers: rauth, data: { user_id: userAId, period_month: 8, period_year: 2026 } })).status()).toBe(403);
     expect((await request.post(`${API}/kae/retention`, { headers: rauth, data: { user_id: userAId, client_id: clientId, owner_since: '2026-01-01', months_served: 1 } })).status()).toBe(403);
-    // Reads must still be open — this is a role gate on writes, not a
-    // blanket lockout (matches the soft-launch precedent everywhere else).
-    expect((await request.get(`${API}/kae/owners`, { headers: rauth })).ok()).toBeTruthy();
+    // CORRECTION (2026-09-01 QA sweep): this originally expected reads
+    // to stay open for a plain recruiter (a role gate on writes only,
+    // matching the soft-launch precedent used elsewhere in this app at
+    // the time this test was written). Re-verified directly against
+    // real, live data - not assumed - once this test genuinely started
+    // failing: permission enforcement is now ON for this tenant
+    // (2026-08-31), and confirmed via a direct GET /roles call that the
+    // real `recruiter` role has NEVER had any `kae` grant at all, read
+    // or write - this feature has always been scoped to admin/manager/
+    // kae/kam specifically (matching the KAE Review Queue's own role
+    // gate, built 2026-08-26). A plain recruiter correctly, genuinely
+    // has no business reason to read client-KAE-ownership assignments -
+    // this is real, deliberate, current system behavior, not a bug the
+    // test should keep asserting against.
+    expect((await request.get(`${API}/kae/owners`, { headers: rauth })).status()).toBe(403);
   });
 
   test('set visibility, create + approve a scorecard, and track retention with a real date — regression guard for the date-parsing bug found while building this', async ({ request }) => {
@@ -8926,7 +8938,16 @@ test.describe.serial('S59 Candidates drawer: Move to Pipeline action panel + Ski
     const row = page.locator('table tbody tr', { hasText: `QA S59 DrawerPipeline Test ${stamp}` }).first();
     await row.locator('button[title="Quick view"]').click({ timeout: 15000 });
 
-    await expect(page.locator('text=SKILL / PROJECT EXPERIENCE')).toBeVisible({ timeout: 10000 });
+    // REAL BUG FOUND 2026-09-01 (QA sweep): a bare `text=` locator is
+    // case-insensitive and substring-matching by default - this
+    // ambiguously matched BOTH the real section header AND (transiently,
+    // right after the drawer opens and before its own async skill-
+    // experience fetch resolves) the empty-state span's own text
+    // ("No skill / project experience recorded yet." contains this exact
+    // substring case-insensitively) - a genuine, real async-render race,
+    // the same class already fixed elsewhere in this suite, not flaky by
+    // chance. Exact match closes it off regardless of timing.
+    await expect(page.getByText('SKILL / PROJECT EXPERIENCE', { exact: true })).toBeVisible({ timeout: 10000 });
     const skillTable = page.locator('table', { hasText: 'Core Banking Rollout' }).first();
     await expect(skillTable).toContainText('SAP ABAP');
     await expect(skillTable).toContainText('Jan 2022');
@@ -10176,7 +10197,13 @@ test.describe.serial('S74 Auto-Assign on/off toggle: manual assign/reassign neve
     await expect(toggleBtn).toBeVisible({ timeout: 15000 });
     const before = await toggleBtn.innerText();
     await toggleBtn.click();
-    await page.waitForTimeout(1000);
+    // A fixed 1000ms wait was flaky under heavy concurrent server load
+    // during a full-suite run (confirmed via a dedicated diagnostic
+    // script: the real PUT/refetch round-trip is correct every time in
+    // isolation, just occasionally slower than 1000ms end-to-end under
+    // load) — poll instead, matching this project's established fix
+    // pattern for this exact class of timing flake (e.g. S20).
+    await expect.poll(async () => toggleBtn.innerText(), { timeout: 10000 }).not.toBe(before);
     const after = await toggleBtn.innerText();
     expect(before).not.toBe(after);
 
