@@ -776,105 +776,19 @@ async def get_copilot(actor: Actor = Depends(get_actor)):
             }
         }
 
-# ── AI Insights (Round 3 — uses candidate_scores + Ollama) ───────────────────
-@intel_router.get("/insights/{candidate_id}")
-async def get_ai_insights(candidate_id: str, requisition_id: Optional[str]=None, actor: Actor = Depends(get_actor)):
-    """Explainable AI scores + Ollama-generated recommendation."""
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        # Get scores
-        scores = await conn.fetchrow("""
-            SELECT cs.*, c.full_name, c.skills, c.total_exp_mo, c.expected_ctc,
-                   c.notice_period_days, c.current_employer, c.source
-            FROM candidate_scores cs
-            JOIN candidates c ON c.id = cs.candidate_id
-            WHERE cs.candidate_id = $1
-            """ + ("AND cs.requisition_id = $2" if requisition_id else "") + """
-            ORDER BY cs.scored_at DESC LIMIT 1
-        """, *([candidate_id, requisition_id] if requisition_id else [candidate_id]))
-
-        if not scores:
-            # Return basic info without scores
-            cand = await conn.fetchrow("SELECT full_name, skills, total_exp_mo FROM candidates WHERE id=$1", candidate_id)
-            return {"has_scores": False, "candidate_name": cand["full_name"] if cand else "Unknown"}
-
-        # Build breakdown
-        skill_details = scores["skill_match_details"] or {}
-        cosine = float(skill_details.get("cosine_similarity", 0)) if isinstance(skill_details, dict) else 0
-
-        score_map = {
-            "Skill Match": float(scores["skill_match_score"] or 0),
-            "Experience": float(scores["experience_score"] or 0),
-            "Stability": float(scores["stability_score"] or 0),
-            "Education": float(scores["education_score"] or 0),
-            "Salary Fit": float(scores["compensation_fit_score"] or 0),
-            "Fraud Risk": float(scores["fraud_risk_score"] or 0),
-        }
-        readiness = float(scores["readiness_index"] or 0)
-        grade = scores["readiness_grade"] or "?"
-        exp_mo = int(scores["total_exp_mo"] or 0)
-        exp_y = round(exp_mo / 12, 1)
-        ctc = scores["expected_ctc"]
-
-        # Rule-based recommendation (Tier 0)
-        if readiness >= 80: rec = "Strong Hire"
-        elif readiness >= 60: rec = "Hire"
-        elif readiness >= 40: rec = "Hold — needs further review"
-        else: rec = "Reject"
-
-        # Rule-based explanation (Tier 0 — no LLM needed for core text)
-        explanations = []
-        if score_map["Skill Match"] < 30:
-            explanations.append("Low skill match — resume keywords differ from JD requirements")
-        elif score_map["Skill Match"] > 70:
-            explanations.append("Strong skill alignment with job requirements")
-        if score_map["Experience"] > 80:
-            explanations.append(f"Experience well-matched ({exp_y}y)")
-        elif score_map["Experience"] < 40:
-            explanations.append(f"Experience gap detected ({exp_y}y for this role)")
-        if score_map["Stability"] > 80:
-            explanations.append("Stable career trajectory — low attrition risk")
-        elif score_map["Stability"] < 40:
-            explanations.append("Frequent job changes — potential retention concern")
-        if score_map["Fraud Risk"] > 50:
-            explanations.append("Fraud risk flag — verify credentials")
-        if ctc:
-            explanations.append(f"Expected CTC: ₹{ctc/100000:.1f}L")
-
-        # Ollama LLM explanation (Tier 2 — optional, non-blocking)
-        llm_summary = None
-        try:
-            import httpx, json as _json
-            prompt = f"""You are a recruitment AI. Summarize this candidate in 2 sentences for a recruiter.
-Candidate: {scores['full_name']}, {exp_y}y exp at {scores['current_employer'] or 'N/A'}.
-Readiness: {readiness:.0f}% (Grade {grade}). Skill match: {score_map['Skill Match']:.0f}%. Recommendation: {rec}.
-Be concise and helpful. Focus on hire/no-hire reasoning."""
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.post("http://ollama:11434/api/generate",
-                    json={"model":"qwen2.5:1.5b-instruct-q4_K_M","prompt":prompt,"stream":False})
-                if resp.status_code == 200:
-                    llm_summary = resp.json().get("response","").strip()[:300]
-        except Exception:
-            pass  # Graceful degradation
-
-        return {
-            "has_scores": True,
-            "candidate_name": scores["full_name"],
-            "readiness_index": readiness,
-            "readiness_grade": grade,
-            "recommendation": rec,
-            "score_breakdown": score_map,
-            "cosine_similarity": cosine,
-            "explanations": explanations,
-            "llm_summary": llm_summary,
-            "candidate_info": {
-                "skills": list(scores["skills"] or []),
-                "exp_years": exp_y,
-                "company": scores["current_employer"],
-                "expected_ctc": float(ctc) if ctc else None,
-                "notice_days": scores["notice_period_days"],
-                "source": scores["source"],
-            }
-        }
+# AI Insights (Round 3) — RETIRED 2026-09-01 (QA sweep, HARD RULE #4
+# audit): GET /pipeline/insights/{candidate_id} had ZERO frontend
+# callers anywhere in the app (confirmed via a whole-frontend grep) —
+# genuinely dead, never exercised in production — AND its optional LLM-
+# summary piece called Ollama directly via a bespoke httpx POST with no
+# caching at all, bypassing the shared ai_router.py module's real
+# semantic-cache cascade (the same real HARD RULE #4 bug class fixed
+# for final_features.py's ollama_ask() the same day). Given zero real
+# usage to preserve, retired outright rather than "fixed" — the same
+# real, explainable rule-based score breakdown this endpoint computed
+# is already available through the live, actively-used /intelligence
+# page and GET /candidates/{id}'s own ai_scores, so nothing user-facing
+# is lost.
 
 # ── Post-move Rule Check (Round 3 — auto-trigger after manual move) ───────────
 @metrics_router.post("/check-rules/{application_id}")

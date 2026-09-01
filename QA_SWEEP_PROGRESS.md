@@ -192,6 +192,12 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 (Preliminary static-analysis pass started opportunistically during a
 Phase-1 rate-limit cooldown wait — real code-reading, not yet the full
 live-verification pass this phase's checklist items still need.)
+- [x] #4 (AI Router as the one module every AI call passes through) —
+      NOT on the original checklist explicitly, but checked while
+      investigating #5/#6/#10/#11 and found 2 real, live violations,
+      both fixed and verified end-to-end (real Ollama generation, real
+      semantic-cache hit on a repeat call, confirmed via a direct
+      `ai_cache` row check) — see findings log #12.
 - [~] #10 HITL gate — spot-checked the 3 named high-stakes actions:
       `approve_offer`/`issue_offer` (offers.py) and `reassign`
       (assignments.py) all correctly `require_role("admin","manager")`.
@@ -453,6 +459,52 @@ real app bug (timeouts, missing elements) rather than what it actually
 is (broken test infrastructure). Verify with
 `curl http://localhost:3001/candidates` (or any real dashboard route)
 returning 200 before trusting any `page`-based test result.
+
+12. **2 real, live HARD RULE #4 violations found and fixed**, while
+    static-checking #5/#6/#10/#11 during a rate-limit cooldown wait —
+    grepped every reference to `ollama:11434`/`OLLAMA_URL` outside the
+    real `ai_router.py` module and `scheduler.py`, then checked each
+    for a real frontend caller before deciding how to fix it:
+    - `final_features.py`'s own local `ollama_ask()` helper called
+      Ollama directly via a bespoke httpx POST, caching through a
+      separate, plain-exact-hash `ollama_cache` table — bypassing the
+      real, shared `ai_router.py` module's semantic-similarity cache
+      (`ai_cache.prompt_embedding vector(384)`, HARD RULE #4's own
+      explicit "not just exact-hash" requirement). The SAME bug class
+      already found and fixed once before in this project
+      (`phase3.py`'s local `call_ollama()`, 2026-08-10) — this instance
+      was simply never caught in that earlier pass. Confirmed this was
+      genuinely LIVE, not dead code: both call sites (`/ai-tools/
+      interview-questions`, `/ai-tools/rank-explanation/{id}`) feed the
+      real, actively-used `/ai-tools` page. Fixed by deleting the local
+      helper and routing both through the real `ai_router.generate()`
+      (imported under an alias, `shared_ai_router`, since this file
+      already had an unrelated LOCAL variable also named `ai_router` —
+      a plain `APIRouter` instance predating this fix, referenced
+      directly by `app.py`'s own router registration, so renaming IT
+      instead would have had a wider blast radius) — wrapped in the
+      same graceful-degradation try/except the old helper had, since
+      the real `ai_router.generate()` has no built-in fallback of its
+      own and a transient Ollama outage must never 500 these real,
+      live endpoints. Verified end-to-end against a real requisition:
+      a real, coherent generation on the first call, and a genuine
+      cache hit (0.196s, down from a real fresh-generation latency) on
+      an identical second call, with a real, correctly-keyed row
+      confirmed directly in the `ai_cache` table.
+    - `pipeline_p2.py`'s `GET /pipeline/insights/{candidate_id}`
+      (Round 3 AI Insights) had an identical direct-Ollama-call bypass
+      — but with ZERO frontend callers anywhere (confirmed via a
+      whole-frontend grep), a genuinely dead endpoint alongside the
+      real HARD RULE #4 violation. Given no real usage to preserve,
+      retired outright (matching this project's own established
+      "genuinely dead, don't invest in fixing what nobody uses"
+      pattern) rather than repaired — the same real, explainable
+      rule-based score breakdown it computed is already available
+      through the live `/intelligence` page and `GET /candidates/{id}`'s
+      own `ai_scores`, so nothing user-facing was lost. Verified via
+      the trusted-internal path: a clean 404 post-fix.
+    Both deployed via the established scp → hash-verify → rebuild →
+    health-check cycle. Zero-token audit: `CONFIRMED CLEAN`.
 
 ---
 

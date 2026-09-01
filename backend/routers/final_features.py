@@ -9,17 +9,21 @@
 7. JD quality optimizer (rules)
 8. Slack/Teams notifications
 """
-import io, json, os, secrets, hashlib, httpx
+import io, json, os, secrets, httpx
 from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
+# Aliased: this file's own `ai_router` name below is a LOCAL FastAPI
+# APIRouter instance (predates this fix) - importing the real, shared
+# ai_router.py module under the same bare name would be silently
+# shadowed by that later assignment. See the HARD RULE #4 fix note
+# below for why this module is needed at all.
+import ai_router as shared_ai_router
 import db
 from deps import Actor, get_actor, require_role
 
 router = APIRouter(prefix="/features", tags=["features"])
-OLLAMA_URL = "http://ollama:11434/api/generate"
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
 
 # ── PDF helpers (reportlab) ───────────────────────────────────
 def pdf_header(canvas, title: str, subtitle: str = ""):
@@ -213,31 +217,21 @@ async def candidate_pdf(candidate_id: str, actor: Actor = Depends(get_actor)):
 # ── 2. AI INTERVIEW QUESTION GENERATOR ────────────────────────
 ai_router = APIRouter(prefix="/ai-tools", tags=["ai-tools"])
 
-async def ollama_ask(prompt: str, max_tokens: int = 512) -> str:
-    """Call Ollama with caching via ollama_cache table."""
-    cache_key = hashlib.md5(prompt.encode()).hexdigest()
-    async with db.system_conn() as conn:
-        cached = await conn.fetchrow(
-            "SELECT response FROM ollama_cache WHERE cache_key=$1 AND created_at > now()-INTERVAL '7 days'",
-            cache_key)
-        if cached:
-            return cached['response']
-    try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            r = await client.post(OLLAMA_URL, json={
-                "model": OLLAMA_MODEL, "prompt": prompt,
-                "stream": False, "options": {"num_predict": max_tokens, "temperature": 0.3}
-            })
-            result = r.json().get('response', '').strip()
-        if result:
-            async with db.system_conn() as conn:
-                await conn.execute(
-                    "INSERT INTO ollama_cache (cache_key, prompt, response) VALUES ($1,$2,$3) "
-                    "ON CONFLICT (cache_key) DO UPDATE SET response=EXCLUDED.response, created_at=now()",
-                    cache_key, prompt[:500], result)
-        return result or "[Ollama returned empty response]"
-    except Exception as e:
-        return f"[Ollama unavailable: {str(e)[:100]}]"
+# REAL HARD RULE #4 VIOLATION FOUND AND FIXED (2026-09-01 QA sweep):
+# this file used to have its own local `ollama_ask()` helper, calling
+# Ollama directly via a bespoke httpx POST and caching through a
+# separate, plain-exact-hash `ollama_cache` table — bypassing the
+# shared ai_router.py module's real Tier-2 cascade (semantic-similarity
+# cache lookup via ai_cache.prompt_embedding vector(384), per HARD RULE
+# #4's own explicit text: "not just exact-hash"). This is the SAME real
+# bug class already found and fixed once before in this project
+# (phase3.py's own local call_ollama() helper, 2026-08-10) — this
+# instance was simply never caught in that earlier pass. Confirmed live
+# via grep this was genuinely bypassing real, active production traffic
+# (both call sites below feed the real /ai-tools page's Interview
+# Questions and Ranking Explanation tabs) - not dead code. Deleted the
+# local helper entirely; both call sites now route through the real,
+# shared shared_ai_router.generate() (see the import alias note above).
 
 @ai_router.post("/interview-questions")
 async def generate_questions(requisition_id: str, count: int = 8,
@@ -249,13 +243,22 @@ async def generate_questions(requisition_id: str, count: int = 8,
             requisition_id, actor.tenant_id)
         if not req: raise HTTPException(404, "Requisition not found")
 
-    skills = ', '.join((req['skills_required'] or [])[:6])
-    prompt = (f"Generate {count} technical interview questions for a {req['title']} role. "
-              f"Key skills: {skills}. "
-              f"Include: 3 technical questions, 2 coding/problem-solving, 2 behavioural, 1 system design. "
-              f"Format: Q1. [question] | Type: technical | Difficulty: medium. One per line. Be concise.")
+        skills = ', '.join((req['skills_required'] or [])[:6])
+        prompt = (f"Generate {count} technical interview questions for a {req['title']} role. "
+                  f"Key skills: {skills}. "
+                  f"Include: 3 technical questions, 2 coding/problem-solving, 2 behavioural, 1 system design. "
+                  f"Format: Q1. [question] | Type: technical | Difficulty: medium. One per line. Be concise.")
 
-    response = await ollama_ask(prompt, max_tokens=600)
+        cache_key = f"interview_questions:{requisition_id}:{count}"
+        try:
+            result = await shared_ai_router.generate(conn, actor.tenant_id, cache_key, prompt)
+            response = result["text"]
+        except Exception as e:
+            # Matches the old ollama_ask() helper's own graceful-
+            # degradation behavior - a transient Ollama outage must
+            # never 500 this real, live endpoint.
+            response = f"[Ollama unavailable: {str(e)[:100]}]"
+
     questions = []
     for line in response.split('\n'):
         line = line.strip()
@@ -284,18 +287,24 @@ async def rank_explanation(candidate_id: str, requisition_id: str,
             requisition_id, actor.tenant_id)
         if not cand or not req: raise HTTPException(404, "Not found")
 
-    cand_skills = ', '.join(list(cand['skills'] or [])[:6])
-    req_skills  = ', '.join(list(req['skills_required'] or [])[:6])
-    exp_yr = (cand['total_exp_mo'] or 0) // 12
-    score  = cand['readiness_index'] or 0
+        cand_skills = ', '.join(list(cand['skills'] or [])[:6])
+        req_skills  = ', '.join(list(req['skills_required'] or [])[:6])
+        exp_yr = (cand['total_exp_mo'] or 0) // 12
+        score  = cand['readiness_index'] or 0
 
-    prompt = (f"In 3 sentences, explain why {cand['full_name']} (score: {score}/100, "
-              f"{exp_yr} years exp, skills: {cand_skills}) is a "
-              f"{'strong' if float(score)>=70 else 'moderate' if float(score)>=50 else 'weak'} "
-              f"match for {req['title']} (needs: {req_skills}). "
-              f"Be specific about skill matches and gaps. Keep it professional and concise.")
+        prompt = (f"In 3 sentences, explain why {cand['full_name']} (score: {score}/100, "
+                  f"{exp_yr} years exp, skills: {cand_skills}) is a "
+                  f"{'strong' if float(score)>=70 else 'moderate' if float(score)>=50 else 'weak'} "
+                  f"match for {req['title']} (needs: {req_skills}). "
+                  f"Be specific about skill matches and gaps. Keep it professional and concise.")
 
-    explanation = await ollama_ask(prompt, max_tokens=200)
+        cache_key = f"rank_explanation:{candidate_id}:{requisition_id}"
+        try:
+            result = await shared_ai_router.generate(conn, actor.tenant_id, cache_key, prompt)
+            explanation = result["text"]
+        except Exception as e:
+            explanation = f"[Ollama unavailable: {str(e)[:100]}]"
+
     return {"candidate": cand['full_name'], "role": req['title'],
             "readiness_score": score, "grade": cand['readiness_grade'],
             "explanation": explanation,
