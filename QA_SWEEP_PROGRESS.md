@@ -258,11 +258,32 @@ live-verification pass this phase's checklist items still need.)
 
 ## PHASE 5 — Security audit
 - [ ] Auth/role gaps (no token / wrong role / wrong tenant)
-- [ ] IDOR sweep
+- [~] IDOR sweep — spot-checked `GET /candidates/documents/{doc_id}/
+      download` (a classic IDOR target, serves files): correctly scopes
+      by `tenant_id` via `db.tenant_conn()`, a cross-tenant attempt
+      would 404. Not a full sweep of every ID-taking endpoint.
 - [ ] Cross-tenant leaks (RLS, security_invoker, SECURITY DEFINER)
 - [ ] Forgeable/guessable token audit
 - [ ] Privilege escalation checks
-- [ ] Injection/XSS spot-check
+- [~] Injection/XSS spot-check — a real, useful SQL-injection static
+      pass (done opportunistically during a Batch-4 background run, no
+      live verification needed for this kind of check): grepped every
+      dynamic-SQL-construction pattern across `backend/routers/*.py`
+      (dynamic `ORDER BY` columns, dynamic `WHERE`-clause assembly,
+      dynamic table/column names). Found and checked the one genuinely
+      real-looking risk pattern — `candidates.py`'s dynamic `ORDER BY
+      c.{sort_by}` — and confirmed it's correctly guarded by a real,
+      hardcoded `ALLOWED` column-name set checked BEFORE interpolation,
+      not a live vulnerability. Every `WHERE`-clause-building pattern
+      found (5 files) always parameterizes actual values via `$N`, only
+      the surrounding SQL structure is built dynamically. The one
+      dynamic `UPDATE {table} SET {col}=...` pattern found
+      (`users.py`'s force-purge endpoint) iterates a hardcoded, code-
+      reviewed Python constant (`_FORCE_NULLIFY`), never user input —
+      the one genuinely request-derived value (`user_id`) is correctly
+      parameterized via `$1`. No real SQL injection found in this pass.
+      Not yet a full sweep of every dynamic-SQL site in the codebase,
+      and XSS wasn't checked at all yet (frontend-side).
 - [ ] Secrets sweep (repo + git history)
 - [ ] Rate limiting/abuse on public endpoints
 
