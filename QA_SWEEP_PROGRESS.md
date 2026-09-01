@@ -125,16 +125,18 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
         (p23_p27.py) read from the confirmed-dead `audit_logs` (plural)
         table — a real, broken, zero-caller duplicate of the already-
         working `/audit` endpoint. Retired.
-- [~] Batch 2: S21–S40 — 81/86 real passes. 4 failed + 1 flaky, all
-      confirmed (via direct backend-log inspection, not assumed) to be
-      this session's own well-documented per-IP login rate-limit
-      artifact from today's unusually heavy cumulative test-run volume
-      — every single failure traced to a real `429` on that specific
-      test's own `POST /auth/login` call, immediately followed by the
-      expected `401` on its next request (S21/S24 already re-confirmed
-      clean in isolation; S34/S35 pending a final clean re-run once the
-      rate-limit window genuinely clears, not just retried immediately).
-      Zero real regressions found in this batch.
+- [x] Batch 2: S21–S40 — DONE, fully clean. Initial run: 81/86 real
+      passes, 4 failed + 1 flaky — all confirmed (via direct backend-
+      log inspection, not assumed) to be this session's own well-
+      documented per-IP login rate-limit artifact from an unusually
+      heavy cumulative test-run volume that day — every failure traced
+      to a real `429` on that specific test's own `POST /auth/login`
+      call, immediately followed by the expected `401` on its next
+      request. Re-verified after a genuine, pure time-based cooldown
+      (zero interim login attempts, to avoid the self-defeating "polling
+      with logins perpetuates the rate limit" trap): S21/S24 clean in
+      isolation, then S34+S35 together (13/13) after the full cooldown.
+      Zero real regressions found anywhere in this batch.
 - [ ] Batch 3: S41–S60
 - [ ] Batch 4: S61–S88
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
