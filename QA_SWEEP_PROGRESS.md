@@ -200,12 +200,20 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
         concluded.
       **Batch 4a (S61–S74) is now fully closed** — every real failure
       root-caused, no outstanding items.
-      Batch 4b (S75–S88) still needs its own dedicated re-run — only
-      S87/S88 were independently re-verified so far (via direct API
-      reproduction during the giant-batch investigation); S75, S76,
-      S77, S78, S79, S80, S81, S82, S83, S84, S85, S86 have not yet
-      been individually re-confirmed clean after the original giant-
-      batch rate-limit cascade.
+      Batch 4b (S75–S88) first dedicated attempt: 33 passed / 7 failed /
+      2 flaky / 15 did-not-run. Confirmed via direct backend-log
+      correlation this run hit 21 real 429s in its own ~8-minute
+      window — the same rate-limit-cascade pattern already documented
+      repeatedly (each of S81-S88's own `.serial()` `setup` steps
+      creates 2-3 throwaway users needing their own real login; running
+      8 of these suites back-to-back in one invocation exceeds the
+      10-login/15min limit almost immediately). **S75-S80 (6 of 14
+      suites) confirmed fully clean** — zero failures anywhere in that
+      range across this run. All 7 real failures + both flaky results
+      are confined to S81-S88 (setup-step cascades in S83/S84/S85/S86,
+      plus S82/S87/S88's own downstream assertions) — not yet
+      individually re-verified clean, re-running in a smaller,
+      isolated sub-batch after a longer cooldown.
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
       S20/S53's own cleanup hooks correctly leave zero residue; found
@@ -375,7 +383,30 @@ live-verification pass this phase's checklist items still need.)
       account P&L, collections, payroll) — hand-verified arithmetic
 
 ## PHASE 5 — Security audit
-- [ ] Auth/role gaps (no token / wrong role / wrong tenant)
+- [x] Auth/role gaps (no token / wrong role / wrong tenant) — real,
+      evidence-based checks against the live production API (no
+      login endpoint touched, so none of this consumed rate-limit
+      budget): (1) 7 real sensitive endpoints (candidates/users/
+      assignments/permission-log) all correctly 401 with zero token,
+      a garbage token, an empty bearer value, and a wrong auth scheme
+      (Basic instead of Bearer) — no leaky error messages, no silent
+      200. (2) A tampered-signature JWT (one flipped character on a
+      real, valid token) correctly 401s, while the real, untampered
+      token still 200s (sanity-checked the tampering was meaningful).
+      (3) The classic `alg: none` JWT forgery attack (a header claiming
+      no signature algorithm at all, admin role + real tenant_id in
+      the payload, no signature) correctly 401s — the JWT library does
+      not fall back to trusting an unsigned/none-alg token. (4) Read
+      `backend/deps.py`'s `get_actor()` in full: when a real
+      `Authorization: Bearer` header is present, the `x-tenant-id`
+      header (the documented "trusted-internal, anonymous, role=None"
+      access pattern) is never even read — the JWT's own embedded
+      `tenant_id` claim is exclusively authoritative. Verified this
+      empirically, not just from reading the code: sent the real admin
+      JWT ALONGSIDE a forged `x-tenant-id: 00000000-...` header
+      claiming a different tenant, and confirmed the response's real
+      candidate data still carries the correct, real tenant_id from the
+      JWT — the forged header had zero effect. No auth/role gaps found.
 - [~] IDOR sweep — spot-checked `GET /candidates/documents/{doc_id}/
       download` (a classic IDOR target, serves files): correctly scopes
       by `tenant_id` via `db.tenant_conn()`, a cross-tenant attempt
