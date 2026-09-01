@@ -18523,3 +18523,119 @@ the formal test-suite hygiene audit (`.serial()` usage, cleanup
 completeness) beyond what was informally covered by this investigation.
 The 12 real orphan-route findings from the wiring audit above remain
 uncatalogued for a fix decision — reported, not yet acted on.
+
+## QA sweep, same day: Batch 2 (S21-S40) run clean, plus 2 real, live
+## HARD RULE #4 violations found and fixed during a rate-limit-wait
+## Phase 4 static-analysis pass — 2026-09-01
+Direct continuation. Phase 1 Batch 2: 81/86 real passes; the 4 failures
+plus 1 flaky test were all confirmed — via direct backend-log
+inspection, not assumed — to be this session's own well-documented
+per-IP login rate-limit artifact from an unusually heavy cumulative
+test-run volume today (every failure traced to a real `429` on that
+specific test's own `POST /auth/login`, immediately followed by the
+expected `401` on its next request). Zero real regressions in this
+batch. Learned a real, useful lesson mid-investigation: a "poll every
+60s by attempting a real login" recovery script is self-defeating for
+exactly this kind of rate limit — each poll attempt itself consumes the
+very budget it's trying to detect the exhaustion of. Switched to a pure
+time-based wait (a single `sleep`, then exactly one login attempt at
+the end) instead, and used the resulting free time productively rather
+than idly — starting Phase 4's HARD RULE compliance work via pure
+static analysis (grep/read only, no API calls, so it couldn't
+interfere with the rate-limit recovery).
+
+**Real, positive findings, verified not just read**: HARD RULE #9
+(app_user only, never postgres) — confirmed clean, `DATABASE_URL`
+correctly defaults to `app_user` in both `backend/db.py` and the real
+`docker-compose.yml`, zero hardcoded postgres-superuser connection
+strings anywhere in app code. HARD RULE #11 (encryption at rest) —
+`erp_encrypt`/`erp_decrypt` (`sql/05_phase12_erp.sql`) genuinely use
+`pgp_sym_encrypt`/`pgp_sym_decrypt` reading `current_setting('app.
+encrypt_key')`; the Python-side fallback default key
+(`ERP_ENCRYPT_KEY`, weak and visible in source if unset) was a real
+concern worth checking, not assumed safe — confirmed directly on the
+live VPS that a real, non-default 64-character key IS configured and
+passed through correctly. HARD RULE #7/#12 (DPDP consent) — enumerated
+all 7 real `INSERT INTO candidates` code paths across the whole
+backend (not assumed complete from memory of the 2026-08-09 consent
+audit alone) and confirmed every one, including `personal_links.py`
+(built 2026-08-25, genuinely after that audit and never independently
+re-checked since), correctly writes a real `consent_records` row.
+HARD RULE #10 (HITL) and #5/#6 (event_outbox) — spot-checked, both
+holding up on the sample checked (full enumeration still open).
+
+**2 real, live HARD RULE #4 violations found and fixed** — grepped
+every reference to `ollama:11434`/`OLLAMA_URL` outside the real,
+shared `ai_router.py` module and `scheduler.py`, then checked each for
+a real frontend caller before deciding how to fix it (not treating
+"calls Ollama directly" alone as automatically requiring the exact
+same remediation):
+- `final_features.py`'s own local `ollama_ask()` helper called Ollama
+  directly via a bespoke httpx POST, caching through a separate,
+  plain-exact-hash `ollama_cache` table — bypassing the real, shared
+  `ai_router.py` module's semantic-similarity cache (`ai_cache.
+  prompt_embedding vector(384)`, HARD RULE #4's own explicit "not just
+  exact-hash" requirement). The exact same bug class already found and
+  fixed once before in this project (`phase3.py`'s local
+  `call_ollama()`, 2026-08-10) — this instance simply wasn't caught in
+  that earlier pass. Confirmed genuinely LIVE, not dead code: both
+  call sites (`/ai-tools/interview-questions`, `/ai-tools/rank-
+  explanation/{id}`) feed the real, actively-used `/ai-tools` page
+  (its own tagline: "Ollama Qwen2.5-1.5B · Cached · Zero external
+  API" — the exact promise this bug was quietly breaking). Fixed by
+  deleting the local helper and routing both through the real
+  `ai_router.generate()`. **A real naming collision had to be handled
+  carefully**: this file already has an unrelated LOCAL variable also
+  named `ai_router` (a plain `APIRouter` instance predating this fix,
+  referenced directly by `app.py`'s own `app.include_router(final_
+  features.ai_router)` registration) — importing the real module under
+  the same bare name would have been silently shadowed by that later
+  assignment. Used an import alias (`import ai_router as shared_
+  ai_router`) instead of renaming the pre-existing local router
+  variable, avoiding any change to `app.py`'s registration code
+  entirely — the more surgical, lower-risk option. Wrapped both new
+  calls in the same graceful-degradation try/except the old helper
+  had, since the real `ai_router.generate()`'s own `call_ollama()` has
+  no built-in fallback and a transient Ollama outage must never 500
+  these real, live endpoints (a real, foreseeable risk — this exact
+  VPS has had genuine Ollama connectivity issues in this project's own
+  recent history). **A real mistake made and caught immediately, not
+  shipped**: a first pass at removing the old helper left a syntactically-
+  valid but pointless dangling stub function behind (`async def
+  _dead_helper_removed(...): try: pass except...`) — caught by reading
+  the file back before moving on, not by a later test failure; cleaned
+  up properly. Verified end-to-end against a real requisition (SAP ABAP
+  Developer): a real, coherent generation on the first call ("Q1. How
+  would you handle a scenario where an SAP ABAP program is running
+  slower than expected?..."), and a genuine cache hit (0.196s, down
+  from real fresh-generation latency) on an identical second call, with
+  a real, correctly-keyed row confirmed directly in the `ai_cache`
+  table — not just a fast response time assumed to mean caching worked.
+- `pipeline_p2.py`'s `GET /pipeline/insights/{candidate_id}` (Round 3
+  AI Insights) had an identical direct-Ollama-call bypass — but with
+  ZERO frontend callers anywhere (confirmed via a whole-frontend grep),
+  a genuinely dead endpoint layered on top of the real HARD RULE #4
+  violation. Given no real usage to preserve, retired outright
+  (matching this project's own established "genuinely dead, don't
+  invest in fixing what nobody uses" retirement pattern — BGV API, Job
+  Distribution, Assessments, the `/sla/audit-log` endpoint fixed
+  earlier the same day) rather than repaired — the same real,
+  explainable rule-based score breakdown it computed is already
+  available through the live `/intelligence` page and `GET /candidates/
+  {id}`'s own `ai_scores`, so nothing user-facing was lost by removing
+  it. Verified via the trusted-internal path (no login needed, useful
+  during the rate-limit wait): a clean 404 post-fix, with the file's
+  own surrounding line-endings (a pre-existing, genuinely mixed CRLF/LF
+  file — confirmed via a direct byte-level boundary check, not just an
+  aggregate count, which isn't a reliable signal for a file already
+  mixed before this session touched it) left internally consistent.
+
+Both deployed via the established scp → hash-verify → rebuild →
+health-check cycle. Zero-token audit: `CONFIRMED CLEAN`. 4 more stray
+leftover requisitions (from this session's own earlier S20 diagnostic
+investigation, before its tunnel-fix conclusion) found incidentally
+while sourcing a real requisition to test against — confirmed the
+requisition-creation-restriction fix from 2026-09-01 is holding
+correctly even for cleanup (the trusted-internal path correctly 403'd
+attempting to delete them), flagged for cleanup via a real login once
+the rate-limit window clears rather than left silently.
