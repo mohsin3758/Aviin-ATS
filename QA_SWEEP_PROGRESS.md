@@ -465,7 +465,26 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 - [ ] Recruiter/KAE-facing tools
 - [ ] Admin/reporting/analytics
 - [ ] Sub-module/variant coverage sweep (per-feature, as areas are hit)
-- [ ] Scale check (real 2,700+ candidate dataset)
+- [x] Scale check (real 2,700+ candidate dataset) — real, current total:
+      **2,723 active candidates** (confirmed via a direct API call, not
+      assumed). Timed the 2 heaviest real matching endpoints directly
+      against this live dataset: `POST /candidates/rank` (the free-text
+      JD-paste ranking feature, the one flagged earlier this sweep as
+      having a real, growing-scale-dependent test limitation for a
+      throwaway candidate cracking a bounded ranking window — S53) took
+      1.56s at `limit:200` and 2.35s at `limit:5000` (the value S53's
+      own fix now uses) — both comfortably within every real timeout in
+      this stack (nginx's 120s proxy timeout, the test suite's own 150s
+      configured timeout for this specific suite). `GET /requisitions/
+      {id}/match-candidates` (the pgvector-based, deliberately 300-row-
+      bounded ranking pool, built 2026-08-23 specifically for
+      performance) took 0.21s — confirming that design decision is
+      genuinely paying off at real scale. **Conclusion**: S53's earlier
+      finding was correctly diagnosed as a TEST-design limitation (a
+      throwaway candidate's own score not guaranteed to crack an
+      arbitrary top-N cutoff), not a real production performance
+      problem — the actual endpoint remains fast and healthy at this
+      tenant's current real scale, no code change needed.
 - [~] Concurrency & idempotency checks — 2 real, targeted checks done.
       (1) `candidate_ownership.py`'s 30-day FCFS claim mechanism —
       confirmed the real `SELECT ... FOR UPDATE` row lock (documented
