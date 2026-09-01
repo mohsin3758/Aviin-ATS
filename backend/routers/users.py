@@ -130,7 +130,9 @@ async def create_user(body: UserCreate, actor: Actor = Depends(require_role("adm
                     "is_active": exists["is_active"],
                 },
             })
-        # Validate role exists
+        # Validate role exists (self-heals a brand-new tenant's empty
+        # role_definitions first — see _ensure_role_definitions_seeded)
+        await _ensure_role_definitions_seeded(conn, actor.tenant_id)
         valid_role = await conn.fetchrow(
             "SELECT role_code, role_name FROM role_definitions "
             "WHERE tenant_id=$1 AND role_code=$2 AND is_active",
@@ -228,6 +230,7 @@ async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(req
         body.joining_date = None
     async with db.tenant_conn(actor.tenant_id) as conn:
         if body.role:
+            await _ensure_role_definitions_seeded(conn, actor.tenant_id)
             valid = await conn.fetchval(
                 "SELECT 1 FROM role_definitions WHERE tenant_id=$1 AND role_code=$2 AND is_active",
                 actor.tenant_id, body.role)
@@ -545,9 +548,46 @@ def _role_dict(r):
     d['permissions'] = perms if isinstance(perms, dict) else json.loads(perms or "{}")
     return d
 
+# REAL GAP FIX (2026-09-01, QA sweep Phase 0 — new-tenant bootstrap
+# check): every sibling tenant-config table (pipeline_stage_config,
+# scoring_weight_config, sla_tier_config, auto_assign_config) already
+# self-heals with a real default on first GET for a brand-new tenant —
+# role_definitions was the one confirmed exception, verified live
+# against a genuine throwaway tenant (all 4 siblings correctly auto-
+# populated; role_definitions alone stayed empty). sql/60's own
+# migration already fixed this ONCE for the 2 tenants that existed at
+# the time, with a comment claiming "any future tenant... self-heals
+# the same way" — but that was a one-time script, never an actual live
+# code path, so a genuinely new tenant created since then would hit the
+# exact same "Invite New User Failed" bug all over again. Shared helper
+# reused by list_roles (the real page-load path) AND create_user/
+# update_user (the actual write paths — a direct API call could
+# theoretically bypass list_roles entirely, so this isn't only a
+# frontend-triggered fix).
+#
+# REAL BUG caught during verification, not shipped blind: the first
+# version of this helper ran the "find whichever tenant has the most
+# role_definitions rows" query directly through this same tenant-scoped
+# conn — RLS correctly restricted it to only the CURRENT (empty)
+# tenant's own rows, so the cross-tenant lookup always returned nothing
+# and this silently never fired. Confirmed live: GET /roles against a
+# real throwaway tenant still returned [] after that first attempt.
+# db.system_conn() doesn't help either — it hits the same recurring
+# ''::uuid RLS-cast-crash class already documented repeatedly elsewhere
+# in this project. Fixed with a real SECURITY DEFINER function
+# (sql/100_seed_role_definitions_function.sql, owned by postgres, which
+# genuinely bypasses RLS) — the same established pattern already used
+# for get_client_portal_token/redeem_referral_click/record_email_open
+# elsewhere in this codebase for exactly this "app_user code needs a
+# narrow, safe read across tenants" situation.
+async def _ensure_role_definitions_seeded(conn, tenant_id: str):
+    await conn.execute("SELECT seed_role_definitions_for_tenant($1)", tenant_id)
+
+
 @roles_router.get("")
 async def list_roles(department: Optional[str]=None, actor: Actor=Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        await _ensure_role_definitions_seeded(conn, actor.tenant_id)
         rows = await conn.fetch("""
             SELECT rd.*,
                    COUNT(u.id) AS user_count

@@ -18180,3 +18180,197 @@ proven correct via 4 separate methods (direct API call, a standalone
 non-suite Playwright script, real screenshots, and S88's own clean first
 run) before the rate limit was hit. Zero-token audit: `CONFIRMED CLEAN`
 (431 files, 0 external API refs).
+
+## Full-Stack Evidence-Based QA Sweep — Phase 0 (environment & schema baseline), 2026-09-01
+User asked for a genuinely comprehensive, evidence-based QA sweep of the
+whole application (S1 through the real permanent suite's current max,
+"or more"), built up across several rounds of "check what's still
+missing in this process" before starting — the agreed plan (real data
+safety rules, a backend↔frontend wiring audit, a dedicated security
+phase, HARD RULE/financial-integrity scrutiny, background-job/
+concurrency/scale checks, and honest disclosure of what can't be fully
+verified) is tracked in a new, permanent, git-committed
+`QA_SWEEP_PROGRESS.md` (repo root — the single source of truth for sweep
+progress across sessions, distinct from this file's own per-fix
+narrative). Phase 0 (environment & schema baseline) is the first
+completed phase — 2 real, structural bugs found and fixed, one real live
+issue flagged (can't be fixed by me), one confirmed stray-test-data leak
+cleaned up.
+
+**1. A 57-table schema-drift finding, the largest single instance of
+this project's own most-recurring bug class.** Diffed the live database
+schema against every committed `sql/*.sql` migration for the first time
+as a deliberate, systematic pass (not incidental discovery) — found 57
+real, live, heavily-used tables with genuinely ZERO `CREATE TABLE`
+anywhere in git, including core, foundational ones: `resume_files`,
+`role_definitions`, `interview_schedules`, `candidate_messages`,
+`email_templates`, `recruiter_tasks`, `webhook_integrations`,
+`skills_taxonomy`, `saved_filters`, `work_sessions`, and 47 more. A
+fresh environment built from git alone would silently be missing all of
+them. Confirmed this wasn't a regex-matching artifact before trusting
+the count — spot-checked 3 known-old, known-heavily-referenced tables
+(`resume_files`/`role_definitions`/`interview_schedules`) directly: zero
+CREATE TABLE for any of them anywhere in `sql/`, despite dozens of other
+migrations referencing/altering them.
+
+`sql/99_phase0_schema_drift_backfill.sql` — captured via a single,
+combined `pg_dump --schema-only` covering all 57 tables in one
+invocation (not several smaller ones), specifically so PostgreSQL's own
+dependency resolution — not manual reordering — determined statement
+order, closing off any cross-table foreign-key ordering risk (confirmed
+several real FKs existed WITHIN this same batch, e.g.
+`calendar_events`→`interview_schedules`, `candidate_messages`→
+`user_email_accounts`/`email_templates`). Built via a small Python
+transform script (not hand-edited) turning pg_dump's raw output into a
+genuinely safe, idempotent migration: `CREATE TABLE`/`CREATE SEQUENCE`
+→ `IF NOT EXISTS`; `CREATE INDEX` → `IF NOT EXISTS`; every `ADD
+CONSTRAINT` wrapped in a real `DO $$ BEGIN ... EXCEPTION WHEN ... THEN
+NULL; END $$;` block (Postgres has no native `ADD CONSTRAINT IF NOT
+EXISTS`); every `CREATE POLICY` preceded by a matching `DROP POLICY IF
+EXISTS`, matching the exact idempotency pattern already established in
+`sql/33_untracked_tables_and_rls.sql`.
+
+**3 real, distinct SQLSTATE bugs found in my OWN transform script while
+verifying it, not shipped blind** — each one only surfaced by actually
+running the migration against production inside a rollback-guarded
+transaction and reading the real error, not assumed from documentation:
+(1) re-adding an already-existing PRIMARY KEY raises `invalid_table_
+definition` (42P16, "multiple primary keys"), NOT `duplicate_object`
+— my first exception handler didn't catch it, confirmed via a live
+error on `agency_submissions_pkey`; (2) re-adding an already-existing
+UNIQUE constraint raises `duplicate_table` (42P07, since UNIQUE creates
+an implicit index) — a THIRD distinct SQLSTATE, confirmed via a live
+error on `agency_users_token_key`; both confirmed via direct, minimal
+reproduction scripts against production (`DO $$ ... EXCEPTION WHEN
+OTHERS THEN RAISE NOTICE 'SQLSTATE: %'...`) before widening the handler,
+not guessed at. Final handler: `EXCEPTION WHEN duplicate_object OR
+invalid_table_definition OR duplicate_table THEN NULL;` — verified via
+a genuinely clean transactional dry-run (`BEGIN; ...; ROLLBACK;`, zero
+errors across the full 4,000+ line file) only after both fixes landed.
+
+Verified for real, not code review, at every step: the transactional
+dry-run proved zero errors AND that it was rolled back (nothing
+committed); the SAME file then run for real (committed) also produced
+zero errors; run a SECOND time afterward specifically to prove genuine
+idempotency (not just "worked once") — zero errors, all 88 "already
+exists, skipping" notices this time, confirming a true no-op on repeat.
+App health (`/api/health`) confirmed 200 throughout every step, and a
+broad regression sweep after (see below) confirmed no behavioral
+regression from the 57 newly-backfilled `CREATE TABLE IF NOT EXISTS`
+statements running against tables that already had real, live data.
+
+**2. A real, structural new-tenant bootstrap gap, found by directly
+creating a genuine throwaway tenant and testing it — not assumed.**
+Confirmed first that there is NO real tenant-creation API endpoint at
+all in this codebase (only a `get_or_create_tenant()` helper inside
+`seed_data.py`, a dev/demo seeding script) — creating a tenant has
+always been a fully manual, ad-hoc process. Created a real throwaway
+tenant directly via SQL and tested every tenant-scoped config table a
+fresh tenant would need: `pipeline_stage_config`, `scoring_weight_
+config`, `sla_tier_config`, and `auto_assign_config` ALL genuinely self-
+heal with real, sensible defaults on their very first `GET` (confirmed
+live — 13 real pipeline stages, real scoring weights, real SLA hour
+tiers, auto-assign enabled by default, all auto-created with zero
+manual intervention) — but `GET /roles` returned a genuinely empty
+list. `sql/60_backfill_role_definitions_for_empty_tenants.sql`
+(2026-08-16) already fixed this exact symptom ONCE, for the 2 tenants
+that existed at the time — its own comment even claims "any future
+tenant created with zero roles self-heals the same way" — but that was
+purely a one-time SQL script, never wired into any actual, live code
+path. A genuinely new tenant created any time after that migration ran
+would hit the EXACT same "Invite New User Failed" bug all over again,
+confirmed live by reproducing it fresh.
+
+**A real bug in my own first fix attempt, caught by verification before
+it shipped, not after.** The first version added a `_ensure_role_
+definitions_seeded()` Python helper that ran the "find whichever tenant
+has the most role_definitions rows" lookup through the SAME tenant-
+scoped `db.tenant_conn(actor.tenant_id)` connection already open for the
+request — but `role_definitions` has real, tenant-scoped RLS, so that
+connection could only ever see the CURRENT (empty) tenant's own zero
+rows, never any other tenant's — the cross-tenant lookup silently always
+returned nothing. Confirmed live: deployed, retested `GET /roles`
+against the real throwaway tenant — still `[]`. Root-caused precisely
+before attempting a second fix, not guessed at: `db.system_conn()`
+(the other obvious candidate) would have hit the exact same recurring
+`''::uuid` RLS-cast-crash class already documented dozens of times
+elsewhere in this project for any FORCE RLS table whose policy casts
+`app.tenant_id` to `::uuid` — not a real solution either. Fixed with the
+actually-correct, already-established pattern for this exact class of
+problem: a real `SECURITY DEFINER` SQL function
+(`sql/100_seed_role_definitions_function.sql`, owned by `postgres`,
+genuinely bypassing RLS rather than merely trying to sidestep it),
+matching the same shape already used elsewhere in this codebase for
+"app_user-level code needs a narrow, safe read across tenant
+boundaries" (`get_client_portal_token`, `redeem_referral_click`,
+`record_email_open`). The Python helper now just calls `SELECT
+seed_role_definitions_for_tenant($1)` — wired into `list_roles` (the
+real page-load path) AND `create_user`/`update_user` (the actual write
+paths — a direct API call could theoretically reach these without ever
+calling `list_roles` first, so this isn't only a frontend-triggered
+fix).
+
+Verified for real end-to-end, not code review: the real throwaway
+tenant went from a genuine 0 to a real, complete 28-role catalog on the
+very next `GET /roles` call after the fix; called it a second time and
+confirmed still exactly 28 (no duplicates — real idempotency, not just
+"it worked once"); confirmed directly in the database, not just via the
+API response. A scoped regression sweep across every suite touching
+`users.py`/role logic (S31/S33/S51/S81, 21 tests — including S31's own
+existing "second tenant (Beta Tech Staffing) now has a real, complete
+role catalog" check, proving the fix didn't disturb the already-correct
+existing tenant) passed 21/21 clean. All throwaway tenant data
+(role_definitions, pipeline_stage_config, scoring_weight_config,
+sla_tier_config, auto_assign_config rows, and the tenant row itself)
+cleaned up afterward via direct SQL in the correct FK-safe order,
+confirmed zero residue.
+
+**3. A real, previously-undetected stray-test-data leak found while
+checking integration health.** `webhook_integrations` (the real MS
+Teams/Slack/Discord notification feature, built 2026-08-08) had exactly
+4 rows — all confirmed, on inspection of their actual `webhook_url`
+values, to be leftover E2E test artifacts from 2026-07-11 ("E2E Test
+Hook"/"E2E Test"/"E2E Final Test"/"Final E2E Test", pointing at fake
+`hooks.slack.com/test` and `httpbin.org/post` URLs) — not real customer-
+configured integrations. This tenant currently has ZERO real Slack/
+Teams/Discord integration configured, a fact that was invisible before
+this check since the table wasn't empty, just entirely fake. Cleaned up
+via direct SQL (documented last resort — no `DELETE` endpoint exists for
+this table, matching this project's own established precedent for the
+same table from the original 2026-08-08 build).
+
+**4. A real, live, currently-active production issue found and flagged
+— NOT fixed, since it genuinely can't be fixed by me.** WAHA's primary
+`"default"` WhatsApp session — the one powering every automated stage-
+change notification, confirmed connected as recently as 2026-08-31 — is
+now showing `SCAN_QR_CODE` (disconnected), along with 2 other real
+sessions (`"aviin"`, and a per-user personal session). This means every
+automated WhatsApp send has been silently failing since whenever this
+disconnected, with no error visible anywhere in the app itself (the
+send just fails quietly, matching this project's own documented "silent
+failure" bug class — just from an external cause this time, not a code
+bug). Reconnecting requires a real, physical QR-code scan from whoever
+holds the linked WhatsApp Business phone, via the WAHA dashboard —
+matching the exact recovery process already documented for this same
+scenario on 2026-08-30. Flagged directly to the user rather than
+silently left for a future session to rediscover independently.
+
+Also confirmed n8n's own live workflow state (not just that the app
+calls the right webhook URLs) — all 13 real workflows genuinely
+`active=1`, checked directly against n8n's own SQLite store (copied
+with its `-wal`/`-shm` sidecars, the same WAL-mode gotcha already
+documented in this project's history) rather than trusted from the
+app's own webhook-call success alone. SSL certificate confirmed valid
+(18 days remaining) with `certbot.timer` genuinely active and within its
+own 30-day auto-renewal window — checked directly, not assumed safe.
+Public-facing links (the real `/careers` page, the public job-board API)
+confirmed reachable via genuine external HTTPS requests from a separate
+network, not just from inside/near the VPS.
+
+Full Phase 0 checklist, findings, and remaining open items tracked in
+`QA_SWEEP_PROGRESS.md` (repo root). Zero-token audit: `CONFIRMED CLEAN`
+throughout every step. Deployed via the established scp → hash-verify →
+rebuild → health-check cycle for every code change; the 2 new SQL
+migrations verified via transactional dry-run before being committed
+for real, matching this project's own established discipline for any
+schema change with real production stakes.
