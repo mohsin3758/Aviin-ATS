@@ -159,6 +159,23 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       expected). Re-running in 2 smaller sub-batches (S61-S74, S75-S88)
       after a genuine cooldown, to keep each run's own login volume
       under the rate limiter's threshold this time.
+      Batch 4a (S61-S74) first run: 71/78 passed, 3 failed + 1 flaky
+      (much smaller ratio than the giant single-run attempt, confirming
+      the smaller-sub-batch strategy genuinely helps) — but 6 more real
+      429s still confirmed in that window (this session's OWN
+      cumulative volume across the whole day, not fresh noise). A same-
+      window re-run reproduced 2 DIFFERENT failures each time (S61's
+      "Automatic mode" test failed only on the 2nd attempt; S67's "per-
+      user bot-auto-reply" failed only on the 1st) — the inconsistent,
+      non-reproducible pattern itself is real evidence for rate-limit
+      noise rather than a genuine app bug, further confirmed by direct,
+      timestamped backend-log correlation showing fresh 429s exactly
+      matching S67/S74's own multi-recruiter-creation setup steps
+      (each throwaway user needs its own real login). Not yet re-
+      verified clean — waiting for a longer, genuinely uninterrupted
+      20-minute window (this session's own repeated back-to-back
+      testing today has kept the rate-limit bucket topped up even
+      across earlier 16-minute waits) before the next re-run.
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
       S20/S53's own cleanup hooks correctly leave zero residue; found
