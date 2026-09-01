@@ -289,7 +289,29 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 - [ ] Localization/multi-language honesty check
 - [ ] Uploads & malformed input
 - [ ] Degraded-dependency behavior
-- [ ] is_active leak sweep
+- [x] is_active leak sweep (`JOIN clients` variant — this project's
+      extensive prior history already exhaustively swept `JOIN users`/
+      `JOIN candidates`, but `JOIN clients` specifically had never had
+      a dedicated pass) — a real Python-regex sweep (not fragile
+      line-grep) found all 38 real `JOIN clients` occurrences across
+      the backend, flagged the 17 with no `is_active` mention in a
+      generous ±10/15-line window, and individually read every one.
+      **No genuine bugs found.** Every flagged occurrence is one of two
+      safe shapes: (1) resolving a real client's name for a historical/
+      financial record or a generated document (placements list/CSV
+      export, timesheets, call letters, resume-generator client
+      attribution, stage-email placeholder substitution) — correctly
+      showing accurate real data regardless of the client's CURRENT
+      active status, matching this project's own established
+      "historical record, deliberately unfiltered" precedent
+      (`audit_log`, `export_placements`); or (2) a single-row lookup
+      scoped by an explicit `WHERE ...id=$1 AND tenant_id=$2` (not a
+      browsable list that could show clutter to begin with). One minor,
+      low-severity, non-security cosmetic note (not fixed, not a real
+      bug): `kae_submission.py`'s submission-preview template picker
+      could show a tracking-sheet template pinned to a now-inactive
+      client as a selectable option — a UX nicety, not a leak (it's a
+      `LEFT JOIN`, degrades gracefully either way).
 - [ ] Responsive/narrow-viewport check
 - [ ] UX/comprehension pass
 
