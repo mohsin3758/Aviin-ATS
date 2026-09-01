@@ -660,9 +660,23 @@ live-verification pass this phase's checklist items still need.)
       give (e.g. `inc=33.335` -> 23.33+10.00=33.33 vs a single
       `round(33.335,2)`=33.34) — a sub-rupee residual with real
       compensation amounts, not worth a fix, but disclosed rather than
-      silently glossed over. Not yet checked: retention bank release/
-      forfeit arithmetic, loyalty milestone amounts, collections aging,
-      or payroll's TDS/PF calculations.
+      silently glossed over.
+      **Retention bank release / loyalty milestone check, added**: both
+      `process_retention_bank_releases()` and `check_loyalty_milestones()`
+      (`scheduler.py`) are pure state-transition functions (held->
+      released, pending->achieved) — neither computes any NEW amount at
+      release time, both just release/flag a value already computed and
+      stored at creation time, so there's no separate release-time
+      arithmetic to verify. Confirmed the real loyalty bonus tiers
+      (`incentives.py`'s `LOYALTY_AMOUNTS` constant) exactly match
+      CLAUDE.md's own documented values (1yr=15000, 2yr=30000,
+      3yr=50000, 5yr=100000) — correct, no discrepancy. Minor,
+      non-bug maintainability note: this same dict is defined twice
+      (a module constant AND an inline literal elsewhere in the same
+      file) with identical values in both — harmless duplication, not
+      a correctness issue, not fixed (out of scope for a QA sweep to
+      refactor working code with no bug). Not yet checked: collections
+      aging or payroll's TDS/PF calculations.
 
 ## PHASE 5 — Security audit
 - [x] Auth/role gaps (no token / wrong role / wrong tenant) — real,
