@@ -18638,4 +18638,106 @@ while sourcing a real requisition to test against — confirmed the
 requisition-creation-restriction fix from 2026-09-01 is holding
 correctly even for cleanup (the trusted-internal path correctly 403'd
 attempting to delete them), flagged for cleanup via a real login once
-the rate-limit window clears rather than left silently.
+the rate-limit window clears rather than left silently. (Cleaned up
+once login was available — see the entry below.)
+
+## QA sweep, same day: Batch 2 fully confirmed clean, plus a real HARD
+## RULE #10 gap found and fixed in bulk-reject — 2026-09-01
+Direct continuation. Login recovered after a genuine, pure time-based
+16-minute wait (zero interim `/auth/login` attempts, per the lesson
+learned earlier the same day) — cleaned up the 4 stray requisitions,
+then re-verified S34/S35 (both had failed earlier purely from rate-
+limiting): 13/13 passed cleanly. Batch 2 (S21–S40) is now fully,
+genuinely confirmed clean — zero real regressions across the whole
+range.
+
+Ran Batch 3 (S41–S60, 128 tests) and found 2 real issues, both
+investigated properly rather than assumed to be more rate-limit noise
+(the established pattern this session had already hit several times) —
+this time neither was:
+
+**S43's real failure** — `a plain recruiter is blocked (403)... reads
+still work` asserted `GET /kae/owners` should succeed for a plain
+recruiter (a role gate on writes only). Reproduced consistently in
+isolation (not a flake) — confirmed directly via `GET /roles/
+enforcement` (`enabled: true`) and a direct read of the real
+`recruiter` role's own permissions that this tenant's `recruiter` role
+has **never** had any `kae` grant at all, read or write — the KAE
+module has always been scoped to admin/manager/kae/kam specifically
+(matching the KAE Review Queue's own role gate, 2026-08-26). The test's
+own assumption predates permission enforcement actually being turned on
+for this tenant (2026-08-31) — genuinely stale now, not a bug. Fixed
+the test's expectation (403, not open) with a comment explaining the
+real, current, deliberate system state.
+
+**S59's real failure** — a bare `page.locator('text=SKILL / PROJECT
+EXPERIENCE')` ambiguously matched BOTH the real section header and
+(transiently, in the async-render window before the drawer's own skill-
+experience fetch resolves) the empty-state span's text ("No skill /
+project experience recorded yet." contains this exact substring case-
+insensitively, and Playwright's bare `text=` locator is case-insensitive
+and substring-matching by default) — a genuine, real async-render race,
+the same class already fixed elsewhere in this suite, not random
+flakiness. Fixed with `getByText(..., { exact: true })`, closing the
+ambiguity regardless of timing.
+
+**A real, previously-undiscovered HARD RULE #10 gap, found while
+closing out the earlier "spot-checked, not fully enumerated" #10
+checklist item** — re-enumerated every real code path that can write
+`stage='rejected'` and found `POST /pipeline/bulk-action`'s "reject"
+branch was a bare stage flip (just a `pipeline_movements` audit row) —
+completely bypassing the structured rejection system the single-
+candidate `PATCH .../stage` path has required since 2026-08-08: no
+`reason_code`, no `application_rejections` row, and — the actual HARD
+RULE #10 violation, not merely a UX inconsistency — **no `assignment_
+event` write at all**. Fixed by replicating the single-candidate path's
+exact logic: one `reason_code` required and validated once for the
+whole batch (matching how a recruiter would realistically use this —
+reject several candidates for the same reason in one action), then the
+full write set (`application_rejections`, `assignment_event`,
+`audit_log`, a real recruiter/manager notification, and the existing
+best-effort Teams/Slack webhook) per application in the loop.
+
+**Honest scope note, checked not assumed**: confirmed via a whole-
+frontend grep that the only real caller of `/pipeline/bulk-action`
+ever sends `action: "move_stage"` — bulk-reject has zero real UI
+exposure right now, matching a 2026-08-09 note already in this exact
+codebase explaining that decision explicitly ("stuffing [reason_code]
+into a bulk flow felt like a different, bigger feature than 'bulk
+stage-move' asked for"). The fix stands on its own merits regardless —
+a real compliance gap in directly-callable API surface, not contingent
+on UI exposure — and deliberately did NOT add a new "Bulk Reject" UI
+button as part of this fix, since that would be a new feature decision
+beyond what was found broken.
+
+Verified end-to-end with a real throwaway candidate/application, using
+a still-valid cached admin token rather than waiting on the rate-
+limited login endpoint again (a real, useful realization mid-
+investigation: the login RATE LIMIT is specifically on the `/auth/
+login` endpoint itself, not on using an already-issued, valid JWT for
+regular API calls — a cached token from earlier in the same session
+stays completely usable through a login cooldown window). A request
+with no `reason_code` cleanly 400s; a real request with one succeeds,
+and all 5 real writes were independently confirmed directly in the
+database — `application_rejections` (correct reason/notes),
+`assignment_event` (`event_type: candidate.rejected`, real metadata
+incl. `via: bulk_reject`), `audit_log`, a real `notifications` row
+(correctly routed to the manager role since the throwaway candidate
+had no assigned recruiter), and `applications.stage` correctly flipped
+to `rejected`. All throwaway data cleaned up after deployment.
+
+**A real, separate, narrow bug found incidentally while sourcing test
+data for the fix above, not fixed (tangential, low real-world impact,
+flagged for a dedicated future pass)**: `POST /candidates/bulk-assign`
+does `str(actor.user_id)` when logging to `candidate_activities` — for
+the trusted-internal auth path (`actor.role is None`, `actor.user_id
+is None`, used throughout this project by n8n/internal automation
+callers), `str(None)` produces the literal string `"None"`, not a real
+NULL, which the real UUID column then correctly rejects with a genuine
+500. Confirmed narrow — every real frontend call to this endpoint
+carries a real JWT with a real `user_id` — but a genuine robustness gap
+for any legitimate trusted-internal caller that might reach it.
+
+Both fixes deployed via the established scp → hash-verify → rebuild →
+health-check cycle. Zero-token audit: `CONFIRMED CLEAN` throughout.
+Full findings recorded in `QA_SWEEP_PROGRESS.md`.
