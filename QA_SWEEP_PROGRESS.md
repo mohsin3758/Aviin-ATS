@@ -287,7 +287,24 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       not a code gap, and out of this specific checklist item's scope.
 - [ ] Generated-file content correctness (CSV/PDF/etc.)
 - [ ] Localization/multi-language honesty check
-- [ ] Uploads & malformed input
+- [~] Uploads & malformed input — checked path-traversal risk on the 2
+      real file-save helpers used across every upload path in the app
+      (`resume_intake_service.py::save_resume_file` — the highest-
+      volume path, used by every resume-intake channel; `candidates.
+      py::_save_candidate_document_file` — LWD confirmation/other
+      candidate documents). Both use the identical, safe pattern: a
+      regex (`re.sub(r'[^\w.\-]', '_', filename)[:200]`) strips every
+      character that isn't a word char/dot/hyphen from the client-
+      supplied filename BEFORE it ever touches a path — a traversal
+      attempt like `../../../etc/passwd` becomes a harmless
+      `.._.._.._etc_passwd`, no `/` or `\` can survive — combined with
+      a server-generated UUID prefix for uniqueness and a fully
+      server-controlled base directory (tenant_id + date, never client
+      input). No path-traversal risk found on either. Not yet a full
+      pass on every other real Phase 3 sub-item this checklist entry
+      covers (malformed/oversized file content, MIME-type spoofing,
+      zip-bomb-style resource exhaustion) — only the path-construction
+      half checked so far.
 - [ ] Degraded-dependency behavior
 - [x] is_active leak sweep (`JOIN clients` variant — this project's
       extensive prior history already exhaustively swept `JOIN users`/
