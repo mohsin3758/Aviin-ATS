@@ -4,6 +4,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import WhatsAppChatButton from '@/components/WhatsAppChatButton';
 import SkillExperienceCard from '@/components/SkillExperienceCard';
+import FollowUpTab from '@/components/FollowUpTab';
 import { ResumeGeneratorModal } from '@/components/ResumeGeneratorModal';
 import { authHeaders, API, getTokenPayload } from '@/lib/auth';
 import {
@@ -140,13 +141,17 @@ function PipelineInner() {
   // on this board entirely (not even shown under Rejected), for cases
   // like "added by mistake" or "duplicate entry." Backend soft-deletes
   // and enforces the same HITL admin/manager bar as Reject — this local
-  // `canManage` just avoids showing a button that would only 403.
+  // `canRemove` just avoids showing a button that would only 403.
   // getTokenPayload() reads localStorage, unavailable during SSR —
   // deferred to an effect so the server/client first-render match (same
   // pattern used elsewhere in this codebase, e.g. offers/recruiter-ops).
-  const [canManage, setCanManage] = useState(false);
+  // Widened (2026-09-01, explicit ask): a recruiter can now remove a
+  // candidate too, tiered by stage — see recruiterCanMoveToStage below,
+  // reused as-is for "can this recruiter touch this application" since
+  // it already encodes the exact right stage boundary (Screened).
+  const [canRemove, setCanRemove] = useState(false);
   useEffect(() => {
-    setCanManage(['admin', 'super_admin', 'manager'].includes(getTokenPayload()?.role || ''));
+    setCanRemove(['admin', 'super_admin', 'manager', 'kae', 'kam', 'recruiter'].includes(getTokenPayload()?.role || ''));
   }, []);
   // Real workflow rule (2026-09-01, explicit ask): a plain recruiter owns
   // sourcing through screening only — anything past Screened is a
@@ -755,7 +760,7 @@ function PipelineInner() {
             refreshStats();
           }}
           onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
-          onRequestRemove={canManage ? () => setPendingRemove({ appId: selected.id, fromStage: selected.stage, candidateName: selected.candidate_name }) : undefined}
+          onRequestRemove={canRemove ? () => setPendingRemove({ appId: selected.id, fromStage: selected.stage, candidateName: selected.candidate_name }) : undefined}
           drawerTab={drawerTab} setDrawerTab={setDrawerTab} showToast={showToast} stages={STAGES} allStages={ALL_STAGES}
           requisitionId={selectedJobId} clientName={selectedJob?.client_name}
           isRecruiter={isRecruiter} recruiterCanMoveToStage={recruiterCanMoveToStage} />
@@ -897,7 +902,22 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onD
           {initials(app.candidate_name)}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.candidate_name}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.candidate_name}</div>
+            {/* View Profile (2026-09-01, explicit ask): "with view profile
+                option also there" — matching the reference AI Matched
+                Candidates list style. The card's own onClick already opens
+                the drawer; this is a genuinely separate, real navigation
+                to the full profile page, stopping propagation so it never
+                also opens the drawer underneath it. */}
+            {app.candidate_id && (
+              <a href={`/candidates/${app.candidate_id}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                title="View full profile" data-testid={`kanban-view-profile-${app.id}`}
+                style={{ display: 'flex', alignItems: 'center', flexShrink: 0, color: '#94A3B8' }}>
+                <Eye size={11} />
+              </a>
+            )}
+          </div>
           <div style={{ fontSize: 10, color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {[app.current_designation, app.current_employer].filter(Boolean).join(' @ ')}
           </div>
@@ -908,7 +928,32 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onD
           </div>
         )}
       </div>
-      {skills.length > 0 && (
+      {/* Matched/missing skills vs the JD (2026-09-01, explicit ask): "it
+          should highlight skills are there in resume and missing skills
+          as per JD... in the pipeline kanban resume" — matching the
+          AI Matched Candidates modal's own green-check/red-cross
+          convention. Real data already computed by score_candidate_core
+          and stored on candidate_scores.skill_match_details, just never
+          surfaced here before — reused as-is via the pipeline board's own
+          endpoint, no new scoring call. Falls back to the plain skill-chip
+          list below when this candidate hasn't been scored against this
+          requisition yet (matched/missing both empty), so nothing regresses
+          for the common not-yet-scored case. */}
+      {(app.matched_skills?.length > 0 || app.missing_skills?.length > 0) ? (
+        <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 7 }}>
+          {(app.matched_skills || []).slice(0, 2).map((sk: string) => (
+            <span key={`m-${sk}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: '#ECFDF5', color: '#059669', border: '1px solid #A7F3D0' }}>✓ {sk}</span>
+          ))}
+          {(app.missing_skills || []).slice(0, 2).map((sk: string) => (
+            <span key={`x-${sk}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}>✕ {sk}</span>
+          ))}
+          {((app.matched_skills?.length || 0) - 2 > 0 || (app.missing_skills?.length || 0) - 2 > 0) && (
+            <span style={{ fontSize: 9, color: '#94A3B8', padding: '2px 4px' }}>
+              +{Math.max((app.matched_skills?.length || 0) - 2, 0) + Math.max((app.missing_skills?.length || 0) - 2, 0)}
+            </span>
+          )}
+        </div>
+      ) : skills.length > 0 && (
         <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 7 }}>
           {skills.slice(0, 3).map((sk: string) => (
             <span key={sk} style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>{sk}</span>
@@ -1029,19 +1074,46 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               <button onClick={() => onRequestReject()} style={{ fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #FCA5A440', background: app.stage === 'rejected' ? '#DC2626' : '#FEF2F2', color: app.stage === 'rejected' ? '#fff' : '#DC2626' }}>Reject</button>
               {/* Remove from Pipeline (2026-08-20) — deliberately separate
                   from Reject: fully removes the candidate from this job's
-                  board, not just moves them to Rejected. admin/manager only
-                  (onRequestRemove is undefined for everyone else). */}
-              {onRequestRemove && (
-                <button title="Fully remove this candidate from the pipeline (different from Reject)" data-testid="drawer-remove-from-pipeline" onClick={() => onRequestRemove()}
-                  style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#64748B' }}>
-                  <Trash2 size={10} /> Remove
-                </button>
-              )}
+                  board, not just moves them to Rejected.
+                  Tiered by stage for a recruiter (2026-09-01, explicit
+                  ask): "recruiter should have option to delete... in
+                  interested, NDA, or in screened and after that KAE or
+                  KAM or ADMIN have to option to delete" — admin/manager/
+                  kae/kam can always remove; a recruiter only while the
+                  application is still at a stage they're themselves
+                  allowed to move through (real, server-enforced in
+                  applications.py's remove_application — this is purely
+                  the matching client-side UX, same lock+tooltip
+                  convention as the stage pills above). onRequestRemove
+                  is undefined for any other role entirely. */}
+              {onRequestRemove && (() => {
+                const removeLocked = isRecruiter && recruiterCanMoveToStage && !recruiterCanMoveToStage(app.stage);
+                return (
+                  <button
+                    title={removeLocked ? 'Removing past Screened requires a KAE, KAM, or admin/manager — hand off to your account team' : 'Fully remove this candidate from the pipeline (different from Reject)'}
+                    data-testid="drawer-remove-from-pipeline"
+                    onClick={() => { if (!removeLocked) onRequestRemove(); }}
+                    style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: removeLocked ? 'not-allowed' : 'pointer', border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#64748B', opacity: removeLocked ? 0.55 : 1 }}>
+                    {removeLocked ? <Lock size={10} /> : <Trash2 size={10} />} Remove
+                  </button>
+                );
+              })()}
             </div>
           </div>
 
-          {/* Drawer tabs */}
-          <div style={{ display: 'flex', gap: 0, marginBottom: -1 }}>
+          {/* Drawer tabs — real bug fix (2026-09-01): 10 tabs no longer fit
+              the drawer's fixed 500px width (this list has grown over many
+              sessions — Submit to Client, Generate Resume, Call Letter,
+              now Follow-up), and this container had neither overflowX nor
+              flexWrap, so anything past "Call Letter" (Notes, Follow-up,
+              Scorecards, Activity) was silently clipped — genuinely
+              unreachable by click, invisible with zero scroll affordance,
+              on every screen width, for every user, not just the one
+              reported. Real horizontal scroll, matching the established
+              convention already used elsewhere in this codebase for
+              overflowing content, rather than wrapping to a cramped
+              multi-row tab strip in a narrow drawer. */}
+          <div style={{ display: 'flex', gap: 0, marginBottom: -1, overflowX: 'auto', flexWrap: 'nowrap' }}>
             {[
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
               { key: 'nda', icon: <FileSignature size={12} />, label: 'NDA' },
@@ -1055,7 +1127,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onSubmittedToKae, onReques
               { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
             ].map(t => (
               <button key={t.key} data-tab={t.key} onClick={() => setDrawerTab(t.key)}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', borderBottom: `2px solid ${drawerTab === t.key ? '#2563EB' : 'transparent'}`, color: drawerTab === t.key ? '#2563EB' : '#64748B' }}>
+                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', borderBottom: `2px solid ${drawerTab === t.key ? '#2563EB' : 'transparent'}`, color: drawerTab === t.key ? '#2563EB' : '#64748B', flexShrink: 0, whiteSpace: 'nowrap' }}>
                 {t.icon}{t.label}
                 {!!t.count && (
                   <span style={{ fontSize: 9, fontWeight: 800, padding: '0px 5px', borderRadius: 999, background: drawerTab === t.key ? '#2563EB' : '#E2E8F0', color: drawerTab === t.key ? '#fff' : '#64748B' }}>{t.count}</span>
@@ -2170,166 +2242,6 @@ function NotesTab({ appId, showToast }: any) {
             <div style={{ fontSize: 10, color: '#94A3B8' }}>{n.author || 'Recruiter'} · {ago(n.created_at)}</div>
           </div>
         ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Follow-up Tab ─────────────────────────────────────────────────────────────
-// Real feature (2026-09-01, explicit ask): "i want followup button on
-// next to notes so recruiter or KAE, and KAM can keep the followup
-// message and features and connect with all followup features and
-// reports". Wired directly to the real, already-built Reminders &
-// Follow-Ups system — same table (recruiter_tasks), same real fields
-// (title/description/follow_up_reason/priority/due_at/reminder_at/
-// recurrence_rule) and same POST/PATCH endpoints as the full /reminders
-// page's own "New Follow-Up" form, not a second, disconnected concept.
-// Any follow-up created here shows up on that page's Follow-Ups tab and
-// counts toward its real Reports numbers automatically, since both read
-// the same table — no separate wiring needed for "connect... with
-// reports". Pre-fills candidate/application/requisition/client linkage
-// from this drawer's own already-loaded context, tighter than the full
-// page's own manual candidate-search picker.
-const FOLLOWUP_PRIORITY_COLOR: Record<string, { bg: string; fg: string }> = {
-  low: { bg: '#F1F5F9', fg: '#64748B' },
-  medium: { bg: '#EFF6FF', fg: '#2563EB' },
-  high: { bg: '#FFF7ED', fg: '#C2410C' },
-  critical: { bg: '#FEF2F2', fg: '#DC2626' },
-};
-function followupFmtDT(s?: string) {
-  if (!s) return '—';
-  return new Date(s).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-}
-function FollowUpTab({ candidateId, candidateName, applicationId, requisitionId, clientName, showToast }: any) {
-  const { data: tasks, refetch } = useFetch<any[]>(candidateId ? `/recruiter-tasks?candidate_id=${candidateId}` : null);
-  const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({
-    title: '', description: '', follow_up_reason: '', priority: 'medium', due_at: '', reminder_at: '',
-  });
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-
-  async function submit() {
-    if (!form.title.trim()) { setErr('Title is required'); return; }
-    if (!form.due_at) { setErr('Due date & time is required'); return; }
-    setSaving(true); setErr('');
-    try {
-      await apiFetch('/recruiter-tasks', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...form,
-          candidate_id: candidateId,
-          application_id: applicationId || undefined,
-          requisition_id: requisitionId || undefined,
-          due_at: new Date(form.due_at).toISOString(),
-          reminder_at: form.reminder_at ? new Date(form.reminder_at).toISOString() : undefined,
-        }),
-      });
-      setAdding(false);
-      setForm({ title: '', description: '', follow_up_reason: '', priority: 'medium', due_at: '', reminder_at: '' });
-      refetch();
-      showToast('Follow-up created');
-    } catch (e: any) {
-      setErr(e.message || 'Failed to save');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function setStatus(taskId: string, status: string) {
-    try {
-      await apiFetch(`/recruiter-tasks/${taskId}?status=${status}`, { method: 'PATCH' });
-      refetch();
-      showToast(status === 'completed' ? 'Marked done' : 'Follow-up updated');
-    } catch (e: any) { showToast(String(e?.message || 'Failed'), false); }
-  }
-
-  const fieldStyle: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, marginBottom: 8, fontFamily: 'inherit' };
-  const labelStyle: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4 };
-
-  return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: '#64748B' }}>{tasks?.length || 0} follow-up(s) for {candidateName}</span>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <a href={`/reminders?tab=followups&candidate=${candidateId || ''}`} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#2563EB', textDecoration: 'none' }}>
-            <ExternalLink size={11} /> Reminders & Reports
-          </a>
-          <button onClick={() => setAdding(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-            <Plus size={12} /> New Follow-up
-          </button>
-        </div>
-      </div>
-
-      {adding && (
-        <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 10, padding: 14, marginBottom: 14 }}>
-          {err && <div style={{ background: '#FEF2F2', color: '#DC2626', padding: '6px 10px', borderRadius: 8, fontSize: 11, marginBottom: 8 }}>{err}</div>}
-          <label style={labelStyle}>TITLE *</label>
-          <input style={fieldStyle} value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="e.g. Call candidate re: offer" />
-          <label style={labelStyle}>FOLLOW-UP REASON</label>
-          <input style={fieldStyle} value={form.follow_up_reason} onChange={e => setForm({ ...form, follow_up_reason: e.target.value })} placeholder="Why this follow-up is needed" />
-          <label style={labelStyle}>DESCRIPTION</label>
-          <textarea style={{ ...fieldStyle, minHeight: 50 }} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <div>
-              <label style={labelStyle}>PRIORITY</label>
-              <select style={fieldStyle} value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })}>
-                <option value="low">Low</option><option value="medium">Medium</option>
-                <option value="high">High</option><option value="critical">Critical</option>
-              </select>
-            </div>
-            <div>
-              <label style={labelStyle}>DUE DATE & TIME *</label>
-              <input type="datetime-local" style={fieldStyle} value={form.due_at} onChange={e => setForm({ ...form, due_at: e.target.value })} />
-            </div>
-            <div style={{ gridColumn: '1 / -1' }}>
-              <label style={labelStyle}>REMINDER AT (optional)</label>
-              <input type="datetime-local" style={fieldStyle} value={form.reminder_at} onChange={e => setForm({ ...form, reminder_at: e.target.value })} />
-            </div>
-          </div>
-          {(requisitionId || clientName) && (
-            <div style={{ fontSize: 10.5, color: '#94A3B8', marginBottom: 8 }}>
-              Linked to {clientName ? `${clientName} · ` : ''}this candidate's application
-            </div>
-          )}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-            <button onClick={() => setAdding(false)} style={{ padding: '7px 14px', background: '#fff', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
-            <button onClick={submit} disabled={saving} style={{ padding: '7px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Create Follow-up'}</button>
-          </div>
-        </div>
-      )}
-
-      {!tasks?.length && !adding && <div style={{ color: '#CBD5E1', fontSize: 12, textAlign: 'center', padding: 20, fontStyle: 'italic' }}>No follow-ups yet for this candidate</div>}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {(tasks || []).map((t: any) => {
-          const c = FOLLOWUP_PRIORITY_COLOR[t.priority] || FOLLOWUP_PRIORITY_COLOR.medium;
-          const isDone = t.status === 'completed' || t.status === 'cancelled';
-          return (
-            <div key={t.id} data-testid={`followup-task-${t.id}`} style={{ border: '1px solid #E2E8F0', borderRadius: 8, padding: '10px 12px', background: isDone ? '#F8FAFC' : '#fff' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <div style={{ fontWeight: 700, fontSize: 12.5, color: isDone ? '#94A3B8' : '#1E293B', textDecoration: isDone ? 'line-through' : 'none' }}>{t.title}</div>
-                <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 7px', borderRadius: 999, background: c.bg, color: c.fg, textTransform: 'uppercase', flexShrink: 0 }}>{t.priority}</span>
-              </div>
-              <div style={{ fontSize: 10.5, color: '#94A3B8', marginTop: 2 }}>
-                Due {followupFmtDT(t.due_at)}
-                {t.is_overdue && <span style={{ color: '#DC2626', fontWeight: 700 }}> · OVERDUE</span>}
-              </div>
-              {(t.follow_up_reason || t.description) && (
-                <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 4, fontStyle: 'italic' }}>
-                  {t.follow_up_reason && <>Reason: {t.follow_up_reason}</>}
-                  {t.follow_up_reason && t.description ? ' · ' : ''}
-                  {t.description}
-                </div>
-              )}
-              {!isDone && (
-                <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                  <button onClick={() => setStatus(t.id, 'completed')} style={{ padding: '4px 10px', fontSize: 10.5, fontWeight: 700, border: '1px solid #A7F3D0', background: '#ECFDF5', color: '#059669', borderRadius: 6, cursor: 'pointer' }}>✓ Mark Done</button>
-                  <button onClick={() => setStatus(t.id, 'cancelled')} style={{ padding: '4px 10px', fontSize: 10.5, fontWeight: 700, border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#64748B', borderRadius: 6, cursor: 'pointer' }}>Cancel</button>
-                </div>
-              )}
-            </div>
-          );
-        })}
       </div>
     </div>
   );

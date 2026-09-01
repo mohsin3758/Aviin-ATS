@@ -5,6 +5,7 @@ import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions, SectionDivider } from '@/components/ui/Modal';
 import { API, authHeaders, getTokenPayload } from '@/lib/auth';
 import WhatsAppChatButton from '@/components/WhatsAppChatButton';
+import FollowUpTab from '@/components/FollowUpTab';
 import {
   Plus, Search, Upload, Download, Brain, Mail, Phone, MapPin, Briefcase,
   Trash2, Edit, ExternalLink, X, Filter, ChevronLeft, ChevronRight,
@@ -319,6 +320,18 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
   const [newTagName,setNewTagName] = useState('');
   const [tagBusy,setTagBusy] = useState(false);
   const [tagErr,setTagErr] = useState('');
+  // Real feature (2026-09-01, explicit ask): "add followup option in
+  // Resume inbox and candidate folder same features" — this drawer has
+  // no floating-toast mechanism at all (unlike pipeline/page.tsx or
+  // resume-inbox/page.tsx), just inline error text (see tagErr above) —
+  // a small, self-contained local equivalent, matching that same
+  // established convention rather than building a new toast system for
+  // this one component.
+  const [followupToast,setFollowupToast] = useState<{msg:string;ok:boolean}|null>(null);
+  const showFollowupToast = (msg:string, ok:boolean = true) => {
+    setFollowupToast({msg,ok});
+    setTimeout(()=>setFollowupToast(null), 4000);
+  };
   const exp = gx(candidate.total_exp_mo);
   const sc = candidate.pipeline_stage ? (stageMap[candidate.pipeline_stage]||null) : null;
 
@@ -634,6 +647,21 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
               })}
             </div>
           )}
+        </div>
+        {/* Follow-up — real feature (2026-09-01, explicit ask): "add
+            followup option in Resume inbox and candidate folder same
+            features" (matching the one already built on the pipeline
+            drawer, next to Notes). This drawer has no tab structure at
+            all (a single scrolling panel), so it's added as its own
+            labeled section here instead of a tab — same real shared
+            component, same real Reminders & Follow-Ups system
+            underneath either way. */}
+        <div style={{padding:'14px 22px',borderBottom:'1px solid #f1f5f9'}}>
+          <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b',marginBottom:'8px'}}>FOLLOW-UP</div>
+          {followupToast && (
+            <div style={{fontSize:'11px',fontWeight:600,padding:'6px 10px',borderRadius:'8px',marginBottom:'8px',background:followupToast.ok?'#f0fdf4':'#fef2f2',color:followupToast.ok?'#15803d':'#dc2626',border:`1px solid ${followupToast.ok?'#bbf7d0':'#fecaca'}`}}>{followupToast.msg}</div>
+          )}
+          <FollowUpTab candidateId={candidate.id} candidateName={candidate.full_name} showToast={showFollowupToast} />
         </div>
         {/* Applications */}
         {Array.isArray(apps) && apps.length>0 && (

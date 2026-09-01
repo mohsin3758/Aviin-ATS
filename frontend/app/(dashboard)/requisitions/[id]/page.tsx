@@ -9,7 +9,7 @@ import {
   Plus, X, ChevronDown, Mail, Phone, Download, ExternalLink,
   Star, MessageSquare, FileText, Activity, Search, SlidersHorizontal,
   RotateCcw, CheckCircle, AlertTriangle, Send, UserCog, Repeat, Sparkles,
-  Trash2, Share2,
+  Trash2, Share2, Lock,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -131,10 +131,33 @@ export default function RequisitionPipelinePage() {
   // /pipeline board, added here too for parity (this embedded board is a
   // separate implementation). getTokenPayload() reads localStorage,
   // deferred to an effect so server/client first-render match.
-  const [canManage, setCanManage] = useState(false);
+  // Widened (2026-09-01, explicit ask): "recruiter should have option to
+  // delete the resume like in interested, NDA, or in screened and after
+  // that KAE or KAM or ADMIN have to option to delete" — admin/manager/
+  // kae/kam can always remove; a recruiter only through Screened. Real
+  // enforcement is server-side (applications.py's remove_application) —
+  // this is purely the matching client-side UX. Deliberately scoped to
+  // ONLY the Remove button: this page's own stage-pill move buttons
+  // (above) have no equivalent recruiter-tier lock at all yet (a real,
+  // separate, pre-existing gap — the main /pipeline board got that
+  // treatment on 2026-09-01 too, this embedded board didn't) and are
+  // NOT touched here, since removal-tiering was the actual ask.
+  const [canRemove, setCanRemove] = useState(false);
+  const [isRecruiter, setIsRecruiter] = useState(false);
   useEffect(() => {
-    setCanManage(['admin', 'super_admin', 'manager'].includes(getTokenPayload()?.role || ''));
+    const role = getTokenPayload()?.role || '';
+    setCanRemove(['admin', 'super_admin', 'manager', 'kae', 'kam', 'recruiter'].includes(role));
+    setIsRecruiter(role === 'recruiter');
   }, []);
+  const recruiterCanMoveToStage = useCallback((targetStage: string) => {
+    if (targetStage === 'hold') return true;
+    const order: Record<string, number> = {};
+    (stageConfigData || []).forEach((s: any) => { order[s.stage_key] = s.display_order; });
+    const screenedOrder = order['screened'];
+    const targetOrder = order[targetStage];
+    if (screenedOrder === undefined || targetOrder === undefined) return false;
+    return targetOrder <= screenedOrder;
+  }, [stageConfigData]);
   const [pendingRemove, setPendingRemove] = useState<{ appId: string; fromStage: string; candidateName: string } | null>(null);
 
   // Real per-stage "Manual" email send mode (2026-08-22) — see moveStage
@@ -463,7 +486,9 @@ export default function RequisitionPipelinePage() {
           onClose={() => setSelected(null)}
           onMoveStage={(toStage: string, extra?: Record<string, any>) => moveStage(selected.id, selected.stage, toStage, undefined, extra)}
           onRequestReject={() => setPendingReject({ appId: selected.id, fromStage: selected.stage })}
-          onRequestRemove={canManage ? () => setPendingRemove({ appId: selected.id, fromStage: selected.stage, candidateName: selected.candidate_name }) : undefined}
+          onRequestRemove={canRemove ? () => setPendingRemove({ appId: selected.id, fromStage: selected.stage, candidateName: selected.candidate_name }) : undefined}
+          isRecruiter={isRecruiter}
+          recruiterCanMoveToStage={recruiterCanMoveToStage}
           drawerTab={drawerTab}
           setDrawerTab={setDrawerTab}
           showToast={showToast}
@@ -687,7 +712,7 @@ function CandidateCard({ app, stageColor, onClick, onDragStart, onMoveStage }: a
 }
 
 // ── Candidate Drawer ──────────────────────────────────────────────────────────
-function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, onRequestRemove, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
+function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, onRequestRemove, isRecruiter, recruiterCanMoveToStage, drawerTab, setDrawerTab, showToast, stages, allStages }: any) {
   const stageCfg = allStages.find((s: any) => s.key === app.stage);
   const score = app.jd_match_score ?? app.fit_score ?? app.ai_match_score ?? app.readiness_index;
 
@@ -742,18 +767,34 @@ function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, onRequest
               </button>
               {/* Remove from Pipeline (2026-08-20) — deliberately separate
                   from Reject: fully removes the candidate from this job's
-                  board, not just moves them to Rejected. admin/manager only. */}
-              {onRequestRemove && (
-                <button title="Fully remove this candidate from the pipeline (different from Reject)" data-testid="drawer-remove-from-pipeline-reqpage" onClick={() => onRequestRemove()}
-                  style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#64748B' }}>
-                  <Trash2 size={10} /> Remove
-                </button>
-              )}
+                  board, not just moves them to Rejected.
+                  Tiered by stage for a recruiter (2026-09-01), same
+                  server-enforced rule + lock/tooltip UX as the main
+                  /pipeline board — see this file's own top-of-component
+                  comment for the exact scope. */}
+              {onRequestRemove && (() => {
+                const removeLocked = isRecruiter && recruiterCanMoveToStage && !recruiterCanMoveToStage(app.stage);
+                return (
+                  <button
+                    title={removeLocked ? 'Removing past Screened requires a KAE, KAM, or admin/manager — hand off to your account team' : 'Fully remove this candidate from the pipeline (different from Reject)'}
+                    data-testid="drawer-remove-from-pipeline-reqpage"
+                    onClick={() => { if (!removeLocked) onRequestRemove(); }}
+                    style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, padding: '4px 9px', borderRadius: 999, cursor: removeLocked ? 'not-allowed' : 'pointer', border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#64748B', opacity: removeLocked ? 0.55 : 1 }}>
+                    {removeLocked ? <Lock size={10} /> : <Trash2 size={10} />} Remove
+                  </button>
+                );
+              })()}
             </div>
           </div>
 
-          {/* Drawer tabs */}
-          <div style={{ display: 'flex', gap: 0, marginBottom: -1 }}>
+          {/* Drawer tabs — same defensive overflowX fix (2026-09-01) as the
+              main /pipeline board's own drawer, applied here preemptively:
+              only 4 tabs today so nothing is actually clipped yet, but the
+              main board's identical container silently clipped Notes/
+              Follow-up/Scorecards/Activity once it grew past 6 tabs with
+              no scroll affordance at all — cheap to guard against here
+              too before this page's own tab list grows the same way. */}
+          <div style={{ display: 'flex', gap: 0, marginBottom: -1, overflowX: 'auto', flexWrap: 'nowrap' }}>
             {[
               { key: 'profile', icon: <Briefcase size={12} />, label: 'Profile' },
               { key: 'notes', icon: <MessageSquare size={12} />, label: 'Notes' },
@@ -761,7 +802,7 @@ function CandidateDrawer({ app, onClose, onMoveStage, onRequestReject, onRequest
               { key: 'activity', icon: <Activity size={12} />, label: 'Activity' },
             ].map(t => (
               <button key={t.key} onClick={() => setDrawerTab(t.key)}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', borderBottom: `2px solid ${drawerTab === t.key ? '#2563EB' : 'transparent'}`, color: drawerTab === t.key ? '#2563EB' : '#64748B' }}>
+                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'none', border: 'none', borderBottom: `2px solid ${drawerTab === t.key ? '#2563EB' : 'transparent'}`, color: drawerTab === t.key ? '#2563EB' : '#64748B', flexShrink: 0, whiteSpace: 'nowrap' }}>
                 {t.icon}{t.label}
               </button>
             ))}

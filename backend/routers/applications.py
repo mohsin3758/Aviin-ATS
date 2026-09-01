@@ -275,16 +275,28 @@ class RemoveApplicationIn(BaseModel):
 # submittals with no ON DELETE clause, so a hard delete would throw on
 # any candidate with real pipeline history; soft-delete also matches
 # this codebase's convention everywhere else (clients/candidates/
-# requisitions/users). Gated the same HITL bar as Reject (admin/manager
-# only) since removing is at least as consequential — it also hides the
-# candidate from the Rejected column, unlike Reject itself.
+# requisitions/users).
+#
+# Tiered role check (2026-09-01, explicit ask, from a live board
+# screenshot): "recruiter should have option to delete the resume like
+# in interested, NDA, or in screened and after that KAE or KAM or ADMIN
+# have to option to delete" — mirrors the exact same recruiter-owns-
+# sourcing-through-screening hierarchy already built the same day for
+# stage moves (recruiter_can_move_to_stage). admin/manager/kae/kam can
+# always remove, at any stage; a plain recruiter can only remove while
+# the application is still at a stage they're themselves allowed to
+# move through (Interested/NDA/Screened or earlier, or Hold) — past
+# Screened, removing becomes a KAE/KAM/admin action, same hand-off
+# point as everything else in this hierarchy. Needs the real stage
+# fetched first, so the tier check now happens after the 404 check
+# rather than before the DB connection opens.
 @router.delete("/{application_id}")
 async def remove_application(
     application_id: str, body: RemoveApplicationIn = RemoveApplicationIn(),
     actor: Actor = Depends(require_permission("pipeline", "delete")),
 ):
-    if actor.role not in ("admin", "manager"):
-        raise HTTPException(status_code=403, detail="Removing a candidate from the pipeline requires manager/admin role (HITL)")
+    if actor.role not in ("admin", "manager", "kae", "kam", "recruiter"):
+        raise HTTPException(status_code=403, detail="Removing a candidate from the pipeline requires manager/admin/KAE/KAM/recruiter role (HITL)")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         old = await conn.fetchrow(
@@ -293,7 +305,23 @@ async def remove_application(
         if old is None:
             raise HTTPException(status_code=404, detail="Application not found (or already removed)")
 
-        await ownership.check_ownership_or_raise(conn, actor.tenant_id, str(old["candidate_id"]), actor)
+        if actor.role == "recruiter" and not await recruiter_can_move_to_stage(conn, actor.tenant_id, old["stage"]):
+            raise HTTPException(status_code=403, detail="Removing a candidate past Screened requires a KAE, KAM, or admin/manager — hand off to your account team")
+
+        # candidate_ownership's own check_ownership_or_raise() only exempts
+        # admin/super_admin/manager — it exists to stop one RECRUITER from
+        # interfering with a DIFFERENT recruiter's still-active 30-day
+        # sourcing claim, unrelated to this feature's own hierarchy. Now
+        # that kae/kam's remove authority here is unconditional (matching
+        # admin/manager, same as the rest of this recruiter-owns-sourcing-
+        # through-screening hierarchy), a kae/kam removing a post-hand-off
+        # candidate a recruiter still technically "owns" is the expected,
+        # common case — not something ownership should block. Skipped only
+        # for THIS endpoint (a local exemption, not a change to the shared
+        # function's own broader exemption list, which other call sites —
+        # stage moves, tagging, messaging — still rely on as-is).
+        if actor.role not in ("kae", "kam"):
+            await ownership.check_ownership_or_raise(conn, actor.tenant_id, str(old["candidate_id"]), actor)
 
         await conn.execute(
             """UPDATE applications

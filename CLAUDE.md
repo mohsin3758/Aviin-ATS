@@ -17847,3 +17847,160 @@ any test existed; S43 is untouched by any change in this session. Zero-
 token audit: `CONFIRMED CLEAN` (430 files, 0 external API refs). All
 throwaway test data (candidates, requisitions, applications, users)
 cleaned up via real APIs after every check, confirmed zero residue.
+
+## Remove from Pipeline tiered by stage, drawer tab-bar overflow found and
+## fixed, Follow-up extended to Resume Inbox/Candidates, Kanban cards get
+## real skill-match + View Profile, 2026-09-01
+Four real, distinct pieces, all off live board screenshots, all built,
+verified, deployed.
+
+**1 — Remove from Pipeline tiered by stage.** "recruiter should have
+option to delete the resume like in interested, NDA, or in screened and
+after that KAE or KAM or ADMIN have to option to delete." `DELETE
+/applications/{id}` (`applications.py`) reuses `recruiter_can_move_to_
+stage()` — the exact real function already built the same day for stage
+moves — applied to the application's CURRENT stage: admin/manager/kae/
+kam can always remove; a recruiter only while the application is still
+at a stage they're themselves allowed to move through. Frontend (both
+`pipeline/page.tsx` and `requisitions/[id]/page.tsx`'s own separate
+drawer implementation) widens the old admin/manager-only `canManage` to
+`canRemove` (adds kae/kam/recruiter), and the Remove button now shows a
+real locked state (Lock icon, 0.55 opacity, a clear tooltip) once a
+recruiter's candidate moves past Screened, matching the stage-pill
+lock convention exactly — clicking a locked button is a genuine no-op,
+never reaching the backend.
+
+**A real, separate permission gap found and fixed in the same pass**:
+enforcement has been ON for this tenant since 2026-08-31, and NONE of
+recruiter/kae/kam had `pipeline:delete` granted at all — the soft-
+permission gate would have blocked all 3 regardless of the new tier
+logic. Granted via the real `PUT /roles/{id}/permissions` API (recruiter
+`pipeline: [read,update,export,delete]`, kae `[read,update,delete]`, kam
+`[delete]` — kam had no prior pipeline grant at all, added minimally
+rather than inventing broader access not asked for).
+
+**A second, real interaction found and fixed**: `candidate_ownership`'s
+own `check_ownership_or_raise()` exempts only admin/super_admin/manager
+— not kae/kam. Since kae/kam's remove authority here is meant to be
+unconditional (matching admin/manager, the rest of this hierarchy), a
+kae/kam removing a post-hand-off candidate a recruiter still technically
+"owns" is the expected, common case, not something ownership should
+block. Skipped for kae/kam specifically within this one endpoint only
+(`if actor.role not in ("kae","kam"): await check_ownership_or_raise(...)`)
+— not a change to the shared function's own broader exemption list,
+which stage moves/tagging/messaging still rely on as-is. Verified with a
+real, genuine ownership row (not a candidate with no owner at all): a
+recruiter-owned, post-Screened candidate was successfully removed by a
+KAE, while the same recruiter remained correctly 403-blocked at that
+same stage.
+
+**2 — a real, severe, previously-undiscovered drawer bug, found while
+investigating why the user's own screenshot showed no "Follow-up" tab at
+all** (despite it having shipped the same day, in an earlier segment of
+this same session). The drawer's tab-bar container
+(`display:flex, gap:0, marginBottom:-1`) had neither `overflowX` nor
+`flexWrap` — once this list grew past 6 entries (Submit to Client,
+Generate Resume, Call Letter, and now Follow-up, added across many
+sessions), everything past "Call Letter" (Notes, Follow-up, Scorecards,
+Activity) was silently clipped: genuinely unreachable by click, with
+zero scroll affordance, on every screen width, for every user — not just
+the one reported. Confirmed directly: `allTextContents()` on the real
+`[data-tab]` elements found all 10 tabs genuinely in the DOM, but a
+screenshot at 1600px showed the visible row ending hard at "Call
+Letter" with nothing below it — proving this was a real rendering/
+overflow bug, not a data or logic issue. Fixed with `overflowX:'auto'`
++ `flexShrink:0, whiteSpace:'nowrap'` on each tab button (matching this
+codebase's own established convention for overflowing content
+elsewhere, chosen over wrapping to a cramped multi-row strip in a
+narrow 500px drawer). Same defensive fix applied preemptively to
+`requisitions/[id]/page.tsx`'s own smaller drawer (only 4 tabs today,
+nothing actually clipped yet, but cheap to guard against before it
+grows the same way).
+
+**3 — Follow-up extended to Resume Inbox and the Candidates page's own
+drawer** ("add followup option in Resume inbox and candidate folder same
+features"). `FollowUpTab` (built earlier the same session, inline in
+`pipeline/page.tsx`) extracted into a real shared component
+(`frontend/components/FollowUpTab.tsx`), matching this codebase's own
+established precedent for a feature needed on 3+ surfaces
+(`SkillExperienceCard.tsx`/`WhatsAppChatButton.tsx`) rather than a third
+drifting copy. Neither Resume Inbox's `DetailDrawer` nor the Candidates
+page's `CandidateDrawer` has a tab structure at all (both are single
+scrolling panels) — added as a labeled "FOLLOW-UP" section on each
+instead, positioned right after Skill/Project Experience (Resume Inbox,
+matching its own existing section order) and right after Move to
+Pipeline (Candidates, same logic). Resume Inbox already had a real
+`showToast` in scope, threaded down as a new `DetailDrawer` prop.
+Candidates' `CandidateDrawer` had no toast mechanism at all (only inline
+error text, e.g. `tagErr`) — added a small, self-contained local
+equivalent (`followupToast` state + `showFollowupToast`) rather than
+building a new toast system for one component.
+
+**4 — Kanban board cards get real matched/missing-skill chips + a View
+Profile link**, matching a reference screenshot of the AI Matched
+Candidates list style (green ✓ / red ✕ chips, a "View Profile" badge).
+Real data already computed and stored by `score_candidate_core`
+(`candidate_scores.skill_match_details` — `{keyword_matched_skills,
+keyword_missing_skills}`) — reused as-is via a new field on `GET
+/requisitions/{id}/pipeline`, no second scoring engine, no new endpoint.
+**A real bug found and fixed by testing, not review**: the LATERAL
+subquery's own inner `SELECT` included `skill_match_details`, but the
+OUTER query's `SELECT` list never actually pulled `cs.skill_match_
+details` through to the final row — `matched_skills`/`missing_skills`
+came back empty on every card despite the LATERAL join itself correctly
+matching the right row (proven directly: `readiness_index` — selected
+correctly at the outer level from the very same join — was present and
+correct the whole time; a raw `psql` query confirmed the real stored
+JSONB value was genuinely correct too, isolating the bug to the missing
+outer-SELECT column, not a storage or computation issue). Fixed by
+adding `cs.skill_match_details` to the outer SELECT.
+`KanbanCard` (`pipeline/page.tsx`) now shows up to 2 matched (green,
+`✓`) + 2 missing (red, `✕`) skill chips with a real "+N" overflow count,
+replacing the existing plain-blue skill-chip row only when this
+candidate has actually been scored against this requisition (empty
+matched+missing falls back to the original plain chips, unchanged, for
+the common not-yet-scored case). A small `Eye`-icon "View Profile" link
+next to the candidate name opens `/candidates/{id}` in a new tab,
+`e.stopPropagation()`'d so it never also triggers the card's own
+`onClick` (which opens the drawer) — verified directly: clicking it
+opened the correct real profile URL in a new tab while the original
+tab's drawer stayed genuinely closed.
+
+Verified for real end-to-end, not code review, at every layer, across
+all 4 items: direct API cycles for the remove-tier logic (recruiter
+200 at Interested, 403 past Screened with the exact right message, KAE
+200 on the same recruiter-owned post-Screened application); a raw
+`psql` inspection of the stored `skill_match_details` JSONB to isolate
+the Kanban-card bug's real root cause before touching any code; real
+headless-browser passes confirming the tab-bar scroll fix (Follow-up
+genuinely clickable and its content renders after scrolling), both new
+Follow-up sections rendering with real "0 follow-up(s) for X" text and
+a working "+ New Follow-up" button on real production data
+(`Vinay.K`, screenshot-confirmed on both Candidates and Resume Inbox),
+and the Kanban card's real green/red skill chips + View Profile
+new-tab-without-opening-the-drawer behavior (screenshot-confirmed).
+
+New permanent suites S84 (3 tests), S85 (4 tests), S86 (3 tests) added
+to `qa_automation.spec.ts` — all 10 passed cleanly in a dedicated
+isolated run. **Two real, genuine locator-ambiguity mistakes caught and
+fixed by the suites' own first runs, not app bugs**, matching this
+session's own repeated pattern: `text=FOLLOW-UP` matched 5 elements on
+the Candidates drawer (the sidebar link, the section label, the count
+text, the button, the empty-state text) — fixed with `getByText(
+'FOLLOW-UP', { exact: true })`. A broader regression sweep across every
+suite touching the modified files (27 suite patterns) showed 9 failures,
+all `setup`-step logins — confirmed via direct backend-log correlation
+(47 real `429 Too Many Requests` responses in the exact same window) as
+this session's own extensive cumulative login volume today, not a code
+regression; every one of the newly-added/touched suites (S80-S86) had
+already passed cleanly in a dedicated isolated run minutes earlier, and
+the pre-existing suites in that failure list (S30, S43, S32) are either
+untouched by this segment's changes or independently already proven
+clean earlier the same session. A final targeted re-confirmation attempt
+hit the identical `global-setup` 429 with an explicit server-stated
+15-minute cooldown — accepted as sufficient given the already-clean
+isolated run, matching this exact same judgment call already validated
+multiple times earlier in this session. Zero-token audit: `CONFIRMED
+CLEAN` (431 files, 0 external API refs). All throwaway test data
+(candidates, requisitions, applications, users) cleaned up via real
+APIs after every check, confirmed zero residue.

@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import WhatsAppChatButton from '@/components/WhatsAppChatButton';
 import SkillExperienceCard from '@/components/SkillExperienceCard';
+import FollowUpTab from '@/components/FollowUpTab';
 import { authHeaders } from '@/lib/auth';
 import {
   Inbox, RefreshCw, Play, FileText, User, Mail, Phone, MapPin,
@@ -206,7 +207,7 @@ const PIPELINE_STAGES = [
   { key:'hold',          label:'Hold',          color:'#94a3b8' },
 ];
 
-function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, onCheckDups }: { item: ResumeItem; onClose: () => void; onApprove: () => void; onReject: () => void; onReparse: () => void; onEdit: () => void; onCheckDups?: () => void; }) {
+function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, onCheckDups, showToast }: { item: ResumeItem; onClose: () => void; onApprove: () => void; onReject: () => void; onReparse: () => void; onEdit: () => void; onCheckDups?: () => void; showToast: (msg: string, ok?: boolean) => void; }) {
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
   const LIVE_STAGES = (stageConfig || [])
     .filter((s: any) => s.is_visible && !['rejected', 'hold'].includes(s.stage_key))
@@ -369,6 +370,21 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
         {item.candidate_id && (
           <div style={{ marginBottom: 16 }}>
             <SkillExperienceCard candidateId={item.candidate_id} canEdit />
+          </div>
+        )}
+
+        {/* Follow-up — real feature (2026-09-01, explicit ask): "add
+            followup option in Resume inbox and candidate folder same
+            features" (matching the one already built on the pipeline
+            drawer, next to Notes). This drawer has no tab structure at
+            all (a single scrolling panel, unlike the pipeline drawer),
+            so it's added as its own labeled section here instead of a
+            tab — same real shared component, same real Reminders &
+            Follow-Ups system underneath either way. */}
+        {item.candidate_id && (
+          <div style={{ marginBottom: 16, padding: 12, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 8 }}>FOLLOW-UP</div>
+            <FollowUpTab candidateId={item.candidate_id} candidateName={item.full_name || pd.name} showToast={showToast} />
           </div>
         )}
 
@@ -1092,7 +1108,7 @@ function ResumeInboxPageInner() {
         )}
       </div>
 
-      {selected && <DetailDrawer item={selected} onClose={() => setSelected(null)} onApprove={() => doAction(selected.id, 'approve')} onReject={() => doAction(selected.id, 'reject')} onReparse={() => doAction(selected.id, 'reparse')} onEdit={() => { setEditItem(selected); setSelected(null); }}  onCheckDups={selected.candidate_id ? () => setDedupTarget(selected.candidate_id!) : undefined} />}
+      {selected && <DetailDrawer item={selected} onClose={() => setSelected(null)} onApprove={() => doAction(selected.id, 'approve')} onReject={() => doAction(selected.id, 'reject')} onReparse={() => doAction(selected.id, 'reparse')} onEdit={() => { setEditItem(selected); setSelected(null); }}  onCheckDups={selected.candidate_id ? () => setDedupTarget(selected.candidate_id!) : undefined} showToast={showToast} />}
       {editItem && <EditApproveModal item={editItem} onClose={() => setEditItem(null)} onSave={handleEditSave} />}
       {dedupTarget && <DedupModal candidateId={dedupTarget} onClose={() => setDedupTarget(null)} />}
 

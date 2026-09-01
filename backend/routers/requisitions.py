@@ -404,7 +404,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                       c.current_designation, c.current_employer, c.location,
                       c.resume_path, c.expected_ctc, c.notice_period_days,
                       c.jd_match_score, c.ai_match_score,
-                      cs.readiness_index, cs.readiness_grade,
+                      cs.readiness_index, cs.readiness_grade, cs.skill_match_details,
                       rf.id AS resume_file_id, rf.file_name AS resume_file_name,
                       a.stage, a.fit_score, a.app_notes, a.app_tags,
                       a.rejected_reason, a.assigned_recruiter_id, a.board_rank,
@@ -420,7 +420,7 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                    ORDER BY rf.created_at DESC LIMIT 1
                ) rf ON true
                LEFT JOIN LATERAL (
-                   SELECT readiness_index, readiness_grade FROM candidate_scores cs
+                   SELECT readiness_index, readiness_grade, skill_match_details FROM candidate_scores cs
                    WHERE cs.candidate_id = c.id AND cs.tenant_id = a.tenant_id
                      AND cs.requisition_id = a.requisition_id
                    ORDER BY cs.scored_at DESC LIMIT 1
@@ -436,6 +436,20 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
         for key in ("app_notes", "app_tags"):
             if isinstance(app.get(key), str):
                 app[key] = json.loads(app[key])
+        # Real feature (2026-09-01, explicit ask): "it should highlight
+        # skills are there in resume and missing skills as per JD... in
+        # the pipeline kanban". skill_match_details is already computed
+        # and stored by score_candidate_core (intelligence.py) — reused
+        # here as-is, no new scoring engine or endpoint. asyncpg has no
+        # jsonb codec registered in this app (the same recurring gap
+        # documented elsewhere in this project, e.g. role_definitions.
+        # permissions), so this comes back as a raw JSON string, not a
+        # dict, and needs an explicit json.loads.
+        smd = app.pop("skill_match_details", None)
+        if isinstance(smd, str):
+            smd = json.loads(smd)
+        app["matched_skills"] = (smd or {}).get("keyword_matched_skills") or []
+        app["missing_skills"] = (smd or {}).get("keyword_missing_skills") or []
         board.setdefault(row["stage"], []).append(app)
     return board
 

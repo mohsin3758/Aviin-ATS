@@ -11257,3 +11257,310 @@ test.describe.serial('S83 Candidates drawer: JD Match Score, Missing Skills, Own
     await expect(page.locator('text=Message on WhatsApp')).toBeVisible();
   });
 });
+
+test.describe.serial('S84 Remove from Pipeline tiered by stage: recruiter through Screened, KAE/KAM/admin always', () => {
+  // 2026-09-01 — explicit ask, from a live board screenshot: "recruiter
+  // should have option to delete the resume like in interested, NDA, or
+  // in screened and after that KAE or KAM or ADMIN have to option to
+  // delete". Real, server-side tiering (never just a hidden button) on
+  // DELETE /applications/{id}, reusing recruiter_can_move_to_stage — the
+  // exact same real function already built the same day for stage moves
+  // (S80) — applied to the application's CURRENT stage instead of a
+  // target stage. admin/manager/kae/kam can always remove; a recruiter
+  // only while the application is still at a stage they're themselves
+  // allowed to move through. A real, separate permission-key gap was
+  // found and fixed in the same pass: pipeline:delete wasn't granted to
+  // any of the 3 roles at all (enforcement is ON for this tenant since
+  // 2026-08-31), so the soft-permission gate would have blocked all 3
+  // regardless of the new tier logic — granted via the real /roles API,
+  // not a code change. A second real interaction was found and fixed:
+  // candidate_ownership's own check_ownership_or_raise() only exempts
+  // admin/manager, not kae/kam — since kae/kam's remove authority here
+  // is meant to be unconditional (matching admin/manager), it's now
+  // skipped for kae/kam specifically within this one endpoint only (not
+  // a change to the shared function's own broader exemption list, which
+  // other call sites — stage moves, tagging, messaging — still rely on).
+  let token = '';
+  let reqId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+  const recEmail = `qa.s84.rec.${stamp}@test.com`;
+  const kaeEmail = `qa.s84.kae.${stamp}@test.com`;
+  let recUserId = '';
+  let kaeUserId = '';
+  let recToken = '';
+  let kaeToken = '';
+  const candIds: string[] = [];
+
+  test.afterAll(async ({ request }) => {
+    for (const id of candIds) await request.delete(`${API}/candidates/${id}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    for (const uid of [recUserId, kaeUserId]) {
+      if (!uid) continue;
+      await request.patch(`${API}/users/${uid}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${uid}/purge?force=true`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('setup: real admin token + a throwaway requisition + throwaway recruiter/kae logins', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, { headers: auth(), data: { title: `S84 RemoveTier Role ${stamp}`, status: 'open', employment_type: 'contract' } });
+    reqId = (await reqR.json()).id;
+
+    const ru = await request.post(`${API}/users`, { headers: auth(), data: { email: recEmail, full_name: `QA S84 Rec ${stamp}`, role: 'recruiter', password: 'TestPass123!' } });
+    recUserId = (await ru.json()).id;
+    recToken = (await (await request.post(`${API}/auth/login`, { data: { email: recEmail, password: 'TestPass123!' } })).json()).access_token;
+
+    const ku = await request.post(`${API}/users`, { headers: auth(), data: { email: kaeEmail, full_name: `QA S84 Kae ${stamp}`, role: 'kae', password: 'TestPass123!' } });
+    kaeUserId = (await ku.json()).id;
+    kaeToken = (await (await request.post(`${API}/auth/login`, { data: { email: kaeEmail, password: 'TestPass123!' } })).json()).access_token;
+
+    expect(reqId && recToken && kaeToken).toBeTruthy();
+  });
+
+  test('BUG FIX: a recruiter can remove their own candidate at Interested, but is blocked once past Screened', async ({ request }) => {
+    const recAuth = { Authorization: `Bearer ${recToken}` };
+    const c1 = await request.post(`${API}/candidates`, { headers: recAuth, data: { full_name: `QA S84 C1 ${stamp}`, phone: `9${String(stamp).slice(-9)}`, skills: ['Python'] } });
+    const c1id = (await c1.json()).id;
+    candIds.push(c1id);
+    await request.post(`${API}/candidates/bulk-assign`, { headers: recAuth, data: { candidate_ids: [c1id], requisition_id: reqId, stage: 'interested' } });
+    const board1 = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const app1 = (Object.values(board1).flat() as any[]).find((a: any) => a.candidate_id === c1id);
+    const removeAtInterested = await request.delete(`${API}/applications/${app1.id}`, { headers: recAuth });
+    expect(removeAtInterested.status()).toBe(200);
+
+    const c2 = await request.post(`${API}/candidates`, { headers: recAuth, data: { full_name: `QA S84 C2 ${stamp}`, phone: `8${String(stamp).slice(-9)}`, skills: ['Java'] } });
+    const c2id = (await c2.json()).id;
+    candIds.push(c2id);
+    await request.post(`${API}/candidates/bulk-assign`, { headers: recAuth, data: { candidate_ids: [c2id], requisition_id: reqId, stage: 'interested' } });
+    const board2 = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const app2 = (Object.values(board2).flat() as any[]).find((a: any) => a.candidate_id === c2id);
+    await request.patch(`${API}/applications/${app2.id}/stage`, { headers: auth(), data: { stage: 'l1_interview', send_email: false } });
+    const blockedRemove = await request.delete(`${API}/applications/${app2.id}`, { headers: recAuth });
+    expect(blockedRemove.status()).toBe(403);
+    const body = await blockedRemove.json();
+    expect(body.detail).toContain('Screened');
+
+    // BUG FIX: a KAE can remove that same post-Screened application, even
+    // though the recruiter (not the KAE) is the real, active owner of the
+    // candidate — the ownership-exemption fix, proven against a real
+    // ownership row, not just a candidate with no owner at all.
+    const kaeAuthH = { Authorization: `Bearer ${kaeToken}` };
+    const kaeRemove = await request.delete(`${API}/applications/${app2.id}`, { headers: kaeAuthH });
+    expect(kaeRemove.status()).toBe(200);
+  });
+
+  test('real headless UI: the Remove button shows unlocked for an Interested candidate and locked (with a lock icon + tooltip) for an L1 Interview candidate; clicking the locked button does nothing', async ({ page, request }) => {
+    const recAuth = { Authorization: `Bearer ${recToken}` };
+    const cA = await request.post(`${API}/candidates`, { headers: recAuth, data: { full_name: `QA S84 UI A ${stamp}`, phone: `7${String(stamp).slice(-9)}`, skills: ['Python'] } });
+    const cAid = (await cA.json()).id;
+    candIds.push(cAid);
+    await request.post(`${API}/candidates/bulk-assign`, { headers: recAuth, data: { candidate_ids: [cAid], requisition_id: reqId, stage: 'interested' } });
+
+    const cB = await request.post(`${API}/candidates`, { headers: recAuth, data: { full_name: `QA S84 UI B ${stamp}`, phone: `6${String(stamp).slice(-9)}`, skills: ['Java'] } });
+    const cBid = (await cB.json()).id;
+    candIds.push(cBid);
+    await request.post(`${API}/candidates/bulk-assign`, { headers: recAuth, data: { candidate_ids: [cBid], requisition_id: reqId, stage: 'interested' } });
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const appB = (Object.values(board).flat() as any[]).find((a: any) => a.candidate_id === cBid);
+    await request.patch(`${API}/applications/${appB.id}/stage`, { headers: auth(), data: { stage: 'l1_interview', send_email: false } });
+
+    await page.goto('/login');
+    await page.fill('input[type="email"]', recEmail);
+    await page.fill('input[type="password"]', 'TestPass123!');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=QA S84 UI A ${stamp}`, { timeout: 15000 });
+    await page.click(`text=QA S84 UI A ${stamp}`);
+    await page.waitForTimeout(600);
+    const removeBtnA = page.locator('[data-testid="drawer-remove-from-pipeline"]');
+    await expect(removeBtnA).toHaveAttribute('title', /Fully remove/);
+    expect(await removeBtnA.evaluate((el: any) => getComputedStyle(el).opacity)).toBe('1');
+
+    await page.reload();
+    await page.waitForSelector(`text=QA S84 UI B ${stamp}`, { timeout: 15000 });
+    await page.click(`text=QA S84 UI B ${stamp}`);
+    await page.waitForTimeout(600);
+    const removeBtnB = page.locator('[data-testid="drawer-remove-from-pipeline"]');
+    await expect(removeBtnB).toHaveAttribute('title', /requires a KAE, KAM, or admin\/manager/);
+    expect(await removeBtnB.evaluate((el: any) => getComputedStyle(el).opacity)).toBe('0.55');
+    await removeBtnB.click();
+    await page.waitForTimeout(500);
+    // clicking a locked Remove must not open the confirm modal at all
+    expect(await page.locator('text=/Fully remove.*pipeline/i').last().isVisible().catch(() => false)).toBe(false);
+  });
+});
+
+test.describe.serial('S85 Drawer tab-bar overflow fix + Follow-up extended to Resume Inbox and Candidates drawers', () => {
+  // 2026-09-01 — a real, severe, previously-undiscovered bug found while
+  // investigating why the user's own screenshot showed no "Follow-up" tab
+  // on the pipeline drawer at all, despite S82 already having shipped it:
+  // the tab bar container (display:flex, no overflowX, no flexWrap) had
+  // been silently clipping any tab past "Call Letter" on every screen
+  // width, for every user, since this list first grew past 6 entries —
+  // Notes/Follow-up/Scorecards/Activity were all genuinely unreachable by
+  // click, with zero scroll affordance. Fixed with a real overflowX:auto
+  // (matching this codebase's own established convention for overflowing
+  // content elsewhere) rather than wrapping to a cramped multi-row strip.
+  //
+  // Also: "add followup option in Resume inbox and candidate folder same
+  // features" — FollowUpTab (built for S82) extracted into a real shared
+  // component (frontend/components/FollowUpTab.tsx, matching the
+  // SkillExperienceCard/WhatsAppChatButton precedent) and added as a
+  // labeled section (neither of these 2 drawers has a tab structure) to
+  // both the Resume Inbox drawer and the Candidates page's own drawer.
+  let token = '';
+  let reqId = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway requisition + candidate + application', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, { headers: auth(), data: { title: `S85 Overflow Test Role ${stamp}`, status: 'open', employment_type: 'contract' } });
+    reqId = (await reqR.json()).id;
+    const candR = await request.post(`${API}/candidates`, { headers: auth(), data: { full_name: `S85 Overflow Candidate ${stamp}`, phone: '9876500040', skills: ['Python'] } });
+    candId = (await candR.json()).id;
+    const bulkR = await request.post(`${API}/candidates/bulk-assign`, { headers: auth(), data: { candidate_ids: [candId], requisition_id: reqId, stage: 'interested' } });
+    expect(bulkR.ok()).toBeTruthy();
+  });
+
+  test('real headless UI: the pipeline drawer\'s tab bar scrolls to reveal Follow-up (previously silently clipped), and it opens correctly', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S85 Overflow Candidate ${stamp}`, { timeout: 15000 });
+    await page.click(`text=S85 Overflow Candidate ${stamp}`);
+    await page.waitForTimeout(800);
+
+    const followupTab = page.locator('[data-tab="followup"]');
+    // The regression this test guards: without overflowX, this tab is
+    // technically in the DOM but has zero effective width/is clipped by
+    // the parent, so isVisible() correctly reads false before the fix.
+    expect(await followupTab.count()).toBe(1);
+    await followupTab.scrollIntoViewIfNeeded();
+    await expect(followupTab).toBeVisible({ timeout: 5000 });
+    await followupTab.click();
+    await expect(page.locator('text=New Follow-up')).toBeVisible({ timeout: 5000 });
+  });
+
+  test('real headless UI: Candidates page drawer shows a real FOLLOW-UP section with a working New Follow-up button', async ({ page }) => {
+    await page.goto(`/candidates?search=S85 Overflow Candidate ${stamp}`);
+    const row = page.locator('table tbody tr', { hasText: `S85 Overflow Candidate ${stamp}` }).first();
+    await row.locator('button[title="Quick view"]').click({ timeout: 15000 });
+    await page.mouse.wheel(0, 1200);
+    await page.waitForTimeout(400);
+    await expect(page.getByText('FOLLOW-UP', { exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('text=New Follow-up')).toBeVisible();
+  });
+
+  test('real headless UI: Resume Inbox drawer shows a real FOLLOW-UP section with a working New Follow-up button (only when a candidate record exists)', async ({ page, request }) => {
+    // Resume Inbox has no direct-creation endpoint (established project
+    // precedent, see S32/S39) — find a real queue item that already has
+    // a candidate_id, matching this test's own real-discovered-data
+    // convention used elsewhere in this file.
+    const queue = await (await request.get(`${API}/resume-intake/queue?limit=50`, { headers: auth() })).json();
+    const items = Array.isArray(queue) ? queue : queue.items || [];
+    const item = items.find((i: any) => i.candidate_id);
+    test.skip(!item, 'no real resume-inbox queue item with a linked candidate found');
+    if (!item) return;
+
+    await page.goto('/resume-inbox');
+    await page.waitForTimeout(2000);
+    const row = page.locator('table tbody tr', { hasText: item.full_name || item.candidate_name || '' }).first();
+    await row.click({ timeout: 15000 }).catch(async () => { await page.locator('table tbody tr').first().click(); });
+    await page.waitForTimeout(1000);
+    await page.mouse.wheel(0, 1200);
+    await page.waitForTimeout(400);
+    await expect(page.getByText('FOLLOW-UP', { exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('text=New Follow-up')).toBeVisible();
+  });
+});
+
+test.describe.serial('S86 Kanban board cards show real matched/missing skills vs the JD + a working View Profile link', () => {
+  // 2026-09-01 — explicit ask, with a reference screenshot of the AI
+  // Matched Candidates list style: "it should highlight skills are there
+  // in resume and missing skills are per JD... like with view profile
+  // option also there... in the pipeline kanban resume". Real data
+  // already computed and stored by score_candidate_core
+  // (candidate_scores.skill_match_details) — reused as-is via a new
+  // field on GET /requisitions/{id}/pipeline, no second scoring engine.
+  // A real bug was found and fixed by testing, not review: the LATERAL
+  // subquery selected skill_match_details internally but the OUTER
+  // query's own SELECT list never pulled cs.skill_match_details through
+  // — matched/missing came back empty on every card despite the LATERAL
+  // join itself correctly matching the right row (proven by readiness_
+  // index being present) until this was fixed.
+  let token = '';
+  let reqId = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway requisition with real skills_required + a candidate scored against it with a genuine partial match', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `S86 KanbanSkills Role ${stamp}`, status: 'open', employment_type: 'contract', skills_required: ['Kubernetes', 'Terraform', 'AWS', 'Python'] },
+    });
+    reqId = (await reqR.json()).id;
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `S86 KanbanSkills Candidate ${stamp}`, phone: '9876500041', skills: ['Python', 'Django'], resume_text: 'Experienced Python Django developer.' },
+    });
+    candId = (await candR.json()).id;
+    await request.post(`${API}/candidates/bulk-assign`, { headers: auth(), data: { candidate_ids: [candId], requisition_id: reqId, stage: 'interested' } });
+    const scoreR = await request.post(`${API}/intelligence/score`, { headers: auth(), data: { candidate_id: candId, requisition_id: reqId } });
+    expect(scoreR.ok()).toBeTruthy();
+  });
+
+  test('BUG FIX: GET /requisitions/{id}/pipeline exposes real matched_skills/missing_skills per card, sourced from the already-stored skill_match_details', async ({ request }) => {
+    const board = await (await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() })).json();
+    const app = (Object.values(board).flat() as any[]).find((a: any) => a.candidate_id === candId);
+    expect(app).toBeTruthy();
+    expect(app.matched_skills).toEqual(['Python']);
+    expect(app.missing_skills).toEqual(expect.arrayContaining(['Kubernetes', 'Terraform', 'AWS']));
+    expect(app.missing_skills.length).toBe(3);
+  });
+
+  test('real headless UI: the Kanban card shows a real green ✓ matched chip and red ✕ missing chips; View Profile opens the real candidate page in a new tab without opening the drawer', async ({ page, context }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    await page.waitForSelector(`text=S86 KanbanSkills Candidate ${stamp}`, { timeout: 15000 });
+
+    await expect(page.locator('text=✓ Python')).toBeVisible();
+    await expect(page.locator('text=✕ Kubernetes')).toBeVisible();
+    await expect(page.locator('text=✕ Terraform')).toBeVisible();
+
+    const [newPage] = await Promise.all([
+      context.waitForEvent('page'),
+      page.locator('[data-testid^="kanban-view-profile-"]').first().click(),
+    ]);
+    await newPage.waitForLoadState('networkidle');
+    expect(newPage.url()).toContain(`/candidates/${candId}`);
+    await newPage.close();
+
+    // clicking View Profile must never also open the drawer on the
+    // original tab (real e.stopPropagation() regression guard)
+    await expect(page.locator('text=Current Stage:')).not.toBeVisible();
+  });
+});
