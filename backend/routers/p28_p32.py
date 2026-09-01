@@ -499,10 +499,20 @@ async def public_apply(
     resume_filename: Optional[str] = None
     resume_mime: Optional[str] = None
     if resume is not None and resume.filename:
+        resume_bytes = await resume.read()
+        resume_filename = resume.filename
+        resume_mime = resume.content_type or ''
+        # Real gap found + fixed (2026-09-02 QA sweep): this is a public,
+        # unauthenticated endpoint - nginx's own 50MB client_max_body_size
+        # was the only prior ceiling, well above what a real resume needs
+        # and inconsistent with the authenticated internal document-upload
+        # endpoint's own established 10MB cap (candidates.py). Checked
+        # BEFORE the parsing try/except below, not folded into its
+        # "best-effort, silently degrade" handling, so an oversized file
+        # gets a real, clear 400 instead of silently vanishing.
+        if len(resume_bytes) > 10 * 1024 * 1024:
+            raise HTTPException(400, "Resume file too large (max 10MB)")
         try:
-            resume_bytes = await resume.read()
-            resume_filename = resume.filename
-            resume_mime = resume.content_type or ''
             from services.resume_intake_service import extract_text_from_attachment, save_resume_file
             from services.document_classifier import classify_document
             from services.improved_parser import parse_resume_v2

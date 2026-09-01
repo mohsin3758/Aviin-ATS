@@ -19096,3 +19096,57 @@ tenant-isolated, orphaned-from-any-visible-candidate residue, matching
 this project's own established precedent for financial/historical-
 record tables elsewhere (`candidate_submissions`, `generated_resumes`,
 `referral_links`). Full detail in `QA_SWEEP_PROGRESS.md`.
+
+## QA sweep, 2026-09-02: real oversized-upload DoS gap on 3 public,
+## unauthenticated endpoints found and fixed
+Direct continuation of the ongoing QA sweep — closing out the "Uploads &
+malformed input" checklist item. Checked every real `await <UploadFile>.
+read()` call site across the backend for a size cap. `candidates.py`'s
+internal, authenticated document-upload endpoint already correctly caps
+at 10MB — but 3 real, PUBLIC, UNAUTHENTICATED upload paths had zero
+application-level cap at all: `personal_links.py`'s job-less and job-
+specific resume uploads plus their shared multi-file `_save_other_
+documents()` helper, and `p28_p32.py`'s public job-apply resume upload.
+Only nginx's blanket `client_max_body_size 50M` stood between an
+anonymous caller and a 50MB-per-request read into memory — the wrong
+way around for the app's most publicly-exposed, zero-identity-
+verification surface, and inconsistent with the already-established
+internal 10MB convention.
+
+Fixed all 4 sites to match: the 2 real resume-upload sites now check
+size BEFORE the parsing try/except, so an oversized file gets a real,
+clear `400 "Resume file too large (max 10MB)"` instead of being
+silently swallowed by the existing "best-effort enrichment, never block
+the submission" catch-all; the multi-file `_save_other_documents()`
+helper simply skips one individual oversized attachment without
+blocking the rest of a real submission, matching its own established
+best-effort contract exactly.
+
+**A real, self-inflicted CRLF/LF corruption caught and fixed before
+deploy, the same recurring class documented multiple times already this
+session**: the Edit tool silently flipped `p28_p32.py` (100% LF in HEAD)
+to 100% CRLF while applying the fix — caught via the established byte-
+count comparison against HEAD before touching the deploy, restored to
+pure LF, re-verified via `ast.parse()`.
+
+Verified for real, not code review: built a genuine 11MB fake resume and
+POSTed it to the live public personal-link endpoint — clean `400` with
+the exact expected message. Directly queried the database and confirmed
+NEITHER rejected attempt (personal link + job-specific link) created any
+candidate record at all — the whole submission correctly fails before
+any write, not a partial/orphaned insert. Confirmed a normal-sized
+resume submission on the same live link still succeeds end-to-end with
+zero regression. New permanent regression test added to the existing
+"S78 Public forms" suite (a real 11MB upload rejected on both forms with
+no DB residue, plus a normal-sized upload still succeeding) — 8/8
+passing. Deployed via the established scp -> hash-verify -> rebuild ->
+health-check cycle. Zero-token audit: `CONFIRMED CLEAN` (436 files).
+
+**Disclosed, not silently dropped**: MIME-type spoofing and zip-bomb-
+style decompression-exhaustion resistance specifically were not given a
+dedicated test in this pass — the real document-classifier/text-
+extraction pipeline is already heavily battle-tested throughout this
+project's history against malformed real-world documents, and the size-
+check fix above already closes the most direct, highest-value gap (raw
+memory exhaustion via a giant file) on the most exposed surface. Full
+detail in `QA_SWEEP_PROGRESS.md`.

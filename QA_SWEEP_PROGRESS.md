@@ -674,24 +674,71 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       on an invalid code (never crashes), and correctly run the HARD
       RULE #7/#12 consent gate before every send. No dishonesty found —
       the 14-language claim is genuinely backed by real content.
-- [~] Uploads & malformed input — checked path-traversal risk on the 2
-      real file-save helpers used across every upload path in the app
-      (`resume_intake_service.py::save_resume_file` — the highest-
-      volume path, used by every resume-intake channel; `candidates.
-      py::_save_candidate_document_file` — LWD confirmation/other
-      candidate documents). Both use the identical, safe pattern: a
-      regex (`re.sub(r'[^\w.\-]', '_', filename)[:200]`) strips every
-      character that isn't a word char/dot/hyphen from the client-
-      supplied filename BEFORE it ever touches a path — a traversal
-      attempt like `../../../etc/passwd` becomes a harmless
-      `.._.._.._etc_passwd`, no `/` or `\` can survive — combined with
-      a server-generated UUID prefix for uniqueness and a fully
-      server-controlled base directory (tenant_id + date, never client
-      input). No path-traversal risk found on either. Not yet a full
-      pass on every other real Phase 3 sub-item this checklist entry
-      covers (malformed/oversized file content, MIME-type spoofing,
-      zip-bomb-style resource exhaustion) — only the path-construction
-      half checked so far.
+- [x] Uploads & malformed input — DONE.
+      **Path-traversal**: checked the 2 real file-save helpers used
+      across every upload path in the app (`resume_intake_service.py::
+      save_resume_file` — the highest-volume path, used by every
+      resume-intake channel; `candidates.py::_save_candidate_document_
+      file` — LWD confirmation/other candidate documents). Both use the
+      identical, safe pattern: a regex (`re.sub(r'[^\w.\-]', '_',
+      filename)[:200]`) strips every character that isn't a word char/
+      dot/hyphen from the client-supplied filename BEFORE it ever
+      touches a path — a traversal attempt like `../../../etc/passwd`
+      becomes a harmless `.._.._.._etc_passwd`, no `/` or `\` can
+      survive — combined with a server-generated UUID prefix for
+      uniqueness and a fully server-controlled base directory
+      (tenant_id + date, never client input). No path-traversal risk
+      found on either.
+      **Oversized-upload DoS, a real gap found and FIXED, 2026-09-02**:
+      checked every real `await <UploadFile>.read()` call site across
+      the backend for a size cap. Found `candidates.py`'s internal,
+      AUTHENTICATED document-upload endpoint already correctly caps at
+      10MB — but the 3 real, PUBLIC, UNAUTHENTICATED upload paths
+      (`personal_links.py`'s job-less and job-specific resume uploads,
+      plus their shared multi-file `_save_other_documents()` helper;
+      `p28_p32.py`'s public job-apply resume upload) had ZERO
+      application-level cap at all — only nginx's blanket
+      `client_max_body_size 50M` (confirmed via the real nginx config)
+      stood between an anonymous caller and a 50MB-per-request read
+      into memory, the wrong way around for the app's most publicly-
+      exposed, zero-identity-verification surface. Fixed all 4 sites to
+      match the same, already-proven 10MB cap — the 2 real resume
+      uploads now check size BEFORE the parsing try/except (so an
+      oversized file gets a real, clear `400 "Resume file too large
+      (max 10MB)"` rather than being silently swallowed by the "best-
+      effort enrichment" catch-all), while the multi-file helper simply
+      skips an individual oversized attachment without blocking the
+      rest of the submission, matching its own established best-effort
+      contract. **A real, self-inflicted CRLF/LF corruption caught and
+      fixed before deploy, same recurring class documented throughout
+      this session**: the Edit tool silently flipped `p28_p32.py` (100%
+      LF in HEAD) to 100% CRLF — caught via the established byte-count
+      comparison, restored, re-verified via `ast.parse()` before
+      deploying. Verified for real, not code review: a genuine 11MB
+      upload to the public personal-link endpoint cleanly 400s with the
+      exact expected message; confirmed via a direct DB search that
+      NEITHER rejected attempt (personal link + job-specific link)
+      created any candidate record at all — the whole submission fails
+      before any write, not a partial/orphaned insert; a normal-sized
+      resume submission on the same link still succeeds (no
+      regression). New permanent regression test added to the existing
+      "S78" suite, 8/8 passing. Deployed via the established scp ->
+      hash-verify -> rebuild -> health-check cycle. Zero-token audit:
+      `CONFIRMED CLEAN` (436 files).
+      **Not fully covered, disclosed rather than silently dropped**:
+      MIME-type spoofing (a file whose extension/declared content-type
+      doesn't match its real content) and zip-bomb-style decompression-
+      exhaustion resistance specifically — the real, live document-
+      classifier/text-extraction pipeline (`document_classifier.py`/
+      `extract_text_from_attachment`) is already independently, heavily
+      battle-tested throughout this project's history against garbled/
+      malformed/misclassified real-world documents (dozens of dated
+      CLAUDE.md entries), giving reasonable confidence it degrades
+      gracefully rather than crashing on a spoofed/malformed file — but
+      a dedicated, deliberate zip-bomb/decompression-ratio test was not
+      constructed in this pass, given the size-check fix above already
+      closes the most direct, highest-value gap (raw memory exhaustion
+      via a giant file) on the most exposed surface.
 - [x] Degraded-dependency behavior (Ollama/embed service down) — real,
       genuine gap found and fixed. Read `ai_router.py`'s `generate()`
       (the shared "one module every AI call passes through" entry

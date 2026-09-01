@@ -10746,6 +10746,56 @@ test.describe.serial('S78 Public forms: mandatory phone (min 10 digits) + multi-
       expect(await submitBtn.isDisabled()).toBe(true);
     }
   });
+
+  test('BUG FIX (2026-09-02 QA sweep): an oversized resume cleanly 400s with no candidate created, on both public forms — previously unbounded, only nginx\'s blanket 50MB applied', async ({ request }) => {
+    // These 2 public, unauthenticated endpoints had no application-level
+    // size cap of their own — inconsistent with the authenticated
+    // internal document-upload endpoint's own established 10MB cap
+    // (candidates.py). An 11MB buffer here is comfortably over the new
+    // 10MB limit but well under nginx's own 50MB ceiling, so this
+    // specifically exercises the new application-level check, not the
+    // pre-existing infrastructure-level one.
+    const bigBuffer = Buffer.alloc(11 * 1024 * 1024, 'A');
+    const email = `s78.oversize.${stamp}@qatest.example`;
+    const r1 = await request.post(`${API}/public/personal-links/${personalLinkToken}/apply`, {
+      multipart: {
+        full_name: `S78 Oversize Test ${stamp}`, email, phone: `9111${String(stamp).slice(-6)}`, consent_given: 'true',
+        resume: { name: 'huge.pdf', mimeType: 'application/pdf', buffer: bigBuffer },
+      },
+    });
+    expect(r1.status()).toBe(400);
+    expect((await r1.json()).detail).toContain('too large');
+
+    const jobEmail = `s78.jobsize.${stamp}@qatest.example`;
+    const r2 = await request.post(`${API}/public/job-links/${jobLinkToken}/apply`, {
+      multipart: {
+        full_name: `S78 Job Oversize Test ${stamp}`, email: jobEmail, phone: `9222${String(stamp).slice(-6)}`, consent_given: 'true',
+        resume: { name: 'huge.pdf', mimeType: 'application/pdf', buffer: bigBuffer },
+      },
+    });
+    expect(r2.status()).toBe(400);
+    expect((await r2.json()).detail).toContain('too large');
+
+    // Confirm the whole submission was rejected before any DB write -
+    // neither candidate should exist at all, not even without a resume.
+    for (const e of [email, jobEmail]) {
+      const listR = await request.get(`${API}/candidates?search=${encodeURIComponent(e)}&limit=5`, { headers: authAdmin() });
+      expect((await listR.json()).items?.length || 0).toBe(0);
+    }
+
+    // A normal-sized resume on the same personal link must still succeed
+    // — proves the fix rejects only genuinely oversized files, not a
+    // regression on the common case.
+    const okEmail = `s78.normalsize.${stamp}@qatest.example`;
+    cleanupEmails.push(okEmail);
+    const r3 = await request.post(`${API}/public/personal-links/${personalLinkToken}/apply`, {
+      multipart: {
+        full_name: `S78 Normal Size ${stamp}`, email: okEmail, phone: `9333${String(stamp).slice(-6)}`, consent_given: 'true',
+        resume: { name: 'small.txt', mimeType: 'text/plain', buffer: Buffer.from('A small, valid resume file.') },
+      },
+    });
+    expect(r3.status()).toBe(200);
+  });
 });
 
 test.describe.serial('S79 Pipeline board "Add Candidate" modal: View Profile + matched(blue)/missing(red) skills + bulk select-all', () => {
