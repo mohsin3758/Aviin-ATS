@@ -831,7 +831,36 @@ live-verification pass this phase's checklist items still need.)
       parameterized via `$1`. No real SQL injection found in this pass.
       Not yet a full sweep of every dynamic-SQL site in the codebase,
       and XSS wasn't checked at all yet (frontend-side).
-- [ ] Secrets sweep (repo + git history)
+- [~] Secrets sweep (repo + git history) — **current working tree:
+      genuinely clean**, no hardcoded passwords/API keys/tokens found
+      via a real regex sweep of every `.py`/`.ts`/`.tsx`/`.sh` file.
+      Confirmed the 2 previously-flagged, real credential-exposure
+      files (`sync_all.py`/`sync_missing.py`, a real base64-"obfuscated"
+      Hostinger email password, found and the files deleted 2026-08-23)
+      are genuinely gone from the current repo. The 5 remaining local-
+      only, gitignored, never-committed scripts still present on this
+      machine (`chk.py`/`chk2.py`/`fix2.py`/`qa_seed.py`/`seed_data.py`
+      at repo root) only reference `"changeme"` — the already publicly-
+      documented seed/demo default for `admin@example.com`, not a real
+      secret.
+      **A real, unresolved risk found in git HISTORY, disclosed
+      rather than assumed fine**: `git log --all -- sync_all.py
+      sync_missing.py` shows 3 real commits still reachable
+      (`693cd11`/`21e64fd`/`45ac385`) — the original credential-bearing
+      commit is still fully recoverable via `git show 693cd11:
+      sync_all.py`, since deleting the files in a LATER commit does not
+      remove them from git HISTORY, and history was explicitly NOT
+      rewritten (per CLAUDE.md's own 2026-08-23 entry — a deliberate
+      choice, scrubbing history is a separate, more destructive
+      decision). Given this repo is confirmed PUBLIC on GitHub, this
+      OLD credential is still technically recoverable by anyone right
+      now. The user was asked to rotate the real Hostinger credential
+      at the time this was found — **I cannot independently verify
+      whether that rotation genuinely happened and is still in effect**
+      (an external system with no API access from here). Flagging this
+      plainly rather than assuming it's resolved: if the credential was
+      NOT actually rotated, or was reverted since, this is a real, live
+      risk sitting in public git history right now.
 - [ ] Rate limiting/abuse on public endpoints
 
 ## PHASE 6 — Final regression pass & sign-off
