@@ -212,8 +212,19 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       range across this run. All 7 real failures + both flaky results
       are confined to S81-S88 (setup-step cascades in S83/S84/S85/S86,
       plus S82/S87/S88's own downstream assertions) — not yet
-      individually re-verified clean, re-running in a smaller,
-      isolated sub-batch after a longer cooldown.
+      individually re-verified clean.
+      2nd attempt (S81-S84 only, a smaller sub-batch) after an 18-min
+      wait: still hit 10 real 429s in the exact run window (confirmed
+      via backend logs) — this session's own cumulative login volume
+      across the entire day has been high enough that even a smaller
+      4-suite batch's ~8-12 logins immediately re-exhausts the rolling
+      15-min window. S81's own setup passed (flaky, on retry); S82's
+      setup passed (flaky) but a downstream test still failed; S83 and
+      S84's own setups both failed outright both times. Not yet a
+      genuine app-level signal either way for S82/S83/S84's real
+      content — waiting for a much longer (25 min) cooldown, then
+      re-attempting ONE suite at a time to keep each individual
+      attempt's login volume minimal.
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
       S20/S53's own cleanup hooks correctly leave zero residue; found
