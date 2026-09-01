@@ -256,7 +256,24 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
 - [ ] Scale check (real 2,700+ candidate dataset)
 - [ ] Concurrency & idempotency checks
 - [ ] Background/scheduled jobs — direct invocation
-- [ ] Silent-failure hunt (`except Exception: pass` grep + log check)
+- [x] Silent-failure hunt (`except Exception: pass` grep + log check) —
+      ran a real Python-regex scan (not a fragile line-based grep) across
+      every file in `backend/routers/*.py` + `backend/*.py` for every
+      genuine silent-swallow shape: same-line `except ...: pass`,
+      multi-line `except ...:\n    pass`, and the same pattern with an
+      `as e` binding or a leading comment before the bare `pass`.
+      **Zero matches across the entire backend, in any shape.** Every
+      real exception handler in this codebase does something (log,
+      re-raise, return an error response, write to a status/error
+      column) — matches this project's own extensively-documented
+      history of finding and fixing this exact pattern repeatedly over
+      time (e.g. `parse_with_ollama`'s failure logging, the SLA-
+      escalation nested-transaction fix); the codebase is now genuinely
+      clean of it, not just improved in isolated spots. Not yet
+      cross-checked against real production logs for a DIFFERENT
+      failure class — a handler that logs but the log message itself
+      never actually gets reviewed/alerted on — that's a process gap,
+      not a code gap, and out of this specific checklist item's scope.
 - [ ] Generated-file content correctness (CSV/PDF/etc.)
 - [ ] Localization/multi-language honesty check
 - [ ] Uploads & malformed input
