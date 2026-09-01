@@ -143,7 +143,9 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       S43 was a stale test assumption predating enforcement being
       turned on for the `kae` feature; S59 was a genuine locator-
       ambiguity/async-render race). Re-verified: 11/11 clean.
-- [~] Batch 4: S61–S88 — in progress. First attempt (all 28 suites in
+- [~] Batch 4: S61–S88 — nearly done; one specific S61 UI test still
+      needs a final clean confirming pass (see detail below), not yet
+      reproducibly failing or reproducibly passing. First attempt (all 28 suites in
       one Playwright invocation) was too much real login volume for
       this project's per-IP rate limiter to absorb in one run — 42 real
       `429`s confirmed directly in backend logs during the run window
@@ -242,6 +244,59 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       a diagnostic probe, consumes a slot when it succeeds through —
       stopped all further curl/login probing entirely and switched to
       a longer, completely untouched wait instead of periodic checks.
+      **4th attempt, after the full 25-min untouched wait: fully
+      clean.** S82-S85 (14 tests) ran first, all 14 passed with zero
+      failures or flakes — confirming these 4 suites (previously only
+      ever seen failing under rate-limit cascade, never with a real
+      app-level signal) are genuinely correct. Immediately followed by
+      S86-S88 (11 tests) while the window stayed open — all 11 passed
+      cleanly too. **Batch 4b (S75-S88, all 14 suites) is now fully
+      confirmed clean.**
+
+      **A NEW, real finding surfaced immediately after, during a
+      follow-up combined re-check (S61+S74+S43+S1 together) — S61's own
+      "real headless UI" test (the drawer stage-pill -> Submit-to-Client
+      modal -> real stage-move-to-submitted test) failed with a genuine
+      assertion mismatch (`expected 'submitted', got 'client_submission'`),
+      consistent on BOTH the original attempt and its retry, so NOT
+      simple rate-limit noise.** Investigated thoroughly before drawing
+      any conclusion: (1) reproduced the EXACT same real backend flow
+      end-to-end via direct API calls (a genuine throwaway client + a
+      real primary SPOC contact + a linked requisition + a candidate at
+      `screened`, then a real `POST .../submit-to-client` call) — the
+      backend is **100% correct**: `stage_bumped_to_submitted:true` in
+      the response, and the candidate's real, final stage genuinely
+      IS `submitted` afterward, confirmed via a follow-up GET. (2) Read
+      the full frontend chain (`SubmitClientTab`'s `send()` ->
+      `onSubmitted?.(r.stage_bumped_to_submitted)` ->
+      `ClientSubmissionMoveModal`'s `onSent(bumped)` ->
+      `commitStageMove(...,'submitted',...)`) — correctly wired on
+      inspection, no obvious bug. (3) Re-ran S61 alone, in true
+      isolation, for a clean signal — got a genuinely DIFFERENT failure
+      this time: a raw `socket hang up` (a transport-level connection
+      error, not an assertion mismatch) on the exact same test's final
+      API read. Re-established a completely fresh SSH tunnel (killed
+      the old process, reconnected with tighter keepalive settings) and
+      attempted a 3rd isolated run, which hit this session's own
+      well-documented login rate-limit before it could even start.
+      **Honest current state, not glossed over**: the backend is proven
+      unambiguously correct via direct reproduction; the frontend code
+      reads correctly; but 2 consecutive UI-test attempts each failed
+      with a DIFFERENT failure signature (an assertion mismatch, then a
+      raw socket error) rather than the SAME deterministic failure —
+      inconsistent with a genuine, reproducible app regression, and
+      consistent with environmental/tunnel instability under this
+      session's very heavy, sustained load today (the same class of
+      "SSH tunnel dies during long operations" issue already documented
+      multiple times this session). Cleaned up all reproduction
+      throwaway data via the real DELETE APIs. **Not yet closed out
+      with a clean, confirming pass** — genuinely needs one more
+      isolated S61 run once the rate limit clears again, with a fresh
+      tunnel, before this can be marked done with real confidence
+      either way. Combined with Batch 4a's earlier closure (S61's OTHER
+      3 tests + S74), the rest of Batch 4 (S61's non-UI tests, S62-S88)
+      is confirmed clean — only this ONE specific UI test within S61
+      remains genuinely unresolved.
 - [ ] Test-suite hygiene audit (cleanup completeness, `.serial()` usage,
       no real-record mutation) — informally covered so far: confirmed
       S20/S53's own cleanup hooks correctly leave zero residue; found
