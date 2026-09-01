@@ -446,6 +446,32 @@ live-verification pass this phase's checklist items still need.)
       real views (all already correctly `security_invoker=true`) were
       confirmed clean in the same sweep, including re-confirming the
       earlier `v_recruiter_capacity` fix is still holding.
+      **SECURITY DEFINER function audit (the other half of this
+      checklist item — a distinct risk class from views, since these
+      always run with the function owner's privileges and RLS never
+      applies at all)**: enumerated all 37 real `SECURITY DEFINER`
+      functions live in the database (all owned by `postgres`), and
+      their real argument signatures. 34 of the 37 take only an
+      unguessable random token (or genuinely non-identifying data like
+      lat/lng, response text) as input — safe by construction, since
+      the token itself IS the sole identifier and can only ever
+      resolve to whatever it was minted for. 3 take an EXTRA identifier
+      parameter alongside their token/auth context, each individually
+      checked: `generate_invoice_from_timesheets(p_tenant_id, ...)` is
+      only ever called with `actor.tenant_id` (JWT-derived, finance-
+      role-gated), never client input; `accept_offer_by_id(p_offer_id)`
+      only ever receives an offer_id that itself came from the SAME
+      token-resolution step moments earlier (`sign_offer_by_token`'s
+      own result), never a client-supplied UUID directly; `submit_
+      agency_candidate(p_token, p_requisition_id, ...)` — the one
+      genuinely client-supplied case — pulled its real, live definition
+      and confirmed it explicitly validates `requisitions.tenant_id =
+      v_tenant` (the token's OWN resolved tenant) before accepting the
+      submission, correctly rejecting a cross-tenant requisition_id
+      with a clean exception. Also self-checked `seed_role_definitions_
+      for_tenant(p_tenant_id)` (built earlier this same session) —
+      confirmed all 3 real call sites pass `actor.tenant_id`, never
+      client input. No SECURITY DEFINER vulnerabilities found.
 - [~] Forgeable/guessable token audit — grepped every real token-
       generation call site across the backend (18 found). All
       consistently use Python's `secrets` module (cryptographically
