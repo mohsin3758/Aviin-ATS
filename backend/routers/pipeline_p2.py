@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import db
+import events
 from deps import Actor, get_actor
 from routers.pipeline_stages import is_valid_stage, recruiter_can_move_to_stage
 from services import candidate_ownership as ownership
@@ -66,6 +67,18 @@ class BulkAction(BaseModel):
     application_ids: List[str]
     action: str              # "move_stage" | "reject" | "move_placed"
     target_stage: Optional[str] = None
+    # REAL GAP FOUND AND FIXED 2026-09-01 (QA sweep, HARD RULE #10 audit):
+    # the "reject" branch below used to be a bare stage flip with none of
+    # the structured rejection taxonomy, HITL audit trail, or recruiter
+    # notification the single-candidate PATCH .../stage path has required
+    # since 2026-08-08 - most seriously, it never wrote assignment_event
+    # at all, a direct HARD RULE #10 gap ("candidate rejected... log to
+    # assignment_event/audit_log"), not just a UX inconsistency. One
+    # reason applies to the whole batch (matching how a recruiter
+    # realistically uses "bulk reject" - the same reason for everyone in
+    # one action), required and validated once before the loop starts.
+    reason_code: Optional[str] = None
+    notes: Optional[str] = None
 
 # notify_n8n()/N8N_WEBHOOK removed here (2026-08-10) - confirmed zero
 # callers anywhere in the codebase (grepped both this file and every
@@ -338,13 +351,29 @@ async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = De
         raise HTTPException(400, "No application IDs provided")
 
     results = {"success": 0, "failed": 0, "details": []}
+    reason_row = None
 
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Same real validation as the single-candidate PATCH .../stage
+        # path (applications.py) - required and checked ONCE before the
+        # loop, matching how a recruiter realistically uses bulk reject
+        # (one reason for the whole selected batch, not a different one
+        # per candidate).
+        if action.action == "reject":
+            if not action.reason_code:
+                raise HTTPException(400, "reason_code is required when bulk-rejecting (see GET /rejection-reasons)")
+            reason_row = await conn.fetchrow(
+                "SELECT code, label FROM rejection_reasons WHERE tenant_id=$1 AND code=$2 AND is_active",
+                actor.tenant_id, action.reason_code)
+            if not reason_row:
+                raise HTTPException(400, f"Unknown rejection reason_code '{action.reason_code}' — see GET /rejection-reasons")
+
         for app_id in action.application_ids:
             try:
                 # Verify ownership
                 app = await conn.fetchrow("""
-                    SELECT a.id, a.stage, a.candidate_id, c.full_name, c.email, c.phone
+                    SELECT a.id, a.stage, a.candidate_id, a.requisition_id, a.assigned_recruiter_id,
+                           c.full_name, c.email, c.phone
                     FROM applications a JOIN candidates c ON c.id=a.candidate_id
                     WHERE a.id=$1 AND a.tenant_id=$2""", app_id, actor.tenant_id)
                 if not app:
@@ -414,6 +443,52 @@ async def bulk_action(action: BulkAction, bg: BackgroundTasks, actor: Actor = De
                         INSERT INTO pipeline_movements (id,tenant_id,candidate_id,application_id,stage_from,stage_to,reason,triggered_by)
                         VALUES (gen_random_uuid(),$1,$2,$3,$4,'rejected','bulk_reject','user')""",
                         actor.tenant_id, app["candidate_id"], app_id, old_stage)
+
+                    # REAL FIX 2026-09-01 (QA sweep) — the rest of this
+                    # branch replicates applications.py's single-candidate
+                    # rejection exactly (structured reason, HITL audit
+                    # trail, recruiter/manager notification), previously
+                    # completely skipped for a bulk reject. reason_row was
+                    # already validated once before the loop started.
+                    await conn.execute(
+                        """INSERT INTO application_rejections
+                             (tenant_id, application_id, candidate_id, requisition_id, reason_code, reason_label, notes, rejected_by)
+                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                        actor.tenant_id, app_id, app["candidate_id"], app["requisition_id"],
+                        reason_row["code"], reason_row["label"], action.notes, actor.user_id,
+                    )
+                    await events.write_assignment_event(
+                        conn, actor.tenant_id, "candidate.rejected",
+                        reason=action.notes, actor_user_id=actor.user_id,
+                        metadata={"application_id": app_id, "from_stage": old_stage,
+                                  "reason_code": reason_row["code"], "via": "bulk_reject"},
+                    )
+                    await events.write_audit(
+                        conn, actor.tenant_id, actor.user_id, "reject", "application", app_id,
+                        before={"stage": old_stage},
+                        after={"stage": "rejected", "reason_code": reason_row["code"],
+                               "reason_label": reason_row["label"], "notes": action.notes},
+                    )
+                    _notif_title = f"Candidate rejected: {app['full_name']}"
+                    _notif_body = reason_row["label"] + (f". {action.notes}" if action.notes else "")
+                    if app["assigned_recruiter_id"]:
+                        await conn.execute(
+                            """INSERT INTO notifications (tenant_id,user_id,recipient_user_id,title,body,type,resource,resource_id,channel)
+                               VALUES ($1,$2,$2,$3,$4,'warning','application',$5,'inapp')""",
+                            actor.tenant_id, app["assigned_recruiter_id"], _notif_title, _notif_body, app_id,
+                        )
+                    else:
+                        await conn.execute(
+                            """INSERT INTO notifications (tenant_id,recipient_role,title,body,type,resource,resource_id,channel)
+                               VALUES ($1,'manager',$2,$3,'warning','application',$4,'inapp')""",
+                            actor.tenant_id, _notif_title, _notif_body, app_id,
+                        )
+                    try:
+                        from routers.final_features import notify_event
+                        await notify_event(actor.tenant_id, "candidate_rejected", f"❌ {_notif_title} — {_notif_body}",
+                                            {"application_id": app_id, "reason_code": reason_row["code"]})
+                    except Exception:
+                        pass  # webhook delivery is best-effort, never blocks the actual rejection
 
                 results["success"] += 1
                 results["details"].append({"name": app["full_name"], "status": "ok"})

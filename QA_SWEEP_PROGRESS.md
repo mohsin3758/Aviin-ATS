@@ -507,11 +507,68 @@ returning 200 before trusting any `page`-based test result.
       the trusted-internal path: a clean 404 post-fix.
     Both deployed via the established scp → hash-verify → rebuild →
     health-check cycle. Zero-token audit: `CONFIRMED CLEAN`.
+13. **A real HARD RULE #10 gap found and fixed: `POST /pipeline/bulk-
+    action`'s "reject" branch bypassed the entire structured rejection
+    system.** Found while re-enumerating every real code path that can
+    write `stage='rejected'` (closing out the earlier "spot-checked, not
+    fully enumerated" item for this rule). Unlike the single-candidate
+    `PATCH .../stage` path (which requires a real `reason_code`, writes
+    `application_rejections`, and — the actual HARD RULE #10 violation,
+    not just a UX gap — writes `assignment_event`, plus `audit_log` and
+    a real recruiter/manager notification), the bulk-reject branch was a
+    bare stage flip with a `pipeline_movements` row and nothing else —
+    no reason on record, **no HITL audit trail at all**. Fixed by
+    replicating the single-candidate path's exact logic (one `reason_
+    code` validated once for the whole batch, matching how a recruiter
+    would realistically use this — reject several candidates for the
+    same reason in one action — rather than one per candidate). **Real,
+    honest scope note**: confirmed via a whole-frontend grep that the
+    only real caller of `/pipeline/bulk-action` ever sends `action:
+    "move_stage"` — bulk-reject has zero real UI exposure right now,
+    matching a 2026-08-09 note in this same codebase explaining that
+    decision explicitly ("stuffing [reason_code] into a bulk flow felt
+    like a different, bigger feature than 'bulk stage-move' asked
+    for"). The backend capability is real and directly callable via API
+    regardless of UI exposure, so the fix stands on its own merits (a
+    genuine compliance/security gap in reachable code) — deliberately
+    did NOT add a "Bulk Reject" button to the UI as part of this fix,
+    since that would be a new feature decision beyond what was found
+    broken, not something to add unilaterally.
+    Verified end-to-end with a real throwaway candidate/application: a
+    request with no `reason_code` cleanly 400s; a real request with one
+    succeeds, and all 5 real writes were independently confirmed
+    directly in the database — `application_rejections` (correct reason/
+    notes), `assignment_event` (`event_type: candidate.rejected`, real
+    metadata incl. `via: bulk_reject`), `audit_log`, a real `notifications`
+    row (correctly routed to the manager role since the throwaway
+    candidate had no assigned recruiter), and `applications.stage`
+    correctly flipped to `rejected`. All throwaway data cleaned up
+    after. Zero-token audit: `CONFIRMED CLEAN`.
+14. **A real, separate, narrow bug found incidentally while sourcing
+    test data for finding #13 — NOT fixed, recorded for a future pass.**
+    `POST /candidates/bulk-assign` (candidates.py:690) does `str(actor.
+    user_id)` when logging to `candidate_activities` — for the trusted-
+    internal auth path (`actor.role is None`, `actor.user_id is None`,
+    used throughout this project by n8n/internal automation callers),
+    `str(None)` produces the literal 4-character string `"None"`, not a
+    real NULL, which a UUID column then correctly rejects
+    (`asyncpg.exceptions.DataError: invalid input... invalid UUID
+    'None'`) — a real 500 for that one specific auth path on this one
+    specific endpoint. Confirmed narrow, not a live production issue
+    right now (every REAL frontend call to this endpoint carries a real
+    JWT with a real `actor.user_id`) but a genuine robustness gap for
+    any legitimate trusted-internal caller (e.g. a future n8n workflow)
+    that might reach this endpoint. Not fixed in this pass — tangential
+    to what was actively being investigated, flagged for a dedicated
+    look rather than a rushed one-line patch mid-unrelated-verification.
 
 ---
 
 ## Open/deferred items (with reason)
 
+- **`candidates.py::bulk_assign`'s `str(actor.user_id)` bug** (finding
+  #14 above) — real, narrow, low-priority (no live production impact
+  found), left for a dedicated future pass rather than a rushed fix.
 - **WAHA default session disconnected** — real, live, currently
   affecting all automated WhatsApp notifications. Cannot be fixed by me
   (needs a physical phone to re-scan the QR via the WAHA dashboard,
