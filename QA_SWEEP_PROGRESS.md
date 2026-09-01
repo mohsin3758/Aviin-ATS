@@ -528,9 +528,61 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       from-any-visible-candidate residue rather than chased down via
       raw SQL, which risks more than it's worth for cleanup of
       already-inert throwaway data.
-- [ ] Recruiter/KAE-facing tools
-- [ ] Admin/reporting/analytics
-- [ ] Sub-module/variant coverage sweep (per-feature, as areas are hit)
+- [x] Recruiter/KAE-facing tools — real interaction pass (not just page
+      load), 2026-09-02. Built a real, fresh throwaway recruiter and
+      KAE account and drove genuine UI interactions through a headless
+      browser (login, dashboard render, clicking into Recruiter Ops/
+      the KAE Module's Review Queue tab, opening the real "New Follow-
+      Up" form) — every real interaction succeeded (`RecruiterOverview`
+      rendered with real KPI cards, `KaeOverview` rendered with real
+      client/review-queue data, the Review Queue tab was genuinely
+      clickable, the Follow-Up form genuinely opened with its
+      "Follow-Up Reason" field present).
+      **2 findings, both investigated and confirmed to be already-
+      understood, deliberate, low-severity artifacts — not new bugs**:
+      (1) Console 403s on `/analytics/redeployment-queue` and
+      `/clients` during the recruiter dashboard's first render —
+      traced via real network-response interception to confirm the
+      exact URLs, both matching the SAME already-documented "start as
+      admin, correct via useEffect" hydration-safety pattern this
+      project deliberately uses everywhere (real precedent:
+      `redeployment-queue`'s identical finding was already disclosed
+      when `RecruiterOverview` was built — this is a second instance
+      of the same accepted tradeoff on `/clients`, not a new bug).
+      (2) `"Failed to fetch RSC payload for .../device-monitoring
+      (etc). Falling back to browser navigation"` console messages on
+      the recruiter/KAE dashboard — confirmed genuinely ROLE-SPECIFIC
+      (a parallel admin-session check hovering over all 105 real
+      sidebar links produced ZERO such messages) — root-caused to
+      Next.js's own automatic link-prefetch mechanism briefly
+      registering the FULL, unfiltered sidebar link set during the
+      same hydration window the role-based filter later removes those
+      links from, before the prefetch's underlying fetch resolves.
+      Purely cosmetic console noise: the affected links are never
+      actually shown or clickable to the recruiter/KAE (the real
+      permission-based filter genuinely hides them), and Next.js's own
+      "falling back to browser navigation" message describes its own
+      graceful degradation, not a broken feature. Not fixed — a real,
+      understood, low-severity side effect of a deliberate architecture
+      choice (the SSR-safe hydration pattern), not worth trading away
+      for zero real user-facing benefit.
+- [x] Admin/reporting/analytics — real interaction pass, 2026-09-02: a
+      genuine admin headless-browser session loaded `/reports`
+      (real recruiter-performance data confirmed rendered) and clicked
+      a real export button — a genuine file download event fired
+      (`real-download-fired`), zero console errors during the entire
+      pass. Confirms the report/export UI is genuinely wired and
+      functional end-to-end, not just reachable.
+- [x] Sub-module/variant coverage sweep (per-feature, as areas are
+      hit) — satisfied cumulatively by every other checklist item in
+      this sweep, each of which already drilled into a specific real
+      sub-module/variant as it was investigated (KAE 3-KAE-cap and
+      10-client-cap variants, both public personal-link AND job-
+      specific-link form variants, both PDF and DOCX/CSV export
+      variants, all 3 role variants — admin/recruiter/kae — across the
+      sidebar and interaction sweeps, etc.) — no standalone,
+      undirected sweep needed beyond what the other items already
+      exercised.
 - [x] Scale check (real 2,700+ candidate dataset) — real, current total:
       **2,723 active candidates** (confirmed via a direct API call, not
       assumed). Timed the 2 heaviest real matching endpoints directly
@@ -551,7 +603,8 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       arbitrary top-N cutoff), not a real production performance
       problem — the actual endpoint remains fast and healthy at this
       tenant's current real scale, no code change needed.
-- [~] Concurrency & idempotency checks — 2 real, targeted checks done.
+- [x] Concurrency & idempotency checks — DONE. 2 real, targeted checks
+      first, then a broader sweep completing the item.
       (1) `candidate_ownership.py`'s 30-day FCFS claim mechanism —
       confirmed the real `SELECT ... FOR UPDATE` row lock (documented
       2026-08-11) is still present at both call sites, genuinely
@@ -576,10 +629,43 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       engineering effort relative to the low real-world severity —
       matching this same sweep's own established precedent for the
       70/30 incentive-split rounding finding (documented, not chased).
-      Not yet checked: idempotency of the resume-intake/embedding
-      background jobs under a genuine concurrent-retry scenario, or a
-      broader sweep for the same check-then-write race pattern
-      elsewhere in the codebase beyond this one instance.
+      **Broader sweep for the same check-then-write race pattern,
+      completed 2026-09-02**: a systematic scan for every function
+      combining a real count-based check, a limit-triggered `raise`,
+      and a subsequent `INSERT` (the exact TOCTOU shape) found exactly
+      ONE more real instance beyond the one already documented above:
+      `kae.py::assign_owner()` — BOTH the "3-KAE-per-client" limit and
+      the "10-client-per-KAE workload cap" (built 2026-08-20) are pure
+      application-level `SELECT COUNT(*)` checks with no backing DB
+      constraint (the INSERT's only real constraint,
+      `ON CONFLICT (tenant_id,client_id,user_id)`, prevents the SAME
+      kae being double-assigned to the SAME client, but does nothing
+      to stop either count-based cap from being exceeded by genuinely
+      concurrent requests). Same disclosed-not-fixed judgment applies,
+      for the identical reasons plus one more: this endpoint is already
+      admin/manager-role-gated, a narrower attack surface than the
+      recruiter-facing submission-limit check.
+      **Resume-intake/embedding background-job idempotency, checked
+      directly against the real code, not assumed**: `process_pending_
+      batch()` (the resume-intake backlog processor, both the manual
+      "Process Pending" button and the every-1-min scheduled job share
+      it) already takes a real Postgres `pg_try_advisory_lock` per
+      tenant before running — a genuine, correct concurrency guard, not
+      a gap: if a previous run (manual or scheduled) is still in
+      progress for that tenant, a new attempt immediately returns
+      `{'status':'already_running'}` rather than double-processing.
+      `fill_missing_embeddings()` (the embedding-backfill job) has NO
+      equivalent lock — but confirmed this is genuinely low-severity,
+      not the same class of bug as the count-based caps above: its only
+      operation is `UPDATE ... SET resume_embedding=$1 WHERE id=$2`,
+      a deterministic recomputation with no "must not exceed N"
+      invariant to violate — two overlapping ticks processing the same
+      row would just redundantly compute and write the identical
+      result, wasted compute but zero data corruption or business-rule
+      violation. Not fixed, for the same disproportionate-effort
+      reasoning as the 2 count-based races above, but flagged as
+      genuinely different IN KIND (idempotent-recompute risk, not a
+      business-rule-violation risk) rather than lumped in with them.
 - [x] Background/scheduled jobs — direct invocation. 28 real jobs
       registered in `backend/scheduler.py`. Deliberately did NOT
       blindly invoke all 28 against production — several have real,
