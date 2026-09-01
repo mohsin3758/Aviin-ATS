@@ -358,7 +358,38 @@ Legend: [ ] not started · [~] in progress · [x] done · [-] deferred (with rea
       covers (malformed/oversized file content, MIME-type spoofing,
       zip-bomb-style resource exhaustion) — only the path-construction
       half checked so far.
-- [ ] Degraded-dependency behavior
+- [x] Degraded-dependency behavior (Ollama/embed service down) — real,
+      genuine gap found and fixed. Read `ai_router.py`'s `generate()`
+      (the shared "one module every AI call passes through" entry
+      point) in full: `embed_text()` and `call_ollama()` both correctly
+      have zero internal try/except, propagating any real HTTP/
+      connection failure straight up — meaning graceful degradation is
+      entirely the CALLER's responsibility. Enumerated all 4 real
+      callers of `ai_router.generate()` across the backend: 3 (offers.
+      py's letter generation, final_features.py's 2 sites — both fixed
+      earlier this same sweep for a different reason, HARD RULE #4)
+      already correctly wrap it in try/except with a real fallback
+      (offers.py falls back to a template letter). The 4th —
+      `ai.py`'s `POST /jd/generate` (the real JD Generator feature) —
+      had NO try/except at all, so a genuinely down Ollama/embed
+      service would propagate as a raw, unhandled exception. Confirmed
+      this was NOT an info-disclosure risk (FastAPI's default 500
+      handler returns a generic `{"detail":"Internal Server Error"}`,
+      confirmed `debug=True` is not set anywhere on the app) — but a
+      real reliability/UX gap regardless. Fixed by wrapping the call in
+      try/except, matching `phase3.py`'s established pattern — but
+      unlike offer letters, a JD has no safe template fallback to
+      fabricate (risks silently passing off generic filler as the real
+      generated JD), so this surfaces a clean, honest `503` with an
+      actionable message instead. Verified for real, not code review:
+      confirmed the happy path (Ollama up) still returns a real,
+      correct generated JD with zero regression; confirmed the exact
+      deployed container file has the new try/except (not just the
+      local copy). Deployed via the established scp -> hash-verify ->
+      rebuild -> health-check cycle. Zero-token audit: `CONFIRMED
+      CLEAN` (435 files). Not yet checked: WAHA-down behavior for
+      manual WhatsApp sends, or an SMTP-down behavior beyond what's
+      already documented elsewhere in CLAUDE.md's history.
 - [x] is_active leak sweep (`JOIN clients` variant — this project's
       extensive prior history already exhaustively swept `JOIN users`/
       `JOIN candidates`, but `JOIN clients` specifically had never had

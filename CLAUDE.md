@@ -18816,3 +18816,30 @@ field whitelist, and `PUT /roles/{id}/permissions`) — all correctly
 gated, no escalation path found.
 
 All findings recorded in `QA_SWEEP_PROGRESS.md`.
+
+## QA sweep, 2026-09-01 continued: real degraded-dependency gap fixed
+## (JD Generator had no fallback for a down Ollama/embed service)
+Direct continuation of the same-day QA sweep — checked `ai_router.py`'s
+own `generate()` (the shared entry point every AI call is supposed to
+pass through per HARD RULE #4) and confirmed it has no internal try/
+except at all around the embed/Ollama HTTP calls, by design — graceful
+degradation is the caller's own responsibility. Enumerated all 4 real
+callers: `offers.py`'s letter generation and `final_features.py`'s 2
+sites (fixed earlier the same day for HARD RULE #4) already correctly
+fall back cleanly on failure. `ai.py`'s `POST /jd/generate` (the JD
+Generator tab, real, live usage since 2026-08-10 per the Deep DB audit
+round 4 that first found and fixed it) had no try/except at all — a
+genuinely down Ollama/embed service would propagate as a raw,
+unhandled exception. Confirmed this was never an info-disclosure risk
+(FastAPI's default handler returns a generic 500, `debug=True` isn't
+set anywhere) — but a real reliability gap regardless. Fixed by
+wrapping the call in try/except, matching `phase3.py`'s established
+pattern — unlike offer letters, a JD has no safe template to fall back
+to (fabricating one risks silently passing off generic filler as the
+real AI-generated JD), so this now surfaces a clean, honest `503` with
+an actionable message instead of a raw 500. Verified for real: the
+happy path (Ollama up) still returns a correct, real generated JD with
+zero regression; confirmed the exact deployed container file carries
+the new try/except, not just the local copy. Deployed via the
+established scp → hash-verify → rebuild → health-check cycle.
+Zero-token audit: `CONFIRMED CLEAN` (435 files, 0 external API refs).
