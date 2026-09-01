@@ -220,6 +220,20 @@ live-verification pass this phase's checklist items still need.)
       both fixed and verified end-to-end (real Ollama generation, real
       semantic-cache hit on a repeat call, confirmed via a direct
       `ai_cache` row check) — see findings log #12.
+- [x] #8 (n8n PostgreSQL nodes must SET app.tenant_id first) — NOT on
+      the original checklist explicitly either, checked via a real
+      `n8n export:workflow --all` against the live n8n container (not
+      guessed from the app's own webhook-call code, which can't see
+      what n8n does on its OWN side once triggered). **Definitive
+      finding**: all 13 real workflows use only 2 node types tenant-
+      wide — `n8n-nodes-base.webhook` and `n8n-nodes-base.set` — ZERO
+      PostgreSQL nodes exist anywhere in this tenant's real n8n setup.
+      HARD RULE #8 is currently vacuously satisfied for this real,
+      live deployment — there is nothing to violate, since no n8n
+      workflow ever directly queries Postgres at all (matching the
+      already-documented "Webhook trigger, then a Set node" shape every
+      one of these workflows follows). A real, conclusive check, not
+      left as "can't verify."
 - [~] #10 HITL gate — spot-checked the 3 named high-stakes actions:
       `approve_offer`/`issue_offer` (offers.py) and `reassign`
       (assignments.py) all correctly `require_role("admin","manager")`.
