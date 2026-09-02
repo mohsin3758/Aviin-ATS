@@ -817,6 +817,24 @@ def _build_tracking_html_table(columns: list, rows: list) -> str:
     )
 
 
+def _default_client_email_text(role_title: str, contact_name: Optional[str], sender_name: Optional[str]) -> tuple[str, str]:
+    """Real, editable starting point for the compose-email step (2026-09-02,
+    reported live: "email mailing message should be display... compose
+    email should be display before sending the email") - shared by the
+    preview (so the KAE sees a real default before typing anything) and
+    the actual send (as the fallback whenever no explicit override is
+    typed), so the two can never quietly drift apart into two different
+    wordings for the same real send."""
+    greeting = f"Hi {contact_name}," if contact_name else "Hi Team,"
+    subject = f"Profile Shared – {role_title}"
+    body = (
+        f"{greeting}\n\n"
+        f"Please find the attached profile for the {role_title} position along with the updated tracking sheet.\n\n"
+        f"Thanks & Regards,\n{sender_name or 'AVIIN ATS'}"
+    )
+    return subject, body
+
+
 async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
                            body_text: str, attachments: list, body_html_extra: str = "") -> tuple:
     """attachments: list of (filename, bytes, mime_subtype). body_html_extra,
@@ -1616,10 +1634,22 @@ async def submit_to_client_preview(
         # table (same data + same cumulative-row logic the real send
         # uses), rendered for whichever template just resolved above.
         tracking_html = None
+        tracking_columns = None
+        tracking_rows = None
         if template:
             columns = _jsonb(template["columns"], [])
             sheet_rows, _, _ = await _client_tracking_sheet_rows(conn, actor.tenant_id, row["requisition_id"], auto_values)
             tracking_html = _build_tracking_html_table(columns, sheet_rows)
+            # REAL FEATURE (2026-09-02, reported live: "keep the option to
+            # editable in the tracking sheet") — structured columns/rows
+            # alongside the pre-rendered HTML, so the frontend can render
+            # the LAST row (the one this send actually represents, still
+            # unset at this point) as real, editable inputs bound to the
+            # already-tracked `fields` state, while every earlier row
+            # (a genuine already-sent submission — an honest audit record,
+            # never rewritten) stays plain, read-only text.
+            tracking_columns = columns
+            tracking_rows = sheet_rows
         prior_count = await conn.fetchval(
             "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
             row["requisition_id"])
@@ -1629,6 +1659,12 @@ async def submit_to_client_preview(
         client_name = None
         if row["client_id"]:
             client_name = await conn.fetchval("SELECT name FROM clients WHERE id=$1", row["client_id"])
+        # REAL FEATURE (2026-09-02, reported live: "compose email should
+        # be display before sending the email") — a real, honest default
+        # subject/body, shown editable in the modal before Send, not a
+        # backend-only string the KAE never sees until it's already gone.
+        default_subject, default_body = _default_client_email_text(
+            row["role_title"], primary_contact["contact_name"] if primary_contact else None, actor.full_name)
     return {
         "candidate_id": str(row["candidate_id"]),
         "requisition_id": str(row["requisition_id"]) if row["requisition_id"] else None,
@@ -1639,6 +1675,10 @@ async def submit_to_client_preview(
         "resolved_template": _template_out(template) if template else None,
         "templates": [_template_out(t) for t in templates],
         "tracking_html": tracking_html,
+        "columns": tracking_columns,
+        "rows": tracking_rows,
+        "default_subject": default_subject,
+        "default_body": default_body,
         "auto_values": {**auto_values, "sl_no": str((prior_count or 0) + 1)},
         "has_resume_text": bool((row["resume_text"] or "").strip()),
         "stage": row["stage"],
@@ -1686,6 +1726,12 @@ async def submit_to_client_tracking_preview(
             conn, actor.tenant_id, row["requisition_id"], auto_values, hidden_list)
     return {
         "tracking_html": _build_tracking_html_table(visible_columns, sheet_rows),
+        # Same real structured columns/rows as the main preview endpoint —
+        # this is the on-change refetch (template/SPOC/hidden-column
+        # picked differently), so the frontend's editable last row needs
+        # a fresh set of columns here too, not just on first load.
+        "columns": visible_columns,
+        "rows": sheet_rows,
         "row_count": len(sheet_rows),
         "template_type": template["template_type"],
         "file_name": template["file_name"],
@@ -1710,6 +1756,14 @@ class SubmitToClientIn(BaseModel):
     # default behavior), 'contact' (this one SPOC only), or 'requisition'
     # (this one project/role only).
     default_scope: str = "client"
+    # REAL FEATURE (2026-09-02, reported live: "compose email should be
+    # display before sending the email") — the KAE's own edited subject/
+    # message, shown pre-filled with a real default in the modal and
+    # freely editable before Send. Falls back to the same honest default
+    # (_default_client_email_text) when left blank, never silently sends
+    # something the KAE never saw.
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
 
 
 async def _do_client_submission(
@@ -1718,6 +1772,7 @@ async def _do_client_submission(
     template_id: Optional[str], columns_override: Optional[list], hidden_columns: list,
     field_values: Optional[dict], to_emails_override: Optional[list], cc_self: bool, save_as_default: bool,
     trigger_source: str = "manual", contact_id: Optional[str] = None, default_scope: str = "client",
+    subject_override: Optional[str] = None, body_override: Optional[str] = None,
 ) -> dict:
     """The KAE->Client hop: mirrors _do_kae_submission's shape (same
     _app_context, same resume attachment, same audit/outbox discipline) but
@@ -1867,7 +1922,7 @@ async def _do_client_submission(
         to_recipients = list(to_emails_override)
         cc_recipients = [c["email"] for c in contacts if c["email"] not in to_recipients] + \
                          ([recruiter_email] if cc_self and recruiter_email else [])
-        greeting = "Hi Team,"
+        contact_name_for_greeting = None
     else:
         to_recipients = [primary_contact["email"]]
         # REAL BUG FIX (2026-09-02): this used to assume the "to" contact
@@ -1879,20 +1934,20 @@ async def _do_client_submission(
         # both To and Cc on the real sent email.
         cc_recipients = [c["email"] for c in contacts if c["id"] != primary_contact["id"] and c["email"]] + \
                          ([recruiter_email] if cc_self and recruiter_email else [])
-        greeting = f"Hi {primary_contact['contact_name'] or ''},"
+        contact_name_for_greeting = primary_contact["contact_name"]
 
     # Real wording match (2026-08-25) — the tenant's own requested exact
     # format ("Hi [Client Name], Please find the attached profile for the
     # [Role Name] position along with the updated tracking sheet. Thanks &
-    # Regards, [Your Name]"). Greeting still addresses the real named SPOC
-    # when one is resolved (more professional than addressing a company
-    # name as if it were a person) rather than literally "Hi {client},".
-    subject = f"Profile Shared – {row['role_title']}"
-    body_text = (
-        f"{greeting}\n\n"
-        f"Please find the attached profile for the {row['role_title']} position along with the updated tracking sheet.\n\n"
-        f"Thanks & Regards,\n{actor.full_name or 'AVIIN ATS'}"
-    )
+    # Regards, [Your Name]"), now via the same shared helper the preview
+    # endpoint uses to show this exact text before Send (2026-09-02,
+    # reported live: "compose email should be display before sending") —
+    # subject_override/body_override (whatever the KAE actually typed in
+    # the compose box, blank or not) always wins over this honest default.
+    default_subject, default_body = _default_client_email_text(
+        row["role_title"], contact_name_for_greeting, actor.full_name)
+    subject = (subject_override or "").strip() or default_subject
+    body_text = (body_override or "").strip() or default_body
     email_sent, email_error = await _send_kae_email(
         tenant_id, to_recipients, cc_recipients, subject, body_text, attachments,
         body_html_extra=body_html_extra,
@@ -2067,4 +2122,5 @@ async def submit_to_client(
         template_id=body.template_id, columns_override=body.columns, hidden_columns=body.hidden_columns,
         field_values=body.field_values, to_emails_override=body.to_emails, cc_self=body.cc_self,
         save_as_default=body.save_as_default, contact_id=body.contact_id, default_scope=body.default_scope,
+        subject_override=body.email_subject, body_override=body.email_body,
     )

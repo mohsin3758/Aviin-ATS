@@ -1996,8 +1996,19 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // before sharing with the client"): the real, live populated table —
   // re-fetched whenever template/SPOC/hidden-columns change, so what's
   // shown here is always exactly what Send will actually produce.
-  const [trackingPreview, setTrackingPreview] = useState<{ tracking_html: string; row_count: number } | null>(null);
+  // columns/rows (2026-09-02, follow-up: "editable in the tracking
+  // sheet") — the real structured data behind tracking_html, so the
+  // last (not-yet-sent) row can be rendered as genuine editable inputs
+  // bound to `fields`, while every earlier row stays honest, read-only
+  // history.
+  const [trackingPreview, setTrackingPreview] = useState<{ tracking_html: string; row_count: number; columns?: any[]; rows?: any[] } | null>(null);
   const [trackingLoading, setTrackingLoading] = useState(false);
+  // REAL FEATURE (2026-09-02, reported live: "compose email should be
+  // display before sending the email") — a real, editable draft of the
+  // actual email subject/message, pre-filled from the backend's own
+  // honest default (same wording the send would otherwise silently use).
+  const [emailSubject, setEmailSubject] = useState('');
+  const [emailBody, setEmailBody] = useState('');
 
   useEffect(() => {
     if (preview && !initialized) {
@@ -2005,7 +2016,9 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       setFields(preview.auto_values || {});
       setToEmail(preview.primary_contact?.email || '');
       setToContactId(preview.primary_contact?.id || '');
-      setTrackingPreview(preview.tracking_html ? { tracking_html: preview.tracking_html, row_count: 0 } : null);
+      setTrackingPreview(preview.tracking_html ? { tracking_html: preview.tracking_html, row_count: 0, columns: preview.columns, rows: preview.rows } : null);
+      setEmailSubject(preview.default_subject || '');
+      setEmailBody(preview.default_body || '');
       setInitialized(true);
     }
   }, [preview, initialized]);
@@ -2092,6 +2105,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
           columns: saveAsDefault && hiddenKeys.length ? visibleColumns : undefined,
           hidden_columns: hiddenKeys,
           field_values: fields, cc_self: ccSelf, save_as_default: saveAsDefault, default_scope: defaultScope,
+          email_subject: emailSubject || undefined, email_body: emailBody || undefined,
           resume_style: resumeStyle,
           manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
           visual_theme: resumeStyle !== 'manual' ? visualTheme : undefined,
@@ -2142,6 +2156,22 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         )}
       </div>
 
+      {/* REAL FEATURE (2026-09-02, reported live: "compose email should be
+          display before sending the email") — the actual message text
+          this send will use, pre-filled with a real, honest default and
+          freely editable right here, not a hidden backend string the
+          sender never sees until it's already out. */}
+      <div>
+        <span style={lbl}>COMPOSE EMAIL — this is exactly what will be sent</span>
+        <input data-testid="submit-client-email-subject" value={emailSubject} onChange={e => setEmailSubject(e.target.value)} placeholder="Email subject"
+          style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontWeight: 600, marginBottom: 6 }} />
+        <textarea data-testid="submit-client-email-body" rows={5} value={emailBody} onChange={e => setEmailBody(e.target.value)} placeholder="Email message"
+          style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontFamily: 'inherit', resize: 'vertical' }} />
+        <p style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
+          The resume and the tracking sheet below are attached/included automatically — this is just the message text.
+        </p>
+      </div>
+
       <div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={lbl}>TRACKING SHEET TEMPLATE</span>
@@ -2171,10 +2201,51 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       </div>
 
       <div>
-        <span style={lbl}>TRACKING SHEET PREVIEW {trackingLoading && '(updating…)'}</span>
-        {trackingPreview?.tracking_html ? (
-          <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, opacity: trackingLoading ? 0.6 : 1 }}
-            dangerouslySetInnerHTML={{ __html: trackingPreview.tracking_html }} />
+        <span style={lbl}>TRACKING SHEET PREVIEW {trackingLoading && '(updating…)'} — your row (highlighted) is directly editable</span>
+        {/* REAL FEATURE (2026-09-02, reported live: "keep the option to
+            editable in the tracking sheet, if i want i can edit or
+            mention the matter and content") — a real React table (not a
+            read-only pre-rendered HTML blob) so the LAST row — the one
+            this send actually represents, not yet sent — can be edited
+            directly in place, bound to the same `fields` state the
+            "TRACKING SHEET ROW" section below already uses (typing in
+            either place updates the other). Every earlier row is a real,
+            already-sent submission — an honest audit record, kept
+            read-only rather than silently rewritable. */}
+        {trackingPreview?.columns?.length ? (
+          <div data-testid="tracking-sheet-editable-table" style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, opacity: trackingLoading ? 0.6 : 1 }}>
+            <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 11 }}>
+              <thead>
+                <tr>
+                  {trackingPreview.columns.map((c: any) => (
+                    <th key={c.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'nowrap' }}>{c.label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(trackingPreview.rows || []).map((r: any, i: number) => {
+                  const isLast = i === (trackingPreview.rows!.length - 1);
+                  return (
+                    <tr key={i} style={{ background: isLast ? '#EFF6FF' : (i % 2 ? '#F8FAFC' : '#fff') }}>
+                      {trackingPreview.columns!.map((c: any) => {
+                        const editable = isLast && c.key !== 'sl_no';
+                        return (
+                          <td key={c.key} style={{ padding: editable ? 2 : '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top' }}>
+                            {editable ? (
+                              <input data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                                style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit' }} />
+                            ) : (
+                              ((isLast ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div style={{ fontSize: 11, color: '#94A3B8', padding: 10, border: '1px dashed #E2E8F0', borderRadius: 8 }}>
             {trackingLoading ? 'Loading the real tracking sheet…' : 'No tracking sheet template resolved yet — pick one above.'}
@@ -2182,7 +2253,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         )}
         <p style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
           This is the exact table that will be sent — including every real candidate already submitted to this client
-          for this role. Edits below (fields, hidden columns) update it live.
+          for this role. Earlier rows are the client's real submission history and can't be changed.
         </p>
       </div>
 
@@ -2355,7 +2426,16 @@ function ClientSubmissionMoveModal({ appId, candidateName, stageLabel, showToast
   const [sending, setSending] = useState(false);
   return (
     <div data-testid="client-submission-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
-      <div style={{ width: 560, maxWidth: '94vw', maxHeight: '88vh', overflowY: 'auto', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+      {/* REAL FEATURE (2026-09-02, reported live: "size should drag resize
+          both width and height... on the corner line with click on
+          mouse") — native CSS `resize: both` gives the browser's own
+          bottom-right-corner drag handle, the exact affordance asked for,
+          with zero hand-rolled mouse-tracking JS needed. `resize` only
+          takes effect on a block element with a real starting width/
+          height and overflow != visible — both already true here (was
+          already overflowY:auto; width/maxHeight are now real starting
+          dimensions, not just an upper bound). */}
+      <div data-testid="client-submission-modal-panel" style={{ width: 640, height: 620, minWidth: 420, minHeight: 320, maxWidth: '95vw', maxHeight: '92vh', resize: 'both', overflow: 'auto', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
           <div>
             {/* Real bug fix (2026-08-25) — was a hardcoded "Client
