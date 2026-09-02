@@ -6,7 +6,7 @@ import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 
-const AUTO_CHANNELS = ['linkedin', 'whatsapp', 'facebook', 'twitter', 'telegram', 'email'];
+const AUTO_CHANNELS = ['linkedin', 'whatsapp', 'facebook', 'twitter', 'telegram', 'email', 'whatsapp_channel'];
 
 const CATEGORY_LABELS: Record<string, string> = {
   social: 'Social / Direct Share',
@@ -88,6 +88,7 @@ const CHANNEL_META: Record<string, { icon: any; ring: string; iconBg: string; ic
   twitter:  { icon: Twitter,       ring: 'ring-gray-900/10',  iconBg: 'bg-gray-900/5',    iconColor: 'text-gray-900' },
   telegram: { icon: Send,          ring: 'ring-[#26A5E4]/20', iconBg: 'bg-[#26A5E4]/10', iconColor: 'text-[#26A5E4]' },
   email:    { icon: Mail,          ring: 'ring-gray-400/20',  iconBg: 'bg-gray-100',      iconColor: 'text-gray-600' },
+  whatsapp_channel: { icon: MessageCircle, ring: 'ring-[#25D366]/20', iconBg: 'bg-[#25D366]/10', iconColor: 'text-[#128C4A]' },
 };
 
 const INTEGRATION_STYLES: Record<string, { border: string; dot: string }> = {
@@ -429,12 +430,110 @@ function TelegramConnectionCard({ onStatusChange }: { onStatusChange: (connected
   );
 }
 
+// Gap-audit addition (2026-09-02) — genuinely simpler than Facebook/
+// Telegram's own connect forms: no credential to type at all, since this
+// reuses the already-connected shared WhatsApp number. "Connecting" is
+// just picking which real channel (that number administers) should get
+// the auto-posts, from a real, live list — never a raw JID typed by hand.
+function WhatsAppChannelConnectionCard({ onStatusChange }: { onStatusChange: (connected: boolean) => void }) {
+  const { data: status, refetch } = useFetch<any>('/job-sharing/whatsapp-channel/status');
+  const [showPicker, setShowPicker] = useState(false);
+  const [channels, setChannels] = useState<any[] | null>(null);
+  const [loadErr, setLoadErr] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [connecting, setConnecting] = useState('');
+
+  useEffect(() => { if (status) onStatusChange(!!status.connected); }, [status]);
+
+  async function openPicker() {
+    setShowPicker(true); setLoading(true); setLoadErr(''); setChannels(null);
+    try {
+      const data = await apiFetch('/job-sharing/whatsapp-channel/available');
+      setChannels(data as any[]);
+    } catch (e: any) { setLoadErr(e.message || 'Could not load channels'); }
+    finally { setLoading(false); }
+  }
+
+  async function connectTo(c: any) {
+    setConnecting(c.id);
+    try {
+      await apiFetch('/job-sharing/whatsapp-channel/connect', { method: 'POST', body: JSON.stringify({ channel_id: c.id, channel_name: c.name }) });
+      setShowPicker(false);
+      refetch();
+    } catch (e: any) { setLoadErr(e.message || 'Connect failed'); }
+    finally { setConnecting(''); }
+  }
+
+  async function disconnect() {
+    if (!confirm('Disconnect this WhatsApp Channel? Job posts will stop going out to it automatically.')) return;
+    await apiFetch('/job-sharing/whatsapp-channel/disconnect', { method: 'DELETE' });
+    refetch();
+  }
+
+  return (
+    <Card className="border-emerald-200 bg-emerald-50/40">
+      <CardHeader>
+        <h2 className="font-semibold flex items-center gap-1.5"><MessageCircle className="h-4 w-4 text-emerald-600" /> WhatsApp Channel — Real Automatic Posting</h2>
+      </CardHeader>
+      <CardContent>
+        {status?.connected ? (
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-sm">
+              <CheckCircle2 className="h-4 w-4 text-green-600" />
+              <span>Connected to <strong>{status.channel_name}</strong> — job posts go out automatically now.</span>
+            </div>
+            <button onClick={disconnect} className="flex items-center gap-1 text-xs text-red-600 hover:text-red-800 border border-red-200 rounded-lg px-2.5 py-1.5">
+              <Unlink className="h-3 w-3" /> Disconnect
+            </button>
+          </div>
+        ) : showPicker ? (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-500 mb-2">
+              Uses your already-connected WhatsApp number (see Company WhatsApp Number in Settings) — no new credential
+              needed. Pick one of the real Channels that number already administers as an Owner/Admin. Don't see the right
+              one? Create it once in the WhatsApp app itself, then reopen this list.
+            </p>
+            {loadErr && <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">{loadErr}</div>}
+            {loading && <p className="text-xs text-gray-500">Loading your real channels…</p>}
+            {channels && channels.length === 0 && !loadErr && (
+              <p className="text-xs text-gray-500">This number doesn't administer any WhatsApp Channels yet — create one in the WhatsApp app first.</p>
+            )}
+            {channels && channels.length > 0 && (
+              <div className="space-y-1.5">
+                {channels.map((c: any) => (
+                  <button key={c.id} onClick={() => connectTo(c)} disabled={!!connecting}
+                    className="w-full flex items-center justify-between text-left border rounded-lg px-2.5 py-1.5 text-sm hover:border-emerald-400 hover:bg-white disabled:opacity-50">
+                    <span>{c.name || c.id}</span>
+                    <span className="text-xs text-emerald-600 font-medium">{connecting === c.id ? 'Connecting…' : 'Use this channel'}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setShowPicker(false)} className="text-xs text-gray-500 px-2 py-1.5">Cancel</button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <p className="text-xs text-gray-600">
+              Not connected — reuses your existing WhatsApp connection, no bot token or app review needed, ~10 seconds to
+              set up once you have a real Channel.
+            </p>
+            <button onClick={openPicker}
+              className="flex items-center gap-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-3 py-1.5 shrink-0">
+              <Link2 className="h-3.5 w-3.5" /> Connect WhatsApp Channel
+            </button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ─── Integrations tab ───────────────────────────────────────────────────────
 // Pulled the two "connect once" API integrations plus the free-feed
 // registration out of the per-job Distribute flow into their own settings
 // area — connecting a Page/bot is a one-time setup action, not something
 // that belongs mixed into "post this specific job" every time.
-function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgStatus }: any) {
+function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgStatus, onWaStatus }: any) {
   return (
     <div className="space-y-5">
       <div className="flex items-start gap-3 border rounded-xl px-4 py-3.5 bg-white">
@@ -444,14 +543,15 @@ function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgSta
           <div className="text-xs text-gray-500 mt-0.5">
             Once connected, every new requisition posts here <strong>automatically</strong> the moment it goes open — right
             when it's created (or, if this tenant uses the approval chain, the moment it clears final approval). No need to
-            visit the Distribute tab for these two — it's still there if you want to re-post, check status, or reach every
-            other free board (those don't have an API to auto-post to, so they stay manual for everyone, not just here).
+            visit the Distribute tab for these three — it's still there if you want to re-post, check status, or reach
+            every other free board (those don't have an API to auto-post to, so they stay manual for everyone, not just here).
           </div>
         </div>
       </div>
 
       <FacebookConnectionCard onStatusChange={onFbStatus} />
       <TelegramConnectionCard onStatusChange={onTgStatus} />
+      <WhatsAppChannelConnectionCard onStatusChange={onWaStatus} />
 
       {feedInfo && (
         <Card className="border-green-200 bg-green-50/40">
@@ -513,6 +613,8 @@ function JobSharingPageInner() {
   const [fbPosting, setFbPosting] = useState(false);
   const [tgConnected, setTgConnected] = useState(false);
   const [tgPosting, setTgPosting] = useState(false);
+  const [waConnected, setWaConnected] = useState(false);
+  const [waPosting, setWaPosting] = useState(false);
 
   useEffect(() => {
     // Restore real server-recorded share state on load/select (was
@@ -566,12 +668,25 @@ function JobSharingPageInner() {
     } finally { setTgPosting(false); }
   }
 
+  async function postToWhatsappChannelApi() {
+    setWaPosting(true);
+    try {
+      await apiFetch('/job-sharing/whatsapp-channel/post', { method: 'POST', body: JSON.stringify({ req_id: selId }) });
+      setPosted(p => ({ ...p, whatsapp_channel: true }));
+      refetchShared();
+    } catch (e: any) {
+      alert(`WhatsApp Channel post failed: ${e.message || 'unknown error'}`);
+    } finally { setWaPosting(false); }
+  }
+
   function openPortal(p: Portal) {
-    // A connected Facebook Page / Telegram channel posts for real, no
-    // dialog at all - see postToFacebookApi/postToTelegramApi. Everything
-    // else still uses the share-dialog/homepage link.
+    // A connected Facebook Page / Telegram channel / WhatsApp Channel
+    // posts for real, no dialog at all - see postToFacebookApi/
+    // postToTelegramApi/postToWhatsappChannelApi. Everything else still
+    // uses the share-dialog/homepage link.
     if (p.key === 'facebook' && fbConnected) { postToFacebookApi(); return; }
     if (p.key === 'telegram' && tgConnected) { postToTelegramApi(); return; }
+    if (p.key === 'whatsapp_channel' && waConnected) { postToWhatsappChannelApi(); return; }
     // Facebook and LinkedIn both stopped letting any tool pre-fill the
     // actual post text years ago (anti-spam policy - not fixable, applies
     // to every product, not just this one) - their dialogs open with a
@@ -591,6 +706,7 @@ function JobSharingPageInner() {
       setTimeout(() => {
         if (p.key === 'facebook' && fbConnected) { postToFacebookApi(); return; }
         if (p.key === 'telegram' && tgConnected) { postToTelegramApi(); return; }
+        if (p.key === 'whatsapp_channel' && waConnected) { postToWhatsappChannelApi(); return; }
         window.open(p.link, '_blank', 'noopener,noreferrer');
         logShare(p.key, p.link);
       }, i * 250);
@@ -621,7 +737,7 @@ function JobSharingPageInner() {
   const flaggedKeys = useMemo(() => new Set(openIssues.map((i: any) => i.portal_key)), [openIssues]);
 
   const selectedReq = (reqs || []).find((r: any) => r.id === selId);
-  const connectedCount = (fbConnected ? 1 : 0) + (tgConnected ? 1 : 0);
+  const connectedCount = (fbConnected ? 1 : 0) + (tgConnected ? 1 : 0) + (waConnected ? 1 : 0);
 
   return (
     <div className="space-y-6" data-testid="job-sharing-page">
@@ -630,7 +746,7 @@ function JobSharingPageInner() {
           <div className="p-2 rounded-lg bg-purple-50"><Share2 className="h-5 w-5 text-purple-600" /></div>
           <div>
             <h1 className="text-2xl font-bold">Job Distribution</h1>
-            <p className="text-sm text-gray-500">Post once, reach {totalPortals || '80+'} free job boards · {connectedCount}/2 accounts connected for real automatic posting</p>
+            <p className="text-sm text-gray-500">Post once, reach {totalPortals || '80+'} free job boards · {connectedCount}/3 accounts connected for real automatic posting</p>
           </div>
         </div>
         <div className="flex items-center border rounded-lg overflow-hidden bg-white">
@@ -658,7 +774,7 @@ function JobSharingPageInner() {
         <IntegrationsTab
           feedInfo={feedInfo} feedCopied={feedCopied}
           onCopyFeed={() => navigator.clipboard.writeText(feedInfo.feed_url).then(() => { setFeedCopied(true); setTimeout(() => setFeedCopied(false), 2000); })}
-          onFbStatus={setFbConnected} onTgStatus={setTgConnected}
+          onFbStatus={setFbConnected} onTgStatus={setTgConnected} onWaStatus={setWaConnected}
         />
       )}
 
@@ -708,8 +824,9 @@ function JobSharingPageInner() {
                 {autoPortals.map(p => {
                   const isFbAuto = p.key === 'facebook' && fbConnected;
                   const isTgAuto = p.key === 'telegram' && tgConnected;
-                  const isAuto = isFbAuto || isTgAuto;
-                  const busy = (isFbAuto && fbPosting) || (isTgAuto && tgPosting);
+                  const isWaAuto = p.key === 'whatsapp_channel' && waConnected;
+                  const isAuto = isFbAuto || isTgAuto || isWaAuto;
+                  const busy = (isFbAuto && fbPosting) || (isTgAuto && tgPosting) || (isWaAuto && waPosting);
                   const isDone = !!posted[p.key];
                   const isFlagged = flaggedKeys.has(p.key);
                   const meta = CHANNEL_META[p.key];

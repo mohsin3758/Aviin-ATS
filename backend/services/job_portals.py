@@ -34,6 +34,16 @@ _PORTALS = [
     ('twitter',       'X (Twitter)',           'social', 'https://twitter.com', True),
     ('telegram',      'Telegram',              'social', 'https://telegram.org', True),
     ('email',         'Email',                 'social', '', True),
+    # Gap-audit addition (2026-09-02) - a genuinely distinct entry from
+    # the plain 'whatsapp' row above: that one is the existing manual
+    # wa.me deep-link for forwarding one job to one contact. This is the
+    # real, automated WhatsApp Channel broadcast (one-to-many, via WAHA's
+    # own /api/sendText against an @newsletter chatId) - share_intent is
+    # deliberately False, since a private channel has no public compose-
+    # intent URL scheme the way a 1:1 chat does; integration_type flips
+    # to 'auto_api' once a real channel is connected, same convention as
+    # facebook/telegram below.
+    ('whatsapp_channel', 'WhatsApp Channel',   'social', 'https://waha.devlike.pro/whatsapp-channels/', False),
 
     # ── General / major India job boards ────────────────────────────────────
     ('naukri',        'Naukri.com',            'general', 'https://www.naukri.com', False),

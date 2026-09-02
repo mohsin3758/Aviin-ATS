@@ -295,26 +295,189 @@ async def telegram_post(body: TelegramPostBody, actor: Actor = Depends(get_actor
     return await _post_to_telegram(actor.tenant_id, body.req_id, actor.user_id)
 
 
+# ─── WhatsApp Channel: real automatic posting ──────────────────────────────
+# Gap-audit fix (2026-09-02) — see sql/105_whatsapp_channel.sql for the
+# real "confirming API availability and cost" research this was built
+# on. Genuinely simpler to connect than Facebook/Telegram — no new
+# secret credential at all, since it reuses the SAME already-connected
+# shared "default" WAHA session (the same one stage-change notifications
+# already use). "Connecting" just means telling this app WHICH of the
+# tenant's real channels (that the connected number already administers)
+# should receive auto-posts.
+WAHA_BASE = os.getenv("WAHA_URL", "http://waha:3000")
+WAHA_KEY = os.getenv("WAHA_API_KEY", "aviinATS2026secure")
+
+
+def _waha_headers() -> dict:
+    return {"X-Api-Key": WAHA_KEY, "Content-Type": "application/json"}
+
+
+async def _get_available_whatsapp_channels() -> list:
+    """Plain importable core, deliberately separate from the route below
+    (same reasoning as _post_to_facebook/_post_to_telegram above) - so
+    whatsapp_channel_connect() can call it directly without needing to
+    satisfy a Depends(get_actor) that only auto-resolves on a real HTTP
+    request. Real, live list of channels the connected WAHA session
+    administers - powers a picker so a recruiter selects a real channel
+    rather than typing a raw @newsletter JID. A disconnected session
+    (needs a real QR scan, out of this app's control) surfaces as a
+    clear, honest error rather than a raw 500/timeout."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{WAHA_BASE}/api/default/channels", headers=_waha_headers())
+    except Exception:
+        raise HTTPException(502, "Could not reach the WhatsApp service - try again shortly")
+    if r.status_code == 422:
+        raise HTTPException(400, "WhatsApp is not connected right now - go to Company WhatsApp Number to reconnect (needs a real QR scan), then try again")
+    if r.status_code != 200:
+        raise HTTPException(502, "WhatsApp rejected this request - the connected number may not administer any channels yet")
+    channels = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
+    return [{"id": c.get("id", {}).get("_serialized") or c.get("id"), "name": c.get("name") or c.get("subject")} for c in channels]
+
+
+@router.get("/whatsapp-channel/available")
+async def whatsapp_channel_available(actor: Actor = Depends(get_actor)):
+    """BUG FIX (caught by S94's own permanent regression test before this
+    ever shipped, not after): the first version had no Depends(get_actor)
+    at all - a genuine, real, unauthenticated-access gap, the same class
+    of bug already found and fixed once for /waha/send on 2026-08-10."""
+    return await _get_available_whatsapp_channels()
+
+
+class WhatsAppChannelConnectBody(BaseModel):
+    channel_id: str
+    channel_name: Optional[str] = None
+
+
+@router.post("/whatsapp-channel/connect")
+async def whatsapp_channel_connect(body: WhatsAppChannelConnectBody, actor: Actor = Depends(get_actor)):
+    """Confirms the given channel_id genuinely appears in the connected
+    session's real, live channel list before storing it - a typo'd or
+    fabricated JID fails here, not silently at post-time."""
+    real = await _get_available_whatsapp_channels()
+    match = next((c for c in real if c["id"] == body.channel_id), None)
+    if not match:
+        raise HTTPException(400, "This channel wasn't found among the ones the connected WhatsApp number administers")
+    channel_name = body.channel_name or match.get("name") or body.channel_id
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute("""
+            INSERT INTO whatsapp_channel_connections
+              (tenant_id, channel_id, channel_name, connected_by, is_active)
+            VALUES ($1, $2, $3, $4, TRUE)
+            ON CONFLICT (tenant_id) DO UPDATE SET
+              channel_id=EXCLUDED.channel_id, channel_name=EXCLUDED.channel_name,
+              connected_by=EXCLUDED.connected_by, is_active=TRUE, updated_at=now()
+        """, actor.tenant_id, body.channel_id, channel_name, actor.user_id)
+    return {"connected": True, "channel_id": body.channel_id, "channel_name": channel_name}
+
+
+@router.get("/whatsapp-channel/status")
+async def whatsapp_channel_status(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            SELECT channel_id, channel_name, is_active, updated_at
+            FROM whatsapp_channel_connections WHERE tenant_id=$1
+        """, actor.tenant_id)
+    if not row or not row["is_active"]:
+        return {"connected": False}
+    return {"connected": True, "channel_id": row["channel_id"], "channel_name": row["channel_name"],
+            "connected_at": row["updated_at"].isoformat()}
+
+
+@router.delete("/whatsapp-channel/disconnect")
+async def whatsapp_channel_disconnect(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute(
+            "UPDATE whatsapp_channel_connections SET is_active=FALSE, updated_at=now() WHERE tenant_id=$1",
+            actor.tenant_id)
+    return {"disconnected": True}
+
+
+class WhatsAppChannelPostBody(BaseModel):
+    req_id: str
+
+
+async def _post_to_whatsapp_channel(tenant_id: str, req_id: str, posted_by: Optional[str]) -> dict:
+    """Plain importable core of whatsapp_channel_post() below - same
+    reasoning as _post_to_facebook/_post_to_telegram above."""
+    async with db.tenant_conn(tenant_id) as conn:
+        conn_row = await conn.fetchrow("""
+            SELECT channel_id, channel_name, session_name
+            FROM whatsapp_channel_connections WHERE tenant_id=$1 AND is_active=TRUE
+        """, tenant_id)
+        if not conn_row:
+            raise HTTPException(400, "No WhatsApp Channel connected - go to Settings to connect one first")
+
+        req = await conn.fetchrow(
+            "SELECT * FROM requisitions WHERE id=$1 AND tenant_id=$2", req_id, tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+
+    title = req["title"]
+    loc = req["location"] or "Bengaluru"
+    skills = list(req["skills_required"] or [])
+    desc = (req["description"] or f"{title} opportunity")[:400]
+    job_url = f"{BASE_URL}/careers/{req_id}"
+    # WhatsApp's own native formatting (single *asterisk* bold, no Markdown
+    # escaping needed the way Telegram's MarkdownV2 requires above).
+    message = (
+        f"*We're hiring: {title}*\n\n"
+        f"📍 {loc} | {req['employment_type'] or 'Full-time'}\n"
+        f"{desc}\n\n"
+        f"*Skills:* {', '.join(skills[:8])}\n\n"
+        f"Apply now: {job_url}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                f"{WAHA_BASE}/api/sendText",
+                json={"chatId": conn_row["channel_id"], "text": message, "session": conn_row["session_name"]},
+                headers=_waha_headers())
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the WhatsApp service: {e}")
+    if r.status_code not in (200, 201):
+        raise HTTPException(502, f"WhatsApp rejected the post (status {r.status_code}) - confirm the connected number is still an admin of this channel")
+
+    async with db.tenant_conn(tenant_id) as conn:
+        await conn.execute("""
+            INSERT INTO job_shares (tenant_id,requisition_id,platform,posted_by,share_url)
+            VALUES ($1,$2,'whatsapp_channel',$3,$4) ON CONFLICT DO NOTHING
+        """, tenant_id, req_id, posted_by, job_url)
+
+    return {"posted": True, "channel_name": conn_row["channel_name"]}
+
+
+@router.post("/whatsapp-channel/post")
+async def whatsapp_channel_post(body: WhatsAppChannelPostBody, actor: Actor = Depends(get_actor)):
+    return await _post_to_whatsapp_channel(actor.tenant_id, body.req_id, actor.user_id)
+
+
 # ─── Auto-distribute when a requisition goes live ──────────────────────────
-# The only two channels with a real posting API (Facebook, Telegram) - every
-# other free board genuinely has no API to auto-post to (confirmed via the
-# 2026-08-08 research, see CLAUDE.md), so "auto-publish everywhere" isn't
-# literally possible; this is "auto-publish to the two channels that can be."
-# Called from requisitions.py at the two real "a job just became open"
-# moments: creation (when no approval gate applies) and the final approval
-# step clearing. Never raises - a failed auto-post must never break the
-# requisition create/approve flow it's attached to; each platform is
-# independent so one failing doesn't block the other.
+# The only three channels with a real posting API (Facebook, Telegram,
+# WhatsApp Channel) - every other free board genuinely has no API to
+# auto-post to (confirmed via the 2026-08-08 research, see CLAUDE.md, and
+# re-confirmed for WhatsApp Channels 2026-09-02), so "auto-publish
+# everywhere" isn't literally possible; this is "auto-publish to the
+# channels that genuinely can be." Called from requisitions.py at the
+# real "a job just became open" moments: creation (when no approval gate
+# applies) and the final approval step clearing. Never raises - a failed
+# auto-post must never break the requisition create/approve flow it's
+# attached to; each platform is independent so one failing doesn't block
+# the others.
 async def auto_distribute_on_open(tenant_id: str, req_id: str, posted_by: Optional[str]) -> dict:
     results: dict = {}
     async with db.tenant_conn(tenant_id) as conn:
         already = {r["platform"] for r in await conn.fetch(
-            "SELECT DISTINCT platform FROM job_shares WHERE tenant_id=$1 AND requisition_id=$2 AND platform IN ('facebook','telegram')",
+            "SELECT DISTINCT platform FROM job_shares WHERE tenant_id=$1 AND requisition_id=$2 AND platform IN ('facebook','telegram','whatsapp_channel')",
             tenant_id, req_id)}
         fb_connected = await conn.fetchval(
             "SELECT is_active FROM facebook_page_connections WHERE tenant_id=$1", tenant_id)
         tg_connected = await conn.fetchval(
             "SELECT is_active FROM telegram_channel_connections WHERE tenant_id=$1", tenant_id)
+        wa_connected = await conn.fetchval(
+            "SELECT is_active FROM whatsapp_channel_connections WHERE tenant_id=$1", tenant_id)
 
     if fb_connected and "facebook" not in already:
         try:
@@ -326,6 +489,11 @@ async def auto_distribute_on_open(tenant_id: str, req_id: str, posted_by: Option
             results["telegram"] = await _post_to_telegram(tenant_id, req_id, posted_by)
         except Exception as e:
             results["telegram"] = {"posted": False, "error": str(e)}
+    if wa_connected and "whatsapp_channel" not in already:
+        try:
+            results["whatsapp_channel"] = await _post_to_whatsapp_channel(tenant_id, req_id, posted_by)
+        except Exception as e:
+            results["whatsapp_channel"] = {"posted": False, "error": str(e)}
     return results
 
 
@@ -527,6 +695,8 @@ async def dashboard(actor: Actor = Depends(get_actor)):
             "SELECT is_active FROM facebook_page_connections WHERE tenant_id=$1", actor.tenant_id)
         tg_connected = await conn.fetchval(
             "SELECT is_active FROM telegram_channel_connections WHERE tenant_id=$1", actor.tenant_id)
+        wa_connected = await conn.fetchval(
+            "SELECT is_active FROM whatsapp_channel_connections WHERE tenant_id=$1", actor.tenant_id)
 
     share_by_platform = {r["platform"]: r for r in share_rows}
     issues_by_portal = {r["portal_key"]: r["open_issues"] for r in issue_rows}
@@ -544,6 +714,10 @@ async def dashboard(actor: Actor = Depends(get_actor)):
     if tg_connected:
         for p in portals:
             if p["key"] == "telegram":
+                p["integration_type"] = "auto_api"
+    if wa_connected:
+        for p in portals:
+            if p["key"] == "whatsapp_channel":
                 p["integration_type"] = "auto_api"
     portal_status = []
     integration_counts: dict[str, int] = {}

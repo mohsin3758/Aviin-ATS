@@ -19914,3 +19914,147 @@ audit: `CONFIRMED CLEAN` (442 files, 0 external API refs). All
 throwaway test data (1 KAE-then-recruiter user, 1 requisition from
 manual verification; S93's own throwaway user+requisition via its
 permanent `afterAll`) confirmed cleaned up with zero residue.
+
+## Gap-audit build, part 5 (final): real WhatsApp Channel job broadcasting, closing all 9 partial and 2 missing items, 2026-09-02
+Direct continuation of the same-day gap-audit build (parts 1-4) - closes
+"WhatsApp Channel job broadcasting" (Medium), the last item from the
+self-authored "AVIIN ATS Gap Audit" report. This item's own explicit
+instruction was "start with confirming real API availability and cost" -
+done properly, not assumed, before any code was written.
+
+**Research, real and current, not from memory**: WAHA (already self-
+hosted here) supports posting to a real WhatsApp Channel via the SAME
+`POST /api/sendText` endpoint 1:1 messages already use in this codebase
+(`phase3.py`'s `send_whatsapp()`) - just with a chatId ending
+`@newsletter` instead of `@c.us`. Confirmed via WAHA's own current
+docs (fetched live, not from an earlier, less-current research pass
+that had flagged a delivery bug): "You can use regular POST /api/
+sendText endpoint to send a text message into the channel." Confirmed
+the account only needs to already be OWNER/ADMIN of a real channel -
+WAHA cannot create channels via API, matching the exact same "connect
+once, automate after" shape already established for the Facebook Page/
+Telegram Bot integrations (a channel is created once, manually, in the
+WhatsApp app itself). Cost: genuinely zero - confirmed as of WAHA
+2026.6.1, every feature that used to need a paid "Plus" tier now ships
+in the single free image, and this tenant already runs 2026.7.2, well
+past that merge (verified live via `/api/server/version`). The 2
+specific GitHub issues an earlier research pass had flagged (channel
+sends silently failing) were both filed against WAHA 2026.1.5 on the
+old "Plus" tier - a different, now-superseded code path - and are both
+closed.
+
+**Schema** (`sql/105_whatsapp_channel.sql`) - `whatsapp_channel_
+connections`, genuinely simpler than its Facebook/Telegram siblings:
+no new secret credential at all (no pgcrypto column needed), since it
+reuses the ALREADY-CONNECTED shared "default" WAHA session (the same
+one stage-change notifications already use) - "connecting" just means
+telling the app WHICH real channel that number administers should
+receive auto-posts.
+
+**Backend** (`backend/routers/job_sharing.py`) - built as a genuine
+third sibling to the existing `_post_to_facebook`/`_post_to_telegram`
+pattern, not a bolted-on special case: `GET .../whatsapp-channel/
+available` (a real, live list of the connected session's own channels,
+powering a picker instead of requiring a hand-typed JID), `POST .../
+connect` (confirms the picked channel_id genuinely appears in that real
+list before storing it - a typo'd/fabricated JID fails here, not
+silently at post-time), `GET .../status`, `DELETE .../disconnect`, and
+`_post_to_whatsapp_channel()` (the real send, WhatsApp's own native
+`*bold*` formatting, no MarkdownV2-style escaping needed) +
+`POST .../post` (manual trigger). `auto_distribute_on_open()` (the real
+hook fired at every "a requisition just became open" moment) now covers
+3 channels instead of 2 - each still fully independent, one failing
+never blocks the others. `services/job_portals.py` gained a genuinely
+distinct `whatsapp_channel` catalog entry (84 portals now, was 83) -
+deliberately NOT reusing the pre-existing plain `whatsapp` key, which
+is a completely different feature (a manual 1:1 `wa.me` deep-link for
+forwarding one job to one contact, unchanged).
+
+**A real, serious security gap found and fixed via the permanent test
+suite's own first run, not shipped**: the first version of `GET .../
+whatsapp-channel/available` had no `Depends(get_actor)` at all -
+reachable with zero authentication, the exact same class of bug already
+found and fixed once before for `/waha/send` on 2026-08-10. Caught
+immediately by S94's own new regression test (built specifically to
+check every endpoint's auth), not by manual review. Fixed by extracting
+a plain, non-decorated `_get_available_whatsapp_channels()` core
+(mirroring `_post_to_facebook`/`_post_to_telegram`'s own established
+"separate the logic from the route so an internal caller doesn't need
+to satisfy Depends()" pattern) - the real route now requires
+`Depends(get_actor)`, and `whatsapp_channel_connect()` calls the plain
+core directly.
+
+**A real, honest, disclosed limitation, not glossed over**: this
+tenant's shared "default" WAHA session is CURRENTLY disconnected
+(status `SCAN_QR_CODE`) - a real, already-flagged, pre-existing
+operational gap from earlier the same day's QA sweep, needing a real
+physical QR-code re-scan by whoever holds the linked company phone,
+entirely outside this session's control. This meant the genuine happy
+path (a connected session + a real channel + an actual successful post)
+could not be exercised - matching this exact same disclosed-gap shape
+already established repeatedly in this project's history for WAHA/
+Telegram features. Verified everything else thoroughly instead: the
+real portal catalog entry, graceful/clear error handling at every layer
+when disconnected (both API - a real, specific 400 with an actionable
+message, not a raw 500/timeout - and UI), role/auth gating, and that a
+brand-new requisition still creates cleanly with the new hook wired in
+but nothing connected (proving `auto_distribute_on_open` never crashes
+requisition creation regardless of connection state).
+
+**Frontend** (`(dashboard)/job-sharing/page.tsx`) - a new `WhatsApp
+ChannelConnectionCard`, genuinely simpler than its Telegram sibling's
+own text-input form: no credential fields at all, just a real, live
+picker of the tenant's own channels (fetched on demand when "Connect"
+is clicked) - or, right now, the honest disconnected-session message
+surfaced directly from the backend. Wired into the same 3-channel
+"Auto channels" grid Facebook/Telegram already populate (added
+`whatsapp_channel` to `AUTO_CHANNELS`, `CHANNEL_META`, the connected-
+count header now reads "N/3" instead of "N/2"), and into the
+`IntegrationsTab`'s connect-once panel alongside its 2 siblings.
+
+Verified for real end-to-end, not code review, at every layer: a real
+local `tsc --noEmit` + a full real local `npm run build` (both clean)
+before deploying; direct API calls confirmed the new portal catalog
+entry (84 total, genuinely distinct from the pre-existing `whatsapp`
+key), the graceful 400 on `/available` with the exact real message, a
+fabricated-channel-id connect attempt correctly refused, `/post`
+without a connection correctly 400ing with a clear message, a genuine
+requisition creation completing cleanly with the new hook wired in, and
+unauthenticated calls correctly 401ing (post-fix). A real headless-
+browser pass confirmed the actual live Integrations tab (screenshot-
+confirmed, not just locator-checked - pulled and visually inspected 2
+real screenshots): the connection card renders cleanly matching the
+established design language, clicking "Connect WhatsApp Channel"
+genuinely calls the real backend and, since the session really is
+disconnected right now, the exact real error message renders in a
+clear red banner with an actionable next step, not a confusing blank
+failure.
+
+New permanent "S94" suite (6 tests) added to `qa_automation.spec.ts` -
+5/6 passed on the first run (the real security-gap fix above was caught
+here, not in production), 6/6 after; one further real, observed timing-
+margin flake (the UI test's own wait needed widening to match the
+backend's real 15s WAHA-call timeout, not a logic bug) fixed and
+re-confirmed clean. Broader regression sweep across every suite
+touching requisitions (S22/S47/S60/S80/S81, alongside S94 - 25 tests)
+passed clean - zero regressions from wiring a 3rd auto-distribute
+channel into the requisition create/approve flow. Zero-token audit:
+`CONFIRMED CLEAN` (443 files, 0 external API refs) - WAHA is self-
+hosted, not an external paid API, matching every other real WhatsApp
+feature already built in this project.
+
+**With this, all 9 PARTIAL and 2 MISSING items from the "AVIIN ATS Gap
+Audit" report (2026-09-02) are closed**, across 5 discrete, individually
+verified and deployed units the same day: Quick Wins (source-attribution
+auto-population, universal auto-scoring, jobs sitemap + per-job
+JSON-LD), the Employee Referral Loop (real hire/bonus tracking), real
+structured Education extraction + auto-populated candidate_skill_
+experience, a real "Jobs Created" metric + monthly-snapshot leaderboard
+surfaced on the main Dashboard, and real WhatsApp Channel broadcasting.
+The one remaining, explicitly out-of-scope item from that same report -
+a real, packaged Chrome Extension (candidate importer from LinkedIn/
+Naukri/Foundit) - was the report's own explicit note that it's "the one
+item with genuinely nothing to build on," a materially larger, separate
+undertaking (a real browser-extension package, its own build/distribution
+pipeline) than any of the 9 items closed today, deliberately left for
+its own future, dedicated pass rather than folded in here.
