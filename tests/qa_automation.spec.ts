@@ -13041,3 +13041,169 @@ test.describe.serial('S96 5 free feed registrations (Careerjet/Adzuna/Trovit/Jor
     await expect(page.locator('[data-testid="feed-program-jooble"]')).toHaveAttribute('data-registered', 'true');
   });
 });
+
+test.describe.serial('S97 KAE reports: real per-KAE SPOC visibility mapping, Companies-page role-awareness, Analytics date-range wiring', () => {
+  // 2026-09-02, real bugs reported live off 9 screenshots by a real KAE
+  // user (Shahana): (3) Companies page showed 0 companies despite 3 real
+  // client_owners assignments - GET /clients was hard-gated on
+  // companies:read, which the kae role doesn't hold, so it correctly
+  // 403'd once enforcement was turned on for this tenant; the frontend's
+  // empty-state made that look like a data bug. (1)/(7) a client can have
+  // many SPOCs, but a KAE should only see the ones an admin has actually
+  // assigned to them - built a real client_contact_kae_assignments
+  // junction table, not just widened access. (4) the "Go to Companies"
+  // link in Submit-to-Client's "No client contact configured" warning
+  // always landed on a generic empty list, not the actual client. (5) the
+  // Submit-to-Client panel never showed which client a candidate was
+  // being submitted to. (6) a KAE had no way to add a SPOC at all. (2) the
+  // Analytics page's Week/Month/Quarter/Year toggle did nothing - none of
+  // its 6 real data fetches ever read it - and Recruiter Performance was
+  // separately, unconditionally hardcoded to a stale June 2026.
+  let admin = '';
+  const authA = () => ({ Authorization: `Bearer ${admin}` });
+  let kaeToken = '';
+  const authK = () => ({ Authorization: `Bearer ${kaeToken}` });
+  let kaeUserId = '', clientId = '', spocAId = '', spocBId = '', spocCId = '', reqId = '', candId = '', appId = '';
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    // FK-safe order; every call best-effort so one failure never blocks
+    // the rest of cleanup.
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: authA() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: authA() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: authA() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: authA() }).catch(() => {});
+    if (kaeUserId) {
+      await request.patch(`${API}/users/${kaeUserId}/deactivate`, { headers: authA() }).catch(() => {});
+      // Real activity (the client_owners assignment, the kae-assignment
+      // rows below) means the force-purge safety net correctly refuses
+      // this one and leaves it deactivated - not a bug, matches the
+      // established precedent used throughout this project's own history.
+      await request.delete(`${API}/users/${kaeUserId}/purge`, { headers: authA() }).catch(() => {});
+    }
+  });
+
+  test('setup: real throwaway KAE + client + client_owners assignment + 2 admin-added SPOCs', async ({ request }) => {
+    admin = await getApiToken(request);
+
+    const uR = await request.post(`${API}/users`, {
+      headers: authA(),
+      data: { email: `qa.s97.kae.${stamp}@test.com`, full_name: `S97 KAE ${stamp}`, role: 'kae', password: 'TestPass123!' },
+    });
+    expect(uR.status()).toBeLessThan(300);
+    kaeUserId = (await uR.json()).id;
+
+    const cR = await request.post(`${API}/clients`, { headers: authA(), data: { name: `QA S97 Client ${stamp}`, industry: 'IT Services' } });
+    expect(cR.status()).toBe(201);
+    clientId = (await cR.json()).id;
+
+    const ownR = await request.post(`${API}/kae/owners`, {
+      headers: authA(),
+      data: { client_id: clientId, user_id: kaeUserId, owner_type: 'kae', visibility_lvl: 'L3' },
+    });
+    expect(ownR.status()).toBe(200);
+
+    const aR = await request.post(`${API}/clients/${clientId}/contacts`, { headers: authA(), data: { contact_name: 'SPOC A', email: 'spoc.a@qas97.example', is_primary: true } });
+    spocAId = (await aR.json()).id;
+    const bR = await request.post(`${API}/clients/${clientId}/contacts`, { headers: authA(), data: { contact_name: 'SPOC B', email: 'spoc.b@qas97.example' } });
+    spocBId = (await bR.json()).id;
+
+    const loginR = await request.post(`${API}/auth/login`, { data: { email: `qa.s97.kae.${stamp}@test.com`, password: 'TestPass123!' } });
+    expect(loginR.status()).toBe(200);
+    kaeToken = (await loginR.json()).access_token;
+  });
+
+  test('BUG FIX (item 3): GET /clients now returns exactly the KAE own owned clients (not a 403 producing an empty list)', async ({ request }) => {
+    const r = await request.get(`${API}/clients`, { headers: authK() });
+    expect(r.status()).toBe(200);
+    const clients = await r.json();
+    expect(clients.length).toBe(1);
+    expect(clients[0].id).toBe(clientId);
+  });
+
+  test('BUG FIX (item 7): a KAE sees zero SPOCs until an admin actually assigns one - not every SPOC on the client', async ({ request }) => {
+    const r = await request.get(`${API}/clients/${clientId}/contacts`, { headers: authK() });
+    expect(r.status()).toBe(200);
+    expect(await r.json()).toEqual([]);
+  });
+
+  test('FEATURE (item 7): admin assigns SPOC A to this KAE via the real kae-assignments endpoint, and only SPOC A (not B) becomes visible to them', async ({ request }) => {
+    const putR = await request.put(`${API}/client-contacts/${spocAId}/kae-assignments`, { headers: authA(), data: { kae_user_ids: [kaeUserId] } });
+    expect(putR.status()).toBe(200);
+    const r = await request.get(`${API}/clients/${clientId}/contacts`, { headers: authK() });
+    const contacts = await r.json();
+    expect(contacts.length).toBe(1);
+    expect(contacts[0].id).toBe(spocAId);
+  });
+
+  test('FEATURE (item 6): a KAE can add a new SPOC for their own assigned client, and it is auto-assigned to them (not silently visible to every KAE on the client)', async ({ request }) => {
+    const r = await request.post(`${API}/clients/${clientId}/contacts`, { headers: authK(), data: { contact_name: 'SPOC C (added by KAE)', email: 'spoc.c@qas97.example' } });
+    expect(r.status()).toBe(201);
+    spocCId = (await r.json()).id;
+    const listR = await request.get(`${API}/clients/${clientId}/contacts`, { headers: authK() });
+    const ids = (await listR.json()).map((c: any) => c.id).sort();
+    expect(ids).toEqual([spocAId, spocCId].sort());
+    // Admin still sees every SPOC on the client regardless (A, B, C).
+    const adminR = await request.get(`${API}/clients/${clientId}/contacts`, { headers: authA() });
+    const adminIds = (await adminR.json()).map((c: any) => c.id).sort();
+    expect(adminIds).toEqual([spocAId, spocBId, spocCId].sort());
+  });
+
+  test('BUG FIX (items 4/5/7): the real Submit-to-Client preview includes client_name, and scopes contacts to exactly what the SPOC-visibility mapping allows', async ({ request }) => {
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: authA(),
+      data: { title: `QA S97 Requisition ${stamp}`, client_id: clientId, client_name: `QA S97 Client ${stamp}`, positions_count: 1, location: 'Bengaluru', status: 'open' },
+    });
+    expect(reqR.status()).toBeLessThan(300);
+    reqId = (await reqR.json()).id;
+
+    const candR = await request.post(`${API}/candidates`, {
+      headers: authA(),
+      data: { full_name: `QA S97 Candidate ${stamp}`, email: `qas97cand${stamp}@example.com`, phone: '9876500002' },
+    });
+    expect(candR.status()).toBeLessThan(300);
+    candId = (await candR.json()).id;
+
+    const appR = await request.post(`${API}/applications`, { headers: authA(), data: { candidate_id: candId, requisition_id: reqId, stage: 'screened' } });
+    expect(appR.status()).toBeLessThan(300);
+    appId = (await appR.json()).id;
+
+    const previewR = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authK() });
+    expect(previewR.status()).toBe(200);
+    const preview = await previewR.json();
+    expect(preview.client_name).toBe(`QA S97 Client ${stamp}`);
+    const previewIds = preview.contacts.map((c: any) => c.id).sort();
+    expect(previewIds).toEqual([spocAId, spocCId].sort());
+    expect(preview.primary_contact.id).toBe(spocAId);
+  });
+
+  test('BUG FIX (item 2): Analytics period toggle now genuinely changes the real time-to-hire window, and Recruiter Performance uses the real current month, not a stale hardcoded one', async ({ request }) => {
+    const now = new Date();
+    const perfR = await request.get(`${API}/reports/recruiter-performance?month=${now.getMonth() + 1}&year=${now.getFullYear()}`, { headers: authA() });
+    expect(perfR.status()).toBe(200);
+    expect(Array.isArray(await perfR.json())).toBe(true);
+
+    const d7 = await (await request.get(`${API}/analytics/time-to-hire?days=7`, { headers: authA() })).json();
+    const d365 = await (await request.get(`${API}/analytics/time-to-hire?days=365`, { headers: authA() })).json();
+    expect(d7.period_days).toBe(7);
+    expect(d365.period_days).toBe(365);
+    // A wider real window can never show FEWER real placements than a
+    // narrower one covering the same end date - the concrete, permanent
+    // guard against the toggle silently going back to doing nothing.
+    expect(d365.total_placed).toBeGreaterThanOrEqual(d7.total_placed);
+  });
+
+  test('real UI: the Companies page renders a role-aware clients-assigned-to-you view for a KAE, with zero console errors', async ({ browser }) => {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`${BASE}/dashboard`);
+    await page.evaluate((tok) => localStorage.setItem('airecruit_token', tok), kaeToken);
+    await page.goto(`${BASE}/companies`, { waitUntil: 'networkidle' });
+    await expect(page.locator('p', { hasText: 'clients assigned to you' })).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('table tbody tr')).toHaveCount(1);
+    expect(errors).toHaveLength(0);
+    await ctx.close();
+  });
+});

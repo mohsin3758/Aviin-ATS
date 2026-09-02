@@ -20364,3 +20364,189 @@ external, hard-to-reverse, company-representing action. Careerjet's real
 flow is bot-walled against any automated agent regardless of what
 details are supplied. Reported to the user directly rather than guessed
 at or silently left undone.
+
+## KAE SPOC-visibility mapping + Companies-page role-awareness + Analytics date-range wiring — all 7 reported items closed, 2026-09-02
+User sent 9 real screenshots and a 7-point list off a real KAE's (Shahana)
+live session: Companies showing "0 clients"/"No companies yet" despite 3
+real client_owners assignments visible on the P16 KAE Module page; the
+Analytics & Reporting page's Week/Month/Quarter/Year toggle not matching
+displayed data; Submit-to-Client's "Go to Company" link redirecting to a
+generic empty Add-Company modal instead of the real client; no client
+name shown anywhere in the Submit-to-Client modal; no way to add client/
+SPOC/email details from that flow; and a detailed, explicit new business
+requirement — a client can have several SPOCs, but a KAE should only see
+the ones an admin has actually assigned to them (Company -> SPOC -> KAE
+User), not the whole client's contact book. Investigated every claim
+against real code/data before building anything, not assumed.
+
+**Root cause of item 3, found by reading the code, not guessed**: `GET
+/clients` was hard-gated on `require_permission("companies","read")` —
+confirmed the real `kae` role has no `companies` grant at all, and this
+tenant's permission enforcement was genuinely flipped ON the day before
+(2026-08-31) — so the endpoint correctly 403'd, and the Companies page's
+own empty-state UI made that read exactly like a data bug. A KAE's real
+authority here was never "see every client" (what the companies:read
+grant means for admin/manager/recruiter) — it's "see the clients I'm
+actually assigned to," which `client_owners` already tracks.
+
+**Fix, `backend/permissions.py`** — new `has_permission_soft(conn, actor,
+feature, action)`, the same allow/deny OUTCOME `require_permission()`'s
+dependency would produce, but as a plain bool a handler can branch on
+instead of a hard 403 — for a route that wants to serve a genuinely
+different, narrower response to a role lacking the broad grant, rather
+than blocking outright. Mirrors that dependency's exact semantics
+(admin/super_admin/anonymous-trusted-internal always True; only False
+when enforcement is genuinely on AND the role has a real permissions row
+denying it) and writes the identical `permission_check_log` row, so real
+usage stays visible to an admin reviewing before enabling enforcement
+further.
+
+**`backend/routers/clients.py`**'s `GET /clients` widened: a caller with
+the real grant (or enforcement off, or no role-definitions row) keeps
+getting the full list, byte-identical to before; a kae/kam caller
+without it now gets their real owned-client subset (`client_owners`
+join) instead of a block; anyone else still cleanly 403s, unchanged.
+
+**The full SPOC-KAE mapping** — `sql/108_spoc_kae_assignments.sql`, a new
+`client_contact_kae_assignments` junction table (tenant_id,
+client_contact_id, kae_user_id, assigned_by/at, FORCE RLS). A real,
+honest backfill (not a blind default): every KAE who already owns a
+client (via `client_owners`) is auto-assigned every one of that client's
+EXISTING SPOCs, preserving exactly the pre-2026-09-02 assumption
+("a KAE could already see every SPOC on their client") as the starting
+state — matching the same "preserve the pre-existing assumption rather
+than introduce a sudden regression" precedent already used for the
+Indeed/Jooble feed-registration backfill. Confirmed live via the real
+backfill's own output: 177 real (client, KAE) pairs, only 1 producing an
+actual row — this tenant's real SPOC data is genuinely almost empty
+right now (Invenio, Shahana's own real client, has zero SPOCs
+configured), which is exactly why her screenshot showed "No client
+contact configured" — not a scoping bug, a real, honest data gap her own
+fix now lets her close herself. Going forward, a brand-new SPOC is never
+auto-granted to every owning KAE — only to whichever KAE actually
+created it (self-assigned at creation time) or whoever an admin
+explicitly picks.
+
+**`backend/routers/kae_submission.py`** — `_resolve_client_contacts()`
+gained an optional `kae_user_id` param (scopes via the new junction
+table; `None` keeps the original, unfiltered admin/manager behavior).
+`GET /clients/{id}/contacts` widened the same way as `/clients` — a
+kae/kam without `companies:read` now gets their real scoped subset
+instead of a 403. `POST /clients/{id}/contacts` now lets a KAE add a
+SPOC for a client they're genuinely assigned to (ownership-checked, not
+a blanket open door) — self-assigning it to themselves on creation, the
+real "the KAE who added it can use it immediately" case, directly
+answering item 6 ("no option to add client/SPOC/email details"). `PUT
+/client-contacts/{id}` now also allows the SPOC's own assigned KAE to
+edit it (a typo fix), not just admin/manager. Two new endpoints — `GET`/
+`PUT /client-contacts/{id}/kae-assignments` (admin/manager-gated,
+full-replace, matching this project's own established "small child
+list, full replace not diff" convention) — are the real admin control
+surface for the explicit requirement ("Admin should be able to assign
+specific SPOCs to a KAE... e.g. Shahana may only be assigned to SPOC A1,
+A2, A5"). `submit_to_client_preview()` and `_do_client_submission()`
+(the actual send/preview path, not just the display list) both now
+apply the identical kae_user_id scoping — closing the loop so a KAE
+can't reach an unassigned SPOC via a raw API call bypassing the UI
+either, and both now include `client_name` in the response, directly
+fixing item 5 (the panel never showed which client a candidate was
+being submitted to).
+
+**`backend/routers/kae.py`**'s `list_owners` (`GET /kae/owners`, the
+Account Ownership tab) gained `cl.name AS client_name` to its SELECT — a
+small, genuine, additional fix found while investigating: the query
+already JOINed `clients` but never selected the name, so the frontend's
+own existing fallback (`clients.find(...) ?? raw-truncated-uuid`) always
+fell back to the raw UUID for a kae/kam viewer, since THEIR `/clients`
+call was 403ing (same root cause as item 3) — fixing `/clients` alone
+already resolves this display bug too, confirmed live.
+
+**Frontend, `companies/page.tsx`** — real role detection via the
+established SSR-safe deferred `getTokenPayload()` pattern; a new
+`?client=<id>` deep-link handler (client-only `useEffect`, auto-opens
+the SidePanel once the real list has loaded) directly fixes item 4;
+role-aware subtitle ("N clients assigned to you" vs "...in your CRM"),
+hidden Add-Company/Edit/Delete controls for kae/kam (avoids dead-end
+403-producing buttons); a new `KaeVisibilityPicker` component — a
+collapsible "Visible to N KAEs" checkbox list per SPOC, admin/manager-
+only, calling the new kae-assignments endpoints — is the actual UI for
+the explicit business requirement; `ClientContactsRow` shows a real
+"(showing only SPOCs assigned to you)" label and an honest empty-state
+message for a KAE with zero SPOCs assigned yet, distinct from "add the
+client's first one" for admin/manager.
+
+**`pipeline/page.tsx`**'s `SubmitClientTab` — "Go to Companies →" now
+deep-links to `/companies?client=${preview.client_id}` (opened in a new
+tab, preserving the in-progress Submit-to-Client panel); both the
+no-contacts warning state and the main send form now show `preview.
+client_name` prominently, fixing item 5 in the actual, most commonly-hit
+place, not just the API response.
+
+**`analytics/page.tsx`** — confirmed the real, precise bug: the Week/
+Month/Quarter/Year toggle existed and looked selectable but was never
+passed to any of the page's 6 real data fetches, pure decoration;
+separately, `/reports/recruiter-performance` was unconditionally
+hardcoded to `month=6&year=2026` (stale June, regardless of the real
+current date). Investigated each of the 6 real endpoints individually
+before deciding scope: `hiring-funnel`/`source-breakdown`/`stage-
+velocity`/`dashboard-summary` are all genuinely current-state snapshots
+(what does the live pipeline look like right now, what's the all-time
+candidate total) — correctly period-independent by design, not a second
+instance of the bug; only `time-to-hire` (already had a real `days`
+param) and `recruiter-performance` (a real month+year lookup) are
+actually meant to move with a date-range control. Wired the toggle to
+`time-to-hire?days=` (week=7/month=30/quarter=90/year=365); fixed
+`recruiter-performance` to always use the real, dynamically-computed
+current month/year instead of the hardcoded literal — and added an
+honest "This month (September 2026)" label next to it explaining
+plainly that this ONE widget reflects the current month rather than
+following the broader toggle, instead of silently implying it does.
+Updated the 3 stale "Last 90 days" labels on the page to a real,
+computed `periodLabel` matching whichever range is actually selected.
+
+**A real transactional dry-run caught a genuine type-inference error
+before it could ship, not after**: the migration's own backfill INSERT
+used a bare `NULL` for `assigned_by`, which Postgres couldn't infer a
+type for against the real `uuid` column — fixed with an explicit
+`NULL::uuid` cast, re-verified via a second clean dry-run before
+applying for real.
+
+Verified for real end-to-end, not code review, at every layer: a
+complete, scripted 19-check cycle against production using a genuine
+throwaway KAE + client + 2 admin-added SPOCs + a real requisition/
+candidate/application — every real behavior proven directly, not
+assumed: `GET /clients` returning exactly the KAE's 1 owned client (not
+403, not the full list); `GET /clients/{id}/contacts` starting at 0
+before any assignment; admin assigning SPOC A to the KAE via the new
+endpoint and the KAE immediately seeing exactly that 1 (not SPOC B); the
+KAE creating a new SPOC C and it auto-appearing for them (while admin
+still sees all 3); the real Submit-to-Client preview correctly returning
+`client_name` and scoping contacts to exactly A+C, with `primary_contact`
+correctly resolved to SPOC A. A second real headless-browser pass (fresh
+throwaway KAE, real login, real localStorage token injection) confirmed
+the actual live Companies page: subtitle "1 clients assigned to you," 1
+real row, and the SidePanel's real SPOC section showing the correct
+role-aware empty-state copy — zero console errors. A third pass on the
+Analytics page confirmed clicking "Week" genuinely fires a real `time-
+to-hire?days=7` network request (not decoration) and the Recruiter
+Performance label correctly reads "This month (September 2026)," not
+stale June — zero console errors. All throwaway data (client, SPOCs,
+requisition, candidate, application, 2 users) cleaned up afterward via
+real APIs — the throwaway KAE user correctly, safely refused permanent
+purge (real activity now on record — the ownership assignment, the
+kae-assignment rows) and stayed deactivated instead, matching the
+established force-purge safety-net precedent exactly; the throwaway
+recruiter purged cleanly.
+
+New permanent "S97" suite (8 tests) added to `qa_automation.spec.ts`,
+8/8 clean on its first isolated run. A broader regression sweep across
+every suite touching the 7 modified files (S1/S13/S14/S17/S22/S29/S37/
+S43/S48/S49/S54/S60/S61/S65/S73/S80/S81/S90/S96/S97 — 152 tests) passed
+151 passed / 1 pre-existing skip / 0 failed — zero regressions anywhere,
+confirming the `has_permission_soft()` widening and the SPOC-scoping
+rewrite didn't disturb any of the many other features that already
+depend on `_resolve_client_contacts()`/`submit_to_client_preview()`/
+`_do_client_submission()` (KAE submission, the auto-screened trigger,
+the Client Submission pipeline stage, the Assignment Dashboard, the
+recruiter stage-move limit, requisition-creation restriction, and more).
+Zero-token audit: `CONFIRMED CLEAN` (440 files, 0 external API refs).

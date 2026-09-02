@@ -48,8 +48,12 @@ class KaeRetentionIn(BaseModel):
 @router.get("/owners")
 async def list_owners(client_id: Optional[str]=None, actor: Actor=Depends(require_permission("kae", "read"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # REAL BUG FIX (2026-09-02): joined `clients cl` but never
+        # selected cl.name -- the Account Ownership tab's CLIENT column
+        # had no client name to render at all and fell back to a raw,
+        # truncated client_id.
         rows = await conn.fetch("""
-            SELECT co.*, u.full_name, u.email
+            SELECT co.*, u.full_name, u.email, cl.name AS client_name
             FROM client_owners co
             JOIN users u ON u.id=co.user_id
             JOIN clients cl ON cl.id=co.client_id

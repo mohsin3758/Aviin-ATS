@@ -37,13 +37,35 @@ const STAGE_COLORS: Record<string,string> = {
 };
 const SOURCE_COLORS = ['#6366f1','#3b82f6','#0ea5e9','#14b8a6','#22c55e','#f59e0b','#ef4444','#8b5cf6'];
 
+// REAL BUG FIX (2026-09-02, reported live: "data displayed is not
+// matching the selected date range"): the Week/Month/Quarter/Year toggle
+// existed and looked selectable (screenshot showed "Year" highlighted)
+// but was never actually passed to any of the page's real data fetches —
+// pure decoration. Separately, and independently wrong regardless of the
+// toggle: the Recruiter Performance table was hardcoded to
+// month=6&year=2026 (June), stale the moment any later month arrived, and
+// Time-to-Hire was hardcoded to a flat 90 days. `/analytics/hiring-
+// funnel`, `/source-breakdown`, `/stage-velocity`, and `/reports/
+// dashboard-summary` are all genuinely CURRENT-STATE snapshots (what does
+// the live pipeline look like right now, what's the all-time candidate
+// total) — correctly period-independent by design, not a second instance
+// of this bug; only Time-to-Hire (which already had a real `days` param)
+// and Recruiter Performance (a real month+year lookup) are actually
+// meant to move with a date-range control.
+const PERIOD_DAYS: Record<string, number> = { week: 7, month: 30, quarter: 90, year: 365 };
+
+const PERIOD_LABELS: Record<string, string> = { week: 'Last 7 days', month: 'Last 30 days', quarter: 'Last 90 days', year: 'Last 365 days' };
+
 export default function AnalyticsPage() {
   const [period, setPeriod] = useState('month');
+  const days = PERIOD_DAYS[period] || 30;
+  const periodLabel = PERIOD_LABELS[period] || 'Last 30 days';
+  const now = new Date();
   const { data: dash } = useFetch<any>('/reports/dashboard-summary');
-  const { data: perf } = useFetch<any[]>('/reports/recruiter-performance?month=6&year=2026');
+  const { data: perf } = useFetch<any[]>(`/reports/recruiter-performance?month=${now.getMonth() + 1}&year=${now.getFullYear()}`);
   const { data: funnel } = useFetch<any>('/analytics/hiring-funnel');
   const { data: sources } = useFetch<any[]>('/analytics/source-breakdown');
-  const { data: tth } = useFetch<any>('/analytics/time-to-hire?days=90');
+  const { data: tth } = useFetch<any>(`/analytics/time-to-hire?days=${days}`);
   const { data: velocity } = useFetch<any>('/analytics/stage-velocity');
 
   const pipeline = dash?.pipeline || {};
@@ -95,7 +117,7 @@ export default function AnalyticsPage() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard label="Avg Days to Hire" value={tth?.avg_days_to_hire ? `${tth.avg_days_to_hire}d` : '—'} icon="⏱️" color="#92400e" bg="#fef3c7" sub="Last 90 days" />
+        <MetricCard label="Avg Days to Hire" value={tth?.avg_days_to_hire ? `${tth.avg_days_to_hire}d` : '—'} icon="⏱️" color="#92400e" bg="#fef3c7" sub={periodLabel} />
         <MetricCard label="Placed (90d)"     value={tth?.total_placed||0}          icon="✅" color="#059669" bg="#d1fae5" />
         <MetricCard label="Offers Pending"   value={velocity?.offers_pending||0}   icon="📋" color="#dc2626" bg="#fee2e2" />
         <MetricCard label="Active Pipeline"  value={funnel?.total_active||0}       icon="⚡" color="#4f46e5" bg="#ede9fe" sub="Excl. placed/rejected" />
@@ -184,7 +206,7 @@ export default function AnalyticsPage() {
               <Clock size={16} style={{ color:'var(--primary)' }} />
               Time-to-Hire by Role
             </h3>
-            <span className="text-xs" style={{ color:'var(--gray-400)' }}>Last 90 days</span>
+            <span data-testid="tth-period-label" className="text-xs" style={{ color:'var(--gray-400)' }}>{periodLabel}</span>
           </div>
           <div className="overflow-x-auto">
             <table className="data-table">
@@ -211,7 +233,7 @@ export default function AnalyticsPage() {
                 ))}
                 {!(tth?.by_requisition||[]).length && (
                   <tr><td colSpan={3} className="text-center py-6 text-sm" style={{ color:'var(--gray-400)' }}>
-                    No placements in last 90 days
+                    No placements in the {periodLabel.toLowerCase()}
                   </td></tr>
                 )}
               </tbody>
@@ -257,9 +279,20 @@ export default function AnalyticsPage() {
             <Users size={16} style={{ color:'var(--primary)' }} />
             Recruiter Performance
           </h3>
-          <Link href="/reports" className="btn btn-ghost btn-sm">
-            Full Report <ChevronRight size={13} />
-          </Link>
+          <div className="flex items-center gap-3">
+            {/* This table is a real calendar-month lookup (backed by
+                GET /reports/recruiter-performance?month&year), a
+                different real shape from the Week/Quarter/Year toggle
+                above — it always reflects the current month rather than
+                following that control, stated plainly here instead of
+                silently implying it does. */}
+            <span data-testid="perf-period-label" className="text-xs" style={{ color:'var(--gray-400)' }}>
+              This month ({now.toLocaleString('en-US', { month: 'long', year: 'numeric' })})
+            </span>
+            <Link href="/reports" className="btn btn-ghost btn-sm">
+              Full Report <ChevronRight size={13} />
+            </Link>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="data-table">

@@ -39,7 +39,7 @@ from pydantic import BaseModel
 import db
 import events
 from deps import Actor, get_actor, require_role
-from permissions import require_permission
+from permissions import require_permission, has_permission_soft
 from routers.pipeline_stages import is_valid_stage
 from services.resume_formatting import render_resume_pdf, redact_contact, mask_name, _VALID_THEMES, _VALID_LOGO_POSITIONS, build_resume_filename
 from services import template_merge
@@ -251,9 +251,26 @@ async def _resolve_template(conn, tenant_id: str, client_id: Optional[str], dire
     return row
 
 
-async def _resolve_client_contacts(conn, tenant_id: str, client_id: Optional[str]):
+async def _resolve_client_contacts(conn, tenant_id: str, client_id: Optional[str], kae_user_id: Optional[str] = None):
+    """kae_user_id, when given, scopes the result to only the SPOCs this
+    specific KAE has actually been assigned (client_contact_kae_
+    assignments) — the real business requirement reported live
+    2026-09-02: a client can have many SPOCs, but a given KAE should only
+    ever see/use the ones an admin has assigned to them, not the whole
+    client's contact book. Admin/manager callers pass kae_user_id=None
+    and keep seeing every SPOC, unchanged."""
     if not client_id:
         return []
+    if kae_user_id:
+        return await conn.fetch(
+            """SELECT cc.id, cc.contact_name, cc.email, cc.role_label, cc.is_primary
+               FROM client_contacts cc
+               JOIN client_contact_kae_assignments ka
+                    ON ka.client_contact_id = cc.id AND ka.tenant_id = cc.tenant_id
+               WHERE cc.tenant_id=$1 AND cc.client_id=$2 AND ka.kae_user_id=$3
+               ORDER BY cc.is_primary DESC, cc.contact_name""",
+            tenant_id, client_id, kae_user_id,
+        )
     return await conn.fetch(
         """SELECT id, contact_name, email, role_label, is_primary
            FROM client_contacts WHERE tenant_id=$1 AND client_id=$2
@@ -1274,9 +1291,20 @@ async def set_kae_decision(submission_id: str, body: KaeDecisionIn, actor: Actor
 # rendering, _send_kae_email) rather than a second, parallel system.
 
 @router.get("/clients/{client_id}/contacts")
-async def list_client_contacts(client_id: str, actor: Actor = Depends(require_permission("companies", "read"))):
+async def list_client_contacts(client_id: str, actor: Actor = Depends(get_actor)):
+    # REAL BUG FIX (2026-09-02): was hard-gated on companies:read — a
+    # KAE/KAM with no such grant couldn't see even their OWN assigned
+    # client's SPOCs at all (the "No client contact configured" warning
+    # in Submit to Client, and an empty SPOC list on Companies, for
+    # someone who genuinely has SPOCs assigned to them). Now scopes to
+    # the caller's own assigned SPOCs for kae/kam instead of blocking.
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await _resolve_client_contacts(conn, actor.tenant_id, client_id)
+        if await has_permission_soft(conn, actor, "companies", "read", route=f"GET /clients/{client_id}/contacts"):
+            rows = await _resolve_client_contacts(conn, actor.tenant_id, client_id)
+        elif actor.role in ("kae", "kam"):
+            rows = await _resolve_client_contacts(conn, actor.tenant_id, client_id, kae_user_id=actor.user_id)
+        else:
+            raise HTTPException(403, f"Your role ('{actor.role}') does not have 'read' access to 'companies'")
     return [dict(r) for r in rows]
 
 
@@ -1288,11 +1316,29 @@ class ClientContactIn(BaseModel):
 
 
 @router.post("/clients/{client_id}/contacts", status_code=201)
-async def create_client_contact(client_id: str, body: ClientContactIn, actor: Actor = Depends(require_permission("companies", "update"))):
+async def create_client_contact(client_id: str, body: ClientContactIn, actor: Actor = Depends(get_actor)):
+    # REAL FEATURE (2026-09-02, reported live): a KAE is very often the
+    # first person to actually learn a new SPOC's contact details — this
+    # now lets them add one for a client they're genuinely assigned to
+    # (client_owners), not just admin/manager. The KAE who adds it is
+    # auto-assigned to it (they added it, they can use it immediately);
+    # extending that visibility to other KAEs on the same client is a
+    # separate, explicit admin action (PUT .../kae-assignments below),
+    # matching the real "admin controls who sees which SPOC" requirement.
     async with db.tenant_conn(actor.tenant_id) as conn:
+        can_manage = await has_permission_soft(conn, actor, "companies", "update", route=f"POST /clients/{client_id}/contacts")
+        is_kae = actor.role in ("kae", "kam")
+        if not can_manage and not is_kae:
+            raise HTTPException(403, f"Your role ('{actor.role}') does not have 'update' access to 'companies'")
         exists = await conn.fetchval("SELECT 1 FROM clients WHERE id=$1 AND tenant_id=$2", client_id, actor.tenant_id)
         if not exists:
             raise HTTPException(404, "Client not found")
+        if is_kae and not can_manage:
+            owns = await conn.fetchval(
+                "SELECT 1 FROM client_owners WHERE tenant_id=$1 AND client_id=$2 AND user_id=$3 AND is_active",
+                actor.tenant_id, client_id, actor.user_id)
+            if not owns:
+                raise HTTPException(403, "You can only add a SPOC for a client you're assigned to")
         if body.is_primary:
             await conn.execute(
                 "UPDATE client_contacts SET is_primary=false WHERE tenant_id=$1 AND client_id=$2",
@@ -1301,16 +1347,31 @@ async def create_client_contact(client_id: str, body: ClientContactIn, actor: Ac
             """INSERT INTO client_contacts (tenant_id, client_id, contact_name, email, role_label, is_primary, created_by)
                VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
             actor.tenant_id, client_id, body.contact_name, body.email, body.role_label, body.is_primary, actor.user_id)
+        if is_kae and not can_manage:
+            await conn.execute(
+                """INSERT INTO client_contact_kae_assignments (tenant_id, client_contact_id, kae_user_id, assigned_by)
+                   VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING""",
+                actor.tenant_id, row["id"], actor.user_id, actor.user_id)
     return dict(row)
 
 
 @router.put("/client-contacts/{contact_id}")
-async def update_client_contact(contact_id: str, body: ClientContactIn, actor: Actor = Depends(require_permission("companies", "update"))):
+async def update_client_contact(contact_id: str, body: ClientContactIn, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         existing = await conn.fetchrow(
             "SELECT client_id FROM client_contacts WHERE id=$1 AND tenant_id=$2", contact_id, actor.tenant_id)
         if not existing:
             raise HTTPException(404, "Contact not found")
+        can_manage = await has_permission_soft(conn, actor, "companies", "update", route=f"PUT /client-contacts/{contact_id}")
+        if not can_manage:
+            if actor.role in ("kae", "kam"):
+                assigned = await conn.fetchval(
+                    "SELECT 1 FROM client_contact_kae_assignments WHERE tenant_id=$1 AND client_contact_id=$2 AND kae_user_id=$3",
+                    actor.tenant_id, contact_id, actor.user_id)
+                if not assigned:
+                    raise HTTPException(403, "You can only edit a SPOC assigned to you")
+            else:
+                raise HTTPException(403, f"Your role ('{actor.role}') does not have 'update' access to 'companies'")
         if body.is_primary:
             await conn.execute(
                 "UPDATE client_contacts SET is_primary=false WHERE tenant_id=$1 AND client_id=$2 AND id != $3",
@@ -1329,6 +1390,55 @@ async def delete_client_contact(contact_id: str, actor: Actor = Depends(require_
     return {"ok": True, "deleted": row != "DELETE 0"}
 
 
+@router.get("/client-contacts/{contact_id}/kae-assignments")
+async def list_contact_kae_assignments(contact_id: str, actor: Actor = Depends(require_permission("companies", "read"))):
+    """Which KAEs can currently see/use this one SPOC — powers the admin-
+    facing "Visible to" picker on the Companies page's SPOC panel."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            """SELECT ka.kae_user_id, u.full_name, u.email
+               FROM client_contact_kae_assignments ka
+               JOIN users u ON u.id = ka.kae_user_id
+               WHERE ka.tenant_id=$1 AND ka.client_contact_id=$2 AND u.is_active IS NOT FALSE
+               ORDER BY u.full_name""",
+            actor.tenant_id, contact_id)
+    return [dict(r) for r in rows]
+
+
+class KaeAssignmentsIn(BaseModel):
+    kae_user_ids: list[str]
+
+
+@router.put("/client-contacts/{contact_id}/kae-assignments")
+async def set_contact_kae_assignments(contact_id: str, body: KaeAssignmentsIn, actor: Actor = Depends(require_permission("companies", "update"))):
+    # Real business-admin action (who is allowed to see and use this
+    # SPOC), same bar as every other client_owners/visibility write in
+    # this codebase — a full-replace of the assignment set, not a diff,
+    # matching this project's established "small child list, full
+    # replace" convention (e.g. candidate_skill_experience PUT).
+    if actor.role not in ("admin", "super_admin", "manager"):
+        raise HTTPException(403, "Assigning SPOC visibility requires manager/admin role")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        exists = await conn.fetchval("SELECT client_id FROM client_contacts WHERE id=$1 AND tenant_id=$2", contact_id, actor.tenant_id)
+        if not exists:
+            raise HTTPException(404, "Contact not found")
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM client_contact_kae_assignments WHERE tenant_id=$1 AND client_contact_id=$2",
+                actor.tenant_id, contact_id)
+            for uid in body.kae_user_ids:
+                await conn.execute(
+                    """INSERT INTO client_contact_kae_assignments (tenant_id, client_contact_id, kae_user_id, assigned_by)
+                       VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING""",
+                    actor.tenant_id, contact_id, uid, actor.user_id)
+        rows = await conn.fetch(
+            """SELECT ka.kae_user_id, u.full_name, u.email
+               FROM client_contact_kae_assignments ka JOIN users u ON u.id = ka.kae_user_id
+               WHERE ka.tenant_id=$1 AND ka.client_contact_id=$2""",
+            actor.tenant_id, contact_id)
+    return [dict(r) for r in rows]
+
+
 @router.get("/applications/{application_id}/submit-to-client/preview")
 async def submit_to_client_preview(
     application_id: str,
@@ -1336,7 +1446,14 @@ async def submit_to_client_preview(
 ):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row, auto_values = await _app_context(conn, application_id)
-        contacts = await _resolve_client_contacts(conn, actor.tenant_id, row["client_id"])
+        # REAL BUG FIX (2026-09-02, reported live): a KAE only ever saw
+        # every SPOC on the client regardless of what an admin actually
+        # assigned them — this is the real send/preview path, so the same
+        # scoping applied to the Companies-page contact list has to apply
+        # here too, or the "view only what's assigned to you" rule would
+        # be enforceable in the UI but bypassable via this endpoint.
+        kae_scope = actor.user_id if actor.role in ("kae", "kam") else None
+        contacts = await _resolve_client_contacts(conn, actor.tenant_id, row["client_id"], kae_user_id=kae_scope)
         template = await _resolve_template(conn, actor.tenant_id, row["client_id"], "kae_to_client")
         templates = await conn.fetch(
             """SELECT tst.id, tst.name, tst.client_id, tst.is_default, tst.template_type, tst.file_name, cl.name AS client_name
@@ -1347,9 +1464,16 @@ async def submit_to_client_preview(
         prior_count = await conn.fetchval(
             "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
             row["requisition_id"])
+        # REAL GAP FIX (2026-09-02, reported live): the Submit-to-Client
+        # panel never showed WHICH client a candidate was being submitted
+        # to anywhere — real, previously-missing context for the reviewer.
+        client_name = None
+        if row["client_id"]:
+            client_name = await conn.fetchval("SELECT name FROM clients WHERE id=$1", row["client_id"])
     return {
         "candidate_id": str(row["candidate_id"]),
         "client_id": str(row["client_id"]) if row["client_id"] else None,
+        "client_name": client_name,
         "primary_contact": dict(contacts[0]) if contacts and contacts[0]["is_primary"] else None,
         "contacts": [dict(c) for c in contacts],
         "resolved_template": _template_out(template) if template else None,
@@ -1399,7 +1523,13 @@ async def _do_client_submission(
         client_id = row["client_id"]
         if not client_id:
             raise HTTPException(400, "This requisition has no client linked — cannot resolve a recipient")
-        contacts = await _resolve_client_contacts(conn, tenant_id, client_id)
+        # Same real "only the SPOCs this KAE was actually assigned" scope
+        # as the preview endpoint — applies to the automated auto-screened
+        # trigger too, but ONLY when that trigger's actor is genuinely a
+        # kae/kam (an admin/manager/recruiter-driven auto-submit keeps
+        # seeing every SPOC on the client, unchanged).
+        kae_scope = actor.user_id if actor.role in ("kae", "kam") else None
+        contacts = await _resolve_client_contacts(conn, tenant_id, client_id, kae_user_id=kae_scope)
         primary_contact = contacts[0] if contacts else None
         if not to_emails_override and not primary_contact:
             raise HTTPException(400, "No client contact is configured — add one under Companies > this client > Contacts")

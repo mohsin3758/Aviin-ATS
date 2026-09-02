@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 import uuid
 from deps import get_actor, Actor
-from permissions import require_permission
+from permissions import require_permission, has_permission_soft
 import db
 import events
 
@@ -33,18 +33,43 @@ class ClientIn(BaseModel):
 # ─── Basic CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("/clients")
-async def list_clients(include_inactive: bool = False, actor: Actor = Depends(require_permission("companies", "read"))):
+async def list_clients(include_inactive: bool = False, actor: Actor = Depends(get_actor)):
     # REAL BUG FIX (2026-08-12): `is_active` has existed on this table all
     # along (frontend already renders an Active/Inactive badge off it) but
     # was never filtered here — every soft-deleted client stayed visible
     # in the real Companies list forever. `include_inactive` matches the
     # same convention GET /requisitions already uses.
+    #
+    # REAL BUG FIX (2026-09-02, reported live: a real KAE's Companies page
+    # showed "No companies yet" despite 3 real client_owners assignments):
+    # this endpoint was a hard require_permission("companies","read") gate
+    # — with enforcement genuinely on and the kae role holding no
+    # companies grant, it correctly 403'd, and the frontend's empty-state
+    # UI made that look exactly like a data bug. A KAE/KAM's real
+    # authority here was never "see every client" (that's what the
+    # companies:read grant means for admin/manager/recruiter) — it's "see
+    # the clients I'm actually assigned to," which client_owners already
+    # tracks. Widened to serve that real, narrower view instead of a
+    # blanket block.
     async with db.tenant_conn(actor.tenant_id) as conn:
         where = "" if include_inactive else "WHERE is_active IS NOT FALSE"
-        rows = await conn.fetch(
-            f"SELECT id, name, industry, priority_tier, is_active, created_at, default_resume_template_id "
-            f"FROM clients {where} ORDER BY name")
-        return [dict(r) for r in rows]
+        if await has_permission_soft(conn, actor, "companies", "read", route="GET /clients"):
+            rows = await conn.fetch(
+                f"SELECT id, name, industry, priority_tier, is_active, created_at, default_resume_template_id "
+                f"FROM clients {where} ORDER BY name")
+            return [dict(r) for r in rows]
+        if actor.role in ("kae", "kam"):
+            active_clause = "AND cl.is_active IS NOT FALSE" if not include_inactive else ""
+            rows = await conn.fetch(f"""
+                SELECT DISTINCT cl.id, cl.name, cl.industry, cl.priority_tier, cl.is_active,
+                       cl.created_at, cl.default_resume_template_id
+                FROM clients cl
+                JOIN client_owners co ON co.client_id = cl.id
+                WHERE co.tenant_id = $1 AND co.user_id = $2 AND co.is_active {active_clause}
+                ORDER BY cl.name
+            """, actor.tenant_id, actor.user_id)
+            return [dict(r) for r in rows]
+        raise HTTPException(403, f"Your role ('{actor.role}') does not have 'read' access to 'companies'")
 
 
 class ClientTierIn(BaseModel):

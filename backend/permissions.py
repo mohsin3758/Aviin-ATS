@@ -242,3 +242,36 @@ def require_permission(feature: str, action: str = "read"):
         return actor
 
     return dependency
+
+
+async def has_permission_soft(conn, actor, feature: str, action: str = "read", route: Optional[str] = None) -> bool:
+    """Same allow/deny OUTCOME require_permission()'s dependency would
+    produce, but as a plain bool a handler can branch on instead of a
+    hard 403 - for a route that wants to serve a genuinely DIFFERENT,
+    narrower response to a role that lacks the broad grant (e.g. a KAE
+    seeing only their own assigned clients) rather than blocking it
+    outright. Mirrors require_permission()'s exact real semantics:
+    admin/super_admin/anonymous-trusted-internal always True; otherwise
+    only False when this tenant genuinely has enforcement on AND the
+    role has a real permissions row that doesn't grant it - a role with
+    no row at all, or a tenant still in soft-launch, is never treated as
+    denied. Also writes the same permission_check_log row
+    require_permission() would, so real usage stays visible to an admin
+    reviewing before enabling enforcement, even though this path never
+    raises on its own."""
+    if actor.role in ("admin", "super_admin") or actor.role is None:
+        return True
+    enforcement_on = await conn.fetchval(
+        "SELECT permission_enforcement_enabled FROM tenants WHERE id=$1", actor.tenant_id)
+    permissions = await get_role_permissions(conn, actor.tenant_id, actor.role)
+    allowed = check_permission(permissions, feature, action)
+    if allowed is not True:
+        await conn.execute(
+            """INSERT INTO permission_check_log
+                 (tenant_id, user_id, role_code, feature, action, route, would_have_blocked)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+            actor.tenant_id, actor.user_id, actor.role, feature, action,
+            route or f"soft-check:{feature}:{action}",
+            bool(enforcement_on and permissions is not None),
+        )
+    return not (allowed is False and enforcement_on and permissions is not None)

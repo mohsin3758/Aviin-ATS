@@ -2,8 +2,9 @@
 import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Modal, FormField, FormRow, FormActions } from '@/components/ui/Modal';
+import { getTokenPayload } from '@/lib/auth';
 import { Plus, Search, Building2, MapPin, Phone, Mail, Globe,
-         Star, Edit, Trash2, Eye, ChevronRight, Briefcase, Users, FileText } from 'lucide-react';
+         Star, Edit, Trash2, Eye, ChevronRight, Briefcase, Users, FileText, UserCheck } from 'lucide-react';
 
 const INDUSTRIES = ['Information Technology','IT Services','IT Consulting','Banking & Finance',
   'Manufacturing','Retail','Healthcare','Pharma','BFSI','Telecom','E-commerce','Consulting','Other'];
@@ -76,7 +77,57 @@ function ResumePreferenceRow({ client, onSaved }: { client: any; onSaved: () => 
 // the Approve & Send flow defaults its "To" from — nothing in this schema
 // stored one before this. A client can have more than one contact (e.g. a
 // primary KAM + a backup HR contact); exactly one can be marked primary.
-function ClientContactsRow({ client }: { client: any }) {
+//
+// REAL FEATURE (2026-09-02, reported live): a client can have many SPOCs,
+// but a KAE should only ever see/use the ones an admin has actually
+// assigned to them — not the whole client's contact book. The backend
+// (GET /clients/{id}/contacts) already returns exactly that scoped subset
+// for a kae/kam caller, so nothing changes here for THEM; what's new is
+// the admin/manager-only "Visible to" picker per SPOC, and admin/manager
+// still seeing (and being able to manage) every SPOC regardless.
+function KaeVisibilityPicker({ contactId, canManage }: { contactId: string; canManage: boolean }) {
+  const { data: assigned, refetch } = useFetch<any[]>(canManage ? `/client-contacts/${contactId}/kae-assignments` : null);
+  const { data: allUsers } = useFetch<any[]>(canManage ? '/users?is_active=true' : null);
+  const kaes = (allUsers || []).filter((u: any) => u.role === 'kae' || u.role === 'kam');
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  if (!canManage) return null;
+
+  const assignedIds = new Set((assigned || []).map((a: any) => a.kae_user_id));
+  const toggle = async (userId: string) => {
+    const next = assignedIds.has(userId) ? [...assignedIds].filter(id => id !== userId) : [...assignedIds, userId];
+    setSaving(true);
+    try {
+      await apiFetch(`/client-contacts/${contactId}/kae-assignments`, {
+        method: 'PUT', body: JSON.stringify({ kae_user_ids: next }),
+      });
+      refetch();
+    } catch { /* silent — the picker just won't reflect the change */ }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      <button onClick={() => setOpen(!open)} style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#7c3aed' }}>
+        <UserCheck size={11} /> Visible to {assigned?.length || 0} KAE{assigned?.length === 1 ? '' : 's'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 6, padding: '8px 10px', background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 6 }}>
+          {!kaes.length && <div style={{ fontSize: 10.5, color: '#94a3b8' }}>No KAE/KAM users on this tenant yet.</div>}
+          {kaes.map((k: any) => (
+            <label key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#374151', padding: '3px 0', cursor: 'pointer' }}>
+              <input type="checkbox" checked={assignedIds.has(k.id)} disabled={saving} onChange={() => toggle(k.id)} />
+              {k.full_name} <span style={{ color: '#94a3b8', fontSize: 10 }}>({k.role})</span>
+            </label>
+          ))}
+          <p style={{ fontSize: 9.5, color: '#94a3b8', marginTop: 4 }}>Only checked KAEs/KAMs can see and use this SPOC when submitting a candidate to this client.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientContactsRow({ client, isKaeUser }: { client: any; isKaeUser: boolean }) {
   const { data: contacts, refetch } = useFetch<any[]>(`/clients/${client.id}/contacts`);
   const [form, setForm] = useState<{ contact_name: string; email: string; role_label: string }>({ contact_name: '', email: '', role_label: '' });
   const [saving, setSaving] = useState(false);
@@ -116,21 +167,24 @@ function ClientContactsRow({ client }: { client: any }) {
   return (
     <div data-testid="client-contacts-row" style={{ padding: '16px', borderBottom: '1px solid #f1f5f9' }}>
       <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#94a3b8', marginBottom: '10px' }}>
-        Client SPOCs
+        Client SPOCs {isKaeUser && <span style={{ textTransform: 'none', fontWeight: 500, color: '#c084fc' }}>(showing only SPOCs assigned to you)</span>}
       </div>
       {(contacts || []).map((c: any) => (
-        <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', background: c.is_primary ? '#eff6ff' : '#f8fafc', border: `1px solid ${c.is_primary ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 8, marginBottom: 6 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b' }}>
-              {c.contact_name}{c.role_label ? ` · ${c.role_label}` : ''} {c.is_primary && <span style={{ fontSize: 9, fontWeight: 800, color: '#1d4ed8' }}>PRIMARY</span>}
+        <div key={c.id} style={{ padding: '7px 9px', background: c.is_primary ? '#eff6ff' : '#f8fafc', border: `1px solid ${c.is_primary ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 8, marginBottom: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b' }}>
+                {c.contact_name}{c.role_label ? ` · ${c.role_label}` : ''} {c.is_primary && <span style={{ fontSize: 9, fontWeight: 800, color: '#1d4ed8' }}>PRIMARY</span>}
+              </div>
+              <div style={{ fontSize: 11, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email}</div>
             </div>
-            <div style={{ fontSize: 11, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email}</div>
+            {!c.is_primary && <button onClick={() => setPrimary(c)} title="Make primary" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#2563eb' }}>Set Primary</button>}
+            {!isKaeUser && <button onClick={() => remove(c)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}><Trash2 size={13} /></button>}
           </div>
-          {!c.is_primary && <button onClick={() => setPrimary(c)} title="Make primary" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#2563eb' }}>Set Primary</button>}
-          <button onClick={() => remove(c)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}><Trash2 size={13} /></button>
+          <KaeVisibilityPicker contactId={c.id} canManage={!isKaeUser} />
         </div>
       ))}
-      {!contacts?.length && <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>No SPOCs yet — add this client's point(s) of contact below. A client can have several SPOCs (e.g. one per role type); the KAE/KAM picks the right one when sending.</div>}
+      {!contacts?.length && <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>{isKaeUser ? "No SPOCs assigned to you for this client yet — ask an admin to assign one, or add a new one below." : "No SPOCs yet — add this client's point(s) of contact below. A client can have several SPOCs (e.g. one per role type); the KAE/KAM picks the right one when sending."}</div>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
         <input placeholder="SPOC name" value={form.contact_name} onChange={e => setForm({ ...form, contact_name: e.target.value })}
           style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
@@ -150,7 +204,7 @@ function ClientContactsRow({ client }: { client: any }) {
   );
 }
 
-function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
+function SidePanel({ client, reqs, onClose, onEdit, onRefetch, isKaeUser }: any) {
   // REAL BUG FIX (2026-08-17): reqs is the full tenant-wide requisitions
   // list — was never filtered to this specific client, so every client's
   // drawer showed the same "Open Jobs" count and job cards as every
@@ -208,7 +262,7 @@ function SidePanel({ client, reqs, onClose, onEdit, onRefetch }: any) {
         </div>
 
         <ResumePreferenceRow client={client} onSaved={onRefetch} />
-        <ClientContactsRow client={client} />
+        <ClientContactsRow client={client} isKaeUser={isKaeUser} />
 
         {/* Open Jobs */}
         <div style={{ padding:'16px' }}>
@@ -254,6 +308,30 @@ export default function CompaniesPage() {
   const { data: clients, loading, refetch } = useFetch<any[]>('/clients');
   const { data: reqs } = useFetch<any[]>('/requisitions');
 
+  // REAL BUG FIX (2026-09-02, reported live): read the caller's own role
+  // only after mount — reading it synchronously during render would
+  // mismatch the server's first paint (no token exists server-side),
+  // the same SSR-hydration guard already established elsewhere in this
+  // codebase (device-monitoring, recruiter-ops TargetsTab).
+  const [role, setRole] = useState<string | null>(null);
+  useEffect(() => { setRole(getTokenPayload()?.role || null); }, []);
+  const isKaeUser = role === 'kae' || role === 'kam';
+
+  // REAL FEATURE (2026-09-02, reported live: "Go to Company" from Submit
+  // to Client landed on a generic empty list, not the actual client).
+  // Deep-link into a specific client's own SidePanel once the real list
+  // has loaded — client-only (window isn't available during SSR).
+  const [deepLinkChecked, setDeepLinkChecked] = useState(false);
+  useEffect(() => {
+    if (deepLinkChecked || !clients) return;
+    const id = new URLSearchParams(window.location.search).get('client');
+    if (id) {
+      const match = clients.find((c: any) => c.id === id);
+      if (match) setSelected(match);
+    }
+    setDeepLinkChecked(true);
+  }, [clients, deepLinkChecked]);
+
   const filtered = (clients||[]).filter(cl =>
     !search || cl.name?.toLowerCase().includes(search.toLowerCase()) ||
     cl.city?.toLowerCase().includes(search.toLowerCase()) ||
@@ -293,7 +371,9 @@ export default function CompaniesPage() {
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'20px', flexWrap:'wrap', gap:'12px' }}>
         <div>
           <h1 style={{ fontSize:'20px', fontWeight:'700', color:'#0f172a' }}>Companies & Clients</h1>
-          <p style={{ fontSize:'13px', color:'#64748b', marginTop:'2px' }}>{(clients||[]).length} clients in your CRM</p>
+          <p style={{ fontSize:'13px', color:'#64748b', marginTop:'2px' }}>
+            {isKaeUser ? `${(clients||[]).length} clients assigned to you` : `${(clients||[]).length} clients in your CRM`}
+          </p>
         </div>
         <div style={{ display:'flex', gap:'8px' }}>
           <div style={{ position:'relative' }}>
@@ -301,9 +381,14 @@ export default function CompaniesPage() {
             <input placeholder="Search companies..." value={search} onChange={e=>setSearch(e.target.value)}
               style={{ ...inputStyle, paddingLeft:'30px', width:'220px', borderRadius:'20px', background:'#f8fafc' }} />
           </div>
-          <button onClick={openCreate} style={{ display:'flex', alignItems:'center', gap:'6px', padding:'9px 18px', background:'#1e40af', color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
-            <Plus size={14} /> Add Company
-          </button>
+          {/* A KAE structurally can't create a new client company (POST
+              /clients stays companies:create-gated, unrelated to today's
+              fix) — a dead-end button here isn't useful to them. */}
+          {!isKaeUser && (
+            <button onClick={openCreate} style={{ display:'flex', alignItems:'center', gap:'6px', padding:'9px 18px', background:'#1e40af', color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
+              <Plus size={14} /> Add Company
+            </button>
+          )}
         </div>
       </div>
 
@@ -316,16 +401,20 @@ export default function CompaniesPage() {
         ) : filtered.length === 0 ? (
           <div style={{ textAlign:'center', padding:'80px 20px' }}>
             <div style={{ fontSize:'56px', marginBottom:'16px' }}>🏢</div>
-            <h3 style={{ fontSize:'18px', fontWeight:'600', color:'#374151', marginBottom:'8px' }}>No companies yet</h3>
-            <p style={{ fontSize:'13px', color:'#9ca3af', marginBottom:'24px' }}>Add your first client company to start managing accounts</p>
-            <button onClick={openCreate} style={{ padding:'10px 24px', background:'#1e40af', color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>+ Add Company</button>
+            <h3 style={{ fontSize:'18px', fontWeight:'600', color:'#374151', marginBottom:'8px' }}>
+              {isKaeUser ? 'No clients assigned to you yet' : 'No companies yet'}
+            </h3>
+            <p style={{ fontSize:'13px', color:'#9ca3af', marginBottom:'24px' }}>
+              {isKaeUser ? 'Ask an admin to assign you as the KAE/KAM on a client account.' : 'Add your first client company to start managing accounts'}
+            </p>
+            {!isKaeUser && <button onClick={openCreate} style={{ padding:'10px 24px', background:'#1e40af', color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>+ Add Company</button>}
           </div>
         ) : (
           <div style={{ overflowX:'auto' }}>
             <table style={{ width:'100%', borderCollapse:'collapse' }}>
               <thead>
                 <tr style={{ background:'#f8fafc', borderBottom:'1px solid #e2e8f0' }}>
-                  {['','Company Name','Industry','Location','Contact','Website','Open Jobs','Status','Actions'].map((h,i)=>(
+                  {['','Company Name','Industry','Location','Contact','Website','Open Jobs','Status',...(isKaeUser?[]:['Actions'])].map((h,i)=>(
                     <th key={i} style={{ padding:'10px 16px', textAlign:'left', fontSize:'11px', fontWeight:'600', textTransform:'uppercase', letterSpacing:'0.05em', color:'#64748b', whiteSpace:'nowrap' }}>{h}</th>
                   ))}
                 </tr>
@@ -380,16 +469,18 @@ export default function CompaniesPage() {
                           {cl.is_active!==false?'Active':'Inactive'}
                         </span>
                       </td>
-                      <td style={{ padding:'12px 16px' }} onClick={e=>e.stopPropagation()}>
-                        <div style={{ display:'flex', gap:'4px' }}>
-                          <button onClick={()=>openEdit(cl)} style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #e2e8f0', background:'#f8fafc', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
-                            <Edit size={12} style={{ color:'#64748b' }} />
-                          </button>
-                          <button onClick={()=>handleDelete(cl.id)} style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #fee2e2', background:'#fef2f2', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
-                            <Trash2 size={12} style={{ color:'#ef4444' }} />
-                          </button>
-                        </div>
-                      </td>
+                      {!isKaeUser && (
+                        <td style={{ padding:'12px 16px' }} onClick={e=>e.stopPropagation()}>
+                          <div style={{ display:'flex', gap:'4px' }}>
+                            <button onClick={()=>openEdit(cl)} style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #e2e8f0', background:'#f8fafc', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
+                              <Edit size={12} style={{ color:'#64748b' }} />
+                            </button>
+                            <button onClick={()=>handleDelete(cl.id)} style={{ width:'28px', height:'28px', borderRadius:'6px', border:'1px solid #fee2e2', background:'#fef2f2', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', padding:0 }}>
+                              <Trash2 size={12} style={{ color:'#ef4444' }} />
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -403,7 +494,7 @@ export default function CompaniesPage() {
       {selected && (
         <>
           <div style={{ position:'fixed', inset:0, background:'transparent', zIndex:199 }} onClick={()=>setSelected(null)} />
-          <SidePanel client={selected} reqs={reqs} onClose={()=>setSelected(null)} onEdit={openEdit} onRefetch={refetch} />
+          <SidePanel client={selected} reqs={reqs} onClose={()=>setSelected(null)} onEdit={openEdit} onRefetch={refetch} isKaeUser={isKaeUser} />
         </>
       )}
 

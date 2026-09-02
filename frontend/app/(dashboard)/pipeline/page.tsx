@@ -2023,10 +2023,19 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   if (!preview.contacts?.length) {
     return (
       <div data-testid="client-submit-panel" style={{ padding: 16, textAlign: 'center', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 10 }}>
+        {preview.client_name && (
+          <div data-testid="submit-client-name" style={{ fontSize: 11, fontWeight: 700, color: '#78350F', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+            Client: {preview.client_name}
+          </div>
+        )}
         <AlertTriangle size={20} color="#CA8A04" style={{ marginBottom: 6 }} />
         <div style={{ fontSize: 12, fontWeight: 700, color: '#92400E', marginBottom: 4 }}>No client contact configured</div>
         <div style={{ fontSize: 11, color: '#92400E', marginBottom: 8 }}>Add the client's KAM/contact email before sending — see the client's Companies page.</div>
-        <a href="/companies" style={{ fontSize: 11, fontWeight: 700, color: '#2563EB' }}>Go to Companies →</a>
+        {/* REAL BUG FIX (2026-09-02, reported live): landed on a generic,
+            empty companies list instead of this candidate's own client —
+            deep-links straight to it now, so "add a SPOC" is one click,
+            not a manual search. */}
+        <a href={preview.client_id ? `/companies?client=${preview.client_id}` : '/companies'} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontWeight: 700, color: '#2563EB' }}>Go to Companies →</a>
       </div>
     );
   }
@@ -2075,6 +2084,13 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
 
   return (
     <div data-testid="client-submit-panel" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* REAL GAP FIX (2026-09-02, reported live): this panel never showed
+          WHICH client a candidate was actually being submitted to. */}
+      {preview.client_name && (
+        <div data-testid="submit-client-name" style={{ fontSize: 11, fontWeight: 700, color: '#1E40AF', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+          Submitting to: {preview.client_name}
+        </div>
+      )}
       <div style={{ padding: 10, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12 }}>
         <span style={lbl}>TO (CLIENT / KAM)</span>
         {preview.contacts.length > 1 ? (
