@@ -13303,11 +13303,33 @@ test.describe.serial('S98 Tracking-sheet live preview + SPOC/project-scoped temp
   });
 
   test('BUG FIX: GET /submission-templates excludes templates pinned to an already-soft-deleted client by default, but include_inactive=true still shows them (real, reported tenant-wide fix)', async ({ request }) => {
+    // Real, self-contained fixture, not ambient tenant data — this test
+    // originally relied on the tenant's own real "QA S54 Client..." stray
+    // rows always existing in the background to prove the include_
+    // inactive distinction; a later, deliberate cleanup (2026-09-03,
+    // closing the real "can't delete a stray template" bug this SAME
+    // suite's own sibling S100 fixes) genuinely removed every one of
+    // those rows on the user's behalf, which is exactly the intended,
+    // correct outcome of that fix — not something this test should ever
+    // have depended on staying true. Builds its own throwaway client +
+    // template + soft-delete cycle instead, so this assertion holds
+    // regardless of what real stray data does or doesn't exist at any
+    // given moment.
+    const c = await request.post(`${API}/clients`, { headers: authA(), data: { name: `QA S98b SoftDel Client ${stamp}` } });
+    const cId = (await c.json()).id;
+    const tpl = await request.post(`${API}/submission-templates`, {
+      headers: authA(), data: { name: `QA S98b Client ${stamp} — Client Tracking Sheet`, direction: 'kae_to_client', client_id: cId, columns: [{ key: 'sl_no', label: 'SL No' }] },
+    });
+    const tplId = (await tpl.json()).id;
+    const delC = await request.delete(`${API}/clients/${cId}`, { headers: authA() });
+    expect(delC.ok()).toBeTruthy();
+
     const filtered = await (await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: authA() })).json();
-    const strayNames = filtered.filter((t: any) => t.name.includes('QA S54 Client'));
-    expect(strayNames.length).toBe(0);
+    expect(filtered.some((t: any) => t.id === tplId)).toBe(false);
     const all = await (await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() })).json();
-    expect(all.length).toBeGreaterThan(filtered.length);
+    expect(all.some((t: any) => t.id === tplId)).toBe(true);
+
+    await request.delete(`${API}/submission-templates/${tplId}`, { headers: authA() }).catch(() => {});
   });
 
   test('FEATURE: the real preview now includes tracking_html (the live populated table), not just a template picker', async ({ request }) => {
@@ -13616,5 +13638,209 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
 
     // Close without sending — this test only exercises the resize UX.
     await page.locator('[data-testid="client-submission-move-only"]').click().catch(() => {});
+  });
+});
+
+test.describe.serial('S100 Tracking-sheet template delete: real FK-block fix (ON DELETE SET NULL) + a real used_template_id audit-trail bug found along the way', () => {
+  // 2026-09-03, direct follow-up to S98/S99, a fresh real report off a
+  // live screenshot: dozens of "QA S54 Client ..." stray templates
+  // couldn't be deleted through the real Ops Settings UI — "Request
+  // failed... after removing default still not able to delete."
+  //
+  // Root-caused live, not guessed: candidate_submissions_template_id_fkey
+  // had no ON DELETE clause at all (defaults to NO ACTION/RESTRICT), so
+  // any template genuinely referenced by a real, already-sent submission
+  // — exactly the situation for every one of those stray rows, confirmed
+  // via direct query before touching anything — could never be deleted;
+  // the raw asyncpg ForeignKeyViolationError surfaced as a bare,
+  // unexplained "Request failed" with zero indication why.
+  //
+  // Fixed the same way the two OTHER FKs on this exact table already
+  // are (application_id, recipient_contact_id — both ON DELETE SET
+  // NULL): template_id is genuinely nullable and the submission's own
+  // field_values JSONB snapshot already carries everything that was
+  // actually sent — losing the secondary "which template config
+  // produced this" reference on a deliberate delete is a fair trade,
+  // silently blocking the delete forever is not (sql/110). The DELETE
+  // endpoint itself also now catches ANY future/unknown FK violation
+  // with a clear, actionable 409 instead of a raw 500, as defense in
+  // depth beyond this one specific fix.
+  //
+  // A second, real, independent, previously-undiscovered bug found via
+  // direct testing while building THIS verification, not code review:
+  // the final candidate_submissions INSERT always used template["id"]
+  // (whatever was resolved BEFORE save_as_default ran), never the
+  // actual newly-created/updated scoped template — the two
+  // `template_id = template_id or str(...)` reassignments inside the
+  // save-as-default branches updated the function's own PARAMETER,
+  // which nothing downstream ever read again. Confirmed live: a real
+  // send with save_as_default=true, default_scope='client' against a
+  // fresh client (no prior default) returned the tenant's unrelated
+  // GLOBAL default's id, not the new template it had just created —
+  // meaning every such send's own audit record was mis-attributed to
+  // the wrong template. Fixed with a real, single source of truth
+  // (used_template_id), correctly updated by both save-as-default
+  // branches and read by the actual INSERT.
+  let admin = '';
+  const authA = () => ({ Authorization: `Bearer ${admin}` });
+  let clientId = '', reqId = '', candId = '', appId = '', tplId = '';
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (tplId) {
+      // Real, deliberate double-check that the fix's own cleanup path
+      // still works even from this suite's own afterAll — un-default
+      // then delete, matching the exact real user flow this suite
+      // exists to prove.
+      try {
+        const listR = await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() });
+        const tpl = (await listR.json()).find((t: any) => t.id === tplId);
+        if (tpl) {
+          await request.put(`${API}/submission-templates/${tplId}`, { headers: authA(), data: { ...tpl, is_default: false } });
+          await request.delete(`${API}/submission-templates/${tplId}`, { headers: authA() });
+        }
+      } catch { /* best-effort */ }
+    }
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: authA() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: authA() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: authA() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: authA() }).catch(() => {});
+  });
+
+  test('setup: a real client/requisition/candidate/application, then a real save_as_default send that creates a genuinely new client-scoped template', async ({ request }) => {
+    admin = await getApiToken(request);
+    const c = await request.post(`${API}/clients`, { headers: authA(), data: { name: `QA S100 Client ${stamp}` } });
+    clientId = (await c.json()).id;
+    await request.post(`${API}/clients/${clientId}/contacts`, { headers: authA(), data: { contact_name: 'QA S100 SPOC', email: `qa.s100.spoc.${stamp}@qatest.example`, is_primary: true } });
+    const r = await request.post(`${API}/requisitions`, { headers: authA(), data: { title: `QA S100 Req ${stamp}`, client_id: clientId, skills_required: ['Python'], status: 'open', positions_count: 1 } });
+    reqId = (await r.json()).id;
+    const cand = await request.post(`${API}/candidates`, { headers: authA(), data: { full_name: `QA S100 Cand ${stamp}`, email: `qa.s100.cand.${stamp}@qatest.example`, phone: '9800000088', skills: ['Python'], total_exp_mo: 20 } });
+    candId = (await cand.json()).id;
+    await request.post(`${API}/candidates/bulk-assign`, { headers: authA(), data: { candidate_ids: [candId], requisition_id: reqId } });
+    const apps = await (await request.get(`${API}/applications?candidate_id=${candId}`, { headers: authA() })).json();
+    appId = Array.isArray(apps) ? apps[0]?.id : apps?.items?.[0]?.id;
+    await request.patch(`${API}/applications/${appId}/stage`, { headers: authA(), data: { stage: 'screened', send_email: false } });
+
+    const send = await request.post(`${API}/applications/${appId}/submit-to-client`, {
+      headers: authA(),
+      data: { resume_style: 'clean_generated', cc_self: false, columns: [{ key: 'sl_no', label: 'SL No' }, { key: 'candidate_name', label: 'Name' }], save_as_default: true, default_scope: 'client' },
+    });
+    expect(send.ok()).toBeTruthy();
+    const r2 = await send.json();
+    tplId = r2.template_id;
+    expect(tplId).toBeTruthy();
+
+    // BUG FIX: this send genuinely CREATED a new client-scoped template
+    // (this client had no prior default) — the resulting submission's
+    // own template_id must point at THAT new template, not whatever
+    // (if anything) the tenant's own, unrelated global default is.
+    const tplList = await (await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: authA() })).json();
+    const created = tplList.find((t: any) => t.id === tplId);
+    expect(created).toBeTruthy();
+    expect(created.client_id).toBe(clientId);
+    expect(created.name).toContain(`QA S100 Client ${stamp}`);
+  });
+
+  test('BUG FIX: a genuinely FK-referenced, non-default template deletes cleanly (was: raw "Request failed"); the real submission it was tied to survives with template_id now NULL', async ({ request }) => {
+    // Confirm real, live FK reference before the fix would have mattered.
+    const before = await (await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() })).json();
+    const tpl = before.find((t: any) => t.id === tplId);
+    expect(tpl.is_default).toBe(true);
+
+    // Un-default first, matching the exact real user flow reported live.
+    const un = await request.put(`${API}/submission-templates/${tplId}`, { headers: authA(), data: { ...tpl, is_default: false } });
+    expect(un.ok()).toBeTruthy();
+
+    const del = await request.delete(`${API}/submission-templates/${tplId}`, { headers: authA() });
+    expect(del.ok()).toBeTruthy();
+
+    const after = await (await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() })).json();
+    expect(after.some((t: any) => t.id === tplId)).toBe(false);
+
+    // The real submission survives — only its template_id reference
+    // is cleanly detached, matching this table's own established
+    // ON DELETE SET NULL convention (application_id, recipient_contact_id).
+    const subs = await (await request.get(`${API}/applications/${appId}/submissions`, { headers: authA() })).json();
+    const kaeSub = subs.find((s: any) => s.direction === 'kae_to_client');
+    expect(kaeSub).toBeTruthy();
+    expect(kaeSub.template_id).toBeNull();
+    expect(kaeSub.status).toBe('sent');
+    tplId = ''; // already deleted — afterAll should not try again
+  });
+
+  test('BUG FIX: a still-default template is still cleanly refused (400), not a raw crash — the existing rule is unaffected by this fix', async ({ request }) => {
+    const c = await request.post(`${API}/clients`, { headers: authA(), data: { name: `QA S100b Client ${stamp}` } });
+    const cId = (await c.json()).id;
+    await request.post(`${API}/clients/${cId}/contacts`, { headers: authA(), data: { contact_name: 'QA S100b SPOC', email: `qa.s100b.spoc.${stamp}@qatest.example`, is_primary: true } });
+    const r = await request.post(`${API}/requisitions`, { headers: authA(), data: { title: `QA S100b Req ${stamp}`, client_id: cId, skills_required: ['Python'], status: 'open', positions_count: 1 } });
+    const rId = (await r.json()).id;
+    const cand = await request.post(`${API}/candidates`, { headers: authA(), data: { full_name: `QA S100b Cand ${stamp}`, email: `qa.s100b.cand.${stamp}@qatest.example`, phone: '9800000087', skills: ['Python'], total_exp_mo: 20 } });
+    const cndId = (await cand.json()).id;
+    await request.post(`${API}/candidates/bulk-assign`, { headers: authA(), data: { candidate_ids: [cndId], requisition_id: rId } });
+    const apps = await (await request.get(`${API}/applications?candidate_id=${cndId}`, { headers: authA() })).json();
+    const aId = Array.isArray(apps) ? apps[0]?.id : apps?.items?.[0]?.id;
+    await request.patch(`${API}/applications/${aId}/stage`, { headers: authA(), data: { stage: 'screened', send_email: false } });
+    const send = await request.post(`${API}/applications/${aId}/submit-to-client`, {
+      headers: authA(), data: { resume_style: 'clean_generated', cc_self: false, columns: [{ key: 'sl_no', label: 'SL No' }], save_as_default: true, default_scope: 'client' },
+    });
+    const newTplId = (await send.json()).template_id;
+
+    const del = await request.delete(`${API}/submission-templates/${newTplId}`, { headers: authA() });
+    expect(del.status()).toBe(400);
+
+    // cleanup this test's own throwaway data
+    await request.put(`${API}/submission-templates/${newTplId}`, { headers: authA(), data: { name: 'x', client_id: cId, columns: [{ key: 'sl_no', label: 'SL No' }], is_default: false, direction: 'kae_to_client' } }).catch(() => {});
+    await request.delete(`${API}/submission-templates/${newTplId}`, { headers: authA() }).catch(() => {});
+    await request.delete(`${API}/applications/${aId}`, { headers: authA() }).catch(() => {});
+    await request.delete(`${API}/candidates/${cndId}`, { headers: authA() }).catch(() => {});
+    await request.delete(`${API}/requisitions/${rId}`, { headers: authA() }).catch(() => {});
+    await request.delete(`${API}/clients/${cId}`, { headers: authA() }).catch(() => {});
+  });
+
+  test('real headless UI: the actual trash-icon click on Ops Settings deletes a genuinely FK-referenced row, with zero console errors', async ({ page, request }) => {
+    // Build a fresh, real FK-referenced template for this UI-level check.
+    const c = await request.post(`${API}/clients`, { headers: authA(), data: { name: `QA S100ui Client ${stamp}` } });
+    const cId = (await c.json()).id;
+    await request.post(`${API}/clients/${cId}/contacts`, { headers: authA(), data: { contact_name: 'QA S100ui SPOC', email: `qa.s100ui.spoc.${stamp}@qatest.example`, is_primary: true } });
+    const r = await request.post(`${API}/requisitions`, { headers: authA(), data: { title: `QA S100ui Req ${stamp}`, client_id: cId, skills_required: ['Python'], status: 'open', positions_count: 1 } });
+    const rId = (await r.json()).id;
+    const cand = await request.post(`${API}/candidates`, { headers: authA(), data: { full_name: `QA S100ui Cand ${stamp}`, email: `qa.s100ui.cand.${stamp}@qatest.example`, phone: '9800000086', skills: ['Python'], total_exp_mo: 20 } });
+    const cndId = (await cand.json()).id;
+    await request.post(`${API}/candidates/bulk-assign`, { headers: authA(), data: { candidate_ids: [cndId], requisition_id: rId } });
+    const apps = await (await request.get(`${API}/applications?candidate_id=${cndId}`, { headers: authA() })).json();
+    const aId = Array.isArray(apps) ? apps[0]?.id : apps?.items?.[0]?.id;
+    await request.patch(`${API}/applications/${aId}/stage`, { headers: authA(), data: { stage: 'screened', send_email: false } });
+    const send = await request.post(`${API}/applications/${aId}/submit-to-client`, {
+      headers: authA(), data: { resume_style: 'clean_generated', cc_self: false, columns: [{ key: 'sl_no', label: 'SL No' }], save_as_default: true, default_scope: 'client' },
+    });
+    const uiTplId = (await send.json()).template_id;
+    const tplList = await (await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() })).json();
+    const tplRow = tplList.find((t: any) => t.id === uiTplId);
+    await request.put(`${API}/submission-templates/${uiTplId}`, { headers: authA(), data: { ...tplRow, is_default: false } });
+
+    const consoleErrors: string[] = [];
+    page.on('pageerror', e => consoleErrors.push(String(e)));
+    page.on('dialog', d => d.accept());
+
+    await page.goto(`${BASE}/ops-settings?tab=templates`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(600);
+    await page.click('button:has-text("KAE → Client")');
+    await page.waitForTimeout(800);
+
+    const delBtn = page.locator(`[data-testid="del-template-${uiTplId}"]`);
+    await expect(delBtn).toBeVisible({ timeout: 10000 });
+    await delBtn.scrollIntoViewIfNeeded();
+    await delBtn.click();
+    await page.waitForTimeout(1200);
+
+    expect(consoleErrors.length).toBe(0);
+    await expect(delBtn).not.toBeVisible();
+    const afterServer = await (await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() })).json();
+    expect(afterServer.some((t: any) => t.id === uiTplId)).toBe(false);
+
+    await request.delete(`${API}/applications/${aId}`, { headers: authA() }).catch(() => {});
+    await request.delete(`${API}/candidates/${cndId}`, { headers: authA() }).catch(() => {});
+    await request.delete(`${API}/requisitions/${rId}`, { headers: authA() }).catch(() => {});
+    await request.delete(`${API}/clients/${cId}`, { headers: authA() }).catch(() => {});
   });
 });

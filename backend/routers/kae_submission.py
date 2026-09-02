@@ -480,7 +480,23 @@ async def delete_template(template_id: str, actor: Actor = Depends(get_actor)):
             raise HTTPException(404, "Template not found")
         if row["is_default"]:
             raise HTTPException(400, "Cannot delete the default template — set another template as default first")
-        await conn.execute("DELETE FROM tracking_sheet_templates WHERE id=$1", template_id)
+        try:
+            await conn.execute("DELETE FROM tracking_sheet_templates WHERE id=$1", template_id)
+        except asyncpg.exceptions.ForeignKeyViolationError:
+            # REAL BUG FIX (2026-09-03, reported live: "Request failed"
+            # on the actual Ops Settings Delete button, even after
+            # un-defaulting first) — candidate_submissions.template_id
+            # now has ON DELETE SET NULL (sql/110), so this branch is a
+            # genuine defensive fallback for any future/unforeseen FK,
+            # not the primary path — the point is this endpoint must
+            # never surface a raw, unexplained 500 for a real,
+            # deliberate delete attempt.
+            raise HTTPException(
+                409,
+                "This template has real submission history attached and can't be permanently deleted. "
+                "Use the deactivate (power) button instead — it removes it from every picker and default "
+                "resolution just as effectively, while keeping the real send history intact.",
+            )
     if row["file_path"]:
         try:
             (Path("/app") / row["file_path"].lstrip("/")).unlink(missing_ok=True)
@@ -1834,6 +1850,22 @@ async def _do_client_submission(
         client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
         recruiter_email = actor.email
 
+        # REAL BUG (found via genuine testing, not code review, while
+        # investigating an unrelated delete-fix on 2026-09-03): the final
+        # candidate_submissions row always recorded whichever template was
+        # resolved BEFORE save_as_default ran (template["id"]) — the two
+        # `template_id = template_id or str(...)` reassignments below this
+        # comment used to update the function's own `template_id`
+        # PARAMETER, which nothing downstream ever reads again (the real
+        # INSERT used `template["id"]` directly), so saving a genuinely
+        # NEW client/SPOC/project-scoped default silently mis-attributed
+        # that very submission to the OLD, broader template instead of the
+        # new, more specific one it was actually configured to use.
+        # used_template_id is the real, single source of truth for what
+        # this send used, correctly updated by both save-as-default
+        # branches and read by the INSERT below.
+        used_template_id = template["id"] if template else None
+
         if save_as_default and columns_override:
             # Real scope tuple this save targets — matches _resolve_
             # template()/_unset_other_defaults()'s own tiering exactly, so
@@ -1864,7 +1896,7 @@ async def _do_client_submission(
                 await conn.execute(
                     "UPDATE tracking_sheet_templates SET columns=$1, updated_at=now() WHERE id=$2",
                     json.dumps(columns_override), existing_scoped_default["id"])
-                template_id = template_id or str(existing_scoped_default["id"])
+                used_template_id = existing_scoped_default["id"]
             else:
                 await _unset_other_defaults(conn, tenant_id, client_id, "kae_to_client",
                                              client_contact_id=scope_client_contact_id, requisition_id=scope_requisition_id)
@@ -1874,7 +1906,7 @@ async def _do_client_submission(
                        VALUES ($1,$2,$3,$4,$5,$6,true,'kae_to_client',$7) RETURNING id""",
                     tenant_id, client_id, scope_client_contact_id, scope_requisition_id,
                     scope_label, json.dumps(columns_override), actor.user_id)
-                template_id = template_id or str(new_tpl["id"])
+                used_template_id = new_tpl["id"]
 
         sheet_rows, merge_rows, sl_no = await _client_tracking_sheet_rows(
             conn, tenant_id, row["requisition_id"], auto_values, hidden_columns)
@@ -1961,7 +1993,7 @@ async def _do_client_submission(
                   direction, hidden_columns, recipient_contact_id, trigger_source)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'kae_to_client',$14,$15,$16) RETURNING *""",
             tenant_id, application_id, row["candidate_id"], row["requisition_id"], client_id,
-            template["id"] if template else None, resume_style, json.dumps(final_values),
+            used_template_id, resume_style, json.dumps(final_values),
             list(dict.fromkeys(to_recipients + cc_recipients)), to_recipients,
             "sent" if email_sent else "failed", email_error, actor.user_id,
             hidden_columns or [], primary_contact["id"] if (primary_contact and not to_emails_override) else None,

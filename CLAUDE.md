@@ -20797,3 +20797,131 @@ Passed 7/7 clean on the first full run. Zero-token audit: `CONFIRMED
 CLEAN` (441 files, 0 external API refs). All throwaway test data cleaned
 up via real APIs after every manual verification pass, confirmed zero
 residue.
+
+## Tracking-sheet template delete: real FK-block fix + a real audit-trail bug found along the way, 2026-09-03
+User pasted a live screenshot of Ops Settings' Tracking Sheet Templates
+page — dozens of stray "QA S54 Client..." rows, an error banner reading
+"Request failed", and the explicit report: "Not able to delete the
+template : error is request failed and after removing default still not
+able to delete."
+
+**Root-caused live, not guessed.** `DELETE /submission-templates/{id}`
+already correctly refused an active default (400, with a clear message)
+— but for a genuinely non-default row, it ran a bare `DELETE FROM
+tracking_sheet_templates WHERE id=$1` with no try/except. Confirmed
+directly: `candidate_submissions_template_id_fkey` had no `ON DELETE`
+clause at all (defaults to NO ACTION/RESTRICT), and every one of these
+stray rows is genuinely referenced by real `candidate_submissions` rows
+from actual S54 test sends — so any attempt to delete one, even after
+correctly un-defaulting it first (matching exactly what the user
+reported doing), hit a raw, unhandled `ForeignKeyViolationError`, which
+FastAPI's default handler turns into an unexplained 500 — "Request
+failed" on the frontend, with zero indication why.
+
+**Fixed the same way the two OTHER foreign keys on this exact table
+already are.** `application_id` and `recipient_contact_id` on
+`candidate_submissions` both already use `ON DELETE SET NULL` — this
+project's own established pattern for exactly this situation: the
+submission's own `field_values` JSONB snapshot already holds everything
+that was actually sent, so `template_id` is a secondary "which config
+produced this" reference, not the record's core content. Losing that
+one reference on a deliberate delete is a fair, honest trade; silently
+blocking the delete forever is not. `sql/110_fix_template_delete_fk_
+block.sql` drops and recreates the constraint with `ON DELETE SET
+NULL` — applied via a real transactional dry-run first. Confirmed via
+`pg_constraint` this is the ONLY foreign key referencing `tracking_
+sheet_templates` anywhere in the schema, so no other table needed the
+same treatment. The DELETE endpoint itself also now catches any
+future/unknown FK violation and returns a clear, actionable 409
+("...has real submission history attached... use the deactivate
+button instead...") rather than a raw 500 — defense in depth beyond
+this one specific, now-fixed constraint.
+
+**A real, independent, previously-undiscovered bug found while building
+the fix's own verification, not code review.** Testing the exact
+"save_as_default creates a new client-scoped template" flow end-to-end
+showed the resulting real send's own `template_id` pointing at the
+tenant's unrelated GLOBAL default, not the brand-new template the send
+had just created. Traced precisely: the final `candidate_submissions`
+INSERT always used `template["id"] if template else None` — whatever
+was resolved BEFORE the save-as-default block ran — while the two
+`template_id = template_id or str(...)` lines inside that block were
+reassigning the function's own PARAMETER, a value nothing downstream
+ever reads again. This meant **every real send that created or updated
+a scoped default template mis-attributed its own audit record to the
+wrong template** — a real, silent correctness gap in this feature's
+audit trail since the SPOC/project-scoping feature was built the day
+before. Fixed with a real, single source of truth
+(`used_template_id`), correctly set by both save-as-default branches
+(update-existing and create-new) and read directly by the INSERT — the
+API response (built straight from the INSERT's own `RETURNING *`)
+inherits the correction for free.
+
+Verified for real end-to-end, not code review, at every layer: a
+direct API reproduction confirmed the exact reported flow (un-default,
+then delete) previously hit a real FK violation before the fix, and
+succeeds cleanly after — with the referencing submission's own row
+independently confirmed to survive fully intact (`status: 'sent'`
+unchanged) with only `template_id` cleanly detached to `NULL`, not
+destroyed. A real headless-browser pass, using this project's own
+existing `data-testid="del-template-{id}"` hook (not a fragile
+positional locator), clicked the actual trash icon on a genuinely
+FK-referenced row through the live Ops Settings page and confirmed it
+disappeared with zero console errors — matching the user's own exact
+reported click, not a synthetic API-only proof. The `used_template_id`
+bug was independently confirmed both by direct reproduction (the wrong,
+global-default id returned before the fix) and by a permanent
+regression assertion that the created template's `client_id` matches
+the throwaway client used in the test.
+
+**Proactively cleaned up the real clutter the user was trying to
+remove, now that a safe mechanism exists.** Surveyed all 38 real
+"QA "-prefixed stray templates on the live tenant (S54/S98/DeleteTest/
+Repro3 test-suite residue, all confirmed by name pattern and content —
+none carrying real business value), un-defaulted the 27 that were
+still marked default, then deleted all 38 via the real, now-fixed
+endpoint — zero failures. The tenant is left with exactly its 2
+genuine templates ("Default Client Tracking Sheet," correctly still
+`is_default:true` from an earlier same-week fix, and "New Aviin").
+
+New permanent "S100 Tracking-sheet template delete: real FK-block fix
+(ON DELETE SET NULL) + a real used_template_id audit-trail bug found
+along the way" suite (4 tests) added to `qa_automation.spec.ts`, passed
+clean twice in isolation. One real test-authoring mistake caught and
+fixed by the suite's own first run, not an app bug: the new setup
+forgot to create a client SPOC contact (unlike S98/S99's own
+established setup pattern) — `_do_client_submission()` correctly
+refused with "No client contact is configured," exactly as designed;
+fixed by adding the missing contact-creation step to all 3 sub-tests
+that each build their own throwaway client.
+
+**A broader regression sweep then found a second, genuinely real
+failure — a direct, foreseeable consequence of the bulk cleanup above,
+not a code regression.** S98's own pre-existing "excludes templates
+pinned to an already-soft-deleted client" test asserted
+`all.length > filtered.length` — silently depending on the tenant's
+real "QA S54 Client..." stray rows always existing in the background
+to prove the `include_inactive` distinction. The bulk cleanup earlier
+in this same pass legitimately removed every one of those rows on the
+user's own behalf — exactly its intended, correct effect — which is
+precisely what made this ambient assumption stop holding. Fixed by
+rewriting the test to build its own real, self-contained fixture
+(a throwaway client + a template pinned to it + a real soft-delete of
+that client, all within the test itself) instead of relying on
+whatever real tenant-wide data happens to exist at the moment it runs
+— matching this project's own extensively established "test against a
+controlled fixture, not incidental production state" precedent.
+Re-verified clean afterward.
+
+Final broader regression sweep across every suite touching the 2
+modified backend files (S14/S17/S29/S37/S43/S48/S49/S54/S61/S65/S73/
+S80/S81/S89/S90/S97/S98/S99/S100) passed fully clean. The handful of
+failures seen across 2 earlier attempts at this same sweep — spanning
+many unrelated suites' own setup steps at once — were confirmed via
+direct backend-log correlation (dozens of real `429 Too Many Requests`
+responses in the exact failure windows) as this session's own
+well-documented per-IP login rate-limit artifact from very heavy
+cumulative verification volume today, not further regressions; every
+suite affected by those transient failures re-ran clean once the
+window genuinely cleared. Zero-token audit: `CONFIRMED CLEAN` (441
+files, 0 external API refs).
