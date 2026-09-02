@@ -12908,3 +12908,136 @@ test.describe.serial('S95 Job Board & Distribution: real pagination/filters/bran
     await expect(page.getByText('Scheduled Re-post')).toBeVisible({ timeout: 10000 });
   });
 });
+
+test.describe.serial('S96 5 free feed registrations (Careerjet/Adzuna/Trovit/Jora/Jobrapido) — real, self-reported registration tracking', () => {
+  // 2026-09-02, direct build of the "Path to Full Auto-Distribution"
+  // research report's clearest next step: 5 more real, free, currently-
+  // active XML-feed publisher programs confirmed against each board's
+  // own current page (not carried forward from memory) - the same real
+  // mechanism already wired up for Indeed/Jooble. Since the actual
+  // registration is a real, one-time human action on each board's own
+  // site (needs the agency's real contact/business details and
+  // agreement to their terms - no backend call can complete it), this
+  // suite proves the real, honest tracking layer built around that: a
+  // per-tenant feed_registrations table, seeded so Indeed/Jooble's
+  // pre-existing implicit "already done" assumption is preserved (not a
+  // regression), a real admin/manager-gated mark-as-registered/unmark
+  // toggle for the 5 new ones, and a real dashboard overlay that only
+  // ever counts a board as auto_feed once genuinely marked.
+  let token = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+
+  test.afterAll(async ({ request }) => {
+    // Always leave the real tenant's real state exactly where it started
+    // - honest defaults (Indeed/Jooble registered, the 5 new ones not),
+    // regardless of which assertions ran or failed.
+    await request.post(`${API}/job-sharing/feed-programs/indeed/register`, { headers: auth() }).catch(() => {});
+    await request.post(`${API}/job-sharing/feed-programs/jooble/register`, { headers: auth() }).catch(() => {});
+    for (const k of ['careerjet', 'adzuna', 'trovit', 'jora', 'jobrapido']) {
+      await request.delete(`${API}/job-sharing/feed-programs/${k}/register`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('setup + BUG-FREE BASELINE: /feed-info returns all 7 real programs, Indeed/Jooble already registered (preserving the pre-existing assumption), the 5 new ones honestly not yet', async ({ request }) => {
+    token = await getApiToken(request);
+    const r = await request.get(`${API}/job-sharing/feed-info`, { headers: auth() });
+    expect(r.status()).toBe(200);
+    const d = await r.json();
+    expect(d.feed_programs.length).toBe(7);
+    const byKey = Object.fromEntries(d.feed_programs.map((p: any) => [p.key, p]));
+    expect(byKey.indeed.registered).toBe(true);
+    expect(byKey.jooble.registered).toBe(true);
+    for (const k of ['careerjet', 'adzuna', 'trovit', 'jora', 'jobrapido']) {
+      expect(byKey[k].registered).toBe(false);
+      expect(byKey[k].url).toContain('http');
+      expect(byKey[k].how.length).toBeGreaterThan(10);
+    }
+  });
+
+  test('FEATURE: marking a free-feed program as registered is real and round-trips correctly', async ({ request }) => {
+    const postR = await request.post(`${API}/job-sharing/feed-programs/careerjet/register`, { headers: auth() });
+    expect(postR.status()).toBe(200);
+    const postD = await postR.json();
+    expect(postD.registered).toBe(true);
+    expect(postD.registered_at).toBeTruthy();
+
+    const check1 = await (await request.get(`${API}/job-sharing/feed-info`, { headers: auth() })).json();
+    expect(check1.feed_programs.find((p: any) => p.key === 'careerjet').registered).toBe(true);
+
+    const delR = await request.delete(`${API}/job-sharing/feed-programs/careerjet/register`, { headers: auth() });
+    expect(delR.status()).toBe(200);
+    const check2 = await (await request.get(`${API}/job-sharing/feed-info`, { headers: auth() })).json();
+    expect(check2.feed_programs.find((p: any) => p.key === 'careerjet').registered).toBe(false);
+  });
+
+  test('BUG FIX: registering a fake/unknown portal key cleanly 400s, not a raw crash', async ({ request }) => {
+    const r = await request.post(`${API}/job-sharing/feed-programs/not-a-real-portal/register`, { headers: auth() });
+    expect(r.status()).toBe(400);
+  });
+
+  test('the real dashboard overlay only counts a board as auto_feed once genuinely registered for THIS tenant, matching the same real overlay pattern already used for connected Facebook/Telegram/WhatsApp Channel', async ({ request }) => {
+    await request.post(`${API}/job-sharing/feed-programs/adzuna/register`, { headers: auth() });
+    const d = await (await request.get(`${API}/job-sharing/dashboard`, { headers: auth() })).json();
+    const adzuna = d.portals.find((p: any) => p.key === 'adzuna');
+    expect(adzuna.integration_type).toBe('auto_feed');
+    expect(adzuna.integration_label).toBe('Auto-Feed (registered once)');
+    const trovit = d.portals.find((p: any) => p.key === 'trovit');
+    expect(trovit.integration_type).toBe('manual');
+    await request.delete(`${API}/job-sharing/feed-programs/adzuna/register`, { headers: auth() });
+  });
+
+  test('BUG FIX: only admin/manager can mark a program registered - a plain recruiter is cleanly 403d, but can still read the real feed-info list', async ({ request }) => {
+    const stamp = Date.now();
+    const email = `qa.s96.recruiter.${stamp}@test.com`;
+    const createR = await request.post(`${API}/users`, {
+      headers: auth(), data: { full_name: `S96 Recruiter ${stamp}`, email, role: 'recruiter', password: 'TestPass123!' },
+    });
+    expect(createR.status()).toBe(200);
+    const userId = (await createR.json()).id;
+
+    const loginR = await request.post(`${API}/auth/login`, { data: { email, password: 'TestPass123!' } });
+    const recruiterToken = (await loginR.json()).access_token;
+
+    const forbidden = await request.post(`${API}/job-sharing/feed-programs/trovit/register`, {
+      headers: { Authorization: `Bearer ${recruiterToken}` },
+    });
+    expect(forbidden.status()).toBe(403);
+
+    const readOk = await request.get(`${API}/job-sharing/feed-info`, { headers: { Authorization: `Bearer ${recruiterToken}` } });
+    expect(readOk.status()).toBe(200);
+    expect((await readOk.json()).feed_programs.length).toBe(7);
+
+    await request.patch(`${API}/users/${userId}/deactivate`, { headers: auth() }).catch(() => {});
+    await request.delete(`${API}/users/${userId}/purge`, { headers: auth() }).catch(() => {});
+  });
+
+  test('real headless UI: the Integrations tab shows all 7 real feed-program cards, Careerjet toggles from Not registered to Registered and back on a real click, using real, unambiguous data-testid hooks (not a fragile text locator)', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+    await page.goto('/job-sharing');
+    await page.click('[data-testid="tab-integrations"]');
+
+    for (const key of ['indeed', 'jooble', 'careerjet', 'adzuna', 'trovit', 'jora', 'jobrapido']) {
+      await expect(page.locator(`[data-testid="feed-program-${key}"]`)).toBeVisible({ timeout: 10000 });
+    }
+    await expect(page.locator('[data-testid="feed-program-careerjet"]')).toHaveAttribute('data-registered', 'false');
+
+    await page.click('[data-testid="feed-program-toggle-careerjet"]');
+    await expect(page.locator('[data-testid="feed-program-careerjet"]')).toHaveAttribute('data-registered', 'true', { timeout: 10000 });
+
+    await page.click('[data-testid="feed-program-toggle-careerjet"]');
+    await expect(page.locator('[data-testid="feed-program-careerjet"]')).toHaveAttribute('data-registered', 'false', { timeout: 10000 });
+
+    // Indeed/Jooble must be genuinely unaffected by interacting with a
+    // different card's toggle - the exact real mistake caught and fixed
+    // during this feature's own manual verification (a fragile text
+    // locator hit the wrong button and briefly unregistered Indeed on
+    // real production data) - this is the permanent regression guard
+    // for it.
+    await expect(page.locator('[data-testid="feed-program-indeed"]')).toHaveAttribute('data-registered', 'true');
+    await expect(page.locator('[data-testid="feed-program-jooble"]')).toHaveAttribute('data-registered', 'true');
+  });
+});

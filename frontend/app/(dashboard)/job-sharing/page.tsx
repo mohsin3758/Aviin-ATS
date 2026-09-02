@@ -646,7 +646,44 @@ function RebumpConfigCard() {
   );
 }
 
-function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgStatus, onWaStatus }: any) {
+function FeedProgramCard({ program, feedUrl, onRegistered }: any) {
+  // Gap-audit follow-up (2026-09-02, "Path to Full Auto-Distribution"):
+  // a real registration state, self-reported by an admin once they've
+  // actually completed the real-world application on the aggregator's
+  // own site - there's no API that can verify a third party's own
+  // publisher approval, so this is honest and explicit rather than
+  // pretending to auto-detect it.
+  const [saving, setSaving] = useState(false);
+  async function toggle() {
+    setSaving(true);
+    try {
+      await apiFetch(`/job-sharing/feed-programs/${program.key}/register`, {
+        method: program.registered ? 'DELETE' : 'POST',
+      });
+      onRegistered();
+    } finally { setSaving(false); }
+  }
+  return (
+    <div data-testid={`feed-program-${program.key}`} data-registered={program.registered ? 'true' : 'false'}
+      className={`border rounded-lg px-3 py-2.5 text-xs ${program.registered ? 'bg-green-50 border-green-300' : 'bg-white'}`}>
+      <div className="flex items-start justify-between gap-2">
+        <a href={program.url} target="_blank" rel="noopener noreferrer" className="font-medium text-gray-700 hover:text-green-700 hover:underline">
+          {program.name}
+        </a>
+        {program.registered
+          ? <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700 shrink-0"><CheckCircle2 className="h-3 w-3" /> Registered</span>
+          : <span className="text-[10px] font-semibold text-gray-400 shrink-0">Not registered</span>}
+      </div>
+      <div className="text-gray-400 mt-0.5">{program.how}</div>
+      <button data-testid={`feed-program-toggle-${program.key}`} onClick={toggle} disabled={saving}
+        className={`mt-2 text-[11px] font-medium rounded px-2 py-1 disabled:opacity-50 ${program.registered ? 'text-gray-500 hover:bg-gray-100 border' : 'text-white bg-green-600 hover:bg-green-700'}`}>
+        {saving ? 'Saving…' : program.registered ? 'Mark as not registered' : "I've registered this →"}
+      </button>
+    </div>
+  );
+}
+
+function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgStatus, onWaStatus, onRefetchFeed }: any) {
   return (
     <div className="space-y-5">
       <div className="flex items-start gap-3 border rounded-xl px-4 py-3.5 bg-white">
@@ -676,8 +713,10 @@ function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgSta
             <p className="text-xs text-gray-600 mb-3">
               This is the real "post once, auto-distribute everywhere" mechanism — the same one every ATS actually relies on for
               its free tier. <strong>Google for Jobs</strong> is already fully automatic (structured data ships on every job
-              listing — nothing to set up). For Indeed/Jooble's free organic listings, register the feed URL below <em>once</em> —
-              every future open requisition then appears automatically, no manual posting, ever again.
+              listing — nothing to set up). For the {(feedInfo.feed_programs || []).length || 7} boards below, register the feed
+              URL <em>once</em> — every future open requisition then appears automatically, no manual posting, ever again. Each
+              registration is a real, one-time application on that board's own site (needs your team's real contact details and
+              agreement to their terms) — nothing here can complete that step for you, so mark it done once you have.
             </p>
             <div className="flex items-center gap-2 mb-3">
               <input readOnly value={feedInfo.feed_url}
@@ -688,12 +727,16 @@ function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgSta
               </button>
             </div>
             <div className="grid sm:grid-cols-2 gap-2">
-              {(feedInfo.registration_steps || []).map((s: any) => (
-                <a key={s.platform} href={s.url} target="_blank" rel="noopener noreferrer"
-                  className="border rounded-lg px-3 py-2 text-xs bg-white hover:border-green-300 hover:bg-green-50">
-                  <div className="font-medium text-gray-700">{s.platform}</div>
-                  <div className="text-gray-400 mt-0.5">{s.how}</div>
-                </a>
+              {(feedInfo.feed_programs || feedInfo.registration_steps || []).map((p: any) => (
+                p.key
+                  ? <FeedProgramCard key={p.key} program={p} feedUrl={feedInfo.feed_url} onRegistered={onRefetchFeed} />
+                  : (
+                    <a key={p.platform} href={p.url} target="_blank" rel="noopener noreferrer"
+                      className="border rounded-lg px-3 py-2 text-xs bg-white hover:border-green-300 hover:bg-green-50">
+                      <div className="font-medium text-gray-700">{p.platform}</div>
+                      <div className="text-gray-400 mt-0.5">{p.how}</div>
+                    </a>
+                  )
               ))}
             </div>
           </CardContent>
@@ -766,7 +809,7 @@ function JobSharingPageInner() {
     if (reqParam) setSelId(reqParam);
   }, [searchParams]);
   const { data: links, loading } = useFetch<any>(selId ? `/job-sharing/requisition/${selId}` : null);
-  const { data: feedInfo } = useFetch<any>('/job-sharing/feed-info');
+  const { data: feedInfo, refetch: refetchFeedInfo } = useFetch<any>('/job-sharing/feed-info');
   const [feedCopied, setFeedCopied] = useState(false);
   const { data: sharedData, refetch: refetchShared } = useFetch<any>(selId ? `/job-sharing/shared/${selId}` : null);
   const { data: issuesData, refetch: refetchIssues } = useFetch<any[]>('/job-sharing/issues?status=open');
@@ -942,6 +985,7 @@ function JobSharingPageInner() {
           feedInfo={feedInfo} feedCopied={feedCopied}
           onCopyFeed={() => navigator.clipboard.writeText(feedInfo.feed_url).then(() => { setFeedCopied(true); setTimeout(() => setFeedCopied(false), 2000); })}
           onFbStatus={setFbConnected} onTgStatus={setTgConnected} onWaStatus={setWaConnected}
+          onRefetchFeed={refetchFeedInfo}
         />
       )}
 

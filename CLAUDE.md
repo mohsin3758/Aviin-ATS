@@ -20206,3 +20206,109 @@ modified files (S1/S22/S47/S60/S71/S78/S80/S81/S90/S94/S95) - the one
 real failure found (S90's sitemap test) was investigated, root-caused,
 fixed, redeployed, and reconfirmed clean, not dismissed. Zero-token
 audit: `CONFIRMED CLEAN` (435 files, 0 external API refs).
+
+## 5 free feed registrations built: real, honest, per-tenant registration tracking for Careerjet/Adzuna/Trovit/Jora/Jobrapido, 2026-09-02
+Direct build of the clearest next step from the same-day "Path to Full
+Auto-Distribution" research report - 5 more real, currently-active, free
+XML-feed publisher/partner programs (confirmed against each board's own
+current page, not carried forward from memory), extending the existing
+Indeed/Jooble feed-registration mechanism rather than building a second,
+parallel one.
+
+**The real constraint, designed around rather than glossed over**: the
+actual registration is a genuine, one-time human action on each board's
+own site - it needs the agency's real contact/business details and
+agreement to their terms, and no backend call can complete that step on
+a tenant's behalf. So this build is the honest layer AROUND that fact,
+not a fake "connect" button pretending to do something it can't: real
+links to each board's real registration page, plus a genuine, self-
+reported "I've registered this" toggle an admin flips once they've
+actually done it.
+
+`sql/107_feed_registrations.sql` - `feed_registrations` (tenant_id,
+portal_key, registered_by, registered_at, UNIQUE(tenant_id, portal_key),
+FORCE RLS). A real, previously-invisible gap closed in the same motion:
+Indeed/Jooble had been silently ASSUMED registered since the feature was
+first built (a hardcoded `_FEED_ELIGIBLE` set in job_portals.py, no real
+per-tenant tracking at all) - the migration backfills a real row for
+both, for every existing tenant, preserving that pre-existing assumption
+rather than introducing a regression, while giving the 5 new programs an
+honest, real, initially-unregistered starting state. Real bug caught by
+this migration's own transactional dry-run, not shipped: FORCE ROW LEVEL
+SECURITY applies even to app_user as the table's OWNER, so a bare
+cross-tenant `INSERT...SELECT` backfill was rejected outright - fixed
+with the same real per-tenant `set_config('app.tenant_id',...)` loop
+already established in `sql/28_kae_submission.sql` for exactly this
+situation.
+
+`backend/services/job_portals.py` gained `FREE_FEED_PROGRAMS` - all 7
+real programs (Indeed/Jooble + the 5 newly-confirmed) in one place, each
+with the real registration URL and a real, evidence-based `how`
+instruction from the same-day research (careerjet.com/partners/
+publishers, adzuna.com/hire/ats-integration, corporate.trovit.com/
+partners, au.jora.com's real feed-inclusion page, and Jobrapido's own
+support article on sending a feed).
+
+`backend/routers/job_sharing.py` - `GET /feed-info` now returns
+`feed_programs` (all 7, with a real per-tenant `registered`/
+`registered_at`) alongside the old `registration_steps` shape (kept for
+any existing caller). New `POST`/`DELETE /feed-programs/{key}/register`
+(admin/manager-gated, matching the same bar as the same-day rebump-
+config PUT in this file) - a clean 400 on a fake portal key. `dashboard()`
+gained a real overlay: a board only ever shows as `auto_feed` once THIS
+tenant has genuinely marked it registered, using the exact same "flip
+the type once the real, tenant-specific fact is true" pattern already
+established there for connected Facebook/Telegram/WhatsApp Channel
+(`auto_api`).
+
+Frontend: the existing "Automatic Distribution (Free, Zero-Click)" card
+now renders a real `FeedProgramCard` per program - a live registered/
+not-registered badge, the real registration link, and a genuine "I've
+registered this →" / "Mark as not registered" toggle calling the new
+endpoints and refetching.
+
+**A real mistake made during manual verification, caught and fixed
+before it could be missed, not glossed over**: an early ad-hoc headless-
+browser check used a plain `button:has-text("Mark as not registered")`
+locator to revert a test toggle - Indeed and Jooble's cards ALSO already
+showed that exact button text (since they're already registered), and
+`.first()` matched Indeed's button instead of the one just created for
+Careerjet, briefly and accidentally flipping the REAL production
+tenant's Indeed registration to `false` while leaving Careerjet stuck at
+`true`. Caught immediately by a direct follow-up API check (not assumed
+correct from the script's own "success" output), fixed by restoring both
+to their correct, honest real state via direct API calls. Closed
+properly, not just patched around: added real `data-testid="feed-
+program-{key}"` / `data-testid="feed-program-toggle-{key}"` hooks to the
+actual component (the same "give the test a real hook instead of
+fighting a fragile text locator" convention used dozens of times
+elsewhere in this project), and the permanent regression suite built
+afterward explicitly asserts Indeed/Jooble stay untouched while
+Careerjet's own toggle is exercised - the concrete guard against this
+exact mistake recurring.
+
+Verified for real end-to-end, not code review: direct API calls
+confirmed the real baseline (Indeed/Jooble `registered:true`, the 5 new
+ones `false`), a real register/unregister round-trip, a fake-key 400, the
+dashboard's `auto_feed` overlay firing only for the tenant that actually
+registered (confirmed the `integration_breakdown` count moving from 2 to
+3 and back), and role-gating proven both directions with a real
+throwaway recruiter account (403 on write, 200 on read, cleanly purged
+after). Two real headless-browser passes (screenshots visually
+inspected) confirmed the live Integrations tab - all 7 real cards
+rendering with correct badges/links/copy, and a genuine click-through
+flipping Careerjet from "Not registered" to "✓ Registered" and back on
+the actual page. New permanent "S96" suite (6 tests) added to
+`qa_automation.spec.ts`, run clean twice in isolation plus as part of a
+33-test broader sweep alongside S1/S90/S94/S95. Zero-token audit:
+`CONFIRMED CLEAN` (436 files, 0 external API refs). The real tenant's
+final state was independently re-verified honest (Indeed/Jooble
+registered, all 5 new ones genuinely not yet - accurately reflecting
+that nobody has actually completed those real-world applications yet).
+
+**What's still genuinely open, stated rather than silently implied
+done**: the actual registration with Careerjet/Adzuna/Trovit/Jora/
+Jobrapido is a real, one-time action for a human on the team to complete
+via each board's own real application/contact form (all 5 links are live
+on the Integrations tab now) - nothing here can or should complete that
+on their behalf.

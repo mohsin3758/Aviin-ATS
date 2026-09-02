@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor, require_role
-from services.job_portals import get_all_portals, build_share_links, portal_count, INTEGRATION_LABELS
+from services.job_portals import get_all_portals, build_share_links, portal_count, INTEGRATION_LABELS, FREE_FEED_PROGRAMS
 from routers.p28_p32 import _require_valid_tenant_id
 
 router = APIRouter(prefix="/job-sharing", tags=["job-sharing"])
@@ -630,18 +630,57 @@ async def feed_info(actor: Actor = Depends(get_actor)):
     further action - this is what genuinely free "auto-post everywhere"
     looks like; it is not a one-click button because the one-time
     registration step requires the agency's own account with each
-    aggregator, which no backend call can do on their behalf."""
+    aggregator, which no backend call can do on their behalf.
+
+    "Path to Full Auto-Distribution" research (2026-09-02) confirmed 5
+    more real, free, currently-active feed programs beyond Indeed/Jooble
+    - real_registered reflects the honest, per-tenant, self-reported
+    fact of whether this tenant has actually completed each one yet
+    (feed_registrations - nothing here can be verified automatically,
+    since it's a third party's own approval)."""
     feed_url = f"{BASE_URL}/api/public/jobs/feed.xml?tenant_id={actor.tenant_id}"
     careers_url = f"{BASE_URL}/careers"
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT portal_key, registered_at FROM feed_registrations WHERE tenant_id=$1", actor.tenant_id)
+    registered = {r["portal_key"]: r["registered_at"].isoformat() for r in rows}
+    programs = [
+        {**p, "registered": p["key"] in registered, "registered_at": registered.get(p["key"])}
+        for p in FREE_FEED_PROGRAMS
+    ]
     return {
         "feed_url": feed_url,
         "careers_url": careers_url,
         "google_for_jobs": "Fully automatic, zero setup - the careers page already carries schema.org/JobPosting structured data, so Google's own crawler indexes every open job into Google for Jobs on its normal schedule.",
-        "registration_steps": [
-            {"platform": "Indeed (free organic listings)", "how": "Indeed Employer Center → Post a job → \"Import via XML feed\" (or Publisher Program signup), paste the Feed URL below.", "url": "https://employers.indeed.com"},
-            {"platform": "Jooble", "how": "Jooble Publisher Program signup, submit the Feed URL for automatic crawling.", "url": "https://jooble.org/publishers"},
-        ],
+        "feed_programs": programs,
+        # Kept for any existing caller that still reads the old shape.
+        "registration_steps": [{"platform": p["name"], "how": p["how"], "url": p["url"]} for p in FREE_FEED_PROGRAMS],
     }
+
+
+@router.post("/feed-programs/{key}/register")
+async def mark_feed_registered(key: str, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    """A real, self-reported "I've completed the real-world application"
+    record - there is no API to verify a third party's own publisher
+    approval, so this is honest and admin-gated rather than automatic."""
+    if key not in {p["key"] for p in FREE_FEED_PROGRAMS}:
+        raise HTTPException(400, "Not a real free-feed program")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO feed_registrations (tenant_id, portal_key, registered_by)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (tenant_id, portal_key) DO UPDATE SET registered_by=$3, registered_at=now()
+            RETURNING registered_at
+        """, actor.tenant_id, key, actor.user_id)
+    return {"key": key, "registered": True, "registered_at": row["registered_at"].isoformat()}
+
+
+@router.delete("/feed-programs/{key}/register")
+async def unmark_feed_registered(key: str, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        await conn.execute(
+            "DELETE FROM feed_registrations WHERE tenant_id=$1 AND portal_key=$2", actor.tenant_id, key)
+    return {"key": key, "registered": False}
 
 
 @router.get("/requisition/{req_id}")
@@ -820,11 +859,24 @@ async def dashboard(actor: Actor = Depends(get_actor)):
             "SELECT is_active FROM telegram_channel_connections WHERE tenant_id=$1", actor.tenant_id)
         wa_connected = await conn.fetchval(
             "SELECT is_active FROM whatsapp_channel_connections WHERE tenant_id=$1", actor.tenant_id)
+        feed_registered_rows = await conn.fetch(
+            "SELECT portal_key FROM feed_registrations WHERE tenant_id=$1", actor.tenant_id)
+    feed_registered_keys = {r["portal_key"] for r in feed_registered_rows}
 
     share_by_platform = {r["platform"]: r for r in share_rows}
     issues_by_portal = {r["portal_key"]: r["open_issues"] for r in issue_rows}
 
     portals = get_all_portals()
+    # "Path to Full Auto-Distribution" research (2026-09-02): Careerjet/
+    # Adzuna/Trovit/Jora/Jobrapido are all real, confirmed, free feed
+    # programs - the same real mechanism Indeed/Jooble already get
+    # credit for - but only once THIS tenant has actually completed the
+    # real-world registration (feed_registrations), matching the same
+    # "flip the type once the real, tenant-specific fact is true" overlay
+    # pattern already established below for fb/tg/wa's auto_api.
+    for p in portals:
+        if p["key"] in feed_registered_keys and p["integration_type"] == "manual":
+            p["integration_type"] = "auto_feed"
     if fb_connected:
         # Facebook is auto_share (share-dialog link) by default in the
         # static catalog, but this tenant has a real Page connected -
