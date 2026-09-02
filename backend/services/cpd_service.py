@@ -39,6 +39,7 @@ def extract_structured_fields(parsed: dict) -> dict:
     phone       = (parsed.get("phone") or "")[:50] or None
     linkedin    = (parsed.get("linkedin_url") or "")[:500] or None
     edu         = parsed.get("education") or ""
+    edu_entries = parsed.get("education_entries") or []
     company     = parsed.get("current_company") or parsed.get("current_employer") or ""
     title       = parsed.get("current_designation") or ""
 
@@ -70,13 +71,28 @@ def extract_structured_fields(parsed: dict) -> dict:
     elif any(x in el for x in ["12th", "hsc", "+2"]):
         edu_level = "12th"
 
+    # Real bug fix (gap-audit, 2026-09-02): `institutions` was hardcoded
+    # to an empty array on every single insert — confirmed live, 0 of 0
+    # candidate records had any institution data. `degrees` now carries
+    # every distinct real degree found, not just one bare string; a
+    # richer entry (with its own institution/year already folded in by
+    # `edu`) still wins the "primary" `degrees[0]` slot when present.
+    real_degrees = [e["degree"] for e in edu_entries if e.get("degree")]
+    real_institutions = list(dict.fromkeys(
+        e["institution"] for e in edu_entries if e.get("institution")
+    ))
+    degrees_out = [edu] if edu else (real_degrees or [])
+    for d in real_degrees:
+        if d not in degrees_out:
+            degrees_out.append(d)
+
     return {
         "extracted_skills":    skills,
         "extracted_titles":    titles,
         "extracted_companies": companies,
         "education_level":     edu_level,
-        "degrees":             [edu] if edu else [],
-        "institutions":        [],
+        "degrees":             degrees_out,
+        "institutions":        real_institutions,
         "total_years_exp":     round(exp_years, 1),
         "job_count":           len(companies),
         "max_gap_months":      0,
@@ -136,6 +152,12 @@ async def upsert_candidate_parsed_data(
                 WHEN array_length(EXCLUDED.degrees,1) IS NOT NULL
                 THEN EXCLUDED.degrees
                 ELSE candidate_parsed_data.degrees END,
+              institutions       = CASE
+                WHEN array_length(EXCLUDED.institutions,1) IS NOT NULL
+                 AND (array_length(candidate_parsed_data.institutions,1) IS NULL
+                      OR array_length(EXCLUDED.institutions,1) > array_length(candidate_parsed_data.institutions,1))
+                THEN EXCLUDED.institutions
+                ELSE candidate_parsed_data.institutions END,
               total_years_exp    = CASE
                 WHEN EXCLUDED.total_years_exp > COALESCE(candidate_parsed_data.total_years_exp, 0)
                 THEN EXCLUDED.total_years_exp

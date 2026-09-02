@@ -346,11 +346,19 @@ async def auto_score_candidate_bg(tenant_id: str, candidate_id: str) -> None:
     since scoring makes a real network call to the embed service that
     must never be able to take a candidate-creation request down with it,
     and must never share a transaction it could poison on a real SQL
-    error."""
+    error. Also, in the same fresh connection (gap-audit, 2026-09-02),
+    auto-populates candidate_skill_experience — the same real, per-
+    intake choke point every candidate creation already passes through,
+    so this closes that gap for every channel at once rather than
+    touching 6 separate routers."""
     try:
         async with db.tenant_conn(tenant_id) as conn:
             n = await score_candidate_against_all_open_jobs(conn, tenant_id, candidate_id)
             print(f"[Intelligence] auto-scored candidate {candidate_id} against {n} open requisitions")
+            from services.skill_experience_parser import auto_populate_skill_experience
+            k = await auto_populate_skill_experience(conn, tenant_id, candidate_id)
+            if k:
+                print(f"[Intelligence] auto-populated {k} skill-experience rows for candidate {candidate_id}")
     except Exception as e:
         print(f"[Intelligence] auto_score_candidate_bg failed for {candidate_id}: {e}")
 

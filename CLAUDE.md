@@ -19655,3 +19655,145 @@ login rate-limit artifact from today's heavy cumulative test volume —
 not a regression; S91 had already proven fully clean in isolation
 beforehand. Zero-token audit: `CONFIRMED CLEAN` (441 files, 0 external
 API refs).
+
+## Gap-audit build, part 3: real structured education extraction (degree/institution/year) + auto-populated candidate_skill_experience, 2026-09-02
+Direct continuation of the same-day gap-audit build (parts 1 and 2) —
+closes "Structured Education extraction + auto-populated skill/project
+history" (Medium). Confirmed exactly what the audit cited before writing
+any code: `parse_resume_v2()`'s old "Education (simple pattern)" block
+was one bare degree-token regex with no year and no institution, and
+`cpd_service.py`'s `extract_structured_fields()` had `institutions`
+hardcoded to `[]` on every single insert — live check confirmed 0 of 0
+candidate records had any institution data, ever. Separately,
+`candidate_skill_experience` (skill/project/duration history) had 0
+rows tenant-wide, only ever reachable via manual entry or a human
+reviewing a pasted tracking-sheet snippet.
+
+**Education extraction** — new `extract_education_v2()`
+(`improved_parser.py`), reusing this file's own established boundary-
+detection convention (`extract_education_section()` mirrors
+`extract_projects_section()`'s real "Education" heading + SECTION_
+HEADERS-boundary pattern exactly). Returns a real list of `{degree,
+institution, year}` entries, each field independently `None` when not
+confidently found — never guessed. Institution matching is keyword-
+anchored (University/College/Institute/Polytechnic/Academy/School,
+case-insensitive — Indian resumes mix all-caps and title-case
+inconsistently) with up to 6 preceding words captured as the likely
+name, handling "XYZ College of Engineering"/"ABC Business School"
+shapes. `parse_resume_v2()` now calls this instead of the old bare
+regex, keeping `parsed['education']` as a plain string for backward
+compatibility (built FROM the richer entries, not a separate parse) and
+adding a new `parsed['education_entries']` list. `cpd_service.py`'s
+`extract_structured_fields()` now populates BOTH `degrees` (every
+distinct real degree found, not just one) and `institutions` (the real
+fix) from these entries — plus a real, previously-missing `institutions
+= CASE...END` clause added to the `ON CONFLICT DO UPDATE` (the column
+was in the INSERT list but never in the UPDATE SET list at all, so a
+re-parse of an existing candidate could never enrich institutions even
+after this fix landed, until this was also added).
+
+**A real bug found and fixed during verification, not shipped blind**:
+the first version used a fixed +/-window around each degree match to
+search for year/institution — on a resume listing 2 degrees back to
+back (a real, common shape — Bachelor's + MBA), the SECOND entry's
+backward-reaching window still contained the FIRST entry's own
+institution/year text, and `re.search()`'s leftmost-match behavior
+silently attributed the wrong school and wrong year to the second
+degree. Confirmed via direct reproduction before fixing: "MBA -
+Finance, XYZ Business School, 2019" right after "B.Tech ..., Indian
+Institute of Technology Bombay, 2015" incorrectly returned MBA pointing
+at IIT Bombay/2015 instead of XYZ Business School/2019. Fixed by
+bounding each entry's search window to forward-only, never past the
+NEXT real degree match — structurally eliminates cross-contamination
+between entries, at the cost of missing an institution stated BEFORE
+the degree on the same line (an accepted trade-off — the old, pre-fix
+parser only ever looked forward from the degree token too). Re-verified
+against the exact same 2-degree resume: both entries now resolve
+correctly and independently.
+
+**Skill-experience auto-population** — new `auto_populate_skill_
+experience(conn, tenant_id, candidate_id)` (`skill_experience_
+parser.py`), reusing the ALREADY-PROVEN `parse_skill_summary_text()`
+extractor (built 2026-08-30 for the KAE-submission "Paste & Parse"
+tool) run directly against the candidate's own `resume_text` —
+deliberately STRICTER than that tool's own "over-inclusive, a human
+reviews it" design, since nothing here gets human review before
+landing in the DB: a row is only created when BOTH the value genuinely
+looks like a real "N Yrs"/"N months" figure AND the extracted label
+matches one of the candidate's own already-recognized skills[] —
+blocking real noise like "Notice Period: 30 Days"/"Current CTC: 18 LPA"
+(a genuine "Label: Value" line that isn't a skill at all) from silently
+becoming a fabricated skill row. Never overwrites or duplicates an
+existing row for the same skill — append-only, matching this table's
+own established convention from the public-form/paste-tool call sites.
+
+Wired into the ONE shared `auto_score_candidate_bg()` function (built
+in part 1) rather than touching every intake router again — it already
+runs after every genuine candidate creation across all 6 real intake
+channels (manual add, email/WhatsApp, public apply, personal/job-share
+links, CSV/Excel import), so this closes the gap for every one of them
+at once.
+
+**A second, real, previously-existing gap found and fixed during
+verification, unrelated to today's core feature but directly blocking
+it**: the internal Add-Candidate resume-upload flow
+(`POST /candidates/{id}/upload-document`, built 2026-08-25) already
+called `parse_resume_v2()` to gap-fill `resume_text`/`skills` onto an
+existing candidate, but NEVER wrote to `candidate_parsed_data` at all
+(unlike the real email/WhatsApp intake pipeline, which always does) and
+never fired the shared auto-score/auto-populate background task —
+confirmed live: a genuine, successful resume upload through this exact
+real flow left `candidate_parsed_data` and `candidate_skill_experience`
+both completely untouched, meaning today's whole fix would have been
+unreachable through one of the most common real intake channels. Fixed
+by adding the same `cpd_service.upsert_candidate_parsed_data()` call
+(synchronous, matching the real intake pipeline's own convention) plus
+`asyncio.create_task(auto_score_candidate_bg(...))` right after the
+gap-fill UPDATE, closing this for real.
+
+Verified for real end-to-end, not code review, at every layer: 3
+synthetic-then-real reproduction rounds — a bare JSON `resume_text`
+create (correctly bypasses the real intake pipeline entirely, proving
+the JSON shortcut doesn't exercise this fix, a real methodology lesson
+caught mid-verification, not a bug); a too-sparse synthetic PDF
+(correctly REJECTED by the document classifier as `not_a_resume`,
+confirmed working as intended, not a bug — matching this project's
+own established precedent for exactly this situation); a realistically
+dense synthetic PDF (`auto_accepted`) uploaded through the REAL
+`/candidates/{id}/upload-document` endpoint end-to-end — confirmed via
+direct DB reads: `candidate_parsed_data.degrees` genuinely populated
+with "B.Tech — Indian Institute of Technology Bombay (2010)", "B.Tech",
+and "MBA"; `institutions` genuinely populated with "Indian Institute of
+Technology Bombay" and "XYZ Business School" (correctly attributed, no
+cross-contamination); `education_level` = "masters"; and 2 real
+`candidate_skill_experience` rows ("SAP FICO" / "8 years", "SAP HANA" /
+"5 years") auto-created with zero manual action, while "Notice Period:
+30 Days" — present in the same resume — correctly did NOT become a
+fabricated skill row.
+
+New permanent "S92" suite (3 tests) added to `qa_automation.spec.ts`,
+using a real .txt multipart upload through the actual endpoint
+(matching the existing S58 suite's own established technique) with a
+realistic dense resume text, polling `candidate_skill_experience` as
+the real completion signal for the whole background chain. One real,
+observed timing flake under a combined multi-suite run (heavier
+concurrent embed-service load slows the scoring step that runs before
+skill-experience population in the same background task) — widened the
+poll from 15 to 30 one-second attempts; re-ran the full combined sweep
+a second time afterward and got 34/34 clean with zero flakes. Broader
+regression sweep across every suite touching the 5 modified files
+(S30/S58/S90/S92, 34 tests) passed clean. Zero-token audit: `CONFIRMED
+CLEAN` (441 files, 0 external API refs). All throwaway test data (4
+candidates from manual verification, cleaned via the real DELETE API;
+S92's own throwaway candidate cleaned via its permanent afterAll)
+confirmed zero residue.
+
+**Explicitly out of scope, disclosed rather than silently left
+unexplained**: this codebase has a genuinely separate, THIRD parser
+implementation (`ner.py::parse_resume()`/`extract_education()`), used
+only as a lazy fallback inside `score_candidate_core()` when a
+candidate's `extracted_skills` is still empty at scoring time — not
+touched by this fix, since the audit's own cited evidence specifically
+matched `parse_resume_v2()`'s crude regex (the real, primary production
+parser per this project's extensive established history), not this
+secondary fallback path.

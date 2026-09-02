@@ -65,3 +65,68 @@ def parse_skill_summary_text(raw_text: str) -> list[dict]:
             "looks_like_experience": bool(_EXP_VALUE_RE.search(value)),
         })
     return rows
+
+
+async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str) -> int:
+    """Real, gap-audit fix (2026-09-02): candidate_skill_experience only
+    ever got populated by manual entry or a human reviewing a pasted
+    tracking-sheet snippet — live before this fix, 0 rows, ever, despite
+    a real, well-designed table existing for exactly this purpose.
+    Reuses the SAME already-proven parse_skill_summary_text() extractor
+    (built for the KAE-submission "Paste & Parse" tool) run directly
+    against the candidate's own resume_text — deliberately STRICTER than
+    that tool's own "over-inclusive, a human reviews it" design: keeps a
+    row only when BOTH the value genuinely looks like a real
+    "N Yrs"/"N months" figure AND the extracted label matches one of
+    this candidate's own already-recognized skills — blocks noise like
+    "Total Experience: 5 Years" or "Notice Period: 30 Days" (a real
+    "Label: Value" line that isn't actually a skill at all) from
+    silently landing in the DB, since nothing here gets a human review
+    first. Never overwrites or duplicates an existing row for the same
+    skill — appends only, matching this table's own established
+    convention from the public-form/paste-tool call sites. Best-effort;
+    never raises (a resume with no usable signal is a real, honest
+    outcome, not a caller-visible failure). Returns how many rows were
+    newly created."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT resume_text, skills FROM candidates WHERE tenant_id=$1 AND id=$2",
+            tenant_id, candidate_id)
+        if not row or not row["resume_text"]:
+            return 0
+        known_skills = {s.lower() for s in (row["skills"] or [])}
+        if not known_skills:
+            return 0
+
+        proposed = parse_skill_summary_text(row["resume_text"])
+        real_rows = [
+            p for p in proposed
+            if p["looks_like_experience"] and p["skill_name"].lower() in known_skills
+        ]
+        if not real_rows:
+            return 0
+
+        existing = await conn.fetch(
+            "SELECT LOWER(skill_name) AS s FROM candidate_skill_experience WHERE tenant_id=$1 AND candidate_id=$2",
+            tenant_id, candidate_id)
+        existing_names = {r["s"] for r in existing}
+        offset = await conn.fetchval(
+            "SELECT COUNT(*) FROM candidate_skill_experience WHERE tenant_id=$1 AND candidate_id=$2",
+            tenant_id, candidate_id) or 0
+
+        created = 0
+        for p in real_rows:
+            key = p["skill_name"].lower()
+            if key in existing_names:
+                continue
+            await conn.execute(
+                """INSERT INTO candidate_skill_experience
+                   (tenant_id, candidate_id, skill_name, relevant_experience, sort_order)
+                   VALUES ($1,$2,$3,$4,$5)""",
+                tenant_id, candidate_id, p["skill_name"], p["relevant_experience"], offset + created,
+            )
+            existing_names.add(key)
+            created += 1
+        return created
+    except Exception:
+        return 0

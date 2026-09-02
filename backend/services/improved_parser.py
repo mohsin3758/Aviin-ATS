@@ -685,6 +685,120 @@ def extract_linkedin_v2(text: str) -> Optional[str]:
     return None
 
 
+_EDUCATION_HEADING_RE = re.compile(
+    r'^\s*(?:academic\s+)?(?:education(?:al\s+qualifications?)?|qualifications?|'
+    r'academic\s+(?:background|details|qualifications?))\s*:?\s*$',
+    re.I | re.M)
+
+# Real bug fix (gap-audit, 2026-09-02): the prior education extraction
+# (see parse_resume_v2's old inline block) was one bare regex match with
+# no year and no institution — confirmed live, 0 of N candidate records
+# had any institution data ever. Degree tokens kept close to the
+# original set (deliberately no bare "BA"/"MA"/"10th"/"12th" — too
+# short/ambiguous, high false-positive risk against unrelated
+# capitalized text elsewhere in a resume).
+_DEGREE_RE = re.compile(
+    r'\bB\.?\s?Tech\b|\bB\.?\s?E\.?\b|\bM\.?\s?Tech\b|\bM\.?\s?E\.?\b|\bMBA\b|'
+    r'\bMCA\b|\bBCA\b|\bB\.?\s?Sc\b|\bM\.?\s?Sc\b|\bB\.?\s?Com\b|\bM\.?\s?Com\b|'
+    r'\bPh\.?\s?D\b|\bBBA\b|\bDiploma\b',
+    re.I)
+
+_EDU_YEAR_RE = re.compile(r'\b(19[5-9]\d|20[0-4]\d)\b')
+
+# Institution names in Indian resumes are inconsistently cased (all-caps,
+# title-case) — matched purely on the trailing keyword, not on
+# capitalization, then a bounded run of words immediately before it is
+# captured as the likely institution name (handles "XYZ College of
+# Engineering", "ABC Institute of Technology", "XYZ Business School"
+# shapes). "School" included deliberately, despite the modest risk of
+# also matching a plain "High School" line — a real, common institution
+# type for this codebase's own market (MBAs from a named "Business
+# School"), and a harmless, non-misleading false positive at worst.
+_INSTITUTION_RE = re.compile(
+    r'(?:[A-Za-z][A-Za-z.&\'\-]*\s+){0,6}'
+    r'(?:University|College|Institute|Polytechnic|Academy|School)'
+    r'(?:\s+of\s+[A-Za-z][A-Za-z\s]{2,30})?',
+    re.I)
+
+
+def extract_education_section(text: str) -> Optional[str]:
+    """Isolate the real "Education" section — same standalone-heading +
+    SECTION_HEADERS-boundary convention already established by
+    extract_projects_section. Deliberately conservative — no heading
+    match, no guess (the caller falls back to scanning the whole
+    document instead of inventing a boundary)."""
+    if not text:
+        return None
+    m = _EDUCATION_HEADING_RE.search(text)
+    if not m:
+        return None
+    start = m.end()
+    rest = text[start:]
+    end = len(rest)
+    for line_m in re.finditer(r'^\s*([A-Za-z][A-Za-z /&\-]{2,40})\s*:?\s*$', rest, re.M):
+        candidate = line_m.group(1).strip().lower()
+        if candidate in SECTION_HEADERS and candidate not in ('education', 'qualifications'):
+            end = line_m.start()
+            break
+    section = rest[:end].strip()
+    return section[:3000] if section else None
+
+
+def extract_education_v2(text: str) -> list[dict]:
+    """Real, structured education extraction — degree + institution +
+    year, each field independently None when not confidently found
+    (never guessed). Scans within the real "Education" section when one
+    exists (isolates real degree/institution pairs from unrelated
+    degree-shaped tokens elsewhere in the resume, e.g. a job title
+    mentioning "MBA required"); falls back to the first 4000 chars of
+    the whole document when no explicit heading exists, matching the
+    old parser's own always-scan-something behavior. Returns up to 5
+    distinct entries, deduped by degree text."""
+    if not text:
+        return []
+    section = extract_education_section(text) or text[:4000]
+    matches = list(_DEGREE_RE.finditer(section))
+    entries = []
+    seen = set()
+    for i, m in enumerate(matches):
+        degree = m.group(0).strip()
+        key = degree.lower().replace('.', '').replace(' ', '')
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Real bug found via testing (2026-09-02): an earlier version
+        # used a fixed +/-window regardless of neighboring entries — on
+        # a resume listing 2 degrees back to back, the second entry's
+        # window reached backward far enough to still contain the FIRST
+        # entry's institution/year, and re.search() (leftmost match)
+        # silently attributed the wrong school and wrong year to the
+        # second degree. Forward-only, and never past the NEXT real
+        # degree match, so one entry's window can never contain another
+        # entry's own institution/year — at the cost of missing an
+        # institution stated BEFORE the degree on the same line, an
+        # accepted trade-off (the old, pre-fix parser only ever looked
+        # forward from the degree token too).
+        window_end = matches[i + 1].start() if i + 1 < len(matches) else len(section)
+        window_end = min(window_end, m.end() + 150)
+        window = section[m.end():window_end]
+
+        year = None
+        ym = _EDU_YEAR_RE.search(window)
+        if ym:
+            year = ym.group(0)
+
+        institution = None
+        im = _INSTITUTION_RE.search(window)
+        if im:
+            institution = re.sub(r'\s+', ' ', im.group(0)).strip(' ,.-')[:150]
+
+        entries.append({'degree': degree[:60], 'institution': institution, 'year': year})
+        if len(entries) >= 5:
+            break
+    return entries
+
+
 _PROJECT_HEADING_RE = re.compile(
     r'^\s*(?:key\s+)?projects?(?:\s+(?:details|experience|handled|worked))?\s*:?\s*$',
     re.I | re.M)
@@ -916,14 +1030,20 @@ def parse_resume_v2(text: str, from_name: str = '', from_email: str = '', filena
     location = extract_location_v2(full_text)
     linkedin = extract_linkedin_v2(full_text)
 
-    # Education (simple pattern)
+    # Education — real, structured degree/institution/year extraction
+    # (gap-audit fix, 2026-09-02); `edu` is kept as a plain string for
+    # backward compatibility with every existing reader of parsed
+    # ['education'], now built from the real, richer entries instead of
+    # a single bare regex match with no year/institution.
+    education_entries = extract_education_v2(full_text)
     edu = None
-    edu_m = re.search(
-        r'(?:B\.?Tech|B\.?E\.?|M\.?Tech|M\.?E\.?|MBA|MCA|BCA|B\.?Sc|M\.?Sc|'
-        r'B\.?Com|M\.?Com|Ph\.?D|BE|BTech|MTech|Diploma|B\.?C\.?A)[^\n,]{0,60}',
-        full_text, re.I)
-    if edu_m:
-        edu = edu_m.group(0).strip()
+    if education_entries:
+        first = education_entries[0]
+        edu = first['degree']
+        if first.get('institution'):
+            edu += f" — {first['institution']}"
+        if first.get('year'):
+            edu += f" ({first['year']})"
 
     # CTC / Notice period (simple)
     ctc = None
@@ -946,6 +1066,7 @@ def parse_resume_v2(text: str, from_name: str = '', from_email: str = '', filena
         'experience_years': exp_years,
         'skills': skills,
         'education': edu,
+        'education_entries': education_entries,
         'expected_ctc': ctc,
         'notice_period': notice,
         'linkedin_url': linkedin,

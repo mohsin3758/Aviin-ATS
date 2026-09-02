@@ -965,6 +965,24 @@ async def upload_candidate_document(
                         skills = CASE WHEN skills = '{}' AND $3::text[] <> '{}' THEN $3 ELSE skills END
                        WHERE id=$1""",
                     candidate_id, parsed.get("_resume_text"), parsed.get("skills") or [])
+                # Real gap fix (gap-audit, 2026-09-02): a resume uploaded
+                # through this internal Add-Candidate flow was parsed via
+                # parse_resume_v2 but never written to candidate_parsed_
+                # data at all (unlike the real email/WhatsApp intake
+                # pipeline, which always writes it) — confirmed live, this
+                # candidate's degrees/institutions/skill-experience rows
+                # never populated despite a real, successful parse.
+                try:
+                    from services.cpd_service import upsert_candidate_parsed_data
+                    await upsert_candidate_parsed_data(
+                        conn, actor.tenant_id, candidate_id, parsed,
+                        resume_file_id=str(row["id"]), parse_source="v2_parser_manual_upload",
+                    )
+                except Exception as _cpd_err:
+                    print(f"[upload_document] cpd write failed: {_cpd_err}")
+                import asyncio
+                from routers.intelligence import auto_score_candidate_bg
+                asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, candidate_id))
             return {"id": str(row["id"]), "document_type": "resume", "file_name": filename}
 
         file_path = _save_candidate_document_file(data, actor.tenant_id, filename)

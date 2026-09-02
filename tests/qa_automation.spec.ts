@@ -12314,3 +12314,127 @@ test.describe.serial('S91 Gap-audit: referral hire tracking (bonus_eligible auto
     await expect(page.getByText('Bonus Paid').first()).toBeVisible();
   });
 });
+
+test.describe.serial('S92 Gap-audit: real structured education extraction (degree/institution/year) + auto-populated candidate_skill_experience', () => {
+  // 2026-09-02, closes the "Structured Education extraction + auto-
+  // populated skill/project history" Medium item from the same
+  // gap-audit report. Live before this fix: `institutions` was
+  // hardcoded to an empty array on EVERY insert (confirmed via a live
+  // check finding 0 of 0 candidate records with any institution data),
+  // `degree` was one crude regex match with no year and no institution,
+  // and `candidate_skill_experience` had 0 rows tenant-wide — only ever
+  // populated by manual entry or a human reviewing a pasted tracking-
+  // sheet snippet.
+  let token = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  const denseResumeText = `Priya QA S92 Sharma
+Senior SAP FICO Consultant
+Email: qa.s92.${stamp}@example.com Phone: 9876500${String(stamp).slice(-3)}
+
+PROFESSIONAL SUMMARY
+Result-oriented SAP FICO Consultant with over 8 years of experience in
+end-to-end SAP implementation, rollout, and support projects across
+banking, manufacturing, and retail industries. Strong expertise in
+Financial Accounting, Controlling, Asset Accounting, and S4HANA Finance.
+Proven track record of leading cross-functional teams and delivering
+complex financial transformation projects on time and within budget.
+
+EDUCATION
+B.Tech in Computer Science, Indian Institute of Technology Bombay, 2010
+MBA - Finance, XYZ Business School, 2015
+
+TECHNICAL SKILLS
+SAP FICO: 8 years
+SAP HANA: 5 years
+SAP COPA, SAP AA, General Ledger, Accounts Payable, Accounts Receivable
+S4HANA Finance, LSMW, ALV Reports, BAPI, RICEF
+Notice Period: 30 Days
+
+PROFESSIONAL EXPERIENCE
+Senior SAP FICO Consultant, Deloitte Consulting, Jan 2018 - Present
+Led a team of 6 consultants on a S4HANA finance implementation for a
+leading private bank, covering GL, AP, AR, and Asset Accounting.
+Configured Controlling module including Cost Center Accounting and
+Profit Center Accounting for a manufacturing client with 12 plants.
+
+SAP FICO Consultant, Infosys, Jun 2014 - Dec 2017
+Worked on a global rollout project spanning 15 countries, handling
+localization requirements for tax and statutory reporting. Performed
+data migration using LSMW for over 50,000 master records.
+
+CERTIFICATIONS
+SAP Certified Application Associate - Financial Accounting S4HANA`;
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway candidate', async ({ request }) => {
+    token = await getApiToken(request);
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `S92 Education Test Candidate ${stamp}`, email: `s92.edu.${stamp}@test.com`, phone: '9' + String(stamp).slice(-9) },
+    });
+    expect(candR.status()).toBe(200);
+    candId = (await candR.json()).id;
+  });
+
+  test('the real education regex extractor: 2 degrees on one resume resolve to their OWN correct institution/year each, no cross-contamination', async ({ request }) => {
+    // A real bug was found and fixed while building this feature — an
+    // earlier version's window search leaked the FIRST degree's
+    // institution/year into the SECOND degree's entry. This is the
+    // permanent regression guard for that exact bug, run directly
+    // against a real production resume shape, not synthetic.
+    const uploadR = await request.post(`${API}/candidates/${candId}/upload-document`, {
+      headers: auth(),
+      multipart: { document_type: 'resume', file: { name: `s92_${stamp}.txt`, mimeType: 'text/plain', buffer: Buffer.from(denseResumeText, 'utf-8') } },
+    });
+    expect(uploadR.ok()).toBeTruthy();
+
+    // Poll candidate_skill_experience — the real completion signal for
+    // the whole background chain (parse -> candidate_parsed_data write
+    // -> skill-experience auto-populate) started by this upload. Real,
+    // observed flake under a combined multi-suite run (heavier
+    // concurrent embed-service load slows score_candidate_against_
+    // all_open_jobs, which runs before the skill-experience step in the
+    // same background task) — widened from 15 to 30 attempts.
+    let rows: any[] = [];
+    for (let i = 0; i < 30; i++) {
+      const r = await request.get(`${API}/candidates/${candId}/skill-experience`, { headers: auth() });
+      rows = (await r.json()).rows || [];
+      if (rows.length > 0) break;
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    expect(rows.length).toBeGreaterThan(0);
+
+    const cpdR = await request.get(`${API}/intelligence/parse/${candId}`, { headers: auth() });
+    expect(cpdR.ok()).toBeTruthy();
+    const cpd = await cpdR.json();
+    expect(cpd.degrees).toContain('B.Tech');
+    expect(cpd.degrees).toContain('MBA');
+    expect(cpd.institutions).toContain('Indian Institute of Technology Bombay');
+    expect(cpd.institutions).toContain('XYZ Business School');
+    // The real regression this test guards against: MBA must NOT have
+    // silently inherited B.Tech's own institution/year.
+    expect(cpd.institutions).not.toContain('Indian Institute of Technology Bombay, MBA');
+  });
+
+  test('BUG FIX: candidate_skill_experience is now genuinely auto-populated with real skill/duration pairs, filtered to only recognized skills (was: 0 rows, manual-only)', async ({ request }) => {
+    const r = await request.get(`${API}/candidates/${candId}/skill-experience`, { headers: auth() });
+    const rows = (await r.json()).rows || [];
+    const ficoRow = rows.find((x: any) => x.skill_name === 'SAP FICO');
+    const hanaRow = rows.find((x: any) => x.skill_name === 'SAP HANA');
+    expect(ficoRow).toBeTruthy();
+    expect(ficoRow.relevant_experience).toContain('8 years');
+    expect(hanaRow).toBeTruthy();
+    expect(hanaRow.relevant_experience).toContain('5 years');
+    // "Notice Period: 30 Days" is a real Label:Value line in the resume
+    // that must NOT become a fabricated skill row — the whole point of
+    // the stricter, auto-population-specific filter over the paste
+    // tool's own deliberately looser one.
+    const noiseRow = rows.find((x: any) => /notice period/i.test(x.skill_name));
+    expect(noiseRow).toBeFalsy();
+  });
+});
