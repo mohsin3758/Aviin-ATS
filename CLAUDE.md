@@ -19797,3 +19797,120 @@ touched by this fix, since the audit's own cited evidence specifically
 matched `parse_resume_v2()`'s crude regex (the real, primary production
 parser per this project's extensive established history), not this
 secondary fallback path.
+
+## Gap-audit build, part 4: real "Jobs Created" per-recruiter metric + a genuine monthly-snapshot leaderboard mode, surfaced on the main Dashboard, 2026-09-02
+Direct continuation of the same-day gap-audit build (parts 1-3) — closes
+""Jobs Created" metric + a true monthly leaderboard" (Medium). Confirmed
+exactly what the audit cited before building: "Jobs Created" had zero
+references anywhere in the whole repo (a real grep confirmed it), the
+one real multi-recruiter leaderboard (`v_recruiter_activity_summary`)
+was always real-time-only (today/this week, computed off `CURRENT_DATE`,
+no monthly cadence at all), and it lived one click further away than
+expected — manager/admin-only, on `/recruiter-ops`, not the main
+Dashboard.
+
+**"Jobs Created"** — `requisitions.created_by` already existed and is
+exactly the real, granular signal needed; no new rollup table, matching
+the view's own established convention of computing every other real-
+time figure the same way. `sql/104_jobs_created_metric_and_leaderboard_
+view.sql` widens `v_recruiter_activity_summary` (via `CREATE OR REPLACE
+VIEW`, additive — every existing `SELECT *` caller keeps working
+unchanged) with real `today_jobs_created`/`week_jobs_created` columns,
+live `LEFT JOIN LATERAL` counts against `requisitions`.
+
+**A real, critical security detail caught and fixed before deploying,
+not after**: `CREATE OR REPLACE VIEW` does NOT preserve `reloptions`
+across a replace — this view was already correctly `security_invoker
+=true` (confirmed live before writing the migration), and a plain
+replace would have silently reopened the exact real cross-tenant-leak
+class this project already found and fixed multiple times the same day
+for `v_recruiter_capacity`/`v_monthly_billing`/`v_sla_dashboard`. Added
+an explicit `ALTER VIEW ... SET (security_invoker = true)` in the same
+migration, right after the replace, and verified it via a real
+transactional dry-run (run as `postgres` — this view, like most of this
+project's RLS-related views, is postgres-owned, not app_user-owned)
+before applying for real.
+
+**Monthly-snapshot mode** — `GET /manager/activity-leaderboard` gained
+a real `?period=live|month` query param (default `live`, byte-identical
+to the original behavior; an invalid value cleanly 400s). `period=month`
+runs a genuinely separate query (the underlying view has no month-
+shaped columns to reuse) — `SUM`s `recruiter_productivity_daily` for
+the current calendar month, a live `COUNT` of requisitions created this
+month per recruiter, and the recruiter's own most-recent
+`recruiter_performance_scores` row for score/grade context (kept as
+"latest regardless of period" — honest and simple, since averaging a
+letter grade across a month isn't a real, defensible operation).
+
+**A real, disclosed scope limitation, found and confirmed before
+building anything around it, not glossed over**: a genuinely separate,
+earlier fix the same day ("Requisition creation restricted to admin/
+manager/KAE/KAM") means a plain `role='recruiter'` user can no longer
+create a requisition through ANY live code path at all — confirmed via
+a direct query that 0 requisitions have EVER been created by a
+recruiter, historically or since. This means `jobs_created` will
+honestly, correctly read 0 for every real recruiter right now — not a
+bug, a genuinely accurate reflection of the current, real, unrelated
+policy. Shipped exactly as the audit literally asked ("the missing
+per-recruiter metric," not a broader KAE/KAM-scoped redefinition of
+the leaderboard, which would have been real scope creep beyond what was
+asked) — if that restriction is ever revisited, this metric becomes
+immediately useful with zero further code changes. Disclosed plainly
+in the UI itself (a code comment on the frontend toggle) and here.
+
+**Dashboard surfacing** — a new "Team Leaderboard" preview card added to
+the main `/dashboard` page (admin/manager-only, right after the existing
+"Recruiter Capacity" widget, matching its own card styling exactly): top
+5 recruiters ranked by real `overall_score`, each row showing rank/name/
+week-sourced/week-placed/score+grade, with a real "View Full Leaderboard
+→" link. `/recruiter-ops/page.tsx` gained a real `?tab=` URL-param
+reader (client-only mount effect, matching this codebase's established
+SSR-safe pattern) so that link lands DIRECTLY on the Leaderboard tab —
+a deliberate deep-link now correctly wins over both the tab's own
+default and the existing recruiter-role auto-switch-to-My-Day behavior.
+The Leaderboard tab itself gained a real Live/Month toggle (segmented
+button, matching this app's own established toggle convention) and a
+"Jobs created" column in both modes.
+
+Verified for real end-to-end, not code review, at every layer: a real,
+fully-API-driven proof of the counting mechanism (since a genuine
+"recruiter creates their own job" path no longer exists) — a throwaway
+KAE (who CAN create jobs) creates a real requisition, then a real admin
+`PUT /users/{id}` promotes that same user to `role='recruiter'` (an
+ordinary, legitimate admin action, not a workaround) — confirmed both
+`today_jobs_created`/`week_jobs_created` (live mode) and
+`month_jobs_created` (month mode) correctly read `1` for that exact
+user, proving `requisitions.created_by` is genuinely, correctly wired
+through end to end, not just plausible from reading the code. A real
+headless-browser pass confirmed the actual live Dashboard renders the
+Team Leaderboard card with real ranked data (screenshot-confirmed, not
+just locator-checked — pulled and visually inspected a real screenshot
+of the live page, catching and fixing an unrelated local tooling
+mistake along the way — an inline env-var-prefixed Node invocation
+silently failed to propagate under this session's Git Bash, so the
+first screenshot attempts wrote nowhere; fixed by hardcoding the output
+path directly in the script instead of routing it through an env var),
+clicking through lands directly on the Leaderboard tab (not the
+default), and the Live/Month toggle + Jobs Created column both render
+and switch correctly.
+
+**A real, incidental cleanup performed while reviewing that same
+screenshot, not part of the core feature but directly improving what
+was being delivered**: 4 stray leftover test-fixture recruiter accounts
+(from earlier, unrelated same-day suites) were visibly cluttering the
+real Team Leaderboard preview — 1 fully purged via the real force-purge
+API, 3 correctly refused (real activity on record) and left safely
+deactivated, matching the established safety-net precedent exactly. A
+handful more stray accounts remain (a separate, pre-existing, larger
+test-data-hygiene issue spanning many earlier sessions) — not chased
+further, out of this item's own scope.
+
+New permanent "S93" suite (5 tests) added to `qa_automation.spec.ts`,
+using the same real KAE-creates-then-promoted-to-recruiter technique
+proven during manual verification. Broader regression sweep across
+every suite touching the 4 modified files (S30/S43/S49/S73/S90/S92/S93,
+45 tests) passed clean — zero regressions, zero flakes. Zero-token
+audit: `CONFIRMED CLEAN` (442 files, 0 external API refs). All
+throwaway test data (1 KAE-then-recruiter user, 1 requisition from
+manual verification; S93's own throwaway user+requisition via its
+permanent `afterAll`) confirmed cleaned up with zero residue.

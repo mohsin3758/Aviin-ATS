@@ -66,6 +66,11 @@ export default function DashboardPage() {
   const { data: recruiterCapacity } = useFetch<any[]>('/analytics/recruiter-capacity');
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
   const { data: redeployments } = useFetch<any[]>(isAdminOrLead ? '/analytics/redeployment-queue' : null);
+  // Real gap-audit fix (2026-09-02): the real, multi-recruiter activity
+  // leaderboard already existed, but only ever lived one click further
+  // away than expected — manager/admin-only, on /recruiter-ops. This is
+  // a real preview of the same data, not a duplicate implementation.
+  const { data: leaderboard } = useFetch<any[]>(isAdminOrLead ? '/manager/activity-leaderboard' : null);
   const { data: clients } = useFetch<any[]>('/clients');
   const { data: emailSettings } = useFetch<any>('/settings/email');
 
@@ -147,6 +152,38 @@ export default function DashboardPage() {
           <p style={{color:"#94a3b8",fontSize:"13px"}}>{isAdminOrLead ? "No recruiter data" : "No capacity data on file for your account yet"}</p>
         )}
       </div>
+
+      {isAdminOrLead && (
+        <div className="card" data-testid="dashboard-leaderboard-preview">
+          <div className="card-header">
+            <h3 className="flex items-center gap-2">
+              <Award size={16} style={{ color:'var(--primary)' }} />
+              Team Leaderboard
+            </h3>
+            <Link href="/recruiter-ops?tab=leaderboard" className="btn btn-ghost btn-sm">
+              View Full Leaderboard <ArrowRight size={13} />
+            </Link>
+          </div>
+          <div className="card-body p-0">
+            {(leaderboard && leaderboard.length > 0) ? (
+              <div style={{ display:'flex', flexDirection:'column' }}>
+                {[...leaderboard].sort((a:any,b:any)=>(b.overall_score||0)-(a.overall_score||0)).slice(0,5).map((r:any, i:number) => (
+                  <div key={r.recruiter_id} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 20px', borderTop: i===0 ? 'none' : '1px solid var(--gray-100)' }}>
+                    <div style={{ width:20, fontSize:12, fontWeight:800, color:'#94a3b8' }}>#{i+1}</div>
+                    <div style={{ flex:1, fontSize:13, fontWeight:600, color:'#0f172a', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.full_name}</div>
+                    <div style={{ fontSize:11, color:'#64748b' }}>{r.week_sourced||0} sourced · {r.week_placements||0} placed (wk)</div>
+                    <div style={{ fontSize:13, fontWeight:800, color: r.grade==='A+'||r.grade==='A' ? '#10b981' : r.grade==='D' ? '#ef4444' : '#f59e0b' }}>
+                      {r.overall_score != null ? Number(r.overall_score).toFixed(0) : '—'}{r.grade ? ` (${r.grade})` : ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p style={{ color:'#94a3b8', fontSize:13, padding:'16px 20px' }}>No recruiter activity data yet.</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Pipeline bar */}
       <div className="card">

@@ -200,17 +200,38 @@ function LeaderboardTab() {
     const role = getTokenPayload()?.role || '';
     setCanView(['admin', 'super_admin', 'manager'].includes(role));
   }, []);
-  const { data: rows, loading } = useFetch<any[]>(canView ? '/manager/activity-leaderboard' : null);
+  // Real gap-audit fix (2026-09-02): this leaderboard was always live/
+  // real-time-only, with no monthly-snapshot mode at all. "Jobs Created"
+  // (also newly real — requisitions.created_by, live) is honestly 0 for
+  // most/all rows right now, since a plain recruiter has since been
+  // restricted from creating requisitions at all (a separate, unrelated
+  // fix, same day) — kept as a genuinely correct, disclosed 0 rather
+  // than hidden, since that restriction isn't necessarily permanent.
+  const [period, setPeriod] = useState<'live' | 'month'>('live');
+  const { data: rows, loading } = useFetch<any[]>(canView ? `/manager/activity-leaderboard?period=${period}` : null);
   const [slaBreachedOnly, setSlaBreachedOnly] = useState(true);
   const { data: slaRows } = useFetch<any[]>(canView ? `/manager/sla-tracking?days=30&breached_only=${slaBreachedOnly}` : null);
 
   if (!canView) {
     return <div style={{ ...card, textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>Team Leaderboard is visible to managers and admins.</div>;
   }
+  const isLive = period === 'live';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
     <div style={card}>
-      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Team activity leaderboard (today / this week)</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Team activity leaderboard ({isLive ? 'today / this week' : 'this calendar month'})</div>
+        <div style={{ display: 'flex', gap: 4, background: '#F1F5F9', borderRadius: 8, padding: 3 }}>
+          {(['live', 'month'] as const).map(p => (
+            <button key={p} onClick={() => setPeriod(p)} data-testid={`leaderboard-period-${p}`}
+              style={{ padding: '4px 12px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                background: period === p ? '#fff' : 'transparent', color: period === p ? '#0F172A' : '#64748B',
+                boxShadow: period === p ? '0 1px 2px rgba(0,0,0,0.08)' : 'none' }}>
+              {p === 'live' ? 'Live' : 'This Month'}
+            </button>
+          ))}
+        </div>
+      </div>
       {loading && <p style={{ fontSize: 12, color: '#94A3B8' }}>Loading…</p>}
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
@@ -219,22 +240,46 @@ function LeaderboardTab() {
               <th style={{ padding: '6px 8px' }}>Recruiter</th>
               <th style={{ padding: '6px 8px' }}>Grade</th>
               <th style={{ padding: '6px 8px' }}>Score</th>
-              <th style={{ padding: '6px 8px' }}>Sourced today</th>
-              <th style={{ padding: '6px 8px' }}>Submitted today</th>
-              <th style={{ padding: '6px 8px' }}>Sourced this week</th>
-              <th style={{ padding: '6px 8px' }}>Placed this week</th>
+              {isLive ? (
+                <>
+                  <th style={{ padding: '6px 8px' }}>Sourced today</th>
+                  <th style={{ padding: '6px 8px' }}>Submitted today</th>
+                  <th style={{ padding: '6px 8px' }}>Sourced this week</th>
+                  <th style={{ padding: '6px 8px' }}>Placed this week</th>
+                  <th style={{ padding: '6px 8px' }}>Jobs created (wk)</th>
+                </>
+              ) : (
+                <>
+                  <th style={{ padding: '6px 8px' }}>Sourced (mo)</th>
+                  <th style={{ padding: '6px 8px' }}>Submitted (mo)</th>
+                  <th style={{ padding: '6px 8px' }}>Placed (mo)</th>
+                  <th style={{ padding: '6px 8px' }}>Jobs created (mo)</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
             {(rows || []).map((r: any) => (
-              <tr key={r.recruiter_id} style={{ borderTop: '1px solid #F1F5F9' }}>
+              <tr key={r.recruiter_id} style={{ borderTop: '1px solid #F1F5F9' }} data-testid="leaderboard-row">
                 <td style={{ padding: '8px' }}>{r.full_name}</td>
                 <td style={{ padding: '8px' }}><GradeBadge grade={r.grade} /></td>
                 <td style={{ padding: '8px' }}>{r.overall_score != null ? Number(r.overall_score).toFixed(1) : '—'}</td>
-                <td style={{ padding: '8px' }}>{r.today_sourced}</td>
-                <td style={{ padding: '8px' }}>{r.today_submitted}</td>
-                <td style={{ padding: '8px' }}>{r.week_sourced}</td>
-                <td style={{ padding: '8px' }}>{r.week_placements}</td>
+                {isLive ? (
+                  <>
+                    <td style={{ padding: '8px' }}>{r.today_sourced}</td>
+                    <td style={{ padding: '8px' }}>{r.today_submitted}</td>
+                    <td style={{ padding: '8px' }}>{r.week_sourced}</td>
+                    <td style={{ padding: '8px' }}>{r.week_placements}</td>
+                    <td style={{ padding: '8px' }} data-testid="jobs-created-cell">{r.week_jobs_created}</td>
+                  </>
+                ) : (
+                  <>
+                    <td style={{ padding: '8px' }}>{r.month_sourced}</td>
+                    <td style={{ padding: '8px' }}>{r.month_submitted}</td>
+                    <td style={{ padding: '8px' }}>{r.month_placements}</td>
+                    <td style={{ padding: '8px' }} data-testid="jobs-created-cell">{r.month_jobs_created}</td>
+                  </>
+                )}
               </tr>
             ))}
             {!loading && !(rows || []).length && (
@@ -1036,6 +1081,12 @@ export default function RecruiterOpsPage() {
   // for managing other people's assignments, not their own work.
   const [tab, setTab] = useState('autoassign');
   useEffect(() => {
+    // Real gap-audit fix (2026-09-02): a deep link (e.g. from the main
+    // Dashboard's new Team Leaderboard preview) explicitly requesting a
+    // tab wins over both the default and the recruiter->My Day switch —
+    // deliberate navigation should never be silently overridden.
+    const requested = new URLSearchParams(window.location.search).get('tab');
+    if (requested && TABS.some(t => t.key === requested)) { setTab(requested); return; }
     if ((getTokenPayload()?.role || '') === 'recruiter') setTab('myday');
   }, []);
   return (

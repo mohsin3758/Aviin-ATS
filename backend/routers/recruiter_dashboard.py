@@ -497,15 +497,63 @@ async def activity_weekly(weeks: int = 12, actor: Actor = Depends(get_actor)):
 
 
 @manager_router.get("/activity-leaderboard")
-async def activity_leaderboard(actor: Actor = Depends(require_role("admin", "manager"))):
+async def activity_leaderboard(period: str = "live", actor: Actor = Depends(require_role("admin", "manager"))):
     """Team activity leaderboard — reads v_recruiter_activity_summary,
     same "SELECT * FROM v_*_summary ORDER BY metric DESC" template as
-    kae.py's v_kae_summary-backed leaderboard."""
+    kae.py's v_kae_summary-backed leaderboard. Real gap-audit fix
+    (2026-09-02): this was always a live, real-time-only view (today/
+    this week, computed off CURRENT_DATE) — the audit's own citation
+    ("neither leaderboard currently has an explicit monthly reset/
+    cadence") is fixed here with a genuine `period=month` mode, a
+    separate query (the underlying view has no month-shaped columns to
+    reuse) summing recruiter_productivity_daily for the current
+    calendar month plus a real, live COUNT of requisitions created this
+    month — matching the same real requisitions.created_by signal the
+    view's own new today_jobs_created/week_jobs_created columns use.
+    `period=live` is the default and stays byte-identical to the
+    original behavior."""
+    if period not in ("live", "month"):
+        raise HTTPException(400, "period must be 'live' or 'month'")
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM v_recruiter_activity_summary WHERE tenant_id=$1 ORDER BY overall_score DESC NULLS LAST",
-            actor.tenant_id)
-    return [dict(r) for r in rows]
+        if period == "live":
+            rows = await conn.fetch(
+                "SELECT * FROM v_recruiter_activity_summary WHERE tenant_id=$1 ORDER BY overall_score DESC NULLS LAST",
+                actor.tenant_id)
+            return [dict(r) for r in rows]
+
+        rows = await conn.fetch("""
+            SELECT u.id AS recruiter_id, u.tenant_id, u.full_name,
+                   COALESCE(m.sourced, 0) AS month_sourced,
+                   COALESCE(m.submitted, 0) AS month_submitted,
+                   COALESCE(m.interviews, 0) AS month_interviews,
+                   COALESCE(m.placements, 0) AS month_placements,
+                   COALESCE(rj.cnt, 0) AS month_jobs_created,
+                   s.overall_score, s.grade, s.score_date
+            FROM users u
+            LEFT JOIN (
+                SELECT recruiter_id,
+                       SUM(candidates_sourced) AS sourced,
+                       SUM(candidates_submitted) AS submitted,
+                       SUM(interviews_completed) AS interviews,
+                       SUM(placements) AS placements
+                FROM recruiter_productivity_daily
+                WHERE tenant_id=$1 AND period_start >= date_trunc('month', CURRENT_DATE)::date
+                GROUP BY recruiter_id
+            ) m ON m.recruiter_id = u.id
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS cnt FROM requisitions r
+                WHERE r.created_by = u.id AND r.tenant_id = u.tenant_id
+                  AND r.created_at >= date_trunc('month', CURRENT_DATE::timestamp) AND r.is_active IS NOT FALSE
+            ) rj ON true
+            LEFT JOIN LATERAL (
+                SELECT overall_score, grade, score_date FROM recruiter_performance_scores rp
+                WHERE rp.recruiter_id = u.id AND rp.tenant_id = u.tenant_id
+                ORDER BY rp.score_date DESC LIMIT 1
+            ) s ON true
+            WHERE u.tenant_id=$1 AND u.role='recruiter' AND u.is_active IS NOT FALSE
+            ORDER BY s.overall_score DESC NULLS LAST
+        """, actor.tenant_id)
+        return [dict(r) for r in rows]
 
 
 class ScoreWeightConfigIn(BaseModel):
