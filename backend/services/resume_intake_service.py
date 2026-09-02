@@ -656,6 +656,8 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
         await _activity_events.log_recruiter_activity(
             conn, tenant_id, str(received_by["user_id"]), _activity_events.SOURCED, candidate_id=str(new_id),
         )
+    from services import source_attribution as _source_attribution
+    await _source_attribution.record_source_attribution(conn, tenant_id, str(new_id), job_board)
     return str(new_id)
 
 
@@ -789,31 +791,6 @@ async def create_application(conn, tenant_id: str, candidate_id: str, requisitio
             tenant_id, requisition_id, candidate_id, default_stage, recruiter_id)
     except Exception as e:
         print(f'[ResumeIntake] Application insert: {e}')
-
-
-async def _auto_score_on_intake_bg(tenant_id: str, candidate_id: str, requisition_id: str):
-    """Background: score a freshly-uploaded resume against the JD it was
-    auto-matched to, on its own connection (see call site for why)."""
-    try:
-        from routers.intelligence import score_candidate_core
-        async with db.tenant_conn(tenant_id) as conn:
-            req = await conn.fetchrow(
-                "SELECT description, experience_min, experience_max, education_required, skills_required "
-                "FROM requisitions WHERE id=$1 AND tenant_id=$2", requisition_id, tenant_id)
-            if not req:
-                return
-            result = await score_candidate_core(
-                conn, tenant_id, candidate_id, requisition_id,
-                required_exp_yr_min=(req["experience_min"] or 0),
-                required_exp_yr_max=req["experience_max"],
-                required_education=req["education_required"],
-                jd_text=req["description"],
-                required_skills=req["skills_required"],
-            )
-            print(f"[ResumeIntake] Auto-scored candidate {candidate_id} vs requisition {requisition_id}: "
-                  f"readiness_index={result.get('readiness_index')}")
-    except Exception as e:
-        print(f'[ResumeIntake] Auto-score on intake failed: {e}')
 
 
 # ─── Phase 5: Notifications & Auto-Reply ─────────────────────────────────────
@@ -1142,15 +1119,24 @@ async def process_email_for_resume(
         requisition_id = await match_requisition(conn, tenant_id, subject, parsed.get('skills', []), job_board)
         if requisition_id:
             await create_application(conn, tenant_id, candidate_id, requisition_id)
-            # Auto-screen against this JD right away ("uploaded -> instant
-            # score", not wait for someone to manually trigger /intelligence/
-            # score). Fire-and-forget on its OWN connection, deliberately not
-            # awaited on `conn` — this file's transaction is one aborted SQL
-            # error away from poisoning every later query in this batch item
-            # (see the routing-decision comment above), and scoring does a
-            # real network call to the embed service, so it must never be
-            # able to take the resume/candidate insert down with it.
-            asyncio.create_task(_auto_score_on_intake_bg(tenant_id, str(candidate_id), str(requisition_id)))
+        # Auto-score against every real open job, not just the one JD this
+        # resume happened to auto-match to ("uploaded -> instant score",
+        # not wait for someone to manually trigger /intelligence/score or
+        # click the AI Match Score button). 2026-09-02 gap-audit fix — this
+        # used to only fire when a JD match was found, and even then only
+        # scored against that ONE requisition; live before the fix, only
+        # ~6% of candidates had ever been scored against anything. Widened
+        # to fire for every genuinely-created candidate here, scored
+        # against every real open job (which naturally includes the
+        # matched JD above, if any, since it's still open). Fire-and-
+        # forget on its OWN connection, deliberately not awaited on `conn`
+        # — this file's transaction is one aborted SQL error away from
+        # poisoning every later query in this batch item (see the routing-
+        # decision comment above), and scoring does a real network call to
+        # the embed service, so it must never be able to take the resume/
+        # candidate insert down with it.
+        from routers.intelligence import auto_score_candidate_bg
+        asyncio.create_task(auto_score_candidate_bg(tenant_id, str(candidate_id)))
 
     # NOTE: if this INSERT hits uq_resume_files_msg_fname (a leftover row
     # from an earlier attempt whose imap_messages.auto_processed update

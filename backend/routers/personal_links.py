@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 
 import db
 from deps import Actor, get_actor
+from services import source_attribution
 
 router = APIRouter(prefix="/personal-links", tags=["personal-links"])
 public_router = APIRouter(prefix="/public/personal-links", tags=["public"])
@@ -309,6 +310,10 @@ async def submit_resume(
                 tenant_id, cand['id'],
                 "Applicant checked the DPDP 2023 consent box on a recruiter's personal resume-drop link.",
             )
+            await source_attribution.record_source_attribution(conn, tenant_id, str(cand['id']), 'recruiter_personal_link')
+            import asyncio
+            from routers.intelligence import auto_score_candidate_bg
+            asyncio.create_task(auto_score_candidate_bg(tenant_id, str(cand['id'])))
         elif parsed.get("_resume_text"):
             # Existing candidate re-submitting — same gap-fill-only
             # convention as upsert_candidate()/public_apply(), never
@@ -511,6 +516,10 @@ async def submit_job_resume(
                 tenant_id, cand['id'],
                 "Applicant checked the DPDP 2023 consent box on a recruiter's job-specific resume link.",
             )
+            await source_attribution.record_source_attribution(conn, tenant_id, str(cand['id']), 'recruiter_job_link')
+            import asyncio
+            from routers.intelligence import auto_score_candidate_bg
+            asyncio.create_task(auto_score_candidate_bg(tenant_id, str(cand['id'])))
         elif parsed.get("_resume_text"):
             await conn.execute("""
                 UPDATE candidates SET

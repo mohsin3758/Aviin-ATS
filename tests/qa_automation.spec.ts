@@ -12061,3 +12061,105 @@ test.describe.serial('S89 Recruiter stage-move-blocked message now points to the
     await request.delete(`${API}/candidates/${candId}`, { headers: authA() }).catch(() => {});
   });
 });
+
+test.describe.serial('S90 Gap-audit quick wins: source-attribution auto-population, auto-score on every intake path, jobs sitemap + per-job JSON-LD', () => {
+  // 2026-09-02, direct follow-up to the "AVIIN ATS Gap Audit" report
+  // published the same day — closes 4 of the report's own "quick win"
+  // recommendations. All 4 verified end-to-end against real production
+  // data before this suite was written (see CLAUDE.md's dated entry for
+  // the full manual verification trail — a real offer walked through
+  // submit->approve->issue->accept, confirming source_attribution's
+  // placed/placement_value flip with the exact real CTC).
+  let token = '';
+  let reqId = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway open requisition (needed for the auto-score check to find something to score against)', async ({ request }) => {
+    token = await getApiToken(request);
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `S90 GapAudit Role ${stamp}`, status: 'open', employment_type: 'fte', work_mode: 'remote', skills_required: ['Python'] },
+    });
+    expect(reqR.status()).toBe(200);
+    reqId = (await reqR.json()).id;
+  });
+
+  test('BUG FIX: creating a candidate with source="linkedin" auto-writes a real, correctly-mapped source_attribution row (was: only a manual-entry endpoint ever populated this table)', async ({ request }) => {
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(), data: { full_name: `S90 SourceAttr Candidate ${stamp}`, email: `s90.sourceattr.${stamp}@test.com`, phone: '9' + String(stamp).slice(-9), source: 'linkedin' },
+    });
+    expect(candR.status()).toBe(200);
+    candId = (await candR.json()).id;
+
+    const attrR = await request.get(`${API}/vendor-analytics/attribution`, { headers: auth() });
+    const rows = await attrR.json();
+    const mine = rows.find((r: any) => r.candidate_id === candId);
+    expect(mine).toBeTruthy();
+    expect(mine.source_channel).toBe('linkedin');
+    expect(mine.placed).toBe(false);
+  });
+
+  test('BUG FIX: the exact same candidate is auto-scored against real open jobs with zero manual action (was: only email-intake auto-scored, and only against the one matched JD)', async ({ request }) => {
+    // A real embed-service round-trip needs a moment to complete —
+    // poll rather than assume it already finished by the time this
+    // test runs.
+    let scores: any[] = [];
+    for (let i = 0; i < 10; i++) {
+      const r = await request.get(`${API}/candidates/${candId}`, { headers: auth() });
+      const d = await r.json();
+      scores = d.ai_scores || [];
+      if (scores.length > 0) break;
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    expect(scores.length).toBeGreaterThan(0);
+  });
+
+  test('GET /vendor-analytics/source-performance (the real "Conversion Rate by Source" view, previously built with zero frontend caller) returns real, non-empty data', async ({ request }) => {
+    const r = await request.get(`${API}/vendor-analytics/source-performance`, { headers: auth() });
+    expect(r.status()).toBe(200);
+    const rows = await r.json();
+    expect(Array.isArray(rows)).toBe(true);
+    expect(rows.length).toBeGreaterThan(0);
+    const linkedinRow = rows.find((row: any) => row.source_channel === 'linkedin');
+    expect(linkedinRow).toBeTruthy();
+    expect(linkedinRow.total_candidates).toBeGreaterThan(0);
+  });
+
+  test('real headless UI: the new "Source Performance" tab on /vendor-analytics renders a real table, not a dead endpoint', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+    await page.goto('/vendor-analytics');
+    await page.getByRole('button', { name: /Source Performance/i }).click();
+    await expect(page.locator('[data-testid="source-performance-panel"]')).toBeVisible({ timeout: 10000 });
+  });
+
+  test('BUG FIX: /jobs-sitemap.xml is genuinely live (was: confirmed 404) and contains real, current job URLs; /robots.txt points at it', async ({ request }) => {
+    const smR = await request.get('/jobs-sitemap.xml');
+    expect(smR.status()).toBe(200);
+    const smBody = await smR.text();
+    expect(smBody).toContain('<urlset');
+    expect(smBody).toContain('/careers/');
+
+    const robotsR = await request.get('/robots.txt');
+    expect(robotsR.status()).toBe(200);
+    const robotsBody = await robotsR.text();
+    expect(robotsBody).toContain('jobs-sitemap.xml');
+  });
+
+  test('BUG FIX: the per-job careers detail page now emits real Schema.org JobPosting JSON-LD (was: only the list page had it, the detail page — the actual URL a candidate or crawler lands on — had none at all)', async ({ request }) => {
+    const pageR = await request.get(`/careers/${reqId}`);
+    const html = await pageR.text();
+    expect(html).toContain('application/ld+json');
+    expect(html).toContain('"@type":"JobPosting"');
+    expect(html).toContain(`S90 GapAudit Role ${stamp}`);
+  });
+});

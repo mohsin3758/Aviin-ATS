@@ -18,6 +18,8 @@ interface Job {
   skills_required: string[];
   positions_count: number;
   created_at: string;
+  budget_min: number | null;
+  budget_max: number | null;
 }
 
 async function fetchJob(jobId: string): Promise<Job | null> {
@@ -54,5 +56,41 @@ export async function generateMetadata({ params }: { params: { jobId: string } }
 
 export default async function JobDetailPage({ params }: { params: { jobId: string } }) {
   const job = await fetchJob(params.jobId);
-  return <JobDetailClient job={job} />;
+  // 2026-09-02 gap-audit fix: this per-job page — the actual URL a real
+  // candidate or Googlebot lands on — carried zero Schema.org structured
+  // data at all before this; the careers LIST page had real JSON-LD, this
+  // one had none. Server-rendered here (not in the client component)
+  // since Googlebot's own JobPosting-rich-results crawler, like the
+  // OG-tag crawlers generateMetadata above already accounts for, reads
+  // raw server HTML rather than executing client JS.
+  const jsonLd = job ? {
+    '@context': 'https://schema.org/',
+    '@type': 'JobPosting',
+    title: job.title,
+    description: job.description || `${job.title} opportunity at AVIIN Jobs Services`,
+    identifier: { '@type': 'PropertyValue', name: 'AVIIN Jobs Services', value: job.id },
+    datePosted: job.created_at,
+    employmentType: (job.employment_type || 'FULL_TIME').toUpperCase().replace(/[\s-]/g, '_'),
+    hiringOrganization: { '@type': 'Organization', name: 'AVIIN Jobs Services' },
+    jobLocation: {
+      '@type': 'Place',
+      address: { '@type': 'PostalAddress', addressLocality: job.location || 'Remote', addressCountry: 'IN' },
+    },
+    directApply: true,
+    ...(job.budget_min != null && job.budget_max != null ? {
+      baseSalary: {
+        '@type': 'MonetaryAmount',
+        currency: 'INR',
+        value: { '@type': 'QuantitativeValue', minValue: job.budget_min, maxValue: job.budget_max, unitText: 'YEAR' },
+      },
+    } : {}),
+  } : null;
+  return (
+    <>
+      {jsonLd && (
+        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      )}
+      <JobDetailClient job={job} />
+    </>
+  );
 }

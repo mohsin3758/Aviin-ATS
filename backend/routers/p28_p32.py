@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Response, HTTPException, Form, File, Upl
 from pydantic import BaseModel
 import db
 from deps import Actor, get_actor, require_role_or_trusted_internal
+from services import source_attribution
 
 _MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 
@@ -367,7 +368,8 @@ async def public_list_jobs(
     async with _db_public.tenant_conn(tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
-                   r.skills_required, r.positions_count, r.created_at
+                   r.skills_required, r.positions_count, r.created_at,
+                   r.budget_min, r.budget_max
             FROM requisitions r
             WHERE r.tenant_id=$1::uuid AND r.status='open' AND r.approval_status='approved'
               AND r.is_active IS NOT FALSE
@@ -440,7 +442,8 @@ async def public_get_job(job_id: str, tenant_id: str):
     async with _db_public.tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
-                   r.skills_required, r.positions_count, r.created_at
+                   r.skills_required, r.positions_count, r.created_at,
+                   r.budget_min, r.budget_max
             FROM requisitions r
             WHERE r.id=$1::uuid AND r.tenant_id=$2::uuid AND r.status='open' AND r.approval_status='approved'
               AND r.is_active IS NOT FALSE
@@ -559,6 +562,13 @@ async def public_apply(
                 tenant_id, cand['id'],
                 f"Applicant checked the DPDP 2023 consent box on the public job application form for job {job_id}.",
             )
+            await source_attribution.record_source_attribution(conn, tenant_id, str(cand['id']), 'job_board')
+            # 2026-09-02 gap-audit fix: public apply never auto-scored at
+            # all before this — same fire-and-forget convention as every
+            # other real intake path.
+            import asyncio
+            from routers.intelligence import auto_score_candidate_bg
+            asyncio.create_task(auto_score_candidate_bg(tenant_id, str(cand['id'])))
         elif parsed.get("_resume_text"):
             # Existing candidate re-applying with a resume — same
             # gap-fill-only convention as upsert_candidate(), never

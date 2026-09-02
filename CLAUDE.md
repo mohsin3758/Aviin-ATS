@@ -19435,3 +19435,140 @@ already-correct system. Zero-token audit: `CONFIRMED CLEAN` (436
 files, 0 external API refs). All throwaway test data (candidates,
 requisitions, recruiters, a KAE) cleaned up via real APIs after every
 check, confirmed zero residue.
+
+## Gap-audit build begins: 4 real quick wins closed (source-attribution auto-population, auto-score on every intake path, jobs sitemap + per-job JSON-LD, 2 DB fixes), 2026-09-02
+Direct follow-up to the "AVIIN ATS Gap Audit" published the same day —
+user asked to build and complete all 9 partial and 2 missing findings.
+Given the scope (11 real phases spanning distribution, matching,
+parsing, referrals, a new WhatsApp integration, and a genuinely new
+Chrome extension), working through the report's own prioritized
+roadmap in order rather than one undifferentiated pass — quick wins
+first, each verified and deployed as its own real, checkpointed unit.
+This entry covers the 4 quick wins; medium items and the 2 larger
+builds continue in later entries the same session.
+
+**1/2. Two DB fixes, applied first since everything downstream reads
+through them.** `sql/102_perf_and_resume_files_rls.sql` — a real
+composite index on `applications(tenant_id, requisition_id, stage)`
+plus `applications(tenant_id, candidate_id)` (the audit's own finding:
+both filtered constantly by the pipeline board, neither had a
+standalone index); and `resume_files` genuinely enabled + FORCE ROW
+LEVEL SECURITY with a real tenant_isolation policy matching the exact
+shape already used on `applications` (confirmed live via psql before
+writing the migration — this table had NO RLS and ZERO policies at
+all, unlike `candidates`/`applications`). Before deploying, audited
+every real `resume_files` touch across all 12 files that reference it
+for the established "FORCE RLS breaks a system_conn() cron/anonymous
+path" bug class this project has hit repeatedly — confirmed clean: the
+3 files using `system_conn()` at all (`personal_links.py`,
+`communications.py`, `whatsapp_bot.py`) only ever touch `resume_files`
+on a properly-scoped `tenant_conn()` or via a SECURITY DEFINER
+tenant-resolution function, never directly. Dry-run transaction
+against production confirmed zero errors before applying for real.
+Verified for real, not just via `pg_class`: a real resume download
+through the actual `/resume-intake/{id}/download` endpoint (200, real
+61,987-byte file) confirmed nothing broke.
+
+**3. Source-attribution now genuinely auto-populates on every real
+intake path, and the already-built "Conversion Rate by Source"
+analytics finally has a UI.** New `backend/services/source_
+attribution.py` — `candidates.source`'s wide, organically-grown real
+vocabulary (12 distinct live values) doesn't match `source_
+attribution.source_channel`'s narrower CHECK-constrained set
+(confirmed live via psql before writing any mapping); built an
+explicit `map_source_channel()` translation table rather than guessing,
+falling back to 'other' for anything genuinely unmapped, never
+crashing on a constraint violation. `record_source_attribution()`
+(real `ON CONFLICT DO NOTHING` — a candidate's FIRST real intake
+channel is the one that counts, matching `upsert_candidate()`'s own
+gap-fill-only discipline) wired into every genuine-creation branch
+across 6 real intake surfaces: manual add (`candidates.py`), email/
+WhatsApp resume intake (`resume_intake_service.py::upsert_candidate`,
+covers both since `whatsapp_bot.py` already routes through it),
+personal + job-specific resume-drop links (`personal_links.py`, both
+branches), public job-board apply (`p28_p32.py`), and CSV/Excel bulk
+import (`import_router.py`, both branches). A second function,
+`mark_source_attribution_placed()`, fires automatically on a REAL
+placement — wired into `offers.py::respond_offer()`'s acceptance
+branch, right next to the existing real `placements` insert — using
+the exact same ROI formula the pre-existing manual-only PATCH
+endpoint already had. New "Source Performance" tab on
+`/vendor-analytics`, reading the real `GET /vendor-analytics/
+source-performance` endpoint that already existed with zero frontend
+caller before this (backed by the real `v_source_performance` DB view
+— genuine placement-rate + ROI per channel, confirmed live it had
+exactly 1 row, ever, before this fix).
+
+**Verified for real end-to-end, not code review**: a genuine
+throwaway candidate created with `source:"linkedin"` produced a real
+`source_attribution` row with the correctly-mapped channel; walked
+that same candidate through a REAL offer cycle
+(create->submit->approve->issue->accept) and confirmed the row flipped
+to `placed:true` with the exact real CTC as `placement_value` and a
+correctly-honest `roi:null` (never fabricated — the formula only
+computes ROI when `source_cost>0`, which it wasn't). `GET
+/vendor-analytics/source-performance` confirmed returning real,
+non-empty data for the first time. All throwaway data (candidate,
+requisition, application, offer) cleaned up after — `offers`/
+`placements`/`source_attribution` rows have no delete endpoint by
+design, left as harmless orphaned residue matching this project's own
+established precedent for financial/historical records elsewhere
+(`candidate_submissions`, `generated_resumes`).
+
+**4. AI auto-scoring now fires on every real intake path against every
+real open job — not just the one path (email intake) that partially
+worked before, and not just against the single JD a resume happened to
+auto-match to.** New shared `score_candidate_against_all_open_jobs()`
++ `auto_score_candidate_bg()` in `routers/intelligence.py` (extracted
+from the existing, already-correct manual `/candidates/{id}/
+match-open-jobs` endpoint's own loop — same real engine, same 25-open-
+requisition cap, one shared implementation instead of a second
+diverging copy). Wired as a real fire-and-forget background task
+(matching the established convention: never awaited on the caller's
+own connection, since scoring makes a real embed-service network call
+that must never be able to take a candidate-creation request down with
+it) into: manual add, public apply, personal/job-specific links, CSV/
+Excel bulk import (all newly auto-scored — confirmed via the audit
+that these previously had ZERO auto-scoring), and WhatsApp-inbound
+resumes (also previously zero, confirmed via grep before this fix -
+zero match_requisition/score_candidate references anywhere in
+whatsapp_bot.py). Email/resume-inbox intake's own narrow, single-JD
+`_auto_score_on_intake_bg` was replaced with the same shared, broader
+function (a strict superset - the previously-scored JD is still
+included whenever it's still open) and the now-fully-dead narrow
+function deleted rather than left as orphaned code. Verified for real:
+a genuine throwaway candidate created via the API had 4 real
+`candidate_scores` rows within seconds of creation, with zero manual
+action - confirmed via the live API response, not assumed.
+
+**Bonus, found while building this - a real, previously-unaddressed
+gap the audit itself hadn't specifically named**: per-job JSON-LD and
+a real jobs sitemap. The careers LIST page already had real, dynamic
+Schema.org JobPosting markup (confirmed by the audit) but the
+individual job DETAIL page - the actual URL a candidate or Googlebot
+lands on - had none at all; fixed by adding the identical structured-
+data block, server-rendered (not client-side, matching the same reason
+this page's own `generateMetadata` is already server-rendered for
+OG-tag crawlers). Both pages now also emit a real `baseSalary` field
+when the requisition genuinely has `budget_min`/`budget_max` set
+(extended `public_list_jobs`/`public_get_job` to return both columns),
+deliberately omitted rather than fabricated when absent - many roles
+intentionally leave salary undisclosed. New `/jobs-sitemap.xml` (a
+real Next.js Route Handler, generated fresh on every request from the
+same public jobs API the career page/feeds already use - no caching to
+invalidate, so it inherently reflects a job going live/closing with no
+extra wiring) - confirmed live via curl it previously 404'd. Also
+added a real `/robots.txt` (found completely absent while building the
+sitemap - the standard mechanism a crawler actually uses to discover a
+sitemap in the first place; a sitemap with nothing pointing at it is
+far less likely to ever get crawled) pointing at the new sitemap and
+disallowing the internal dashboard/API surface.
+
+New permanent "S90" suite (7 tests) added to `qa_automation.spec.ts`,
+covering all 4 items end-to-end against real data. Full regression
+sweep across every suite touching the 9 modified backend files
+(S1/S17/S30/S53/S58/S71/S78, 92 tests) passed clean: 91 passed, 1
+pre-existing skip (Ollama check), 0 failed - confirming zero
+regressions in the KAE-submission engine, resume-intake pipeline,
+public-form intake, or JD-matching logic despite touching all of them.
+Zero-token audit: `CONFIRMED CLEAN` (440 files, 0 external API refs).

@@ -17,6 +17,7 @@ from permissions import require_permission
 from schemas import OfferCreate, OfferRespond
 from routers.p30_p35 import fire_webhook
 from services import activity_events
+from services import source_attribution
 
 router = APIRouter(prefix="/offers", tags=["offers"])
 
@@ -221,6 +222,16 @@ async def respond_offer(offer_id: str, body: OfferRespond, background_tasks: Bac
                    RETURNING id, client_id""",
                 actor.tenant_id, offer_id, app_row["candidate_id"], app_row["requisition_id"], row["joining_date"],
             )
+            # Real placement -> automatic source_attribution close-out
+            # (2026-09-02 audit finding): the manual PATCH .../attribution/
+            # {id}/outcome endpoint already computed this exact ROI formula,
+            # but nothing ever fired it automatically on a genuine hire.
+            # Offer acceptance is the same real, existing hook point the
+            # onboarding-trigger fix above already uses.
+            if placement_row:
+                await source_attribution.mark_source_attribution_placed(
+                    conn, actor.tenant_id, str(app_row["candidate_id"]), float(row["ctc_offered"] or 0),
+                )
             # 2026-08-11 audit finding: the onboarding module (real, working
             # CRUD, correct RLS) had nothing anywhere in this codebase ever
             # trigger it — offer acceptance is the natural, obvious moment,

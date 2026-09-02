@@ -1,16 +1,18 @@
 """P38: Bulk CSV Import - minimal safe version."""
-import csv, io
+import csv, io, asyncio
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
 import db
 from deps import Actor, get_actor
 from services import candidate_ownership as ownership
 from services import activity_events
+from services import source_attribution
 
 import_router = APIRouter(prefix="/import", tags=["import"])
 
 @import_router.post("/candidates")
 async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get_actor)):
+    from routers.intelligence import auto_score_candidate_bg
     content = (await file.read()).decode("utf-8", "ignore")
     reader = csv.DictReader(io.StringIO(content))
     created = updated = errors = skipped_owned = 0
@@ -72,6 +74,13 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                         "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
                         "VALUES ($1,$2,'resume_processing','bulk_import',TRUE,$3)",
                         actor.tenant_id, new_id, f"Added via CSV bulk import by {actor.user_id}.")
+                    await source_attribution.record_source_attribution(conn, actor.tenant_id, str(new_id), 'csv_import')
+                    # 2026-09-02 gap-audit fix: bulk import never auto-scored
+                    # at all before this. Fire-and-forget per row, same
+                    # convention as every other intake path — a large import
+                    # queues many background scoring tasks rather than
+                    # blocking the import itself on any of them.
+                    asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, str(new_id)))
                     # Individual recruiter ownership (2026-08-11): whoever
                     # runs the bulk import individually owns every new
                     # candidate it creates for 30 days (never the existing-
@@ -102,6 +111,7 @@ async def candidate_import_template(actor: Actor=Depends(get_actor)):
 @import_router.post("/candidates/excel")
 async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_actor)):
     """Import candidates from .xlsx file."""
+    from routers.intelligence import auto_score_candidate_bg
     try:
         import openpyxl, io as _io
     except ImportError:
@@ -161,6 +171,8 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                         "INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text) "
                         "VALUES ($1,$2,'resume_processing','bulk_import',TRUE,$3)",
                         actor.tenant_id, new_id, f"Added via Excel bulk import by {actor.user_id}.")
+                    await source_attribution.record_source_attribution(conn, actor.tenant_id, str(new_id), 'excel_import')
+                    asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, str(new_id)))
                     # Same individual-ownership claim as the CSV path above.
                     if actor.user_id and actor.email:
                         await ownership.claim_ownership(

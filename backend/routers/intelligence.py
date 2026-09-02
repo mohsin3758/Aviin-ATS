@@ -298,6 +298,63 @@ async def score_candidate_core(conn, tenant_id: str, candidate_id: str, requisit
     return dict(row)
 
 
+async def score_candidate_against_all_open_jobs(conn, tenant_id: str, candidate_id: str, limit: int = 25) -> int:
+    """2026-09-02 gap-audit fix: the only place this ever ran was a manual
+    button click (POST /candidates/{id}/match-open-jobs) or, on intake, a
+    score against the ONE requisition a resume happened to auto-match to
+    — never every open job, and never automatically for public apply or
+    manual add at all. Live before this fix: only ~6% of candidates had
+    ever been scored against anything. This is the same real engine
+    (score_candidate_core, one Tier-1 embed-similarity pass per
+    requisition) the manual endpoint already used — extracted here so
+    every real intake path can fire it as a background task instead of
+    duplicating the loop. Capped at `limit` open requisitions, matching
+    the manual endpoint's own established real-world bound, ordered
+    newest-first so a candidate is scored against the roles most likely
+    to actually be hiring right now. Returns how many requisitions were
+    genuinely scored, for logging — never raises; one bad requisition
+    must never block the rest of the batch."""
+    reqs = await conn.fetch(
+        "SELECT id, title, description, experience_min, experience_max, education_required, skills_required"
+        " FROM requisitions WHERE tenant_id=$1 AND status='open' AND is_active IS NOT FALSE"
+        " ORDER BY created_at DESC LIMIT $2",
+        tenant_id, limit)
+    scored = 0
+    for r in reqs:
+        try:
+            await score_candidate_core(
+                conn, tenant_id, candidate_id, str(r["id"]),
+                required_exp_yr_min=(r["experience_min"] or 0),
+                required_exp_yr_max=r["experience_max"],
+                required_education=r["education_required"],
+                jd_text=r["description"],
+                required_skills=r["skills_required"],
+            )
+            scored += 1
+        except Exception as e:
+            print(f"[Intelligence] auto-score vs requisition {r['id']} failed: {e}")
+    return scored
+
+
+async def auto_score_candidate_bg(tenant_id: str, candidate_id: str) -> None:
+    """Fire-and-forget wrapper on its own fresh connection — this is now
+    the ONE shared auto-score entry point every real intake path calls
+    (manual add, email/WhatsApp resume intake, public apply, personal/
+    job-share links, CSV/Excel bulk import), replacing several call sites
+    that previously either didn't auto-score at all or only scored
+    against a single matched job. Never awaited on a caller's own conn,
+    since scoring makes a real network call to the embed service that
+    must never be able to take a candidate-creation request down with it,
+    and must never share a transaction it could poison on a real SQL
+    error."""
+    try:
+        async with db.tenant_conn(tenant_id) as conn:
+            n = await score_candidate_against_all_open_jobs(conn, tenant_id, candidate_id)
+            print(f"[Intelligence] auto-scored candidate {candidate_id} against {n} open requisitions")
+    except Exception as e:
+        print(f"[Intelligence] auto_score_candidate_bg failed for {candidate_id}: {e}")
+
+
 @router.post("/score")
 async def score_one(body: ScoreRequest, actor: Actor = Depends(get_actor)):
     """Score a single candidate against a JD (or standalone)."""

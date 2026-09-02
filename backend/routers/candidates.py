@@ -11,6 +11,7 @@ from routers.pipeline_stages import is_valid_stage, recruiter_can_move_to_stage
 from permissions import require_permission
 from services import candidate_ownership as ownership
 from services import activity_events
+from services import source_attribution
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
@@ -866,8 +867,16 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
             await activity_events.log_recruiter_activity(
                 conn, actor.tenant_id, str(actor.user_id), activity_events.SOURCED, candidate_id=str(cid),
             )
+        await source_attribution.record_source_attribution(conn, actor.tenant_id, str(cid), body.source)
         await events.write_outbox(conn, actor.tenant_id, "candidate.created",
             {"candidate_id": str(cid), "full_name": body.full_name}, f"candidate.created:{cid}")
+    # 2026-09-02 gap-audit fix: manual add never auto-scored at all before
+    # this — fire-and-forget, on its own connection, same convention as
+    # resume-intake's own auto-score (never block/poison this request's
+    # own transaction on a real embed-service call).
+    import asyncio
+    from routers.intelligence import auto_score_candidate_bg
+    asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, str(cid)))
     return dict(row)
 
 

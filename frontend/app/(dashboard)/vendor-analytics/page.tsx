@@ -8,6 +8,13 @@ export default function VendorAnalyticsPage() {
   const {data:vendors}=useFetch<any[]>(tab==='vendors'?'/vendor-analytics/vendors':null);
   const {data:funnel}=useFetch<any[]>(tab==='funnel'?'/vendor-analytics/recruiter-funnel':null);
   const {data:diversity}=useFetch<any>(tab==='diversity'?'/vendor-analytics/diversity':null);
+  // Real fix (2026-09-02 gap audit): the backend endpoint behind this tab
+  // (/vendor-analytics/source-performance, backed by the real
+  // v_source_performance view — genuine placement rate + ROI per channel)
+  // already existed with zero frontend caller anywhere. Wired up now that
+  // source_attribution is finally auto-populated on every real intake path
+  // instead of the one manual-entry endpoint it used to depend on alone.
+  const {data:sourcePerf}=useFetch<any[]>(tab==='source'?'/vendor-analytics/source-performance':null);
   const {data:sum}=useFetch<any>('/vendor-analytics/summary');
   return(
     <div data-testid="vendor-analytics-page" className="anim-fade-up space-y-6">
@@ -18,7 +25,7 @@ export default function VendorAnalyticsPage() {
         ))}
       </div>
       <div style={{display:'flex',borderBottom:'1px solid #e2e8f0'}}>
-        {[['vendors','🏢 Vendors'],['funnel','📊 Recruiter Funnel'],['diversity','🌍 Diversity']].map(([k,l])=>(
+        {[['vendors','🏢 Vendors'],['funnel','📊 Recruiter Funnel'],['source','📈 Source Performance'],['diversity','🌍 Diversity']].map(([k,l])=>(
           <button key={k} onClick={()=>setTab(k)} style={{padding:'10px 18px',border:'none',background:'none',cursor:'pointer',fontSize:'13px',fontWeight:tab===k?'600':'400',color:tab===k?'#1e40af':'#64748b',borderBottom:tab===k?'2px solid #1e40af':'2px solid transparent',marginBottom:'-1px'}}>{l}</button>
         ))}
       </div>
@@ -50,6 +57,23 @@ export default function VendorAnalyticsPage() {
               <td style={{padding:'10px 16px',fontSize:'12px',fontWeight:'600',color:'#1e40af'}}>{pct(r.sub_to_interview_pct)}</td>
             </tr>))}
             {!funnel?.length&&<tr><td colSpan={6} style={{textAlign:'center',padding:'32px',color:'#94a3b8',fontSize:'12px'}}>No funnel data yet</td></tr>}
+          </tbody>
+        </table>
+      </div>}
+      {tab==='source'&&<div data-testid="source-performance-panel" style={{background:'white',borderRadius:'12px',border:'1px solid #e2e8f0',overflow:'hidden'}}>
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0'}}>{['Source','Candidates','Placed','Conversion Rate','Cost','Revenue','Avg ROI'].map(h=><th key={h} style={{padding:'10px 16px',textAlign:'left',fontSize:'11px',fontWeight:'600',textTransform:'uppercase',color:'#64748b'}}>{h}</th>)}</tr></thead>
+          <tbody>{(sourcePerf||[]).map((r:any,i:number)=>(
+            <tr key={r.source_channel+'-'+(r.vendor_id||i)} style={{borderBottom:'1px solid #f1f5f9'}}>
+              <td style={{padding:'10px 16px',fontWeight:'600',fontSize:'13px',color:'#0f172a',textTransform:'capitalize'}}>{(r.source_channel||'').replace(/_/g,' ')}{r.vendor_name?` · ${r.vendor_name}`:''}</td>
+              <td style={{padding:'10px 16px',fontWeight:'600'}}>{r.total_candidates}</td>
+              <td style={{padding:'10px 16px'}}><span style={{fontSize:'11px',fontWeight:'700',padding:'3px 10px',borderRadius:'10px',background:'#d1fae5',color:'#059669'}}>{r.placed_count}</span></td>
+              <td style={{padding:'10px 16px',fontSize:'12px',fontWeight:'600',color:'#1e40af'}}>{pct(r.placement_rate)}</td>
+              <td style={{padding:'10px 16px',fontSize:'12px',color:'#475569'}}>{fmt(r.total_cost)}</td>
+              <td style={{padding:'10px 16px',fontSize:'12px',color:'#475569'}}>{fmt(r.total_revenue)}</td>
+              <td style={{padding:'10px 16px',fontSize:'12px',fontWeight:'600',color:r.avg_roi>0?'#059669':r.avg_roi<0?'#dc2626':'#64748b'}}>{r.avg_roi!=null?`${r.avg_roi}%`:'—'}</td>
+            </tr>))}
+            {!sourcePerf?.length&&<tr><td colSpan={7} style={{textAlign:'center',padding:'32px',color:'#94a3b8',fontSize:'12px'}}>No source-attribution data yet</td></tr>}
           </tbody>
         </table>
       </div>}

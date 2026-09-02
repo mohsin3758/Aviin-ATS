@@ -1,5 +1,5 @@
 """Enhanced WhatsApp Bot — candidate self-service via WAHA."""
-import httpx, os
+import httpx, os, asyncio
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -80,6 +80,7 @@ async def _download_waha_media(media: dict) -> Optional[bytes]:
 
 
 async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str, whatsapp_account_id: str = None) -> str:
+    from routers.intelligence import auto_score_candidate_bg
     """Download + parse an inbound WhatsApp resume attachment, upsert a
     candidate (same regex-NER pipeline as email intake), log a resume_files
     row, and return the WhatsApp reply text to send back."""
@@ -139,6 +140,14 @@ async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str, whatsa
               (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
             VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
         """, tenant_id, candidate_id, f"[Resume attachment: {filename}]", whatsapp_account_id)
+
+    # 2026-09-02 gap-audit fix: WhatsApp-inbound resumes were the one real
+    # intake path with no auto-scoring at all — confirmed via grep, zero
+    # match_requisition/score_candidate references anywhere in this file.
+    # Fire-and-forget, same convention as every other intake path (outside
+    # the transaction above so an embed-service hiccup can never affect
+    # whether the candidate/resume/message were actually saved).
+    asyncio.create_task(auto_score_candidate_bg(tenant_id, str(candidate_id)))
 
     first_name = (parsed.get("name") or "").split()[0] if parsed.get("name") else ""
     greeting = f"Thanks {first_name}!" if first_name else "Thanks!"

@@ -56,6 +56,8 @@ interface Job {
   positions_count: number;
   description: string;
   created_at: string;
+  budget_min: number | null;
+  budget_max: number | null;
 }
 
 function usePublicJobs(search: string, location: string) {
@@ -230,6 +232,18 @@ export default function PublicJobsPage() {
       address: { '@type': 'PostalAddress', addressLocality: job.location || 'Remote', addressCountry: 'IN' },
     },
     directApply: true,
+    // 2026-09-02 gap-audit fix: baseSalary was never emitted at all.
+    // Only rendered when the tenant has genuinely set a real budget
+    // range on this requisition (budget_min/budget_max, both non-null)
+    // - many roles deliberately leave salary undisclosed, and a
+    // fabricated range would be worse than none at all.
+    ...(job.budget_min != null && job.budget_max != null ? {
+      baseSalary: {
+        '@type': 'MonetaryAmount',
+        currency: 'INR',
+        value: { '@type': 'QuantitativeValue', minValue: job.budget_min, maxValue: job.budget_max, unitText: 'YEAR' },
+      },
+    } : {}),
   }));
 
   return (
