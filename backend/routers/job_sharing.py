@@ -5,14 +5,28 @@ from typing import Optional
 from urllib.parse import urlencode, quote
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 import db
-from deps import Actor, get_actor
+from deps import Actor, get_actor, require_role
 from services.job_portals import get_all_portals, build_share_links, portal_count, INTEGRATION_LABELS
+from routers.p28_p32 import _require_valid_tenant_id
 
 router = APIRouter(prefix="/job-sharing", tags=["job-sharing"])
 # Matches the convention already used in routers/offers.py and routers/nda.py.
 BASE_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+
+
+def _dist_click_url(tenant_id: str, req_id: str, platform: str) -> str:
+    """Gap-audit fix (2026-09-02): job_shares.click_count/apply_count are
+    real, existing columns already read by /stats and /dashboard - never
+    written anywhere, since every auto-post's job_url pointed straight at
+    the real careers page with no tracking hop in between. Every auto-
+    posted link now routes through this redirect first (same "short
+    tracked link, then 307 to the real destination" shape as the
+    referral_links /r/{code} redirect already established) so a click is
+    a real, measurable event, not just "was it posted"."""
+    return f"{BASE_URL}/api/job-sharing/go/{tenant_id}/{req_id}/{platform}"
 
 # Real Facebook Graph API posting (not the sharer.php dialog trick, which
 # never lets a URL pre-fill post text - Meta anti-spam policy, unrelated
@@ -116,7 +130,7 @@ async def _post_to_facebook(tenant_id: str, req_id: str, posted_by: Optional[str
     loc = req["location"] or "Bengaluru"
     skills = list(req["skills_required"] or [])
     desc = (req["description"] or f"{title} opportunity")[:400]
-    job_url = f"{BASE_URL}/careers/{req_id}"
+    job_url = _dist_click_url(tenant_id, req_id, "facebook")
     message = f"We're hiring: {title}\n\nLocation: {loc} | {req['employment_type'] or 'Full-time'}\n{desc}\n\nSkills: {', '.join(skills[:8])}\n\nApply now: {job_url}"
 
     async with httpx.AsyncClient(timeout=20) as client:
@@ -241,7 +255,7 @@ async def _post_to_telegram(tenant_id: str, req_id: str, posted_by: Optional[str
     loc = req["location"] or "Bengaluru"
     skills = list(req["skills_required"] or [])
     desc = (req["description"] or f"{title} opportunity")[:400]
-    job_url = f"{BASE_URL}/careers/{req_id}"
+    job_url = _dist_click_url(tenant_id, req_id, "telegram")
     # Telegram's Markdown parse mode needs its own reserved characters
     # escaped, distinct from HTML/reportlab escaping used elsewhere in
     # this codebase — a literal '.', '-', '(' etc. in a job title breaks
@@ -418,7 +432,7 @@ async def _post_to_whatsapp_channel(tenant_id: str, req_id: str, posted_by: Opti
     loc = req["location"] or "Bengaluru"
     skills = list(req["skills_required"] or [])
     desc = (req["description"] or f"{title} opportunity")[:400]
-    job_url = f"{BASE_URL}/careers/{req_id}"
+    job_url = _dist_click_url(tenant_id, req_id, "whatsapp_channel")
     # WhatsApp's own native formatting (single *asterisk* bold, no Markdown
     # escaping needed the way Telegram's MarkdownV2 requires above).
     message = (
@@ -495,6 +509,115 @@ async def auto_distribute_on_open(tenant_id: str, req_id: str, posted_by: Option
         except Exception as e:
             results["whatsapp_channel"] = {"posted": False, "error": str(e)}
     return results
+
+
+# ─── Click tracking: the real write side of job_shares.click_count/apply_count ──
+@router.get("/go/{tenant_id}/{req_id}/{platform}")
+async def distribution_click(tenant_id: str, req_id: str, platform: str):
+    """Public, no-auth redirect - every auto-posted link now points here
+    instead of straight at the careers page (see _dist_click_url above).
+    Increments the most recent job_shares row for this (tenant, req,
+    platform) - fails open (no matching row, malformed platform) by
+    redirecting anyway rather than 404ing a real candidate mid-click.
+    tenant_id/req_id are plain path params, same as /public/jobs already
+    accepts tenant_id directly - click analytics carry no candidate PII,
+    so there's no token to resolve first."""
+    _require_valid_tenant_id(tenant_id)
+    try:
+        async with db.tenant_conn(tenant_id) as conn:
+            await conn.execute("""
+                UPDATE job_shares SET click_count = click_count + 1
+                WHERE id = (
+                    SELECT id FROM job_shares
+                    WHERE tenant_id=$1::uuid AND requisition_id=$2::uuid AND platform=$3
+                    ORDER BY posted_at DESC LIMIT 1
+                )
+            """, tenant_id, req_id, platform)
+    except Exception:
+        pass
+    return RedirectResponse(url=f"{BASE_URL}/careers/{req_id}?dsrc={platform}", status_code=307)
+
+
+# ─── Bulk distribution ──────────────────────────────────────────────────────
+@router.post("/distribute-all")
+async def distribute_all_open_jobs(actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    """Gap-audit fix (2026-09-02): every real auto-post action (the
+    Distribute tab's per-job buttons, the on-open hook) has always
+    operated on exactly one requisition at a time - a recruiter revisiting
+    distribution after a gap had to click through jobs one by one. Reuses
+    auto_distribute_on_open() as-is (already correctly skips a platform
+    already posted-to for a given job) across every real open+approved
+    requisition in one action."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        reqs = await conn.fetch("""
+            SELECT id, title FROM requisitions
+            WHERE tenant_id=$1 AND status='open' AND approval_status='approved' AND is_active IS NOT FALSE
+        """, actor.tenant_id)
+    results = []
+    for r in reqs:
+        job_results = await auto_distribute_on_open(actor.tenant_id, str(r["id"]), actor.user_id)
+        if job_results:
+            results.append({"requisition_id": str(r["id"]), "title": r["title"], "results": job_results})
+    return {"jobs_processed": len(reqs), "jobs_with_new_posts": len(results), "details": results}
+
+
+# ─── Distribution analytics: real click/apply counts, per job + tenant-wide ──
+@router.get("/analytics/{req_id}")
+async def distribution_analytics(req_id: str, actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT platform, COUNT(*) AS times_posted, SUM(click_count) AS clicks,
+                   SUM(apply_count) AS applies, MAX(posted_at) AS last_posted_at
+            FROM job_shares WHERE tenant_id=$1 AND requisition_id=$2
+            GROUP BY platform ORDER BY clicks DESC NULLS LAST
+        """, actor.tenant_id, req_id)
+    return [dict(r) for r in rows]
+
+
+@router.get("/analytics-summary")
+async def distribution_analytics_summary(actor: Actor = Depends(get_actor)):
+    """Tenant-wide, all-time, by platform - the real counterpart to the
+    already-existing /stats endpoint, extended with the apply-through
+    signal /stats never had."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch("""
+            SELECT platform, COUNT(*) AS shares, COUNT(DISTINCT requisition_id) AS jobs,
+                   SUM(click_count) AS clicks, SUM(apply_count) AS applies
+            FROM job_shares WHERE tenant_id=$1
+            GROUP BY platform ORDER BY clicks DESC NULLS LAST
+        """, actor.tenant_id)
+    return [dict(r) for r in rows]
+
+
+# ─── Scheduled re-post ("bump") config - opt-in, off by default ────────────
+class RebumpConfigIn(BaseModel):
+    auto_rebump_enabled: bool
+    rebump_after_days: int = 14
+
+
+@router.get("/rebump-config")
+async def get_rebump_config(actor: Actor = Depends(get_actor)):
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("SELECT * FROM job_distribution_config WHERE tenant_id=$1", actor.tenant_id)
+        if not row:
+            row = await conn.fetchrow(
+                "INSERT INTO job_distribution_config (tenant_id) VALUES ($1) RETURNING *", actor.tenant_id)
+    return dict(row)
+
+
+@router.put("/rebump-config")
+async def update_rebump_config(body: RebumpConfigIn, actor: Actor = Depends(require_role("admin", "super_admin", "manager"))):
+    if body.rebump_after_days < 1 or body.rebump_after_days > 90:
+        raise HTTPException(400, "rebump_after_days must be between 1 and 90")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO job_distribution_config (tenant_id, auto_rebump_enabled, rebump_after_days, updated_by, updated_at)
+            VALUES ($1,$2,$3,$4,now())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+              auto_rebump_enabled=$2, rebump_after_days=$3, updated_by=$4, updated_at=now()
+            RETURNING *
+        """, actor.tenant_id, body.auto_rebump_enabled, body.rebump_after_days, actor.user_id)
+    return dict(row)
 
 
 @router.get("/feed-info")

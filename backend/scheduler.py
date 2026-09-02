@@ -1726,6 +1726,75 @@ async def rediscovery_daily_catchup():
             logger.error(f"rediscovery_daily_catchup failed for tenant {tid}: {e}")
 
 
+async def rebump_stale_job_postings():
+    """Job Distribution gap-audit fix (2026-09-02): "no scheduled re-
+    posting" - a listing posts once, on the day it opens, and most free
+    boards rank by recency, so a role open for weeks quietly sinks with
+    no way to bump it. Weekly, per-tenant, opt-in (job_distribution_
+    config - defaults OFF, so an untouched tenant sees zero behavior
+    change). Re-posts to whichever connected auto-channel's own most
+    recent post for a still-open requisition is older than the tenant's
+    configured threshold, reusing the exact same _post_to_facebook/
+    _post_to_telegram/_post_to_whatsapp_channel functions a fresh post
+    already uses - no duplicate-blocking constraint exists on job_shares
+    (confirmed via a full constraint scan), so a second row per
+    (requisition, platform) is structurally fine and is exactly what a
+    re-bump means here. Standard tenant-loop pattern: list tenants via
+    system_conn(), then a real per-tenant tenant_conn() for the work,
+    try/except around each tenant AND each platform so one bad post
+    never blocks the rest."""
+    from routers.job_sharing import _post_to_facebook, _post_to_telegram, _post_to_whatsapp_channel
+    logger.info("scheduler: job posting re-bump")
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id FROM tenants")
+    except Exception as e:
+        logger.error(f"rebump_stale_job_postings: could not list tenants: {e}")
+        return
+
+    for t in tenants:
+        tid = str(t["id"])
+        try:
+            async with db.tenant_conn(tid) as conn:
+                cfg = await conn.fetchrow(
+                    "SELECT auto_rebump_enabled, rebump_after_days FROM job_distribution_config WHERE tenant_id=$1", tid)
+                if not cfg or not cfg["auto_rebump_enabled"]:
+                    continue
+                threshold_days = cfg["rebump_after_days"]
+                fb_connected = await conn.fetchval(
+                    "SELECT is_active FROM facebook_page_connections WHERE tenant_id=$1", tid)
+                tg_connected = await conn.fetchval(
+                    "SELECT is_active FROM telegram_channel_connections WHERE tenant_id=$1", tid)
+                wa_connected = await conn.fetchval(
+                    "SELECT is_active FROM whatsapp_channel_connections WHERE tenant_id=$1", tid)
+                if not (fb_connected or tg_connected or wa_connected):
+                    continue
+                reqs = await conn.fetch("""
+                    SELECT id FROM requisitions
+                    WHERE tenant_id=$1 AND status='open' AND approval_status='approved' AND is_active IS NOT FALSE
+                """, tid)
+                for r in reqs:
+                    rid = str(r["id"])
+                    for platform, connected, poster in (
+                        ("facebook", fb_connected, _post_to_facebook),
+                        ("telegram", tg_connected, _post_to_telegram),
+                        ("whatsapp_channel", wa_connected, _post_to_whatsapp_channel),
+                    ):
+                        if not connected:
+                            continue
+                        try:
+                            last_posted = await conn.fetchval(
+                                "SELECT posted_at FROM job_shares WHERE tenant_id=$1 AND requisition_id=$2 AND platform=$3 ORDER BY posted_at DESC LIMIT 1",
+                                tid, rid, platform)
+                            if last_posted and (datetime.now(timezone.utc) - last_posted).days < threshold_days:
+                                continue
+                            await poster(tid, rid, None)
+                        except Exception as e:
+                            logger.warning(f"rebump: {platform} failed for req {rid} (tenant {tid}): {e}")
+        except Exception as e:
+            logger.error(f"rebump_stale_job_postings failed for tenant {tid}: {e}")
+
+
 def start_scheduler():
     """Register and start all jobs.
 
@@ -1829,6 +1898,12 @@ def start_scheduler():
     # re-running this safe — only genuinely new matches produce a row/notification.
     scheduler.add_job(rediscovery_daily_catchup, "cron", hour=5, minute=0,
                       id="rediscovery_daily_catchup", replace_existing=True)
+    # Job Distribution gap-audit fix (2026-09-02): weekly, opt-in re-post
+    # of stale open-job listings on connected auto-channels. Monday 05:15,
+    # after the daily 05:00 rediscovery job, before the 09:00 Monday
+    # weekly KPI summary.
+    scheduler.add_job(rebump_stale_job_postings, "cron", day_of_week="mon", hour=5, minute=15,
+                      id="rebump_stale_job_postings", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

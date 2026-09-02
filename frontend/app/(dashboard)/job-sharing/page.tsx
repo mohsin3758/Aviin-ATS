@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, BarChart3, Facebook, Link2, Unlink, Send, Linkedin, Twitter, Mail, MessageCircle, Plug, Briefcase, MapPin } from 'lucide-react';
+import { Share2, ExternalLink, Copy, CheckCircle2, Search, Flag, XCircle, RotateCcw, Zap, AlertTriangle, BarChart3, Facebook, Link2, Unlink, Send, Linkedin, Twitter, Mail, MessageCircle, Plug, Briefcase, MapPin, Rocket, MousePointerClick, TrendingUp, Clock } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { useFetch, apiFetch } from '@/lib/useFetch';
@@ -114,6 +114,63 @@ function StatTile({ label, value, sub }: { label: string; value: string | number
   );
 }
 
+function DistributionPerformance() {
+  // Gap-audit fix (2026-09-02): real per-channel click/apply analytics -
+  // job_shares.click_count/apply_count already existed on the schema,
+  // just never written until the /job-sharing/go/{...} click-redirect
+  // was added. Shows genuine engagement, not just "was it posted".
+  const { data } = useFetch<any[]>('/job-sharing/analytics-summary');
+  const PLATFORM_LABELS: Record<string, string> = { facebook: 'Facebook', telegram: 'Telegram', whatsapp_channel: 'WhatsApp Channel', linkedin: 'LinkedIn', twitter: 'X / Twitter', whatsapp: 'WhatsApp (share)', email: 'Email' };
+  const rows = (data || []).filter(r => r.clicks > 0 || r.applies > 0 || r.shares > 0);
+  const totalClicks = rows.reduce((s, r) => s + (r.clicks || 0), 0);
+  const totalApplies = rows.reduce((s, r) => s + (r.applies || 0), 0);
+
+  return (
+    <Card>
+      <CardHeader><h2 className="font-semibold flex items-center gap-1.5"><TrendingUp className="h-4 w-4 text-gray-400" /> Distribution Performance</h2></CardHeader>
+      <CardContent>
+        <p className="text-xs text-gray-400 mb-3">
+          Real click-through and apply-through counts per channel — only tracked for the 3 auto-post channels (Facebook, Telegram, WhatsApp Channel), since only those route through a trackable link.
+        </p>
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <StatTile label="Total Clicks" value={totalClicks} />
+          <StatTile label="Applications from Clicks" value={totalApplies} />
+        </div>
+        {rows.length === 0 ? (
+          <div className="text-xs text-gray-400 text-center py-6">No tracked clicks yet — connect an auto-channel and distribute a job to start seeing real engagement here.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-gray-400 border-b">
+                  <th className="py-2 pr-3 font-medium">Channel</th>
+                  <th className="py-2 pr-3 font-medium">Posts</th>
+                  <th className="py-2 pr-3 font-medium">Jobs</th>
+                  <th className="py-2 pr-3 font-medium">Clicks</th>
+                  <th className="py-2 pr-3 font-medium">Applications</th>
+                  <th className="py-2 pr-3 font-medium">Conversion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r: any) => (
+                  <tr key={r.platform} className="border-b border-gray-50">
+                    <td className="py-2 pr-3 font-medium text-gray-800">{PLATFORM_LABELS[r.platform] || r.platform}</td>
+                    <td className="py-2 pr-3 text-gray-600">{r.shares}</td>
+                    <td className="py-2 pr-3 text-gray-600">{r.jobs}</td>
+                    <td className="py-2 pr-3 text-gray-700 font-semibold">{r.clicks || 0}</td>
+                    <td className="py-2 pr-3 text-gray-700 font-semibold">{r.applies || 0}</td>
+                    <td className="py-2 pr-3 text-gray-500">{r.clicks > 0 ? `${((r.applies / r.clicks) * 100).toFixed(0)}%` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function DashboardView() {
   const { data } = useFetch<any>('/job-sharing/dashboard');
   const [dCat, setDCat] = useState('');
@@ -136,6 +193,8 @@ function DashboardView() {
         <StatTile label="Open Issues" value={summary.open_issues} sub={summary.open_issues > 0 ? 'needs attention' : 'all clear'} />
         <StatTile label="Never Posted" value={summary.portals_never_posted} sub={`of ${summary.total_portals} portals`} />
       </div>
+
+      <DistributionPerformance />
 
       <Card>
         <CardHeader><h2 className="font-semibold">Integration Type</h2></CardHeader>
@@ -533,6 +592,60 @@ function WhatsAppChannelConnectionCard({ onStatusChange }: { onStatusChange: (co
 // registration out of the per-job Distribute flow into their own settings
 // area — connecting a Page/bot is a one-time setup action, not something
 // that belongs mixed into "post this specific job" every time.
+function RebumpConfigCard() {
+  // Gap-audit fix (2026-09-02): "no scheduled re-posting" - a listing
+  // posts once and sinks in a recency-ranked feed with no way to bump
+  // it. Real, opt-in, off-by-default weekly re-post to whichever
+  // connected auto-channel's post for a still-open job is older than
+  // the configured threshold.
+  const { data, refetch } = useFetch<any>('/job-sharing/rebump-config');
+  const [saving, setSaving] = useState(false);
+  const [days, setDays] = useState(14);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { if (data) setDays(data.rebump_after_days); }, [data]);
+
+  async function toggle(enabled: boolean) {
+    setSaving(true);
+    try {
+      await apiFetch('/job-sharing/rebump-config', { method: 'PUT', body: JSON.stringify({ auto_rebump_enabled: enabled, rebump_after_days: days }) });
+      refetch();
+      setSaved(true); setTimeout(() => setSaved(false), 1500);
+    } finally { setSaving(false); }
+  }
+
+  if (!data) return null;
+
+  return (
+    <Card>
+      <CardHeader><h2 className="font-semibold flex items-center gap-1.5"><Clock className="h-4 w-4 text-gray-400" /> Scheduled Re-post ("Bump")</h2></CardHeader>
+      <CardContent>
+        <p className="text-xs text-gray-500 mb-3">
+          Most free boards rank by recency — a role open for weeks quietly sinks. When enabled, every Monday a still-open job
+          gets re-posted to any connected auto-channel (Facebook / Telegram / WhatsApp Channel) whose most recent post for it
+          is older than the threshold below. Off by default.
+        </p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={!!data.auto_rebump_enabled} disabled={saving}
+              onChange={e => toggle(e.target.checked)} className="h-4 w-4" />
+            Auto re-post stale listings
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-600">
+            Re-post after
+            <input type="number" min={1} max={90} value={days} disabled={saving}
+              onChange={e => setDays(Number(e.target.value) || 14)}
+              onBlur={() => data.auto_rebump_enabled && toggle(true)}
+              className="w-14 border rounded px-1.5 py-1 text-center" />
+            days of no new post
+          </label>
+          {saved && <span className="text-xs text-green-600 font-medium">Saved</span>}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgStatus, onWaStatus }: any) {
   return (
     <div className="space-y-5">
@@ -552,6 +665,7 @@ function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgSta
       <FacebookConnectionCard onStatusChange={onFbStatus} />
       <TelegramConnectionCard onStatusChange={onTgStatus} />
       <WhatsAppChannelConnectionCard onStatusChange={onWaStatus} />
+      <RebumpConfigCard />
 
       {feedInfo && (
         <Card className="border-green-200 bg-green-50/40">
@@ -586,6 +700,59 @@ function IntegrationsTab({ feedInfo, feedCopied, onCopyFeed, onFbStatus, onTgSta
         </Card>
       )}
     </div>
+  );
+}
+
+function BulkDistributeAllCard({ connectedCount }: { connectedCount: number }) {
+  // Gap-audit fix (2026-09-02): every real distribution action operated
+  // on exactly one requisition at a time before this - a recruiter
+  // revisiting distribution after a gap had to click through jobs one
+  // by one. Calls the real backend bulk endpoint, which reuses
+  // auto_distribute_on_open() per job (already skips a platform already
+  // posted-to for that specific job).
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [err, setErr] = useState('');
+
+  async function run() {
+    if (connectedCount === 0) return;
+    if (!confirm('Distribute every currently open job to all connected auto-channels (Facebook / Telegram / WhatsApp Channel)? Jobs already posted to a channel are skipped for that channel.')) return;
+    setRunning(true); setErr(''); setResult(null);
+    try {
+      const res = await apiFetch('/job-sharing/distribute-all', { method: 'POST' });
+      setResult(res);
+    } catch (e: any) {
+      setErr(e.message || 'Bulk distribution failed');
+    } finally { setRunning(false); }
+  }
+
+  return (
+    <Card className="border-purple-200 bg-purple-50/40">
+      <CardContent className="flex items-center justify-between flex-wrap gap-3 py-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-lg bg-purple-100"><Rocket className="h-4 w-4 text-purple-700" /></div>
+          <div>
+            <div className="text-sm font-semibold text-gray-900">Distribute all open jobs</div>
+            <div className="text-xs text-gray-500 mt-0.5">
+              {connectedCount === 0
+                ? 'Connect at least one auto-channel (Facebook, Telegram, or WhatsApp Channel) on the Integrations tab first.'
+                : `Posts every currently open job to your ${connectedCount} connected auto-channel${connectedCount > 1 ? 's' : ''} in one action, skipping anything already posted.`}
+            </div>
+            {result && (
+              <div className="text-xs text-green-700 font-medium mt-1">
+                Done — {result.jobs_processed} open job{result.jobs_processed === 1 ? '' : 's'} checked, {result.jobs_with_new_posts} had a new post.
+              </div>
+            )}
+            {err && <div className="text-xs text-red-600 font-medium mt-1">{err}</div>}
+          </div>
+        </div>
+        <button onClick={run} disabled={running || connectedCount === 0}
+          className="flex items-center gap-1.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-40 rounded-lg px-4 py-2 shrink-0">
+          {running ? <Spinner size="sm" /> : <Rocket className="h-3.5 w-3.5" />}
+          {running ? 'Distributing…' : 'Distribute All'}
+        </button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -779,6 +946,7 @@ function JobSharingPageInner() {
       )}
 
       {tab === 'distribute' && (<>
+        <BulkDistributeAllCard connectedCount={connectedCount} />
         <Card>
           <CardHeader><h2 className="font-semibold flex items-center gap-1.5"><Briefcase className="h-4 w-4 text-gray-400" /> Choose a job</h2></CardHeader>
           <CardContent>

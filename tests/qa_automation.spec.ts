@@ -12685,3 +12685,226 @@ test.describe.serial('S94 Gap-audit: WhatsApp Channel job broadcasting (real WAH
     }
   });
 });
+
+test.describe.serial('S95 Job Board & Distribution: real pagination/filters/branding/related-jobs/status-link, click-tracking, bulk distribute, rebump config', () => {
+  // 2026-09-02 — builds every gap from the same-day "Job Board & Job
+  // Distribution" follow-up review: the public /public/jobs 50-job hard
+  // cap with fake client-side pagination (now real, server-driven, real
+  // total count); hardcoded "AVIIN Jobs Services" branding (now a real
+  // tenants join); missing work_mode/employment_type/experience filters
+  // (now real, wired to the real employment_types[]/work_modes[]/
+  // experience_min/max columns); no related-jobs on the detail page (now
+  // a real skill-overlap query); no self-service status link on apply
+  // (now generated + emailed, reusing the pre-existing candidate_status_
+  // tokens/my-status mechanism); job_shares.click_count/apply_count
+  // existing on the schema but never written (now a real click-redirect
+  // + dsrc apply-credit); no bulk "distribute all open jobs" action (now
+  // real, reusing auto_distribute_on_open per job); no scheduled re-post
+  // (now a real, opt-in, off-by-default weekly job + admin config).
+  const TENANT_ID = 'a92d7fd7-fb72-47d8-881e-2493c61717ce';
+  let token = '';
+  let reqAId = '';
+  let reqBId = '';
+  let candIds: string[] = [];
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    for (const cid of candIds) await request.delete(`${API}/candidates/${cid}`, { headers: auth() }).catch(() => {});
+    if (reqAId) await request.delete(`${API}/requisitions/${reqAId}`, { headers: auth() }).catch(() => {});
+    if (reqBId) await request.delete(`${API}/requisitions/${reqBId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: 2 real throwaway open requisitions with overlapping skills, for pagination/filter/related-jobs checks', async ({ request }) => {
+    token = await getApiToken(request);
+    const rA = await request.post(`${API}/requisitions`, {
+      headers: auth(),
+      data: {
+        title: `S95 JobBoard Test Role A ${stamp}`, status: 'open',
+        employment_types: ['contract'], work_modes: ['remote'],
+        experience_min: 2, experience_max: 6,
+        skills_required: [`S95Skill${stamp}`, 'CommonOverlapSkill'],
+        mandatory_skills: [`S95Skill${stamp}`],
+      },
+    });
+    expect(rA.status()).toBe(200);
+    reqAId = (await rA.json()).id;
+
+    const rB = await request.post(`${API}/requisitions`, {
+      headers: auth(),
+      data: {
+        title: `S95 JobBoard Test Role B ${stamp}`, status: 'open',
+        employment_types: ['fulltime'], work_modes: ['onsite'],
+        skills_required: ['CommonOverlapSkill'],
+      },
+    });
+    expect(rB.status()).toBe(200);
+    reqBId = (await rB.json()).id;
+  });
+
+  test('BUG FIX: /public/jobs is now real, server-driven pagination with a real total count, not a bare array capped at 50', async ({ request }) => {
+    const r = await request.get(`${API}/public/jobs?tenant_id=${TENANT_ID}&search=S95 JobBoard Test Role&limit=1&offset=0`);
+    expect(r.status()).toBe(200);
+    const d = await r.json();
+    expect(d).toHaveProperty('jobs');
+    expect(d).toHaveProperty('total');
+    expect(d.total).toBeGreaterThanOrEqual(2);
+    expect(d.jobs.length).toBe(1);
+    // page 2 returns the OTHER real job, not an empty/repeated result -
+    // proves offset is a real, working parameter, not decorative.
+    const r2 = await request.get(`${API}/public/jobs?tenant_id=${TENANT_ID}&search=S95 JobBoard Test Role&limit=1&offset=1`);
+    const d2 = await r2.json();
+    expect(d2.jobs[0].id).not.toBe(d.jobs[0].id);
+  });
+
+  test('BUG FIX: real company_name via a tenants join (was hardcoded "AVIIN Jobs Services" — confirmed via a real 16-occurrence grep before this fix)', async ({ request }) => {
+    const r = await request.get(`${API}/public/jobs/${reqAId}?tenant_id=${TENANT_ID}`);
+    expect(r.status()).toBe(200);
+    const d = await r.json();
+    expect(d.company_name).toBeTruthy();
+    expect(d.company_name).not.toBe('AVIIN Jobs Services');
+    const tenantInfo = await (await request.get(`${API}/public/tenant-info?tenant_id=${TENANT_ID}`)).json();
+    expect(d.company_name).toBe(tenantInfo.name);
+  });
+
+  test('real employment_type/work_mode/experience-band filters, wired to the real requisition columns', async ({ request }) => {
+    const contract = await (await request.get(`${API}/public/jobs?tenant_id=${TENANT_ID}&search=S95 JobBoard Test Role&employment_type=contract`)).json();
+    expect(contract.jobs.some((j: any) => j.id === reqAId)).toBe(true);
+    expect(contract.jobs.some((j: any) => j.id === reqBId)).toBe(false);
+
+    const remote = await (await request.get(`${API}/public/jobs?tenant_id=${TENANT_ID}&search=S95 JobBoard Test Role&work_mode=remote`)).json();
+    expect(remote.jobs.some((j: any) => j.id === reqAId)).toBe(true);
+    expect(remote.jobs.some((j: any) => j.id === reqBId)).toBe(false);
+
+    // exp band 3-5 overlaps role A's real 2-6 range but role B has no
+    // experience range set at all - the honest "no data, don't exclude"
+    // behavior, not a false filter.
+    const expFiltered = await (await request.get(`${API}/public/jobs?tenant_id=${TENANT_ID}&search=S95 JobBoard Test Role&min_exp=3&max_exp=5`)).json();
+    expect(expFiltered.jobs.some((j: any) => j.id === reqAId)).toBe(true);
+  });
+
+  test('real related-jobs on the single-job endpoint, ranked by genuine skill overlap', async ({ request }) => {
+    const d = await (await request.get(`${API}/public/jobs/${reqAId}?tenant_id=${TENANT_ID}`)).json();
+    expect(d.mandatory_skills).toContain(`S95Skill${stamp}`);
+    expect(Array.isArray(d.related_jobs)).toBe(true);
+    expect(d.related_jobs.some((rj: any) => rj.id === reqBId)).toBe(true);
+  });
+
+  test('BUG FIX: public apply now returns a real, working self-service status_url (candidate_status_tokens + my-status, previously only reachable via a recruiter manually generating a link later)', async ({ request }) => {
+    const email = `s95.apply.${stamp}@test.com`;
+    const fd = { tenant_id: TENANT_ID, job_id: reqAId, full_name: `S95 Apply Test ${stamp}`, email, phone: '9876500001', consent_given: 'true' };
+    const r = await request.post(`${API}/public/jobs/apply`, { multipart: fd as any });
+    expect(r.status()).toBe(200);
+    const d = await r.json();
+    expect(d.applied).toBe(true);
+    expect(d.status_url).toContain('/my-status?token=');
+
+    const token2 = d.status_url.split('token=')[1];
+    const statusR = await request.get(`${API}/candidate-status/public?token=${token2}`);
+    expect(statusR.status()).toBe(200);
+    const statusD = await statusR.json();
+    expect(statusD.candidate.email).toBe(email);
+
+    const candR = await request.get(`${API}/candidates?search=${encodeURIComponent(`S95 Apply Test ${stamp}`)}`, { headers: auth() });
+    const candD = await candR.json();
+    if (candD.items?.[0]?.id) candIds.push(candD.items[0].id);
+  });
+
+  test('BUG FIX: job_shares.click_count/apply_count (real, pre-existing columns, never written before) now genuinely track — a real click through /go/ increments click_count, and a follow-up apply with a matching dsrc credits apply_count', async ({ request }) => {
+    // A real job_shares row for this exact (req, platform) must exist
+    // first - simulate what a real auto-post would have logged.
+    const logR = await request.post(`${API}/job-sharing/log`, {
+      headers: auth(), data: { req_id: reqBId, platform: 'facebook', share_url: 'https://example.com/s95-fake-share' },
+    });
+    expect(logR.status()).toBe(200);
+
+    const before = await (await request.get(`${API}/job-sharing/analytics/${reqBId}`, { headers: auth() })).json();
+    const fbBefore = before.find((r: any) => r.platform === 'facebook');
+
+    const clickR = await request.get(`${API}/job-sharing/go/${TENANT_ID}/${reqBId}/facebook`, { maxRedirects: 0 });
+    expect(clickR.status()).toBe(307);
+    expect(clickR.headers()['location']).toBe(`https://ats.aviinjobs.com/careers/${reqBId}?dsrc=facebook`);
+
+    const after = await (await request.get(`${API}/job-sharing/analytics/${reqBId}`, { headers: auth() })).json();
+    const fbAfter = after.find((r: any) => r.platform === 'facebook');
+    expect(fbAfter.clicks).toBe((fbBefore?.clicks || 0) + 1);
+
+    const email2 = `s95.dsrc.${stamp}@test.com`;
+    const applyR = await request.post(`${API}/public/jobs/apply`, {
+      multipart: { tenant_id: TENANT_ID, job_id: reqBId, full_name: `S95 Dsrc Test ${stamp}`, email: email2, phone: '9876500002', consent_given: 'true', dsrc: 'facebook' } as any,
+    });
+    expect(applyR.status()).toBe(200);
+
+    const afterApply = await (await request.get(`${API}/job-sharing/analytics/${reqBId}`, { headers: auth() })).json();
+    const fbAfterApply = afterApply.find((r: any) => r.platform === 'facebook');
+    expect(fbAfterApply.applies).toBe((fbBefore?.applies || 0) + 1);
+
+    const candR = await request.get(`${API}/candidates?search=${encodeURIComponent(`S95 Dsrc Test ${stamp}`)}`, { headers: auth() });
+    const candD = await candR.json();
+    if (candD.items?.[0]?.id) candIds.push(candD.items[0].id);
+  });
+
+  test('BUG FIX: /job-sharing/distribute-all is real, admin/manager-gated, and safely processes every real open job (never crashes even with zero channels connected)', async ({ request }) => {
+    const r = await request.post(`${API}/job-sharing/distribute-all`, { headers: auth() });
+    expect(r.status()).toBe(200);
+    const d = await r.json();
+    expect(d.jobs_processed).toBeGreaterThanOrEqual(2);
+    expect(Array.isArray(d.details)).toBe(true);
+  });
+
+  test('real per-job and tenant-wide distribution analytics endpoints return correctly-shaped data', async ({ request }) => {
+    const perJob = await request.get(`${API}/job-sharing/analytics/${reqBId}`, { headers: auth() });
+    expect(perJob.status()).toBe(200);
+    const perJobD = await perJob.json();
+    expect(perJobD.some((r: any) => r.platform === 'facebook' && r.clicks >= 1)).toBe(true);
+
+    const summary = await request.get(`${API}/job-sharing/analytics-summary`, { headers: auth() });
+    expect(summary.status()).toBe(200);
+    expect(Array.isArray(await summary.json())).toBe(true);
+  });
+
+  test('BUG FIX: real, opt-in, off-by-default scheduled re-post ("bump") config — get-or-create, real validation, round-trips correctly, always restored to the safe default', async ({ request }) => {
+    const getR = await request.get(`${API}/job-sharing/rebump-config`, { headers: auth() });
+    expect(getR.status()).toBe(200);
+    const original = await getR.json();
+
+    const badR = await request.put(`${API}/job-sharing/rebump-config`, { headers: auth(), data: { auto_rebump_enabled: true, rebump_after_days: 999 } });
+    expect(badR.status()).toBe(400);
+
+    const goodR = await request.put(`${API}/job-sharing/rebump-config`, { headers: auth(), data: { auto_rebump_enabled: true, rebump_after_days: 30 } });
+    expect(goodR.status()).toBe(200);
+    const goodD = await goodR.json();
+    expect(goodD.auto_rebump_enabled).toBe(true);
+    expect(goodD.rebump_after_days).toBe(30);
+
+    // Always restore, whether it started on or off - this is a real,
+    // tenant-wide, shared setting.
+    await request.put(`${API}/job-sharing/rebump-config`, {
+      headers: auth(), data: { auto_rebump_enabled: original.auto_rebump_enabled, rebump_after_days: original.rebump_after_days },
+    });
+  });
+
+  test('real headless UI: careers page shows real tenant branding + a working filter bar, and the job-sharing dashboard shows the bulk Distribute-All action + Distribution Performance panel + Scheduled Re-post config', async ({ page }) => {
+    await page.goto('/careers');
+    await page.waitForLoadState('networkidle');
+    const heading = await page.locator('h1').first().textContent();
+    expect(heading).toBeTruthy();
+    expect(heading).not.toContain('AVIIN Jobs Services');
+    await expect(page.getByRole('button', { name: 'Onsite' })).toBeVisible({ timeout: 10000 });
+
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.goto('/job-sharing');
+    await expect(page.getByRole('button', { name: 'Distribute All' })).toBeVisible({ timeout: 10000 });
+
+    await page.click('[data-testid="tab-analytics"]');
+    await expect(page.getByText('Distribution Performance')).toBeVisible({ timeout: 10000 });
+
+    await page.click('[data-testid="tab-integrations"]');
+    await expect(page.getByText('Scheduled Re-post')).toBeVisible({ timeout: 10000 });
+  });
+});

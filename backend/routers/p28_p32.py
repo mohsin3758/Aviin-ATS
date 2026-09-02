@@ -357,27 +357,86 @@ def _require_valid_tenant_id(tenant_id: str) -> None:
 
 public_jobs_router = APIRouter(prefix="/public", tags=["public"])
 
+@public_jobs_router.get("/tenant-info")
+async def public_tenant_info(tenant_id: str):
+    """Gap-audit fix (2026-09-02): the real tenant name, for the public
+    careers pages to render instead of a hardcoded literal company name -
+    confirmed via grep as 16 separate hardcoded occurrences across the
+    2 public page components. A tiny, dedicated endpoint rather than
+    folding this into /jobs, since the header/branding needs a real
+    name even before any job list has loaded (or when there are zero
+    open jobs at all)."""
+    _require_valid_tenant_id(tenant_id)
+    async with _db_public.tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow("SELECT name FROM tenants WHERE id=$1::uuid", tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"name": row["name"]}
+
+
 @public_jobs_router.get("/jobs")
 async def public_list_jobs(
     tenant_id: str,
     search: Optional[str] = None,
     location: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    work_mode: Optional[str] = None,
+    min_exp: Optional[int] = None,
+    max_exp: Optional[int] = None,
+    offset: int = 0,
+    limit: int = 20,
 ):
-    """No-auth public job board endpoint — uses db.tenant_conn for RLS."""
+    """No-auth public job board endpoint — uses db.tenant_conn for RLS.
+
+    Gap-audit fixes (2026-09-02):
+    - Real, server-driven pagination: the old hardcoded LIMIT 50 with no
+      offset meant a tenant with 51+ real open requisitions silently lost
+      every job past #50, with the frontend's own client-side pagination
+      just re-slicing that already-truncated array. offset/limit are now
+      real query params (limit capped at 50/page, matching the old ceiling
+      as a sane per-page maximum, not a total-results ceiling), and the
+      response carries a real total count via COUNT(*) OVER() so the
+      frontend can build genuine page numbers instead of faking them.
+    - Real employment_type / work_mode / experience-band filters, wired
+      to the real employment_types[]/work_modes[]/experience_min/
+      experience_max columns (built 2026-08-24) - these existed on every
+      requisition already, just never exposed on the one page a
+      candidate could actually filter by them. A "department" filter
+      was in the original audit too, but genuinely no such column/
+      taxonomy exists anywhere on requisitions - not fabricated here.
+    - company_name via a real tenants join, replacing the hardcoded
+      "AVIIN Jobs Services" this endpoint's own callers were building
+      display strings around.
+    """
     _require_valid_tenant_id(tenant_id)
+    limit = max(1, min(limit, 50))
+    offset = max(0, offset)
     async with _db_public.tenant_conn(tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
                    r.skills_required, r.positions_count, r.created_at,
-                   r.budget_min, r.budget_max
+                   r.budget_min, r.budget_max, r.employment_types, r.work_modes,
+                   r.experience_min, r.experience_max, r.mandatory_skills,
+                   t.name AS company_name,
+                   COUNT(*) OVER() AS total_count
             FROM requisitions r
+            JOIN tenants t ON t.id = r.tenant_id
             WHERE r.tenant_id=$1::uuid AND r.status='open' AND r.approval_status='approved'
               AND r.is_active IS NOT FALSE
               AND ($2::text IS NULL OR lower(r.title) LIKE '%'||lower($2)||'%')
               AND ($3::text IS NULL OR lower(r.location) LIKE '%'||lower($3)||'%')
-            ORDER BY r.created_at DESC LIMIT 50
-        """, tenant_id, search, location)
-    return [dict(r) for r in rows]
+              AND ($4::text IS NULL OR $4 = ANY(r.employment_types) OR r.employment_type = $4)
+              AND ($5::text IS NULL OR $5 = ANY(r.work_modes) OR r.work_mode = $5)
+              AND ($6::int IS NULL OR r.experience_max IS NULL OR r.experience_max >= $6)
+              AND ($7::int IS NULL OR r.experience_min IS NULL OR r.experience_min <= $7)
+            ORDER BY r.created_at DESC
+            OFFSET $8 LIMIT $9
+        """, tenant_id, search, location, employment_type, work_mode, min_exp, max_exp, offset, limit)
+    total = rows[0]["total_count"] if rows else 0
+    jobs = [dict(r) for r in rows]
+    for j in jobs:
+        j.pop("total_count", None)
+    return {"jobs": jobs, "total": total, "offset": offset, "limit": limit}
 
 @public_jobs_router.get("/jobs/feed.xml")
 async def public_jobs_feed(tenant_id: str):
@@ -394,6 +453,7 @@ async def public_jobs_feed(tenant_id: str):
     import xml.sax.saxutils as sx
     base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
     async with _db_public.tenant_conn(tenant_id) as conn:
+        tenant_name = await conn.fetchval("SELECT name FROM tenants WHERE id=$1::uuid", tenant_id) or "AVIIN Jobs Services"
         rows = await conn.fetch("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
                    r.skills_required, r.created_at, t.name AS company_name
@@ -414,16 +474,20 @@ async def public_jobs_feed(tenant_id: str):
     <date>{r['created_at'].strftime('%a, %d %b %Y %H:%M:%S GMT')}</date>
     <referencenumber>{r['id']}</referencenumber>
     <url><![CDATA[{base}/careers/{r['id']}]]></url>
-    <company><![CDATA[{r['company_name'] or 'AVIIN Jobs Services'}]]></company>
+    <company><![CDATA[{r['company_name'] or tenant_name}]]></company>
     <city><![CDATA[{r['location'] or ''}]]></city>
     <country>IN</country>
     <description><![CDATA[{desc}\n\nSkills: {skills}]]></description>
     <jobtype><![CDATA[{r['employment_type'] or 'Full-time'}]]></jobtype>
   </job>""")
 
+    # Gap-audit fix (2026-09-02): publisher name was hardcoded regardless
+    # of which tenant's feed this is - real bug for a multi-tenant
+    # deployment, same root cause as the frontend's own hardcoded
+    # branding fixed in the same pass.
     xml_body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <source>
-  <publisher>AVIIN Jobs Services</publisher>
+  <publisher>{esc(tenant_name)}</publisher>
   <publisherurl><![CDATA[{base}/careers]]></publisherurl>
   <lastBuildDate>{__import__('datetime').datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}</lastBuildDate>
 {chr(10).join(jobs_xml)}
@@ -437,20 +501,47 @@ async def public_get_job(job_id: str, tenant_id: str):
     (careers/[jobId]/page.tsx) - used both by generateMetadata (so
     Facebook/LinkedIn/Twitter's crawlers, which don't execute JS, see a
     real title/description in the page's initial HTML) and by the
-    client-rendered apply UI on the same page."""
+    client-rendered apply UI on the same page.
+
+    Gap-audit fixes (2026-09-02): company_name (real tenant join, see
+    public_list_jobs above for the same fix), employment_types/
+    work_modes/experience_min/max/mandatory_skills exposed (were already
+    real, structured data - just never selected here), and a real
+    "related jobs" list - up to 4 other genuinely open roles at this
+    tenant that share at least one required skill with this one,
+    excluding itself, ranked by how many skills they share. No AI/
+    embedding call - a plain array-overlap COUNT, honest and free."""
     _require_valid_tenant_id(tenant_id)
     async with _db_public.tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
                    r.skills_required, r.positions_count, r.created_at,
-                   r.budget_min, r.budget_max
+                   r.budget_min, r.budget_max, r.employment_types, r.work_modes,
+                   r.experience_min, r.experience_max, r.mandatory_skills,
+                   t.name AS company_name
             FROM requisitions r
+            JOIN tenants t ON t.id = r.tenant_id
             WHERE r.id=$1::uuid AND r.tenant_id=$2::uuid AND r.status='open' AND r.approval_status='approved'
               AND r.is_active IS NOT FALSE
         """, job_id, tenant_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Job not found or closed")
-    return dict(row)
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found or closed")
+        related_rows = await conn.fetch("""
+            SELECT r.id, r.title, r.location, r.employment_type,
+                   cardinality(ARRAY(SELECT unnest(r.skills_required) INTERSECT SELECT unnest($2::text[]))) AS overlap
+            FROM requisitions r
+            WHERE r.tenant_id=$3::uuid AND r.status='open' AND r.approval_status='approved'
+              AND r.is_active IS NOT FALSE AND r.id <> $1::uuid
+              AND r.skills_required && $2::text[]
+            ORDER BY overlap DESC, r.created_at DESC
+            LIMIT 4
+        """, job_id, list(row["skills_required"] or []), tenant_id)
+    out = dict(row)
+    out["related_jobs"] = [
+        {"id": str(r["id"]), "title": r["title"], "location": r["location"], "employment_type": r["employment_type"]}
+        for r in related_rows
+    ] if row["skills_required"] else []
+    return out
 
 
 @public_jobs_router.post("/jobs/apply")
@@ -465,6 +556,7 @@ async def public_apply(
     experience_months: int = Form(0),
     consent_given: bool = Form(False),
     ref: Optional[str] = Form(None),
+    dsrc: Optional[str] = Form(None),
     resume: Optional[UploadFile] = File(None),
 ):
     """No-auth public job application — uses db.tenant_conn for RLS.
@@ -627,6 +719,63 @@ async def public_apply(
                     await claim_ownership(
                         conn, tenant_id, cand['id'], str(ref_row['referrer_user_id']),
                         referrer_email, 'job_share_link')
+
+        # Gap-audit fix (2026-09-02): credit the distribution channel
+        # (job_shares.apply_count) that led to this application, when the
+        # candidate arrived via a tracked auto-post click (the ?dsrc=
+        # query param the /job-sharing/go/{...} redirect appends). Same
+        # "most recent share row for this platform" resolution the click
+        # counter itself uses - best-effort, never blocks the real
+        # application if it can't find a matching row.
+        if dsrc:
+            try:
+                await conn.execute("""
+                    UPDATE job_shares SET apply_count = apply_count + 1
+                    WHERE id = (
+                        SELECT id FROM job_shares
+                        WHERE tenant_id=$1::uuid AND requisition_id=$2::uuid AND platform=$3
+                        ORDER BY posted_at DESC LIMIT 1
+                    )
+                """, tenant_id, job_id, dsrc)
+            except Exception:
+                pass
+
+        # Gap-audit fix (2026-09-02): give every real applicant a genuine
+        # self-service way to check their own status afterward, instead
+        # of only ever being reachable if a recruiter later manually
+        # generates and sends the link (the pre-existing, real, working
+        # my-status page/candidate_status_tokens mechanism - reused
+        # as-is, not rebuilt). Best-effort on both the token write and
+        # the confirmation email - neither can ever block a real
+        # application from succeeding.
+        status_url = None
+        try:
+            import secrets as _secrets
+            status_token = _secrets.token_urlsafe(32)
+            await conn.execute("""
+                INSERT INTO candidate_status_tokens (tenant_id, candidate_id, token)
+                VALUES ($1::uuid, $2, $3) ON CONFLICT DO NOTHING
+            """, tenant_id, cand['id'], status_token)
+            base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+            status_url = f"{base}/my-status?token={status_token}"
+        except Exception:
+            status_url = None
+
+        if status_url and email:
+            try:
+                from routers.phase3 import send_email as _send_status_email
+                import asyncio as _asyncio2
+                tenant_name = await conn.fetchval("SELECT name FROM tenants WHERE id=$1::uuid", tenant_id)
+                _asyncio2.create_task(_send_status_email(
+                    email,
+                    f"Application received — {tenant_name or 'your application'}",
+                    f"Thanks for applying! We've received your application.\n\n"
+                    f"You can check your application status any time at:\n{status_url}\n\n"
+                    f"This link stays valid for 30 days.",
+                ))
+            except Exception:
+                pass
+
         # Low-severity finding (2026-08-11 audit): returning the real
         # internal candidate_id here, and always with the same shape
         # whether the email matched an existing candidate or created a
@@ -634,5 +783,5 @@ async def public_apply(
         # is already a candidate and learn their internal id. The
         # frontend never reads candidate_id from this response (confirmed
         # via grep) — dropped from the public payload entirely.
-    return {"applied": True}
+    return {"applied": True, "status_url": status_url}
 

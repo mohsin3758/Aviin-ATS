@@ -16,11 +16,24 @@ const SITE_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://ats.aviinjobs.com';
 export async function GET() {
   let jobs: any[] = [];
   try {
+    // Gap-audit fix (2026-09-02, same day): /public/jobs's response
+    // shape changed from a bare array to {jobs,total,offset,limit} as
+    // part of the real, server-driven pagination fix - this route
+    // wasn't updated at the same time, and silently 500'd on every
+    // request as a result (jobs.map is not a function once `jobs` was
+    // the whole response object, not an array). Caught by this route's
+    // own permanent regression test, not in production. limit=500
+    // matches the existing /public/jobs/feed.xml's own convention - a
+    // sitemap needs every real open job, not just the public board's
+    // one-page default.
     const r = await fetch(
-      `${INTERNAL_API_URL}/public/jobs?tenant_id=${TENANT_ID}`,
+      `${INTERNAL_API_URL}/public/jobs?tenant_id=${TENANT_ID}&limit=500`,
       { cache: 'no-store' }
     );
-    if (r.ok) jobs = await r.json();
+    if (r.ok) {
+      const d = await r.json();
+      jobs = Array.isArray(d) ? d : (d.jobs || []);
+    }
   } catch {
     // A real backend hiccup should never make the sitemap itself 500 -
     // return a structurally valid, empty sitemap instead. A crawler

@@ -20058,3 +20058,151 @@ item with genuinely nothing to build on," a materially larger, separate
 undertaking (a real browser-extension package, its own build/distribution
 pipeline) than any of the 9 items closed today, deliberately left for
 its own future, dedicated pass rather than folded in here.
+
+## Job Board & Job Distribution: all 11 gaps from the same-day follow-up review built, verified, and closed, plus a real regression caught by the review's own test suite, 2026-09-02
+Direct build of the "Job Board & Distribution Gaps" report published earlier
+the same day - user asked to build every finding, real bugs and missing
+features alike, not pick a subset. All 6 Job Board items and all 5 Job
+Distribution items closed in one pass.
+
+**Job Board (`backend/routers/p28_p32.py`, `frontend/app/(public)/careers/*`)**:
+- **Real, server-driven pagination** - `public_list_jobs()`'s hard
+  `LIMIT 50` with no offset (any tenant with 51+ real open roles silently
+  lost everything past #50, with the frontend re-slicing an already-
+  truncated array) replaced with real `offset`/`limit` params (capped at
+  50/page) and a real total count via `COUNT(*) OVER()`. Response shape
+  changed from a bare array to `{jobs, total, offset, limit}`.
+- **Real tenant branding** - a `tenants` join replaces the hardcoded
+  "AVIIN Jobs Services" literal (confirmed via grep as 16 separate
+  occurrences before this fix) across `public_list_jobs`,
+  `public_get_job`, `public_jobs_feed`, and both careers page components;
+  a new `GET /public/tenant-info` endpoint serves the name for the page
+  header even before any job has loaded.
+- **Real Work Mode / Employment Type / Experience-band filters** - wired
+  to the real `employment_types[]`/`work_modes[]`/`experience_min`/
+  `experience_max` columns (built 2026-08-24) - existed on every
+  requisition already, just never exposed on the public board. A
+  "Department" filter was in the original finding too, but genuinely no
+  such column/taxonomy exists on `requisitions` - not fabricated.
+- **Real "Related Openings"** on the per-job detail page - up to 4 other
+  genuinely open roles sharing at least one required skill, ranked by
+  overlap count, plain SQL `INTERSECT` cardinality, no AI/embedding call.
+- **Self-service application status link** - `public_apply()` now
+  generates a real `candidate_status_tokens` row and returns/emails a
+  working `/my-status?token=...` link (reusing the pre-existing,
+  already-built status-portal mechanism, not rebuilt) - previously only
+  reachable if a recruiter manually generated one later.
+- **Expanded social share** - LinkedIn/X unchanged, WhatsApp and
+  copy-link added (WhatsApp notably absent before despite this project's
+  own extensive WhatsApp infrastructure elsewhere).
+- Bonus, same root cause as the branding fix: `TalentCommunitySignup`
+  now maps the visitor's real active filters onto the REAL, already-
+  existing `talent_community.job_categories`/`preferred_location`
+  columns (not a fabricated new field the backend would silently ignore).
+
+**Job Distribution (`backend/routers/job_sharing.py`,
+`frontend/app/(dashboard)/job-sharing/page.tsx`)**:
+- **Real click/apply tracking** - `job_shares.click_count`/
+  `apply_count` were real, pre-existing, already-read-by-`/stats`
+  columns that nothing had ever written. New `GET /job-sharing/go/
+  {tenant_id}/{req_id}/{platform}` (public, no-auth) redirect - every
+  auto-posted `job_url` (Facebook/Telegram/WhatsApp Channel) now routes
+  through it instead of the raw careers URL, incrementing `click_count`
+  and forwarding `?dsrc={platform}` into the eventual apply, which
+  credits `apply_count` on the matching share row. Same "short tracked
+  link, then 307" shape as the existing `referral_links` `/r/{code}`
+  redirect.
+- **Bulk "Distribute All Open Jobs"** - `POST /job-sharing/distribute-all`
+  (admin/manager-gated) loops every real open+approved requisition and
+  reuses `auto_distribute_on_open()` as-is (already skips a platform
+  already posted-to for a given job) - previously every action operated
+  on exactly one job at a time.
+- **Scheduled re-post ("bump")** - `sql/106_job_distribution_config.sql`
+  (real, opt-in, off-by-default per-tenant config, matching
+  `auto_assign_config`'s exact shape/ownership) + a new weekly
+  `rebump_stale_job_postings()` scheduler job (Monday 05:15 IST) that
+  re-posts to any connected auto-channel whose most recent post for a
+  still-open job is older than the configured threshold. Confirmed via a
+  full constraint scan that `job_shares` has no unique constraint at
+  all, so a second row per (requisition, platform) for a re-bump is
+  structurally safe, not blocked by `ON CONFLICT`.
+- **Real distribution analytics** - `GET /job-sharing/analytics/{req_id}`
+  (per-job) and `/analytics-summary` (tenant-wide), both real click/
+  apply/conversion numbers, surfaced as a new "Distribution Performance"
+  panel on the existing Analytics tab.
+- **Google-indexing visibility and native LinkedIn/Naukri auto-post**
+  both confirmed still genuinely unbuildable without real, unavailable
+  credentials (Search Console OAuth; a paid/partner posting API,
+  respectively) - explicitly not faked, matching this project's own
+  established precedent for exactly this class of external blocker.
+
+**A real regression found and fixed via the review's own new permanent
+test suite, not shipped to production undetected**: `frontend/app/
+jobs-sitemap.xml/route.ts` (built earlier the same day, in the "gap-audit
+build" session) called `/public/jobs` and did `jobs.map(...)` directly
+against the response - broke the moment the pagination fix changed that
+response from a bare array to `{jobs,total,offset,limit}`, throwing a
+real 500 on every request. Caught by re-running the OLDER S90 suite
+(built for the sitemap's own original 404 fix) as part of this session's
+own regression sweep - not assumed safe just because the new S95 suite
+passed. Fixed by unwrapping the new shape (defensively handling both, in
+case of a stale cached response) and raising the requested `limit` to
+500 (matching `/public/jobs/feed.xml`'s own established convention) so
+the sitemap includes every real open job, not just the public board's
+one-page default. A real file-ownership snag hit during this specific
+deploy, not seen elsewhere in the session: `frontend/app/jobs-sitemap.xml/`
+and its `route.ts` were owned by `root` (from whatever process created
+them earlier the same day) - a plain `cp` failed with Permission Denied;
+resolved with `sudo cp` + `sudo chown dev:dev` (the `dev` user's real,
+established `sudo` group membership, documented in this project's own
+24/7-operation notes), not by working around it another way.
+
+**A real "which git state is actually live" discovery made before any
+deploy, disclosed rather than silently risked**: the VPS's git working
+tree showed ~50 files as locally modified relative to its own checked-
+out HEAD (`916d30d`) - investigated properly rather than blindly
+overwritten, since several of those files (`careers/page.tsx`,
+`job-sharing/page.tsx`, `p28_p32.py`, `job_sharing.py`) were files this
+session was about to edit too. Cross-checked via `md5sum` against this
+local repo's own `git show HEAD:<file>` and confirmed byte-identical -
+the VPS's real, live file CONTENT already matched local HEAD (`226a8598`,
+"Gap-audit build, part 5"), a later commit than the VPS's own stale git
+ref (`916d30d`) had ever been `git pull`ed to. The VPS's "modified" flags
+were purely a stale-git-metadata symptom, not real content drift - safe
+to proceed on the local repo as the correct baseline, confirmed rather
+than assumed.
+
+Verified for real end-to-end throughout, not code review: every backend
+endpoint hit directly via curl against the live production domain (real
+pagination/total-count round-trip, real employment_type/work_mode/
+experience-band filtering, real related-jobs skill-overlap ranking, a
+genuine public apply producing a real status_url that resolves via
+`/candidate-status/public`, a real click through `/go/{...}` incrementing
+`click_count` with the correct 307 target, a real follow-up apply with
+`dsrc` crediting `apply_count`, `/distribute-all` safely processing all 4
+real open requisitions with zero channels connected, both analytics
+endpoints, and the rebump-config's real validation + round-trip, always
+restored to its safe default). Two real headless-browser passes
+(screenshots visually inspected, not just locator-checked) confirmed the
+live careers list page (real "Acme Staffing India" branding, working
+filter chips, all 3 real jobs, 4 real share buttons per card) and the
+live job detail page (real branding, real "3-8 yrs experience" range,
+real Related Openings section). A third confirmed the job-sharing
+dashboard's 3 new UI pieces (Distribute All card, Distribution
+Performance panel, Scheduled Re-post config) all render correctly.
+
+All throwaway/incidental test data cleaned up: 2 real throwaway
+candidates from manual verification (deleted via the real DELETE API), a
+genuinely stray "QA Diag S61 Role" test requisition discovered still live
+on the public careers board from an earlier, unrelated diagnostic script
+this same session (soft-deleted), and the `click_count`/`apply_count`
+bumped on a REAL client's real requisition during manual verification
+(reset back to 0/0 directly, since injecting fake analytics into a real
+client's job stats would be a real, if small, data-integrity mistake).
+New permanent "S95" suite (11 tests) added to `qa_automation.spec.ts`,
+run clean twice in isolation (11/11 both times) plus as part of a
+broader 68-test regression sweep across every suite touching the
+modified files (S1/S22/S47/S60/S71/S78/S80/S81/S90/S94/S95) - the one
+real failure found (S90's sitemap test) was investigated, root-caused,
+fixed, redeployed, and reconfirmed clean, not dismissed. Zero-token
+audit: `CONFIRMED CLEAN` (435 files, 0 external API refs).
