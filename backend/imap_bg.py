@@ -12,6 +12,7 @@ import base64
 import asyncio
 import asyncpg
 import json
+import fcntl
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
@@ -19,6 +20,43 @@ from datetime import datetime, timezone
 _running = False
 _threads = []
 DB_URL = None
+
+# REAL BUG FIX (2026-09-03): the backend runs `uvicorn --workers 2`
+# (Dockerfile) — start() below already correctly guards against being
+# called twice WITHIN one process (the `if _running: return` check, since
+# app.py genuinely calls it from 2 separate startup hooks — a lifespan
+# handler and a legacy @app.on_event('startup') one, both harmless
+# thanks to that guard), but `_running` is plain process-local module
+# state, invisible ACROSS the 2 separate worker processes uvicorn
+# actually runs. Confirmed live: every real IMAP log line — "N account(s)
+# — M emails need attachment scan", every "IDLE listener starting"/"IDLE
+# active" line — appeared genuinely duplicated, one full independent set
+# per worker. This means 2 completely independent sets of IDLE listener
+# threads have been running against the SAME real mailboxes the whole
+# time, each capable of independently detecting and processing the SAME
+# new email — a real, direct, plausible contributor to this project's own
+# repeatedly-documented duplicate-candidate problem, not just wasted
+# connections. Matches the IDENTICAL architectural gap already found and
+# fixed once in this exact codebase for scheduler.py's cron jobs — same
+# real fix here: a plain, non-blocking flock on a fixed path (a separate
+# lock file from scheduler.py's own, since these are logically
+# independent subsystems that happen to share the same cross-worker-
+# single-owner need) — whichever worker wins owns IMAP sync for the
+# container's lifetime; the losing worker still serves HTTP normally, it
+# just never starts a second, redundant set of IMAP listener threads.
+_IMAP_LOCK_PATH = "/tmp/aviin_imap_bg.lock"
+_imap_lock_fh = None
+
+
+def _acquire_imap_lock() -> bool:
+    global _imap_lock_fh
+    try:
+        fh = open(_IMAP_LOCK_PATH, "w")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _imap_lock_fh = fh  # keep open for process lifetime
+        return True
+    except (IOError, OSError):
+        return False
 
 
 def _dec(h):
@@ -155,7 +193,13 @@ async def _do_sync_folder_full(acc, folder):
                     # Pending". Collecting tasks and awaiting them via gather()
                     # below actually runs them before the loop closes.
                     if folder == 'INBOX':
-                        resume_tasks.append(_auto_process_resume(conn, acc, uid_s, folder, msg, att_meta))
+                        # No longer passed this function's own `conn` - see
+                        # _auto_process_resume's docstring: multiple of
+                        # these can genuinely run concurrently via the
+                        # gather() below, and a single shared asyncpg
+                        # connection cannot safely serve more than one
+                        # in-flight query at a time.
+                        resume_tasks.append(_auto_process_resume(acc, uid_s, folder, msg, att_meta))
             except Exception as ex:
                 print(f'[IMAP] Sync err uid={uid}: {ex}')
         M.logout()
@@ -173,10 +217,39 @@ async def _do_sync_folder_full(acc, folder):
 
 
 
-async def _auto_process_resume(conn, acc, uid_s, folder, msg, att_meta):
-    """Background coroutine — Phase 1-5 pipeline for new INBOX email with resume."""
+async def _auto_process_resume(acc, uid_s, folder, msg, att_meta):
+    """Background coroutine — Phase 1-5 pipeline for new INBOX email with resume.
+
+    REAL BUG FIX (2026-09-03): this used to receive the CALLER's own
+    shared connection (_do_sync_folder_full's single `conn`, opened once
+    for the whole folder-sync run) and pass it straight through to
+    process_email_for_resume() — but _do_sync_folder_full schedules one
+    of these as a real asyncio Task PER new resume-bearing email in the
+    same sync batch (via resume_tasks.append(...)), then runs them all
+    CONCURRENTLY via asyncio.gather(*resume_tasks). A single asyncpg
+    Connection cannot safely serve more than one in-flight query at a
+    time — confirmed empirically, not assumed: firing 2 real concurrent
+    queries against one real shared connection reproduces a genuine
+    `InterfaceError: cannot perform operation: another operation is in
+    progress` on the second one, every time. Root-caused while
+    investigating a real, live report (a Bhagender.S resume ending up
+    linked to a completely unrelated, real "Profile Shared" system-
+    notification email that happened to sync in the same batch) — this
+    exact failure mode was silently swallowed by this function's own
+    broad try/except below, meaning ANY sync batch containing 2+ new
+    resume-bearing emails together has been silently losing (or, per the
+    original report, potentially cross-linking) resume processing for
+    all but whichever task happened to win the race for the shared
+    connection, since this code was written. Fixed by giving this
+    function its OWN, dedicated connection - matching the same "open a
+    fresh connection per concurrently-scheduled item" discipline already
+    established elsewhere in this exact codebase (resume_intake_service.
+    py's process_pending_batch: "Opens its OWN db.tenant_conn() per item
+    rather than sharing one connection for the whole batch")."""
     import os
+    conn = None
     try:
+        conn = await asyncpg.connect(DB_URL)
         from services.resume_intake_service import is_resume_attachment, process_email_for_resume
 
         has_resume = any(
@@ -229,6 +302,9 @@ async def _auto_process_resume(conn, acc, uid_s, folder, msg, att_meta):
             print(f'[ResumeIntake] {result.get("status","?")} uid={uid_s}')
     except Exception as ex:
         print(f'[ResumeIntake] Error uid={uid_s}: {ex}')
+    finally:
+        if conn:
+            await conn.close()
 
 def _run_sync_folder(acc, folder):
     loop = asyncio.new_event_loop()
@@ -502,6 +578,13 @@ async def _count_unscanned():
 def start(db_url: str, interval: int = 10):
     global _running, _threads, DB_URL
     if _running:
+        return
+    # Cross-worker guard — see the module-level comment above. Only the
+    # worker that wins this non-blocking flock actually starts any IMAP
+    # sync thread; the loser returns immediately and stays a plain, fully
+    # functional HTTP-serving worker with zero IMAP activity of its own.
+    if not _acquire_imap_lock():
+        print('[IMAP] another worker already owns the IMAP sync lock — skipping in this worker')
         return
     DB_URL = db_url
     _running = True

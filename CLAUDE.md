@@ -21185,3 +21185,119 @@ duplicate-candidate merges, the 8 "Unknown Candidate" renames, the 4
 `imap_msg_id` nulls, the 6 test-message soft-deletes) were applied via
 real, established APIs — never raw SQL where an API existed — and
 independently re-verified via direct API/DB reads after each change.
+
+## Root cause of the imap_msg_id mismatch closed: 2 real bugs found and fixed in imap_bg.py, 2026-09-03
+Direct follow-up to the entry above — that entry fixed the affected DATA
+rows but explicitly left the underlying mechanism as a disclosed,
+unresolved gap. Investigated further and found 2 real, previously-
+undiscovered, significant bugs in `backend/imap_bg.py`, both verified via
+direct empirical reproduction (not assumed from reading the code alone)
+and both fixed.
+
+**Bug 1 — a real connection-sharing race in `_auto_process_resume()`.**
+`_do_sync_folder_full(acc, folder)` opens ONE `asyncpg.connect()` for the
+whole folder-sync run, then — for the INBOX folder — schedules one
+`_auto_process_resume(conn, ...)` coroutine PER new resume-bearing email
+found in that same sync batch via `resume_tasks.append(...)`, and runs
+all of them CONCURRENTLY via `await asyncio.gather(*resume_tasks,
+return_exceptions=True)`. Every one of those concurrent tasks was passed
+the SAME shared connection. A single `asyncpg.Connection` cannot safely
+serve more than one in-flight query at a time — confirmed empirically
+via a real reproduction script (`/tmp/verify_conn_race.py`, run inside
+the live `aviin_backend` container): firing 2 real concurrent
+`conn.fetchrow()` calls against one shared connection via
+`asyncio.gather()` succeeds on the first and raises a genuine
+`InterfaceError: cannot perform operation: another operation is in
+progress` on the second, every time. This directly explains the
+originally-reported symptom (Bhagender.S's resume ending up linked to an
+unrelated "Profile Shared" system-notification email that happened to
+sync in the same IMAP batch) — the failure was silently swallowed by
+this function's own broad `except Exception` handler, meaning ANY sync
+batch containing 2+ new resume-bearing emails together has been silently
+losing (or, per the original report, potentially cross-linking) resume
+processing for all but whichever task happened to win the race for the
+shared connection, since this code was written.
+
+Fixed by removing the `conn` parameter entirely and having the function
+open its own dedicated `asyncpg.connect(DB_URL)` right after entry, with
+a `finally: await conn.close()` — matching the exact discipline already
+established elsewhere in this codebase for this precise situation
+(`resume_intake_service.py`'s `process_pending_batch()`, whose own
+comment already states: "Opens its OWN db.tenant_conn() per item rather
+than sharing one connection for the whole batch"). The one real call
+site (`_do_sync_folder_full`) was updated to stop passing `conn`.
+Verified for real: a second reproduction script
+(`/tmp/verify_fix_no_race.py`) confirmed the identical concurrent-task
+pattern, each now opening its own connection, both succeeded cleanly
+with correct, distinct real candidate results ("Shivani S", "Ashok.K")
+and zero exception. `inspect.signature()` confirmed the deployed
+function's real signature no longer includes `conn`.
+
+**Bug 2 — `imap_bg.start()` was launching a full, duplicate set of real
+IMAP sync threads once per uvicorn worker process.** `backend/Dockerfile`
+runs `uvicorn app:app ... --workers 2` — any FastAPI startup/lifespan
+code genuinely runs once PER WORKER PROCESS, a recurring architectural
+gap in this codebase (already found and fixed once before for
+`scheduler.py`'s APScheduler cron jobs via a `fcntl.flock()`-based
+cross-worker lock). `imap_bg.start()`'s existing `if _running: return`
+guard only protects against a SECOND call WITHIN the same process (and
+`app.py` does call it twice in-process — once from the real `lifespan`
+context manager, once from a redundant `@app.on_event('startup')`
+handler — but that redundancy was already harmless, correctly no-op'd by
+the pre-existing guard, and left untouched as genuinely out of scope).
+The real, actionable duplication was cross-process: 2 separate uvicorn
+workers, each with its OWN `_running` global starting `False`, each
+independently launching a full set of real per-account IDLE listener
+threads plus the attachment-scanner thread. Confirmed directly via
+`docker logs`: every real startup line ("IDLE listener starting for
+mohsinkhan@aviintech.com on INBOX", "IDLE active on INBOX", etc.)
+appeared exactly TWICE, one pair per real connected mailbox, for the
+whole container's lifetime — 2 fully independent, redundant IMAP
+sync/IDLE subsystems running concurrently against the same real mailboxes
+this entire time. This is a second, real, plausible contributor to the
+same class of duplicate/cross-linked resume-processing symptoms already
+investigated above (2 independent listeners racing to process the SAME
+new email is a second real path into the same bug class Bug 1 fixes,
+now doubly closed).
+
+Fixed by replicating the exact, already-proven pattern from
+`scheduler.py` verbatim: a new module-level `_IMAP_LOCK_PATH = "/tmp/
+aviin_imap_bg.lock"` (deliberately a SEPARATE lock file from scheduler's
+own `/tmp/aviin_scheduler.lock` — logically independent subsystems, each
+gets its own lock) and `_acquire_imap_lock()` (a non-blocking
+`fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)`, returning
+`False` on `IOError`/`OSError` if another process already holds it).
+`start()` now checks this lock immediately after the existing `if
+_running: return` guard — only the ONE worker that wins the lock actually
+launches any IMAP sync thread; the loser prints a clear log line and
+returns immediately, remaining a fully functional, plain HTTP-serving
+worker with zero IMAP activity of its own (both workers still correctly
+serve every other real API request — this only gates the background
+IMAP subsystem, nothing else).
+
+Verified for real end-to-end, not code review: both fixes deployed via
+the established scp → sha256 hash-verify → `docker compose up -d --build
+backend` (a full rebuild, not a hot-copy) → health-check (`curl
+localhost:8080/health` → 200) cycle. Direct `docker logs aviin_backend
+--since 30s` post-deploy confirmed the exact expected, corrected
+sequence — every real startup/IDLE-active line now appears exactly ONCE,
+with a genuine, correctly-worded "[IMAP] another worker already owns the
+IMAP sync lock — skipping in this worker" line from the losing worker in
+between. A scoped Playwright regression sweep
+(`--config=tests/playwright.config.ts`, `-g 'S1 API Health|S68 '`)
+confirmed 6 passed / 1 pre-existing skip / 0 failed — no regression to
+backend health or the Profile/Signatures/Fetch-Inbox suite most directly
+adjacent to the real-mailbox/IMAP code path touched by this fix.
+
+**Not attempted in this pass, and honestly disclosed rather than
+silently left ambiguous**: the earlier investigation was already able to
+conclusively pin the exact affected historical rows and repair them (per
+the entry above); these 2 code fixes close the real, confirmed
+mechanisms that could plausibly have caused it, but — since neither
+original bug logged anything distinguishable at the time it would have
+fired, and the affected rows are already fixed — there is no further way
+to retroactively prove which of the 2 mechanisms (or both) produced the
+ORIGINAL Bhagender.S/Shivani.P mismatch specifically, beyond what the
+earlier entry already established. Both are real, independently-
+reproduced, now-closed bugs regardless of which one (or both) explains
+that one historical incident.
