@@ -187,8 +187,8 @@ FREE_FEED_PROGRAMS = [
     },
     {
         "key": "careerjet", "name": "Careerjet",
-        "url": "https://www.careerjet.com/partners/publishers",
-        "how": "Confirmed real, free publisher XML feed program - submit a publisher application with the Feed URL below.",
+        "url": "https://www.careerjet.com/recruiter/indexing/submit-your-website",
+        "how": "This is Careerjet's real free auto-indexing signup (the old /partners/publishers link was their unrelated paid-traffic affiliate program). Careerjet puts a bot/CAPTCHA check in front of this page - it must be completed by a real person in a real browser, not automated.",
     },
     {
         "key": "adzuna", "name": "Adzuna",
@@ -198,17 +198,17 @@ FREE_FEED_PROGRAMS = [
     {
         "key": "trovit", "name": "Trovit Jobs",
         "url": "https://corporate.trovit.com/partners/",
-        "how": "Confirmed real, free feed sync via Trovit's Partners program - strong reach across Europe/Latin America audiences too.",
+        "how": "This link now redirects to Trovit's parent company Thribee, and becoming a feed partner is a real B2B sales conversation, not a quick free self-serve signup - email thribee.salesinfo@lifullconnect.com with the Feed URL and expect a real reply/negotiation, possibly paid.",
     },
     {
         "key": "jora", "name": "Jora",
-        "url": "https://au.jora.com/cms/get-your-feed-included-on-jora",
-        "how": "Confirmed real and explicitly free - send the Feed URL via Jora's contact form; live within 2-24 hours on their own crawl schedule.",
+        "url": "https://au.jora.com/cms/contact",
+        "how": "Jora's dedicated feed-submission page and India-specific site could not be confirmed live as of 2026-09; their current regional footer no longer lists an India site at all. This is their general AU contact form - use it to ask directly whether/how they still accept an employer's own free job feed.",
     },
     {
         "key": "jobrapido", "name": "Jobrapido",
-        "url": "https://support.jobrapido.com/hc/en-us/articles/360019196973-FEED-XML-how-can-I-send-my-feed-to-Jobrapido",
-        "how": "Confirmed real, free XML feed integration - jobs typically live within 24 hours once the feed is registered.",
+        "url": "https://brands.recruitrapido.com/ServiceJR/feed_guide/index_eng.html",
+        "how": "Confirmed real, free XML feed integration guide - follow the instructions on that page to register the Feed URL below. If you get stuck, Jobrapido's support portal (support.jobrapido.com) has a real, working contact/ticket option too.",
     },
 ]
 

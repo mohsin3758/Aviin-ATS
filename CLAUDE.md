@@ -20312,3 +20312,55 @@ Jobrapido is a real, one-time action for a human on the team to complete
 via each board's own real application/contact form (all 5 links are live
 on the Integrations tab now) - nothing here can or should complete that
 on their behalf.
+
+## Feed-registration links re-verified live and corrected — 2 were pointing at the wrong or a dead page, 2026-09-02
+Direct follow-up to the same-day 5-free-feed-registration build. User asked
+me to go actually complete the real-world registrations ("yes, do it").
+Investigated the real, current state of all 5 links via live browser checks
+(not carried forward from the earlier research pass) before touching
+anything - found the stored data itself had drifted or was wrong on 3 of
+the 5, corrected `FREE_FEED_PROGRAMS` (`backend/services/job_portals.py`)
+to match reality, then stopped short of submitting anything, since every
+genuinely reachable one now needs real company contact details I don't
+have and must not invent.
+
+- **Careerjet** - the stored URL (`/partners/publishers`) was the WRONG
+  program entirely - a paid-traffic affiliate signup, not job submission.
+  The real free auto-indexing flow is `/recruiter/indexing/submit-your-
+  website` - but hitting it live returned a genuine bot/CAPTCHA wall
+  ("Verification required... unusual traffic"), confirmed via a real
+  Playwright navigation, not assumed. Corrected the URL and the `how`
+  text to say plainly this needs a real person in a real browser.
+- **Trovit** - the stored partner-application URL now 301s to Thribee (its
+  parent company)'s login page; becoming a feed partner is a real B2B
+  sales conversation (email `thribee.salesinfo@lifullconnect.com`),
+  possibly paid - not the quick free self-serve signup it was originally
+  characterized as. `how` text corrected to say so honestly.
+- **Jora** - the stored feed-submission URL is genuinely dead (404,
+  confirmed live), as are its FAQ/support pages; Jora's current regional
+  footer no longer lists an India site at all. No working feed-specific
+  page was found - pointed the URL at their real, live AU contact form
+  instead, with an honest note that the India program's current status
+  is unconfirmed.
+- **Jobrapido** - the stored URL (a specific support-article link) is
+  genuinely dead (404, confirmed live) - the real, live page is a
+  separate feed-guide (`brands.recruitrapido.com/.../feed_guide/
+  index_eng.html`, confirmed 200), corrected to point there, with the
+  general support portal (also confirmed live) kept as a fallback.
+- **Adzuna** - re-verified, genuinely unchanged and correct.
+
+Deployed via the established scp -> hash-verify -> rebuild -> health-
+check cycle; the live `GET /job-sharing/feed-info` response confirmed
+matching the corrected data with the real per-tenant registered state
+(all 5 honestly still `false`) untouched.
+
+**Deliberately not completed further, disclosed rather than silently
+attempted or silently dropped**: every one of the 5 that's still
+genuinely reachable by a person (Adzuna's contact form, Jobrapido's
+guide/support, the Trovit/Thribee sales email) requires real company
+contact information - legal name, a real monitored email, sometimes
+phone - to actually submit. I don't have this and won't invent it for an
+external, hard-to-reverse, company-representing action. Careerjet's real
+flow is bot-walled against any automated agent regardless of what
+details are supplied. Reported to the user directly rather than guessed
+at or silently left undone.
