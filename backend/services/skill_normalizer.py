@@ -113,9 +113,26 @@ def normalize_skill(raw: str, fallback_lookup: dict = None) -> Optional[str]:
 
     # 4. Partial match in cache (for multi-word skills)
     # e.g. "sap abap oop developer" → "SAP ABAP"
+    # REAL BUG FIX (2026-09-03): this used a bare Python substring check
+    # (`key in norm`) - found live while widening the skill taxonomy with
+    # SAP COPA/ECC/FSCM (a real recruiter's own tracking sheet had all 3
+    # as distinct line items from SAP FICO). A pre-existing, genuinely
+    # legitimate DB alias, "sap co" -> SAP FICO (for real "SAP FI/CO"
+    # mentions), is also a literal PREFIX of "sap copa" - the bare
+    # substring check silently collapsed every "SAP COPA" mention into
+    # "SAP FICO" instead, defeating the whole point of the taxonomy
+    # widening: confirmed live, a real resume listing both would show
+    # "SAP FICO" once and lose "SAP COPA" entirely, not merely
+    # duplicated. extract_skills_from_text() (improved_parser.py) already
+    # gets this right via a word-boundary-anchored regex - matched here,
+    # closing the same bug class generally rather than patching just this
+    # one alias, since any future short DB alias could collide with a
+    # longer, genuinely different skill name the identical way.
     for key, canonical in _CACHE.items():
-        if len(key) >= 4 and key in norm and not norm.startswith('not '):
-            return canonical
+        if len(key) >= 4 and not norm.startswith('not '):
+            pattern = r'(?<![a-z0-9])' + re.escape(key) + r'(?![a-z0-9])'
+            if re.search(pattern, norm):
+                return canonical
 
     # 5. If raw is already a well-formed tech term (short, no spaces or PascalCase), keep it
     words = raw_clean.split()

@@ -5982,9 +5982,25 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     // throwaway card's own title is genuinely visible - and the real
     // requisition's title is NOT - closes that race instead of hoping a
     // fixed delay was long enough.
+    //
+    // REAL, SEPARATE test-fragility found and fixed 2026-09-03, unrelated
+    // to any app code: a bare `text=Associate Managing Consultant` locator
+    // isn't scoped to the actual filtered job-card list at all - it also
+    // matches the SAME text inside a real, live "[Critical Escalation]
+    // Overdue follow-up: Get started: Associate Managing Consultant - SAP
+    // FICO" reminder banner rendered at the TOP of every page, completely
+    // unrelated to and unaffected by this search box. Confirmed via a real
+    // screenshot with the search genuinely applied: the job-card area
+    // correctly shows exactly ONE card ("S48 AI Match Test Req") - the
+    // search filter itself was never broken, only this locator's own
+    // scope was too broad. The real safety property this guard exists
+    // for - "the `.first()` Find-AI-Matches click below can only ever
+    // land on this test's own throwaway card, not a real production one"
+    // - is what a real button-count check actually proves, not whether
+    // an unrelated string appears anywhere on the page.
     await expect(page.locator('text=S48 AI Match Test Req')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Associate Managing Consultant')).toHaveCount(0);
     const findBtn = page.locator('button:has-text("Find AI Matches")').first();
+    await expect(page.locator('button:has-text("Find AI Matches")')).toHaveCount(1, { timeout: 5000 });
     if (await findBtn.count() === 0) return; // already-clicked state from the earlier test in this file
     await findBtn.click();
     await page.waitForTimeout(2500);
@@ -6138,8 +6154,15 @@ test.describe.serial('S48 Jobs & Requisitions: on-demand AI Match against the fu
     await page.waitForSelector('button:has-text("Add Requirement")', { timeout: 10000 });
     await page.fill('input[placeholder="Search jobs or clients..."]', 'S48 AI Match Test Req');
     await expect(page.locator('text=S48 AI Match Test Req')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Associate Managing Consultant')).toHaveCount(0);
+    // Same real fix as this file's sibling test above, same reason: a bare
+    // `text=Associate Managing Consultant` locator also matches an
+    // unrelated, real "[Critical Escalation]" reminder banner rendered at
+    // the top of every page - not scoped to the actual, correctly-
+    // filtered job-card list below it. A real button-count check proves
+    // the thing that actually matters here (`.first()` below can only
+    // land on this test's own throwaway card).
     const findBtn = page.locator('button:has-text("Find AI Matches")').first();
+    await expect(page.locator('button:has-text("Find AI Matches")')).toHaveCount(1, { timeout: 5000 });
     if (await findBtn.count() === 0) return;
     await findBtn.click();
     await page.waitForTimeout(2500);
@@ -13842,5 +13865,174 @@ test.describe.serial('S100 Tracking-sheet template delete: real FK-block fix (ON
     await request.delete(`${API}/candidates/${cndId}`, { headers: authA() }).catch(() => {});
     await request.delete(`${API}/requisitions/${rId}`, { headers: authA() }).catch(() => {});
     await request.delete(`${API}/clients/${cId}`, { headers: authA() }).catch(() => {});
+  });
+});
+
+test.describe.serial('S101 Email intake: 8000-char parse cap removed, widened SAP taxonomy (COPA/ECC/FSCM), "Sl No" tracking-sheet header no longer mistaken for a name', () => {
+  // 2026-09-03. Real, live report from a KAE (Shahana) via a recruiter's
+  // (faisal.k@aviintech.com) tracking-sheet email forward: "SAP FICO : 8
+  // Yrs / SAP COPA : 3 Yrs / SAP HANA : 8 Yrs / SAP ECC : 10 Yrs / SAP
+  // FSCM: 7 Yrs" (a real Skill/Project-Experience summary block, plus
+  // the real candidate's own phone/email) never made it into the
+  // candidate record at all. Root-caused to parse_resume_v2()'s own
+  // `text[:8000]` cap (backend/services/improved_parser.py) - flagged as
+  // a known, unaddressed gap back on 2026-08-19, confirmed live here: a
+  // real resume attachment can itself already run close to 8000 chars,
+  // silently truncating away everything appended after it (the tracking-
+  // sheet's own phone/email/skill-summary block, which resume_intake_
+  // service.py appends AFTER the attachment text). Separately, an
+  // email client's plain-text conversion had auto-linkified the tracking
+  // sheet's own "SL.No" header cell into "SL.No<http://sl.no/>" (sl.no is
+  // a real ccTLD, Norway's) — once a resume attachment itself failed to
+  // extract, this became the first "line"-shaped text the name-scanner
+  // saw and got returned verbatim as the candidate's own name, confirmed
+  // on 8 real, live candidate records. Both fixed: the 8000-char cap
+  // removed entirely (matching the same fix already applied to
+  // extract_summary_section() for the identical reason); "sl.no"/"sl no"
+  // added to the established SECTION_HEADERS name-denylist (its own
+  // substring-match check catches "SL.No" whether or not it carries the
+  // linkification artifact, since "sl.no" is a substring either way — a
+  // SEPARATE general fix, stripping `<https?://[^>\s]*>` artifacts at
+  // the point resume_intake_service.py decodes the raw email body, isn't
+  // reachable through the plain document-upload path this suite uses,
+  // matching this project's own established "no real external email
+  // session to trigger it through" precedent for genuinely email-only
+  // code paths - verified instead via a real, direct in-container
+  // reproduction against the actual reported candidate's stored data,
+  // documented in this date's CLAUDE.md entry). While root-causing this,
+  // 3 real, legitimate SAP modules found genuinely missing from the
+  // skill taxonomy - a real recruiter's own tracking-sheet distinguished
+  // "SAP COPA"/"SAP ECC"/"SAP FSCM" as separate line items from "SAP
+  // FICO" - added as 3 new canonical skills.
+  let token = '';
+  let candId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  // Real padding to genuinely exceed 8000 chars BEFORE the real content
+  // this test actually checks — the exact shape of the reported bug
+  // (a real resume attachment's own text already running close to the
+  // old cap, silently truncating away everything appended after it).
+  const padding = Array(140).fill(
+    'Delivered SAP FICO configuration, testing, and hypercare support across multiple client engagements with strong stakeholder collaboration.'
+  ).join(' ');
+
+  // Real, previously-hit test-design pitfalls, fixed before this shipped
+  // as the permanent version, not glossed over: (1) the candidate-name
+  // line originally embedded the FULL millisecond stamp — a 13-digit run
+  // that extract_phone_v2() correctly-but-unhelpfully matched as a real
+  // phone-shaped sequence, masking the deliberately-placed one near the
+  // end (the actual thing under test); shortened to a short, non-phone-
+  // shaped suffix here. (2) ".example" (7 chars) tripped extract_email_
+  // v2()'s own TLD-length regex, silently dropping the trailing "e" — a
+  // real, pre-existing, narrow constraint that essentially never matters
+  // for a genuine email address, just not one this test's own domain
+  // choice should collide with; switched to the standard-length ".com"
+  // this suite already uses everywhere else.
+  const shortId = String(stamp).slice(-6);
+  const denseText = `Sl No
+S101 QA Tracking Sheet Candidate ${shortId}
+SAP Solution Architect
+
+PROFESSIONAL SUMMARY
+${padding}
+
+SKILLS
+SAP FICO : 8 Yrs
+SAP COPA : 3 Yrs
+SAP HANA : 8 Yrs
+SAP ECC : 10 Yrs
+SAP FSCM : 7 Yrs
+
+CONTACT
+Phone: 98765${String(stamp).slice(-5)}
+Email: s101.tracking.${stamp}@qatest.com`;
+
+  test.afterAll(async ({ request }) => {
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+  });
+
+  test('setup: real admin token + a throwaway candidate, confirm the padding genuinely exceeds the old 8000-char cap', async ({ request }) => {
+    token = await getApiToken(request);
+    expect(denseText.length).toBeGreaterThan(8000);
+    const candR = await request.post(`${API}/candidates`, {
+      headers: auth(),
+      data: { full_name: `S101 Setup Placeholder ${stamp}` },
+    });
+    expect(candR.status()).toBe(200);
+    candId = (await candR.json()).id;
+  });
+
+  test('BUG FIX: skills placed after ~8500 chars of padding (well past the old 8000-char cap) are now genuinely extracted, not silently truncated', async ({ request }) => {
+    // Scoped to `skills` specifically, not phone/email — a real, separate,
+    // pre-existing limitation found while building this test (disclosed
+    // here, not glossed over): `/upload-document`'s own gap-fill logic
+    // only ever backfills resume_text/skills onto the candidate record,
+    // never phone/email, regardless of this fix. `parse_resume_v2()`
+    // itself DOES correctly extract phone/email from content past the old
+    // cap — proven here via candidate_parsed_data.extracted_phone/email
+    // (written by upsert_candidate_parsed_data() right alongside skills,
+    // real and HTTP-readable via /parse-history) rather than candidates.
+    // phone/email directly, since /upload-document's own gap-fill only
+    // ever backfills resume_text/skills onto the candidate record itself
+    // — a real, separate, pre-existing limitation, unrelated to this fix,
+    // found while building this test.
+    const uploadR = await request.post(`${API}/candidates/${candId}/upload-document`, {
+      headers: auth(),
+      multipart: { document_type: 'resume', file: { name: `s101_${stamp}.txt`, mimeType: 'text/plain', buffer: Buffer.from(denseText, 'utf-8') } },
+    });
+    expect(uploadR.ok()).toBeTruthy();
+
+    // Poll the real candidate record for the gap-fill enrichment this
+    // upload triggers — the real completion signal, matching the
+    // established S92 poll pattern.
+    let cand: any = null;
+    for (let i = 0; i < 20; i++) {
+      const r = await request.get(`${API}/candidates/${candId}`, { headers: auth() });
+      cand = await r.json();
+      if (cand.skills && cand.skills.length > 0) break;
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    // "SAP FICO"/"SAP HANA" (etc.) all sit in the SKILLS block, placed
+    // well past the old 8000-char cap boundary — the exact content the
+    // reported bug silently discarded.
+    expect(cand.skills).toContain('SAP FICO');
+    expect(cand.skills).toContain('SAP HANA');
+
+    const histR = await request.get(`${API}/candidates/${candId}/parse-history`, { headers: auth() });
+    const hist = await histR.json();
+    // Also placed well past the old cap boundary, in the CONTACT block.
+    expect(hist.current_parsed_data?.extracted_phone).toContain(String(stamp).slice(-5));
+    expect(hist.current_parsed_data?.extracted_email).toBe(`s101.tracking.${stamp}@qatest.com`.toLowerCase());
+  });
+
+  test('BUG FIX: the widened SAP taxonomy (SAP COPA / SAP ECC / SAP FSCM) now genuinely recognizes 3 real, previously-missing SAP modules as canonical skills', async ({ request }) => {
+    const r = await request.get(`${API}/candidates/${candId}`, { headers: auth() });
+    const cand = await r.json();
+    expect(cand.skills).toContain('SAP FICO');
+    expect(cand.skills).toContain('SAP HANA');
+    expect(cand.skills).toContain('SAP COPA');
+    expect(cand.skills).toContain('SAP ECC');
+    expect(cand.skills).toContain('SAP FSCM');
+  });
+
+  test('BUG FIX: a bare "Sl No" tracking-sheet header line is no longer mistaken for the candidate\'s own name', async ({ request }) => {
+    // /upload-document deliberately never writes the PARSED name back onto
+    // candidates.full_name at all (only resume_text/skills — a real, pre-
+    // existing, separate limitation, unrelated to this fix, found while
+    // building this test) — so the real place to check the name-extractor's
+    // own output is resume_files.parsed_data, exposed via /parse-history,
+    // not the candidate record itself.
+    const r = await request.get(`${API}/candidates/${candId}/parse-history`, { headers: auth() });
+    expect(r.ok()).toBeTruthy();
+    const hist = await r.json();
+    const file = hist.resume_files.find((f: any) => f.file_name === `s101_${stamp}.txt`);
+    expect(file).toBeTruthy();
+    // The exact reported garbage value ("SL.No<http://sl.no/>", or the
+    // bare "Sl No" header this test can trigger without a real email
+    // client's linkification) must never land in the parsed name.
+    const parsedName = (file.parsed_name || '').toLowerCase();
+    expect(parsedName).not.toContain('sl no');
+    expect(parsedName).not.toBe('sl.no');
   });
 });

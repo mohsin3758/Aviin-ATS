@@ -997,7 +997,20 @@ async def process_email_for_resume(
         file_size = len(att_data)
         file_path = save_resume_file(att_data, tenant_id, fn)
         resume_text = extract_text_from_attachment(att_data, mt, fn).replace('\x00', ' ')
-        body_text_clean = body_text.replace('\x00', ' ')
+        # REAL BUG FIX (2026-09-03): some email clients' plain-text
+        # conversion of an HTML table auto-linkifies a word that resembles
+        # a domain into "Word<http://word/>" right inside the plain-text
+        # body — confirmed live: a tracking-sheet email's own "SL.No"
+        # header cell became "SL.No<http://sl.no/>" (sl.no is a real
+        # ccTLD, Norway's) verbatim in the plain-text part, and once the
+        # resume attachment itself failed to extract, this artifact got
+        # returned as the candidate's own name. Stripped here, at the one
+        # point the raw email body is decoded, so every downstream
+        # extraction function (name/email/phone/skills/company) sees the
+        # clean word, not the linkification wrapper — not just name
+        # extraction, which only got a second, narrower, word-specific
+        # denylist entry alongside this general fix.
+        body_text_clean = re.sub(r'<https?://[^>\s]*>', '', body_text.replace('\x00', ' '))
         # REAL BUG FIX (2026-08-18): full_text used to be capped at 6000
         # chars and that SAME capped value fed both the document classifier
         # AND parse_resume_v2()'s real field extraction. For a dense multi-
@@ -1136,7 +1149,16 @@ async def process_email_for_resume(
         # the embed service, so it must never be able to take the resume/
         # candidate insert down with it.
         from routers.intelligence import auto_score_candidate_bg
-        asyncio.create_task(auto_score_candidate_bg(tenant_id, str(candidate_id)))
+        # Pass the combined resume+email-body text (2026-09-03 real fix)
+        # so the skill/project-experience auto-population below sees a
+        # recruiter's own tracking-sheet skill-summary line even when it
+        # only ever lived in the email body, never the stored (attachment-
+        # only) resume_text column. `full_text` is still in scope here —
+        # it's set inside the attachment-processing loop above, which
+        # `break`s right after processing the first resume attachment, so
+        # the variable itself persists past the loop, unchanged.
+        asyncio.create_task(auto_score_candidate_bg(
+            tenant_id, str(candidate_id), skill_scan_text=full_text))
 
     # NOTE: if this INSERT hits uq_resume_files_msg_fname (a leftover row
     # from an earlier attempt whose imap_messages.auto_processed update

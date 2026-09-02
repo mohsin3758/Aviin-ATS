@@ -67,7 +67,8 @@ def parse_skill_summary_text(raw_text: str) -> list[dict]:
     return rows
 
 
-async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str) -> int:
+async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str,
+                                          override_text: Optional[str] = None) -> int:
     """Real, gap-audit fix (2026-09-02): candidate_skill_experience only
     ever got populated by manual entry or a human reviewing a pasted
     tracking-sheet snippet — live before this fix, 0 rows, ever, despite
@@ -87,18 +88,36 @@ async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str
     convention from the public-form/paste-tool call sites. Best-effort;
     never raises (a resume with no usable signal is a real, honest
     outcome, not a caller-visible failure). Returns how many rows were
-    newly created."""
+    newly created.
+
+    override_text (real gap fix, 2026-09-03): email-intake candidates
+    have candidates.resume_text stored as ATTACHMENT-ONLY text -- the
+    email body (where a recruiter's own tracking-sheet skill-summary
+    line often actually lives, e.g. "SAP FICO : 8 Yrs") is never
+    persisted into that column, by design, since blindly storing raw
+    email chrome (signatures, thread quotes, "please find attached")
+    into a field the Resume Generator later renders verbatim into a
+    candidate-facing PDF would visibly pollute it. Instead, the ONE real
+    intake call site that has the combined resume+body text on hand at
+    the moment it matters (resume_intake_service.py's
+    process_email_for_resume) passes it here directly, so this function
+    scans the richer text without ever persisting it anywhere -- every
+    other caller is unaffected, still reading resume_text from the DB
+    exactly as before."""
     try:
         row = await conn.fetchrow(
             "SELECT resume_text, skills FROM candidates WHERE tenant_id=$1 AND id=$2",
             tenant_id, candidate_id)
-        if not row or not row["resume_text"]:
+        if not row:
+            return 0
+        scan_text = override_text if override_text and override_text.strip() else row["resume_text"]
+        if not scan_text:
             return 0
         known_skills = {s.lower() for s in (row["skills"] or [])}
         if not known_skills:
             return 0
 
-        proposed = parse_skill_summary_text(row["resume_text"])
+        proposed = parse_skill_summary_text(scan_text)
         real_rows = [
             p for p in proposed
             if p["looks_like_experience"] and p["skill_name"].lower() in known_skills

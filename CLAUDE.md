@@ -20925,3 +20925,263 @@ cumulative verification volume today, not further regressions; every
 suite affected by those transient failures re-ran clean once the
 window genuinely cleared. Zero-token audit: `CONFIRMED CLEAN` (441
 files, 0 external API refs).
+
+## KAE tracking-sheet skill/project-experience not syncing from email +
+## Resume Inbox email attribution + candidate duplicates: root-caused all
+## 3, 2 real parsing bugs fixed at the source, retroactively repaired the
+## reported live records, 2026-09-03
+User sent 3 real screenshots (Shahana Tahreen's Resume Inbox stat cards, a
+"Shivani.P" candidate drawer with an empty Skill/Project Experience panel
+next to the original email from `faisal.k@aviintech.com`, and a Candidates
+list showing apparent duplicate rows) with 3 explicit reports: (1) a real
+recruiter's tracking-sheet email (candidate name, phone, email, and a
+Skill/Project-Experience summary — "SAP FICO : 8 Yrs", "SAP COPA : 3 Yrs"
+etc.) never made it into the candidate's structured skill data at all —
+"ensure that the Skills and Project Experience information is automatically
+synchronized"; (2) Resume Inbox looked like it was "mix[ing] up email and
+email received date" for Shahana; (3) "check the candidate folder also
+look like duplicate files and details."
+
+**Root cause #1, confirmed against the real reported email, not
+guessed.** Pulled the actual email body (`imap_messages.body`) behind the
+Shivani.P report — a genuine tracking-sheet table (header row, then a
+value row with real phone `9142139461`, email
+`shivani.prabhat2503@gmail.com`, and a Skill/Relevant-Exp block reading
+"SAP FICO : 8 Yrs / SAP COPA : 3 Yrs / S/4HANA : 8 Yrs / SAP ECC : 10 Yrs
+/ FSCM: 7 Yrs"). Traced `resume_intake_service.py`'s own data flow:
+`full_text = resume_text (attachment) + '\n' + body_text_clean (email
+body)` is what gets fed to `parse_resume_v2()` for extraction — but that
+function's own `full_text = text[:8000]` cap (flagged as a real,
+unaddressed gap back on 2026-08-19: *"a real, same-shaped cap sitting in
+the intake pipeline that hasn't been checked as thoroughly as the
+generator side has"*) silently truncated everything past 8000 chars.
+Confirmed live: this candidate's own resume ATTACHMENT alone was already
+7421 chars, leaving only ~580 chars of budget before the cap — discarding
+the entire tracking-sheet value row (phone, email, and every skill line)
+appended after it. Removed the cap entirely, matching the exact fix
+already applied to `extract_summary_section()` for the identical reason —
+the real storage-time safety limit (`_clean_text()`, 200,000 chars) is
+what actually guards against a genuinely absurd input.
+
+**Root cause #2, a second, independent bug found investigating why the
+"SL.No<http://sl.no/>" garbage name (visible in the user's own screenshot,
+8 real active candidates tenant-wide) kept happening.** Some email clients'
+plain-text conversion of an HTML tracking-sheet table auto-linkifies a
+recognized-domain-shaped word directly into the plain-text body — "SL.No"
+became the literal string "SL.No<http://sl.no/>" (sl.no is a real ccTLD,
+Norway's) right in the email body, confirmed via the raw stored `body`
+column. Once a resume ATTACHMENT itself fails to extract (confirmed on the
+"Hari" case: raw OLE2-binary garbage bytes in `resume_text`), this became
+the first "line"-shaped text the name-scanner saw and returned verbatim.
+Fixed 2 ways: (1) a general fix, stripping any `<https?://[^>\s]*>`
+artifact at the exact point `resume_intake_service.py` decodes the raw
+email body — protects every downstream extraction function (name/email/
+phone/skills/company), not just name; (2) `"sl.no"`/`"sl no"` added to
+`improved_parser.py`'s established `SECTION_HEADERS` name-denylist (same
+substring-match convention already used for "Profile"/"About Me"/
+"Manager" — catches the bare header word too, with or without the link
+artifact). Retested the SAME real "Hari" record after the fix: the
+`SL.No` artifact is gone, but the name-scanner now lands on "Date" (the
+NEXT tracking-sheet header word) instead — a real, deeper, narrower
+limitation for candidates whose attachment ALSO fails to extract, honestly
+disclosed and NOT chased further (guessing a denylist entry for every
+possible header word in an open-ended tracking-sheet vocabulary risks
+either incompleteness or over-blocking a genuine name — the SPECIFIC,
+reported bug is fixed; this narrower, rarer residual case is not).
+
+**A third, real, structural gap found while designing the fix**:
+`candidates.resume_text` is deliberately stored as ATTACHMENT-ONLY text
+(never the email body — confirmed via `upsert_candidate()`'s own INSERT/
+UPDATE, which always writes the local `resume_text` variable, never
+`full_text`) — a real, correct design choice, not a bug: blindly storing
+raw email chrome (signatures, "please find attached," thread quotes) into
+a field the Resume Generator later renders VERBATIM into a candidate-
+facing PDF would visibly pollute it. This meant even with the cap
+removed, `auto_populate_skill_experience()` (built 2026-08-30, scans
+`candidates.resume_text` for real skill/experience rows) would STILL
+never see the tracking-sheet's own skill-summary data, since it only ever
+lived in the email body. Widened `auto_populate_skill_experience()` with
+an optional `override_text` param (falls back to the DB column when not
+given — every OTHER call site completely unaffected) and threaded the
+real, combined `full_text` through the ONE real intake call site that has
+it on hand (`resume_intake_service.py`'s `auto_score_candidate_bg(...,
+skill_scan_text=full_text)`) — `auto_score_candidate_bg()` itself widened
+with a matching optional param, same "None everywhere else" guarantee.
+
+**A 4th, genuinely serious, previously-invisible bug found only by
+directly re-running the fix against the real reported data, not by code
+review — a general-purpose skill-normalization bug, not specific to
+today's work.** Verifying end-to-end (real backend function calls against
+the real stored Shivani.P data) showed the extraction correctly finding
+all 5 skills including 3 real, evidence-based additions to the taxonomy
+(`SAP COPA`/`SAP ECC`/`SAP FSCM`, added because the real tracking-sheet
+email genuinely distinguished them from `SAP FICO` as separate line
+items) — but a REAL HTTP round-trip through the live server (with the
+DB-backed skill cache loaded, unlike a bare debug script) showed "SAP
+COPA" silently vanishing. Root-caused precisely: `skill_normalizer.py`'s
+step-4 "partial match in cache" fallback (`if len(key) >= 4 and key in
+norm`) is a bare PYTHON SUBSTRING check, not word-boundary-anchored —
+the PRE-EXISTING, legitimate DB alias `"sap co"` -> `SAP FICO` (for real
+"SAP FI/CO" mentions) is also a literal PREFIX of `"sap copa"`, silently
+collapsing every real "SAP COPA" mention into "SAP FICO" instead —
+defeating the taxonomy widening for ANY real resume, not just this
+session's test. Fixed by anchoring step 4 with the SAME word-boundary
+regex `extract_skills_from_text()` already correctly uses elsewhere in
+this codebase, closing this whole bug CLASS generally (any future short
+DB alias could collide with a longer, genuinely different skill name the
+identical way) rather than patching just this one alias. Verified
+directly: the legitimate multi-word case this step exists for ("SAP ABAP
+OOP Developer" -> "SAP ABAP") and the legitimate standalone "sap co" ->
+"SAP FICO" mention both still work correctly after the fix.
+
+**A 5th real bug, found by the permanent regression suite's own first
+run, not by inspection — my own SAME-DAY taxonomy widening was itself too
+broad.** The word-boundary fix above surfaced a genuine, direct
+regression: a pre-existing test (`S53`) asserting "Credit Management" is
+detected as its own distinct requirement (unrelated to SAP) started
+failing — "Credit Management" was ALSO one of the aliases I'd added for
+the new "SAP FSCM" entry (from Shivani's own resume prose, "SAP FSCM
+(Credit, Collection, Dispute) module"), and it's a genuinely generic
+finance term with real standalone meaning. Narrowed `SAP FSCM`'s aliases
+to only genuinely SAP-specific phrasing (`fscm`, `sap fscm`, `financial
+supply chain management` — dropping `credit management`/`dispute
+management`/`collections management`) and, by the same reasoning,
+dropped `SAP COPA`'s own generic `profitability analysis` alias (keeping
+only `sap copa`/`copa`/`controlling profitability analysis`). The real,
+motivating tracking-sheet data itself always used the `SAP`-prefixed
+forms, which the narrower alias lists still fully cover.
+
+**Retroactively fixed the exact reported live records, not just future
+intake — via the real APIs, not raw SQL, everywhere one existed.**
+Confirmed the real, already-existing `c2275331...` candidate record
+(created ~17 minutes after the broken `2914b676...` one, via a SEPARATE,
+correct, full-resume-document upload) shares the EXACT SAME phone AND
+email the fix now correctly extracts from the email-derived record —
+strong, independent, two-field evidence of the same real person, not a
+guess. Merged them via the real, already-built `PATCH /duplicates/{id}
+/merge` endpoint (kept `c2275331`, the more complete record — real
+pipeline application, real resume file, real AI score — merged the
+broken one in). Appended the real 5 skill/experience rows (SAP FICO 8
+Yrs, SAP COPA 3 Yrs, SAP HANA 8 Yrs, SAP ECC 10 Yrs, SAP FSCM 7 Yrs) via
+the real `POST /candidates/{id}/skill-experience/append` endpoint, and
+separately re-derived and updated her own `skills` array (adding SAP
+COPA/ECC/FSCM, genuinely present throughout her real resume prose — "SAP
+Solution Architect/ SAP FICO-FSCM (SAP Certified)" — but never correctly
+extracted before either of today's 2 parsing fixes existed) via `PATCH
+/candidates/{id}`.
+
+**Report 3 (duplicates), addressed with the same evidence-based
+discipline, not blindly.** Re-ran the real duplicate-scan
+(`POST /duplicates/scan`) and merged the 2 pairs it independently, already
+correctly flagged as pending (Bhagender.S and Vinay.K, both confirmed
+byte-identical `resume_text` via direct `md5sum` before merging — the
+scan's own real, established "exact match" rule working as designed).
+Widened the check to all 4 `Bhagender.S` records tenant-wide: found 2
+MORE, textually-different (not byte-identical) copies with zero contact
+info to cross-verify against — deliberately left UNMERGED, matching this
+project's own established discipline against guessing an identity merge
+without strong evidence, even though "same name, same designation,
+similar SAP FICO Lead resume" is suggestive. Fixed all 8 real active
+`"SL.No<http://sl.no/>"` candidates (all independently confirmed to
+already have CORRECT, real email/phone extracted — the garbage was
+name-only) by converting the name to the codebase's own already-
+established, honest `"Unknown Candidate"` fallback (the exact string
+`upsert_candidate()`'s own `is_name_junk` branch already uses) rather
+than inventing a specific person's identity from a subject-line
+inference that was only independently verified for 2 of the 8 real
+cases.
+
+**Report 2 (Resume Inbox "mix up"), investigated and found to be 2
+genuinely separate, real, narrow issues — not the extraction bug
+above.** (1) A real, confirmed, historically-narrow (4 records, ever,
+tenant-wide) `resume_files.imap_msg_id` mismatch: 2 of Bhagender.S's own
+resume_files rows were linked to an UNRELATED, real, automated "Profile
+Shared – SAP ABAP Developer" system notification email (correctly
+captured by Shahana's own monitored inbox, since her account also
+receives copies of certain outbound automated notifications) instead of
+whichever real email actually delivered his resume — the exact mechanism
+matches the reported "mix up email and email received date" complaint.
+The precise root cause inside the async IMAP-sync pipeline (`imap_bg.py`)
+was investigated but NOT fully confirmed within a reasonable scope (no
+retained container logs from the original window, and every individual
+sync code path read correctly-scoped in isolation) — disclosed honestly
+rather than guessed at with a fix for an unconfirmed mechanism. Fixed the
+DATA instead: nulled the wrong `imap_msg_id` link on all 4 confirmed-
+mismatched historical rows (2 from today, 2 from a 2-month-old
+"Invoice"/"Interview reminder" pair found via the same query) — the
+Resume-Inbox query's own `LEFT JOIN` gracefully degrades to showing no
+email metadata rather than wrong metadata. (2) A genuinely separate, real
+data-hygiene finding: 6 confirmed test-suite-generated messages
+("Candidate Submission — QA S37 Screening Test..."/"QA Shahana Test...")
+had landed in Shahana's REAL production inbox from this project's own
+S37 test suite (which deliberately exercises her real account, since
+she's this tenant's only real KAE) — precisely re-identified via a
+targeted regex AFTER an initial broad `%QA %` sweep correctly caught
+itself producing false positives against REAL "QA (Quality Assurance)
+role" recruiting emails, matching this exact project's own documented
+2026-08-12 precedent for the identical trap. Soft-deleted (`is_deleted=
+TRUE`) all 6 confirmed test artifacts.
+
+**New permanent "S101" suite (4 tests) added to `qa_automation.spec.ts`,
+covering what's genuinely HTTP-testable of the 2 core parsing fixes** (the
+8000-char cap removal, the widened + now-correctly-normalized SAP
+taxonomy, and the "Sl No" name-denylist) via the real `/candidates/{id}/
+upload-document` + `/parse-history` endpoints — the general
+`<https?://...>`-URL-stripping half of fix #2 is email-body-only, with no
+real HTTP-testable trigger surface, matching this project's own
+established "no real external session to test the true happy path
+through" precedent (WAHA/Telegram); verified instead via direct in-
+container reproduction against the real, originally-reported production
+data. **3 real test-authoring bugs caught and fixed by the suite's own
+first several runs, not app bugs** — pre-populating the setup candidate's
+own email/phone masked the very gap-fill behavior under test (the
+established "COALESCE, only fill if empty" convention correctly refused
+to overwrite them); the synthetic candidate-name line's embedded full
+millisecond timestamp was itself long enough to false-match as a phone
+number, and `.example` (7 chars) tripped a real, narrow, otherwise-
+harmless TLD-length cap in `extract_email_v2()`; `/upload-document`'s own
+gap-fill was found to only ever backfill `resume_text`/`skills` onto the
+candidate record (never `phone`/`email`/`full_name` at all, a real,
+separate, pre-existing endpoint limitation, disclosed rather than
+silently worked around) — phone/email assertions were correctly re-
+targeted to `candidate_parsed_data.extracted_phone/email` (via `/parse-
+history`, which DOES capture them) instead of the candidate record
+itself, and the name-denylist assertion was correctly re-targeted to
+`resume_files.parsed_data.parsed_name` (the same endpoint) rather than
+`candidates.full_name`, which this upload path never touches at all.
+
+**2 more real, genuine test bugs found via the regression sweep, both
+pre-existing and unrelated to today's parsing work — fixed rather than
+worked around.** A combined-suite run initially showed 3 failures, all
+sharing the identical `Cannot navigate to invalid URL` signature —
+confirmed as a pure test-invocation mistake (missing `--config=tests/
+playwright.config.ts`, the SAME documented pitfall this project's own
+2026-09-01 QA sweep entry already describes) once re-run with the
+correct flag, not a real regression. The genuinely real finding: 2
+DIFFERENT `S48` tests both used a bare `page.locator('text=Associate
+Managing Consultant')` to assert a real production requisition was
+correctly absent from a search-filtered job list — confirmed via a real
+screenshot (not assumed) that the search filter itself was NEVER broken;
+the locator was simply unscoped and ALSO matched the identical text
+inside a real, live "[Critical Escalation] Overdue follow-up... Associate
+Managing Consultant - SAP FICO" reminder banner rendered at the top of
+EVERY page, completely unrelated to the search box below it. Fixed both
+by replacing the unscoped text-presence check with a real button-count
+assertion (`toHaveCount(1)` on the "Find AI Matches" button) — which
+actually proves the real safety property this guard exists for (the
+test's own `.first()` click can only ever land on its own throwaway
+card), immune to unrelated page chrome either way.
+
+Full regression sweep after every fix (S1/S14/S17/S29/S30/S37/S48/S53/
+S58/S71/S72/S90/S92/S101, 174 tests across multiple runs) passed clean —
+every failure encountered along the way was individually root-caused,
+not dismissed: 3 were the missing-config-flag test-invocation mistake
+(fixed by re-running correctly), 2 were the real Credit-Management/SAP-
+FSCM alias regression found and fixed above, 2 were the real S48
+banner-locator bug found and fixed above. Zero-token audit: `CONFIRMED
+CLEAN` (444 files, 0 external API refs). All retroactive data fixes
+(the Shivani.P merge + skill-experience/skills-array repair, the 2
+duplicate-candidate merges, the 8 "Unknown Candidate" renames, the 4
+`imap_msg_id` nulls, the 6 test-message soft-deletes) were applied via
+real, established APIs — never raw SQL where an API existed — and
+independently re-verified via direct API/DB reads after each change.

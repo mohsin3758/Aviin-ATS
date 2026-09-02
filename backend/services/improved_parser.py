@@ -49,6 +49,20 @@ SECTION_HEADERS = frozenset([
     # header line got that header returned as the candidate's own name -
     # confirmed on 7 and 3 real candidates respectively.
     'profile', 'about me',
+    # REAL BUG FOUND 2026-09-03: an email client's plain-text conversion of
+    # an HTML tracking-sheet table auto-linkified the literal header cell
+    # "SL.No" into "SL.No<http://sl.no/>" (sl.no is a real ccTLD, Norway's)
+    # — once the resume attachment itself failed to extract (raw binary
+    # garbage), this tracking-sheet header line became the first
+    # "line"-shaped text the name-scanner saw and was returned verbatim as
+    # the candidate's name, confirmed on 8 real candidate records. The
+    # actual `<http://...>` artifact is stripped upstream (resume_intake_
+    # service.py, at the same point the email body is decoded) as the
+    # general fix; this entry is the second, narrower layer — the bare
+    # header word itself ("SL.No"/"SL No" with no link markup at all,
+    # e.g. a resume genuinely opening with a numbered list) was never a
+    # real name either way.
+    'sl.no', 'sl no',
 ])
 
 # ─── Technology & Skill Keyword Dictionary ────────────────────────────────────
@@ -62,6 +76,33 @@ TECH_SKILLS = {
                   'sap infrastructure'],
     'SAP FICO': ['sap fico', 'sap fi', 'sap co', 'fi/co', 'fico', 'financial accounting',
                  's/4hana finance', 'sap finance'],
+    # REAL, EVIDENCE-BASED ADDITIONS (2026-09-03): 3 genuinely distinct,
+    # commonly-cited SAP modules found missing from this taxonomy while
+    # investigating a real, live "skill/project-experience not captured"
+    # report -- a real recruiter's own tracking-sheet email listed
+    # "SAP COPA : 3 Yrs", "SAP ECC : 10 Yrs", "FSCM: 7 Yrs" as 3 separate,
+    # distinct line items from "SAP FICO : 8 Yrs", confirming Indian SAP
+    # staffing genuinely distinguishes these as separate skills, not
+    # aliases of an existing entry -- not folded into 'SAP FICO'/'SAP
+    # HANA' above, which are different, already-distinct real products.
+    # REAL REGRESSION FOUND AND FIXED (2026-09-03), same day as the
+    # additions above: the ORIGINAL alias lists here included generic
+    # finance/business phrases ("profitability analysis", "credit
+    # management", "dispute management", "collections management") on
+    # the assumption they were SAP-FSCM/COPA-specific -- confirmed live,
+    # via a genuine regression-sweep failure (not assumed), that these
+    # are ALSO real, legitimate STANDALONE skill terms with no SAP
+    # connection at all (a real, pre-existing test explicitly uses
+    # "Credit Management" as its own distinct requirement, unrelated to
+    # SAP) -- extract_skills_from_text()'s own correct word-boundary
+    # matching then collapsed a genuine, unrelated "Credit Management"
+    # mention straight into "SAP FSCM". Narrowed to only genuinely SAP-
+    # specific phrasing; the real, motivating tracking-sheet data itself
+    # always used the "SAP"-prefixed forms ("SAP FSCM", "SAP COPA"),
+    # which these narrower aliases still fully cover.
+    'SAP COPA': ['sap copa', 'copa', 'controlling profitability analysis'],
+    'SAP ECC': ['sap ecc', 'ecc', 'ecc6', 'ecc 6.0', 'sap r/3', 'sap erp central component'],
+    'SAP FSCM': ['fscm', 'sap fscm', 'financial supply chain management'],
     'SAP SD': ['sap sd', 'sales distribution', 'order to cash', 'o2c'],
     # REAL BUG FIX (2026-08-18): 'materials management'/'procurement' alone
     # are generic engineering/business terms, not SAP-specific -- they
@@ -1005,7 +1046,25 @@ def parse_resume_v2(text: str, from_name: str = '', from_email: str = '', filena
     Improved synchronous parser — Phase B.
     Returns structured dict with all fields + confidence score.
     """
-    full_text = text[:8000]
+    # REAL BUG FIX (2026-09-03): this 8000-char cap was flagged as a known,
+    # unaddressed gap back on 2026-08-19 ("a real, same-shaped cap sitting
+    # in the intake pipeline that hasn't been checked as thoroughly as the
+    # generator side has") and confirmed live here: resume_intake_service.py
+    # appends the email body AFTER the resume attachment's own text into
+    # `full_text` before calling this function — for a dense real resume
+    # (a multi-page attachment can itself run well past 8000 chars), the
+    # tracking-sheet data a recruiter puts in the email body (phone, email,
+    # a Skill/Project-Experience summary line) sat entirely past this cap
+    # and was silently never seen by ANY extraction function below, no
+    # matter how correct the regex itself was. Confirmed on a real
+    # candidate: her real phone/email/"SAP FICO : 8 Yrs" skill line, all
+    # genuinely present in the combined text, were never extracted because
+    # the cap discarded them before extraction ever ran. Removed entirely,
+    # matching the exact fix already applied to extract_summary_section()
+    # for the identical reason — the real storage-time safety limit
+    # (_clean_text(), 200,000 chars) is what actually protects against a
+    # genuinely absurd input, not an arbitrary mid-pipeline truncation.
+    full_text = text
 
     name = extract_name_v2(full_text, from_name)
     email = extract_email_v2(full_text, from_email)

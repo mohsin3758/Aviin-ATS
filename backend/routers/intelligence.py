@@ -336,7 +336,8 @@ async def score_candidate_against_all_open_jobs(conn, tenant_id: str, candidate_
     return scored
 
 
-async def auto_score_candidate_bg(tenant_id: str, candidate_id: str) -> None:
+async def auto_score_candidate_bg(tenant_id: str, candidate_id: str,
+                                   skill_scan_text: str | None = None) -> None:
     """Fire-and-forget wrapper on its own fresh connection — this is now
     the ONE shared auto-score entry point every real intake path calls
     (manual add, email/WhatsApp resume intake, public apply, personal/
@@ -350,13 +351,22 @@ async def auto_score_candidate_bg(tenant_id: str, candidate_id: str) -> None:
     auto-populates candidate_skill_experience — the same real, per-
     intake choke point every candidate creation already passes through,
     so this closes that gap for every channel at once rather than
-    touching 6 separate routers."""
+    touching 6 separate routers.
+
+    skill_scan_text (real gap fix, 2026-09-03): optional richer text (e.g.
+    email-intake's resume-attachment + email-body combined text, which
+    can carry a recruiter's own tracking-sheet skill-summary line that
+    the STORED candidates.resume_text — attachment-only, by design —
+    never contains) to scan for skill/experience rows instead of the
+    plain resume_text column. None for every other call site, preserving
+    their existing, unchanged behavior."""
     try:
         async with db.tenant_conn(tenant_id) as conn:
             n = await score_candidate_against_all_open_jobs(conn, tenant_id, candidate_id)
             print(f"[Intelligence] auto-scored candidate {candidate_id} against {n} open requisitions")
             from services.skill_experience_parser import auto_populate_skill_experience
-            k = await auto_populate_skill_experience(conn, tenant_id, candidate_id)
+            k = await auto_populate_skill_experience(conn, tenant_id, candidate_id,
+                                                       override_text=skill_scan_text)
             if k:
                 print(f"[Intelligence] auto-populated {k} skill-experience rows for candidate {candidate_id}")
     except Exception as e:
