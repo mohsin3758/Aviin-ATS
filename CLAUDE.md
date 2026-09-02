@@ -20550,3 +20550,145 @@ depend on `_resolve_client_contacts()`/`submit_to_client_preview()`/
 the Client Submission pipeline stage, the Assignment Dashboard, the
 recruiter stage-move limit, requisition-creation restriction, and more).
 Zero-token audit: `CONFIRMED CLEAN` (440 files, 0 external API refs).
+
+## Tracking sheet: real live table preview, SPOC/project-scoped template defaults, and a real stray-template picker fix, 2026-09-02
+Direct follow-up to the same-day SPOC/KAE-mapping work — user reported a
+new, real screenshot of the Submit to Client modal showing dozens of
+stray "QA S54 Client..." test templates cluttering the real tracking-
+sheet picker, plus 3 explicit asks: a genuine live TABLE preview of the
+tracking sheet before sending (not just a template-name picker), a way
+to manually upload a template file, and support for making a template
+the default at the SPOC level or the project (requisition) level, not
+just the whole client.
+
+**Root cause of the stray-template clutter, confirmed before fixing
+anything**: `list_templates()`/`submit_to_client_preview()`'s own inline
+templates query both selected every `is_active=true` template
+regardless of whether its PINNED CLIENT had itself been soft-deleted —
+29 of 30 real `kae_to_client` templates in this tenant were leftover
+"QA S54 Client ..." test residue, all pinned to already-soft-deleted
+test clients from the S54 suite's own long-standing cleanup gap (fixed
+in the same pass — see below). Fixed both queries with `AND (tst.
+client_id IS NULL OR cl.is_active IS NOT FALSE)` — a template pinned to
+a real, active client (or none, i.e. the global default) still shows;
+one pinned to a soft-deleted client is hidden by default, still
+reachable via `include_inactive=true` for admin cleanup.
+
+**Manual upload — already real, just extended.** `TemplateFileUpload`
+(built 2026-08-23 for the KAE→Client submission feature) already lets
+an admin upload a real `.xlsx`/`.docx`/`.pdf` as a template's file —
+Phase 4 didn't need to build this, only extend the SAME `TemplateForm`
+it lives in with the two new scope dimensions below, so an uploaded
+file template can now be pinned as narrowly as a single SPOC or
+requisition, not just a whole client.
+
+**SPOC/project-scoped defaults — the real new feature.**
+`sql/109_tracking_template_spoc_project_scope.sql` adds
+`client_contact_id`/`requisition_id` to `tracking_sheet_templates`
+(both nullable FKs, `ON DELETE SET NULL`), plus 2 new partial unique
+indexes (`uq_tst_one_contact_default_per_direction`, `...requisition...`)
+matching this table's own already-established "each genuinely new,
+independently-defaultable scope needs its own narrow unique index, not
+sharing/fighting over an existing one" pattern (`sql/75_kae_client_
+submission.sql`). `_resolve_template()` (`kae_submission.py`) widened
+to a real 4-tier priority: requisition > SPOC (client_contact) > client
+> global, most-specific wins, each tier an independent, real DB lookup
+(not a client-side re-derivation). `_do_client_submission()`'s
+save-as-default logic extended from a single client-only checkbox to a
+real 3-way scope choice (`default_scope: 'client'|'contact'|
+'requisition'`), each checking for an existing same-scope default
+before creating a new one so repeated saves at the same scope update in
+place rather than accumulating duplicates.
+
+**A real, second bug found only by end-to-end testing, not code
+review, requiring a second migration fix before this could actually
+work.** The FIRST version of the send1→send2 (client-default, then
+SPOC-default) flow crashed with a genuine `asyncpg.exceptions.
+UniqueViolationError: duplicate key value violates unique constraint
+"uq_tst_one_client_default_per_direction"` — root-caused precisely: that
+PRE-EXISTING index (from `sql/75`, back when `client_id` was the ONLY
+scope dimension that existed) was defined as `UNIQUE(tenant_id,
+client_id, direction) WHERE is_default AND client_id IS NOT NULL` —
+with no exclusion for the two brand-new sub-scopes just added, so
+saving a genuinely NEW SPOC-scoped default (which also carries the same
+`client_id`, since a SPOC always belongs to one client) still collided
+with this old, too-broad index the instant a client-wide default
+already existed for that client. Fixed by narrowing it
+(`DROP INDEX` + recreate with `AND client_contact_id IS NULL AND
+requisition_id IS NULL` added), matching every other tier's own
+narrow, single-purpose index exactly — applied via a real transactional
+dry-run first, then for real, appended directly into `sql/109` so a
+fresh-environment migration replay gets the correct, narrowed
+definition from the start rather than needing this fix applied as a
+second, separate step.
+
+**A separate, real, previously-undiscovered bug found in
+`_do_client_submission()`'s contact-resolution logic during the SAME
+verification pass, fixed before the index bug was even found**: `c["id"]
+== contact_id` compared an asyncpg-returned native `uuid.UUID` object
+against a plain JSON-body `str` — Python's `UUID.__eq__` never coerces a
+string, so this comparison silently always evaluated `False`, meaning
+an explicitly-passed, genuinely valid `contact_id` was treated as "not
+found" and fell through to a misleading "No client contact is
+configured" 400 — reproduced directly via a standalone curl script
+before touching any code. Fixed by comparing both sides as strings
+(`str(c["id"]) == str(contact_id)`).
+
+**Live table preview** — new `GET /applications/{id}/submit-to-client/
+tracking-preview` (`template_id`/`contact_id`/`hidden_columns` query
+params) resolves the same real cumulative per-requisition tracking rows
+`_do_client_submission()` itself would send and renders them via the
+already-existing `_build_tracking_html_table()` — a genuine preview of
+exactly what a real send would produce, not a second, drifting render
+path. `submit_to_client_preview()`'s own response also gained
+`tracking_html` directly, so the modal's default (auto-resolved
+template) view shows the real table with zero extra clicks. Frontend
+(`pipeline/page.tsx`'s `SubmitClientTab`): a debounced (350ms) fetch on
+template/contact/hidden-column change renders the live HTML table
+inline via `dangerouslySetInnerHTML`; a new "Manage Templates →" link
+opens Ops Settings directly on the Templates tab (`/ops-settings?tab=
+templates`, a new client-only `?tab=` deep-link reader on the Ops
+Settings page, matching the same SSR-safe pattern already used
+elsewhere in this project); the old single "Save as default" checkbox
+became a real 3-way Client/SPOC/Project radio picker.
+
+Verified for real end-to-end, not code review, at every step: direct
+curl reproduction of both bugs BEFORE fixing (the UUID comparison via a
+standalone send with an explicit `contact_id`; the index collision via
+a real send1-then-send2 sequence matching S98's own test exactly) and
+of the fix AFTER (client default preserved untouched at 3 columns,
+SPOC-A default correctly created at 2 columns and outranking the client
+default for SPOC A specifically, SPOC B correctly still falling back to
+the client-wide default) — both via a fresh, disposable client/contact/
+requisition/candidate/application built directly against production,
+cleaned up afterward via the real DELETE APIs (one FK-referenced stray
+template from an earlier repro attempt was correctly left in place
+rather than force-deleted, matching this project's own established
+"never destroy real historical audit-trail data" discipline — already
+invisible from the live picker via the exact same fix being verified).
+New permanent "S98 Tracking-sheet live preview + SPOC/project-scoped
+template defaults + stray-template picker fix" suite (8 tests) added to
+`qa_automation.spec.ts`, run clean twice in full isolation (8/8 both
+times) after both fixes landed. Also fixed S54's own long-standing
+`test.afterAll` cleanup gap while investigating the stray-template root
+cause — it never un-defaulted its own client-scoped template before
+attempting to delete it (the API correctly refuses to delete an active
+default), so every S54 run left one more permanent stray template
+behind; now un-defaults via a `PUT` before the `DELETE`, matching the
+same fix already applied to a sibling suite's identical gap earlier in
+this project's history.
+
+A broader regression sweep across every suite touching the modified
+files (S14/S17/S29/S37/S43/S48/S49/S54/S61/S65/S73/S80/S81/S90/S96/S97/
+S98, 127 tests total across two passes) passed fully clean — 5 failures/
+2 flakes on the first combined run were all confirmed, via direct
+backend-log correlation (8 real `429 Too Many Requests` responses in
+the exact failure window), as this session's own well-documented per-IP
+login rate-limit artifact from very heavy cumulative test-run volume
+today, not a regression; all 17 re-ran clean in isolation after a
+genuine cooldown wait, and the remaining 110 tests (which hadn't run
+yet due to the earlier `.serial()` cascade) passed clean in the same
+follow-up sweep. Zero-token audit: `CONFIRMED CLEAN` (440 files, 0
+external API refs). All throwaway/repro test data cleaned up via real
+APIs, confirmed zero residue beyond the one deliberately-preserved
+FK-referenced template noted above.

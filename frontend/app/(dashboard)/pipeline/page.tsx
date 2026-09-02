@@ -1968,7 +1968,6 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // bug, a slow/failed request under load had no visible failure state
   // at all. Now surfaces a real error with a one-click Retry.
   const { data: preview, error: previewError, refetch: refetchPreview } = useFetch<any>(`/applications/${appId}/submit-to-client/preview`);
-  const { data: templates } = useFetch<any[]>('/submission-templates?direction=kae_to_client');
   const { data: allHistory, refetch: refetchHistory } = useFetch<any[]>(`/applications/${appId}/submissions`);
   const history = (allHistory || []).filter((h: any) => h.direction === 'kae_to_client');
   const { data: visualThemes } = useFetch<any[]>('/resume-generator/visual-themes');
@@ -1980,21 +1979,56 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [hiddenKeys, setHiddenKeys] = useState<string[]>([]);
   const [toEmail, setToEmail] = useState('');
+  const [toContactId, setToContactId] = useState('');
   const [ccSelf, setCcSelf] = useState(true);
   const [saveAsDefault, setSaveAsDefault] = useState(false);
+  // REAL FEATURE (2026-09-02, reported live: "make default for the
+  // selected client and spoc or project wise") — which scope a
+  // save-as-default targets: the whole client, just this SPOC, or just
+  // this requisition/project.
+  const [defaultScope, setDefaultScope] = useState<'client' | 'contact' | 'requisition'>('client');
   const [sending, setSending] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [manualDraft, setManualDraft] = useState<Record<string, string> | null>(null);
   const [manualLoading, setManualLoading] = useState(false);
+  // REAL FEATURE (2026-09-02, reported live: "Tracking sheet should be
+  // visible and display with TABLE sheet with all details to review
+  // before sharing with the client"): the real, live populated table —
+  // re-fetched whenever template/SPOC/hidden-columns change, so what's
+  // shown here is always exactly what Send will actually produce.
+  const [trackingPreview, setTrackingPreview] = useState<{ tracking_html: string; row_count: number } | null>(null);
+  const [trackingLoading, setTrackingLoading] = useState(false);
 
   useEffect(() => {
     if (preview && !initialized) {
       setTemplateId(preview.resolved_template?.id || '');
       setFields(preview.auto_values || {});
       setToEmail(preview.primary_contact?.email || '');
+      setToContactId(preview.primary_contact?.id || '');
+      setTrackingPreview(preview.tracking_html ? { tracking_html: preview.tracking_html, row_count: 0 } : null);
       setInitialized(true);
     }
   }, [preview, initialized]);
+
+  // Re-fetch the live table whenever what would actually be sent changes.
+  // Debounced so toggling several hidden-column eyes in quick succession
+  // doesn't fire a request per click.
+  useEffect(() => {
+    if (!initialized) return;
+    const t = setTimeout(async () => {
+      setTrackingLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (templateId) params.set('template_id', templateId);
+        if (toContactId) params.set('contact_id', toContactId);
+        if (hiddenKeys.length) params.set('hidden_columns', hiddenKeys.join(','));
+        const d = await apiFetch(`/applications/${appId}/submit-to-client/tracking-preview?${params.toString()}`);
+        setTrackingPreview(d);
+      } catch { /* the main form still works even if this live preview fails to load */ }
+      finally { setTrackingLoading(false); }
+    }, 350);
+    return () => clearTimeout(t);
+  }, [appId, templateId, toContactId, hiddenKeys, initialized]);
 
   useEffect(() => {
     if (resumeStyle === 'manual' && !manualDraft) {
@@ -2040,7 +2074,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
     );
   }
 
-  const selectedTemplate = (templates || []).find((t: any) => t.id === templateId) || preview.resolved_template;
+  const selectedTemplate = (preview.templates || []).find((t: any) => t.id === templateId) || preview.resolved_template;
   const isFileTemplate = selectedTemplate?.template_type === 'file';
   const toggleHidden = (key: string) => setHiddenKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
 
@@ -2053,10 +2087,11 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         method: 'POST',
         body: JSON.stringify({
           template_id: templateId || undefined,
+          contact_id: toContactId || undefined,
           to_emails: toEmail ? [toEmail] : undefined,
           columns: saveAsDefault && hiddenKeys.length ? visibleColumns : undefined,
           hidden_columns: hiddenKeys,
-          field_values: fields, cc_self: ccSelf, save_as_default: saveAsDefault,
+          field_values: fields, cc_self: ccSelf, save_as_default: saveAsDefault, default_scope: defaultScope,
           resume_style: resumeStyle,
           manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
           visual_theme: resumeStyle !== 'manual' ? visualTheme : undefined,
@@ -2067,6 +2102,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       setInitialized(false);
       setHiddenKeys([]);
       setSaveAsDefault(false);
+      setDefaultScope('client');
       refetchHistory();
       refetchPreview();
       // Real automation (2026-08-26): a real send now auto-advances the
@@ -2094,8 +2130,12 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       <div style={{ padding: 10, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12 }}>
         <span style={lbl}>TO (CLIENT / KAM)</span>
         {preview.contacts.length > 1 ? (
-          <select value={toEmail} onChange={e => setToEmail(e.target.value)} style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 }}>
-            {preview.contacts.map((c: any) => <option key={c.id} value={c.email}>{c.contact_name}{c.role_label ? ` (${c.role_label})` : ''} — {c.email}</option>)}
+          <select value={toContactId} onChange={e => {
+            const c = preview.contacts.find((x: any) => x.id === e.target.value);
+            setToContactId(e.target.value);
+            setToEmail(c?.email || '');
+          }} style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 }}>
+            {preview.contacts.map((c: any) => <option key={c.id} value={c.id}>{c.contact_name}{c.role_label ? ` (${c.role_label})` : ''} — {c.email}</option>)}
           </select>
         ) : (
           <input value={toEmail} onChange={e => setToEmail(e.target.value)} style={{ width: '100%', padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 }} />
@@ -2103,14 +2143,23 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       </div>
 
       <div>
-        <span style={lbl}>TRACKING SHEET TEMPLATE</span>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={lbl}>TRACKING SHEET TEMPLATE</span>
+          {/* REAL GAP FIX (2026-09-02, reported live: "where is the
+              option to check all these tracking sheet template") — a
+              direct path to the real management page (upload a file,
+              add/rename columns, set a client/SPOC/project default),
+              not just a flat row of name buttons here. */}
+          <a href="/ops-settings?tab=templates" target="_blank" rel="noreferrer" style={{ fontSize: 10, fontWeight: 700, color: '#2563EB' }}>Manage Templates →</a>
+        </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          {(templates || []).map((t: any) => (
+          {(preview.templates || []).map((t: any) => (
             <button key={t.id} onClick={() => { setTemplateId(t.id); setHiddenKeys([]); }}
+              title={[t.client_name && `Client: ${t.client_name}`, t.spoc_name && `SPOC: ${t.spoc_name}`, t.requisition_title && `Project: ${t.requisition_title}`].filter(Boolean).join(' · ')}
               style={{ fontSize: 11, fontWeight: 700, padding: '6px 12px', borderRadius: 999, cursor: 'pointer',
                 border: `1px solid ${templateId === t.id ? '#2563EB' : '#E2E8F0'}`,
                 background: templateId === t.id ? '#2563EB' : '#fff', color: templateId === t.id ? '#fff' : '#475569' }}>
-              {t.name}{t.client_name ? ` (${t.client_name})` : t.is_default ? ' (Default)' : ''}{t.template_type === 'file' ? ' 📄' : ''}
+              {t.name}{t.spoc_name ? ` (SPOC: ${t.spoc_name})` : t.requisition_title ? ` (Project: ${t.requisition_title})` : t.client_name ? ` (${t.client_name})` : t.is_default ? ' (Default)' : ''}{t.template_type === 'file' ? ' 📄' : ''}
             </button>
           ))}
         </div>
@@ -2119,6 +2168,22 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
             This is an uploaded {selectedTemplate?.file_name} — real candidate data is merged directly into it{selectedTemplate?.file_name?.toLowerCase().endsWith('.pdf') ? ' (PDF is attached as-is; a live table is also included below since a PDF can\'t be merge-filled)' : ' and attached'}.
           </div>
         )}
+      </div>
+
+      <div>
+        <span style={lbl}>TRACKING SHEET PREVIEW {trackingLoading && '(updating…)'}</span>
+        {trackingPreview?.tracking_html ? (
+          <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, opacity: trackingLoading ? 0.6 : 1 }}
+            dangerouslySetInnerHTML={{ __html: trackingPreview.tracking_html }} />
+        ) : (
+          <div style={{ fontSize: 11, color: '#94A3B8', padding: 10, border: '1px dashed #E2E8F0', borderRadius: 8 }}>
+            {trackingLoading ? 'Loading the real tracking sheet…' : 'No tracking sheet template resolved yet — pick one above.'}
+          </div>
+        )}
+        <p style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
+          This is the exact table that will be sent — including every real candidate already submitted to this client
+          for this role. Edits below (fields, hidden columns) update it live.
+        </p>
       </div>
 
       <div>
@@ -2231,10 +2296,30 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         <input type="checkbox" checked={ccSelf} onChange={e => setCcSelf(e.target.checked)} /> CC myself
       </label>
       {hiddenKeys.length > 0 && (
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#475569', cursor: 'pointer' }}>
-          <input type="checkbox" checked={saveAsDefault} onChange={e => setSaveAsDefault(e.target.checked)} />
-          Save as this client's default template ({hiddenKeys.length} hidden field{hiddenKeys.length === 1 ? '' : 's'} removed permanently — otherwise this hide only applies to this one send)
-        </label>
+        <div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#475569', cursor: 'pointer' }}>
+            <input type="checkbox" checked={saveAsDefault} onChange={e => setSaveAsDefault(e.target.checked)} />
+            Save as default ({hiddenKeys.length} hidden field{hiddenKeys.length === 1 ? '' : 's'} removed permanently — otherwise this hide only applies to this one send)
+          </label>
+          {saveAsDefault && (
+            <div style={{ display: 'flex', gap: 10, marginTop: 6, marginLeft: 20 }}>
+              {/* REAL FEATURE (2026-09-02, reported live: "make default
+                  for the selected client and spoc or project wise") —
+                  three real, independent scopes, matching what
+                  Ops Settings' own template form now supports. */}
+              {([
+                { key: 'client', label: 'This client (all SPOCs/projects)' },
+                { key: 'contact', label: 'This SPOC only' },
+                { key: 'requisition', label: 'This project only' },
+              ] as const).map(o => (
+                <label key={o.key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10.5, color: '#64748B', cursor: 'pointer' }}>
+                  <input type="radio" name="default_scope" checked={defaultScope === o.key} onChange={() => setDefaultScope(o.key)} />
+                  {o.label}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       <button onClick={send} disabled={sending}

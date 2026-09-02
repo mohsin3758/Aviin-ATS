@@ -534,6 +534,17 @@ function slugifyColumnKey(title: string): string {
 function TemplateForm({ initial, direction, columnsReg, clients, onSave, onCancel }: any) {
   const [name, setName] = useState(initial?.name || '');
   const [clientId, setClientId] = useState(initial?.client_id || '');
+  // REAL FEATURE (2026-09-02, reported live: "make default for the
+  // selected client and spoc or project wise") — a template can now be
+  // pinned narrower than the whole client: one specific SPOC, or one
+  // specific requisition/project. Both stay blank (client-wide, the
+  // original behavior) unless the admin explicitly picks one, and both
+  // only make sense once a client is actually selected.
+  const [clientContactId, setClientContactId] = useState(initial?.client_contact_id || '');
+  const [requisitionId, setRequisitionId] = useState(initial?.requisition_id || '');
+  const { data: clientContacts } = useFetch<any[]>(clientId ? `/clients/${clientId}/contacts` : null);
+  const { data: clientReqsRaw } = useFetch<any>(clientId ? `/requisitions?client_id=${clientId}&include_inactive=false` : null);
+  const clientReqs = clientReqsRaw?.items || clientReqsRaw || [];
   const [isDefault, setIsDefault] = useState(initial?.is_default || false);
   // Real column model: registry keys are toggled on/off as before, but a
   // recruiter/KAE can now also type an arbitrary title and add it as a
@@ -566,6 +577,15 @@ function TemplateForm({ initial, direction, columnsReg, clients, onSave, onCance
   const renameCustomColumn = (key: string, label: string) =>
     setCustomColumns(prev => prev.map(c => c.key === key ? { ...c, label } : c));
 
+  // Switching clients invalidates whatever SPOC/project was previously
+  // picked (it belonged to the old client) — reset rather than silently
+  // carry over a mismatched pin the backend would reject anyway.
+  const handleClientChange = (v: string) => {
+    setClientId(v);
+    setClientContactId('');
+    setRequisitionId('');
+  };
+
   const save = async () => {
     if (!name.trim()) { setErr('Name is required'); return; }
     if (selectedKeys.length === 0 && customColumns.length === 0) { setErr('Add at least one column'); return; }
@@ -575,7 +595,11 @@ function TemplateForm({ initial, direction, columnsReg, clients, onSave, onCance
         ...(columnsReg || []).filter((c: any) => selectedKeys.includes(c.key)).map((c: any) => ({ key: c.key, label: c.label })),
         ...customColumns,
       ];
-      await onSave({ name, client_id: clientId || null, columns, is_default: isDefault, direction });
+      await onSave({
+        name, client_id: clientId || null,
+        client_contact_id: clientContactId || null, requisition_id: requisitionId || null,
+        columns, is_default: isDefault, direction,
+      });
     } catch (e: any) {
       setErr(e.message || 'Save failed');
     } finally {
@@ -583,20 +607,48 @@ function TemplateForm({ initial, direction, columnsReg, clients, onSave, onCance
     }
   };
 
+  const defaultScopeLabel = requisitionId
+    ? 'this project/requisition'
+    : clientContactId
+    ? 'this SPOC'
+    : clientId
+    ? 'this client (every SPOC/project)'
+    : 'the tenant (global fallback)';
+
   return (
     <div style={card}>
       <label style={label}>TEMPLATE NAME</label>
       <input value={name} onChange={e => setName(e.target.value)} style={input} placeholder="e.g. Acme Corp Tracking Sheet" />
 
       <label style={label}>CLIENT (LEAVE BLANK FOR A GLOBAL TEMPLATE)</label>
-      <select value={clientId} onChange={e => setClientId(e.target.value)} style={input}>
+      <select value={clientId} onChange={e => handleClientChange(e.target.value)} style={input}>
         <option value="">-- Global (any client) --</option>
         {(clients || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
       </select>
 
+      {clientId && (
+        <>
+          <label style={label}>SPOC (OPTIONAL — NARROWS THE DEFAULT TO ONE CONTACT AT THIS CLIENT)</label>
+          <select value={clientContactId} onChange={e => { setClientContactId(e.target.value); if (e.target.value) setRequisitionId(''); }} style={input}>
+            <option value="">-- Any SPOC at this client --</option>
+            {(clientContacts || []).map((c: any) => <option key={c.id} value={c.id}>{c.contact_name}{c.role_label ? ` (${c.role_label})` : ''}</option>)}
+          </select>
+
+          <label style={label}>PROJECT / REQUISITION (OPTIONAL — NARROWS THE DEFAULT TO ONE ROLE AT THIS CLIENT)</label>
+          <select value={requisitionId} onChange={e => { setRequisitionId(e.target.value); if (e.target.value) setClientContactId(''); }} style={input}>
+            <option value="">-- Any project at this client --</option>
+            {clientReqs.map((r: any) => <option key={r.id} value={r.id}>{r.title}</option>)}
+          </select>
+          <p style={{ fontSize: 10.5, color: '#94A3B8', marginTop: -6, marginBottom: 10 }}>
+            SPOC and project are two independent, mutually-exclusive ways to narrow a client-level default — picking
+            one clears the other. Leave both blank for a template that applies to the whole client.
+          </p>
+        </>
+      )}
+
       <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 10, cursor: 'pointer' }}>
         <input type="checkbox" checked={isDefault} onChange={e => setIsDefault(e.target.checked)} />
-        Use as the default {clientId ? "template for this client" : "global fallback template"} ({direction === 'kae_to_client' ? 'KAE → Client' : 'Recruiter → KAE'})
+        Use as the default template for {defaultScopeLabel} ({direction === 'kae_to_client' ? 'KAE → Client' : 'Recruiter → KAE'})
       </label>
 
       <label style={label}>COLUMNS ({selectedKeys.length + customColumns.length} selected)</label>
@@ -775,7 +827,12 @@ function TemplatesTab() {
                     <span style={{ fontSize: 9, fontWeight: 800, padding: '1px 7px', borderRadius: 999, background: '#EEF2FF', color: '#4338CA' }}>FILE TEMPLATE</span>
                   )}
                 </div>
-                <div style={{ color: '#64748B', fontSize: 11 }}>{t.client_name ? `Client: ${t.client_name}` : 'Global (any client)'} · {t.columns?.length || 0} columns</div>
+                <div style={{ color: '#64748B', fontSize: 11 }}>
+                  {t.client_name ? `Client: ${t.client_name}` : 'Global (any client)'}
+                  {t.spoc_name && ` → SPOC: ${t.spoc_name}`}
+                  {t.requisition_title && ` → Project: ${t.requisition_title}`}
+                  {' · '}{t.columns?.length || 0} columns
+                </div>
               </div>
               <button onClick={() => duplicate(t)} title="Duplicate" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}><Copy size={14} /></button>
               <button onClick={() => toggleActive(t)} title={t.is_active === false ? 'Reactivate' : 'Deactivate'} style={{ background: 'none', border: 'none', cursor: 'pointer', color: t.is_active === false ? '#16A34A' : '#64748B' }}><Power size={14} /></button>
@@ -833,6 +890,15 @@ function GdprTab() {
 
 export default function OpsSettingsPage() {
   const [tab, setTab] = useState('scoring');
+  // REAL FEATURE (2026-09-02): a real ?tab= deep link (e.g. from the
+  // Submit-to-Client modal's "Manage Templates →" link) — client-only
+  // (window isn't available during SSR), matching the same deferred-
+  // read pattern already established elsewhere in this app (Companies'
+  // own ?client= deep link).
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('tab');
+    if (t && TABS.some(x => x.key === t)) setTab(t);
+  }, []);
   return (
     <div className="anim-fade-up" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div>

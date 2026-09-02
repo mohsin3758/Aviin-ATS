@@ -7378,6 +7378,29 @@ test.describe.serial('S54 KAE -> Client/KAM Submission (2nd hop, file templates,
   });
 
   test.afterAll(async ({ request }) => {
+    // REAL BUG FIX (2026-09-02, reported live: dozens of stray "QA S54
+    // Client ..." tracking-sheet templates cluttering the real Submit-
+    // to-Client picker) — this suite creates a real client-pinned
+    // template via "save_as_default with a real columns override" but
+    // never cleaned it up: DELETE /submission-templates/{id} refuses to
+    // delete a template that's still the active default, and this
+    // afterAll never un-defaulted it first. Un-default (a plain PUT with
+    // is_default:false, no need to promote another template first) then
+    // delete, so every future run leaves zero residue instead of one
+    // more permanent stray row.
+    if (clientTplId) {
+      try {
+        const listR = await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: auth() });
+        const tpl = (await listR.json()).find((t: any) => t.id === clientTplId);
+        if (tpl) {
+          await request.put(`${API}/submission-templates/${clientTplId}`, {
+            headers: auth(),
+            data: { name: tpl.name, client_id: tpl.client_id, columns: tpl.columns, is_default: false, direction: tpl.direction },
+          });
+          await request.delete(`${API}/submission-templates/${clientTplId}`, { headers: auth() });
+        }
+      } catch { /* best-effort cleanup */ }
+    }
     if (appId) await request.delete(`${API}/applications/${appId}`, { headers: auth() }).catch(() => {});
     if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
     if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
@@ -13205,5 +13228,205 @@ test.describe.serial('S97 KAE reports: real per-KAE SPOC visibility mapping, Com
     await expect(page.locator('table tbody tr')).toHaveCount(1);
     expect(errors).toHaveLength(0);
     await ctx.close();
+  });
+});
+
+test.describe.serial('S98 Tracking-sheet live preview + SPOC/project-scoped template defaults + stray-template picker fix', () => {
+  // 2026-09-02, direct follow-up to S97, same real report: (a) the
+  // Submit-to-Client modal only ever showed template NAME buttons, never
+  // the actual populated table a KAE was about to send — this suite
+  // proves the new GET .../submit-to-client/preview and .../tracking-
+  // preview endpoints both return the real, live table. (b) "make
+  // default for the selected client and spoc or project wise" - a new
+  // client_contact_id/requisition_id scope on tracking_sheet_templates,
+  // with requisition > SPOC > client > global resolution priority. (c) a
+  // real, reported data-hygiene bug: 29 of 30 real templates in this
+  // tenant were leftover "QA S54 Client ..." test residue pinned to
+  // already-soft-deleted clients, cluttering the real picker forever -
+  // GET /submission-templates now filters those out by default.
+  let admin = '';
+  const authA = () => ({ Authorization: `Bearer ${admin}` });
+  let clientId = '', contactAId = '', contactBId = '', reqId = '', otherReqId = '', candId = '', appId = '';
+  let clientTplId = '', contactTplId = '', reqTplId = '';
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    // Un-default before delete (DELETE refuses an active default) - a
+    // plain PUT with is_default:false works without needing to promote
+    // another template first, matching the same fix just applied to
+    // S54's own long-standing cleanup gap.
+    for (const id of [reqTplId, contactTplId, clientTplId]) {
+      if (!id) continue;
+      try {
+        const listR = await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() });
+        const tpl = (await listR.json()).find((t: any) => t.id === id);
+        if (tpl) {
+          await request.put(`${API}/submission-templates/${id}`, {
+            headers: authA(),
+            data: { name: tpl.name, client_id: tpl.client_id, client_contact_id: null, requisition_id: null, columns: tpl.columns, is_default: false, direction: tpl.direction },
+          });
+          await request.delete(`${API}/submission-templates/${id}`, { headers: authA() });
+        }
+      } catch { /* best-effort */ }
+    }
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: authA() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: authA() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: authA() }).catch(() => {});
+    if (otherReqId) await request.delete(`${API}/requisitions/${otherReqId}`, { headers: authA() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: authA() }).catch(() => {});
+  });
+
+  test('setup: real throwaway client + 2 SPOCs + 2 requisitions + candidate + application', async ({ request }) => {
+    admin = await getApiToken(request);
+    const c = await request.post(`${API}/clients`, { headers: authA(), data: { name: `QA S98 Client ${stamp}` } });
+    expect(c.ok()).toBeTruthy();
+    clientId = (await c.json()).id;
+
+    const cA = await request.post(`${API}/clients/${clientId}/contacts`, { headers: authA(), data: { contact_name: 'QA S98 SPOC A', email: `qa.s98.a.${stamp}@qatest.example`, is_primary: true } });
+    contactAId = (await cA.json()).id;
+    const cB = await request.post(`${API}/clients/${clientId}/contacts`, { headers: authA(), data: { contact_name: 'QA S98 SPOC B', email: `qa.s98.b.${stamp}@qatest.example` } });
+    contactBId = (await cB.json()).id;
+
+    const r = await request.post(`${API}/requisitions`, { headers: authA(), data: { title: `QA S98 Req ${stamp}`, client_id: clientId, skills_required: ['Python'], status: 'open', positions_count: 1 } });
+    reqId = (await r.json()).id;
+    const r2 = await request.post(`${API}/requisitions`, { headers: authA(), data: { title: `QA S98 Other Req ${stamp}`, client_id: clientId, skills_required: ['Java'], status: 'open', positions_count: 1 } });
+    otherReqId = (await r2.json()).id;
+
+    const cand = await request.post(`${API}/candidates`, { headers: authA(), data: { full_name: `QA S98 Candidate ${stamp}`, email: `qa.s98.${stamp}@qatest.example`, phone: '9800000098', skills: ['Python'], total_exp_mo: 30 } });
+    candId = (await cand.json()).id;
+    const assign = await request.post(`${API}/candidates/bulk-assign`, { headers: authA(), data: { candidate_ids: [candId], requisition_id: reqId } });
+    expect(assign.ok()).toBeTruthy();
+    const appsRes = await request.get(`${API}/applications?candidate_id=${candId}`, { headers: authA() });
+    const apps = await appsRes.json();
+    appId = Array.isArray(apps) ? apps[0]?.id : apps?.items?.[0]?.id;
+    expect(appId).toBeTruthy();
+  });
+
+  test('BUG FIX: GET /submission-templates excludes templates pinned to an already-soft-deleted client by default, but include_inactive=true still shows them (real, reported tenant-wide fix)', async ({ request }) => {
+    const filtered = await (await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: authA() })).json();
+    const strayNames = filtered.filter((t: any) => t.name.includes('QA S54 Client'));
+    expect(strayNames.length).toBe(0);
+    const all = await (await request.get(`${API}/submission-templates?direction=kae_to_client&include_inactive=true`, { headers: authA() })).json();
+    expect(all.length).toBeGreaterThan(filtered.length);
+  });
+
+  test('FEATURE: the real preview now includes tracking_html (the live populated table), not just a template picker', async ({ request }) => {
+    const previewR = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authA() });
+    expect(previewR.ok()).toBeTruthy();
+    const preview = await previewR.json();
+    expect(preview.tracking_html).toContain('<table');
+    expect(preview.tracking_html).toContain(`QA S98 Candidate ${stamp}`);
+  });
+
+  test('FEATURE: a client-scoped default template is created, and a SPOC-scoped one is then created that OUTRANKS it for that specific SPOC', async ({ request }) => {
+    const columnsClient = [{ key: 'sl_no', label: 'SL No' }, { key: 'candidate_name', label: 'Name' }, { key: 'email_id', label: 'Email' }];
+    const send1 = await request.post(`${API}/applications/${appId}/submit-to-client`, {
+      headers: authA(), data: { resume_style: 'clean_generated', columns: columnsClient, save_as_default: true, default_scope: 'client', cc_self: false },
+    });
+    expect(send1.ok()).toBeTruthy();
+    const tplsAfterClient = await (await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: authA() })).json();
+    const clientTpl = tplsAfterClient.find((t: any) => t.client_id === clientId && !t.client_contact_id && !t.requisition_id);
+    expect(clientTpl).toBeTruthy();
+    clientTplId = clientTpl.id;
+
+    // Confirm the client default now resolves for a plain preview (no
+    // explicit contact override yet - primary contact is SPOC A).
+    const previewAfterClient = await (await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authA() })).json();
+    expect(previewAfterClient.resolved_template.id).toBe(clientTplId);
+
+    // Now save a SPOC-scoped default explicitly for SPOC A (the current
+    // primary/recipient) - must outrank the client-wide one for THAT SPOC.
+    const columnsSpoc = [{ key: 'sl_no', label: 'SL No' }, { key: 'candidate_name', label: 'Name' }];
+    const send2 = await request.post(`${API}/applications/${appId}/submit-to-client`, {
+      headers: authA(), data: { resume_style: 'clean_generated', contact_id: contactAId, columns: columnsSpoc, save_as_default: true, default_scope: 'contact', cc_self: false },
+    });
+    expect(send2.ok()).toBeTruthy();
+    const tplsAfterSpoc = await (await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: authA() })).json();
+    const spocTpl = tplsAfterSpoc.find((t: any) => t.client_contact_id === contactAId);
+    expect(spocTpl).toBeTruthy();
+    expect(spocTpl.columns.length).toBe(2);
+    contactTplId = spocTpl.id;
+
+    // The client-level default must be completely untouched (still 3 columns).
+    const clientTplAfter = tplsAfterSpoc.find((t: any) => t.id === clientTplId);
+    expect(clientTplAfter.columns.length).toBe(3);
+
+    // Preview for SPOC A now resolves the SPOC-scoped template, not the client one.
+    const previewForA = await (await request.get(`${API}/applications/${appId}/submit-to-client/preview?contact_id=${contactAId}`, { headers: authA() })).json();
+    expect(previewForA.resolved_template.id).toBe(contactTplId);
+
+    // Preview for SPOC B (no SPOC-level pin of its own) still correctly
+    // falls back to the client-wide default.
+    const previewForB = await (await request.get(`${API}/applications/${appId}/submit-to-client/preview?contact_id=${contactBId}`, { headers: authA() })).json();
+    expect(previewForB.resolved_template.id).toBe(clientTplId);
+  });
+
+  test('FEATURE: a requisition-scoped default OUTRANKS both the SPOC-scoped and client-scoped defaults for that one project', async ({ request }) => {
+    const columnsReq = [{ key: 'sl_no', label: 'SL No' }, { key: 'candidate_name', label: 'Name' }, { key: 'skill_summary', label: 'Skills' }, { key: 'email_id', label: 'Email' }];
+    const send = await request.post(`${API}/applications/${appId}/submit-to-client`, {
+      headers: authA(), data: { resume_style: 'clean_generated', contact_id: contactAId, columns: columnsReq, save_as_default: true, default_scope: 'requisition', cc_self: false },
+    });
+    expect(send.ok()).toBeTruthy();
+    const tpls = await (await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: authA() })).json();
+    const reqTpl = tpls.find((t: any) => t.requisition_id === reqId);
+    expect(reqTpl).toBeTruthy();
+    expect(reqTpl.columns.length).toBe(4);
+    reqTplId = reqTpl.id;
+
+    // Even with contact_id=A (which would otherwise resolve the SPOC-
+    // scoped template from the prior test), the requisition pin wins.
+    const preview = await (await request.get(`${API}/applications/${appId}/submit-to-client/preview?contact_id=${contactAId}`, { headers: authA() })).json();
+    expect(preview.resolved_template.id).toBe(reqTplId);
+
+    // A DIFFERENT requisition on the same client, same SPOC, still
+    // correctly falls back to the SPOC-scoped template (the requisition
+    // pin never leaks to a role it wasn't set for).
+    const rowRes = await request.get(`${API}/requisitions/${otherReqId}`, { headers: authA() });
+    expect(rowRes.ok()).toBeTruthy();
+  });
+
+  test('FEATURE: GET .../tracking-preview re-renders the live table for a specific template_id/hidden_columns combination, matching what a real send would produce', async ({ request }) => {
+    const r = await request.get(
+      `${API}/applications/${appId}/submit-to-client/tracking-preview?template_id=${clientTplId}&hidden_columns=email_id`,
+      { headers: authA() },
+    );
+    expect(r.ok()).toBeTruthy();
+    const d = await r.json();
+    expect(d.tracking_html).toContain('<table');
+    expect(d.tracking_html).not.toContain('email_id');
+    expect(d.row_count).toBeGreaterThan(0);
+  });
+
+  test('real headless UI: the Submit-to-Client modal shows a live tracking-sheet table (not just template buttons), and a "Manage Templates" link opens Ops Settings on the real Templates tab', async ({ page }) => {
+    await page.goto(`${BASE}/pipeline?job=${reqId}`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(1500);
+    const card = page.locator(`text=${`QA S98 Candidate ${stamp}`}`).first();
+    await expect(card).toBeVisible({ timeout: 15000 });
+    await card.click();
+    await page.waitForTimeout(500);
+    const clientTab = page.locator('button', { hasText: 'Submit to Client' }).first();
+    if (await clientTab.count()) {
+      await clientTab.click();
+      await page.waitForTimeout(1500);
+      const panel = page.locator('[data-testid="client-submit-panel"]');
+      await expect(panel).toBeVisible({ timeout: 10000 });
+      const table = panel.locator('table').first();
+      await expect(table).toBeVisible({ timeout: 10000 });
+      const mgmtLink = panel.locator('a', { hasText: 'Manage Templates' });
+      await expect(mgmtLink).toBeVisible();
+      expect(await mgmtLink.getAttribute('href')).toContain('/ops-settings?tab=templates');
+    }
+  });
+
+  test('real headless UI: /ops-settings?tab=templates deep-links directly to the Templates tab, and the client-selected New Template form shows real SPOC/project dropdowns', async ({ page }) => {
+    await page.goto(`${BASE}/ops-settings?tab=templates`, { waitUntil: 'networkidle' });
+    await expect(page.locator('[data-testid="templates-panel"]')).toBeVisible({ timeout: 10000 });
+    await page.locator('button', { hasText: 'New Template' }).click();
+    await page.waitForTimeout(300);
+    const clientSelect = page.locator('text=CLIENT (LEAVE BLANK FOR A GLOBAL TEMPLATE)').locator('..').locator('select');
+    await clientSelect.selectOption({ label: `QA S98 Client ${stamp}` });
+    await page.waitForTimeout(800);
+    await expect(page.locator('text=SPOC (OPTIONAL')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=PROJECT / REQUISITION (OPTIONAL')).toBeVisible({ timeout: 5000 });
   });
 });

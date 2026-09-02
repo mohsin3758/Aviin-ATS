@@ -226,7 +226,8 @@ async def _resolve_kaes(conn, tenant_id: str, client_id: Optional[str]):
     )
 
 
-async def _resolve_template(conn, tenant_id: str, client_id: Optional[str], direction: str = "recruiter_to_kae"):
+async def _resolve_template(conn, tenant_id: str, client_id: Optional[str], direction: str = "recruiter_to_kae",
+                             client_contact_id: Optional[str] = None, requisition_id: Optional[str] = None):
     """Real fix (this feature): a client can now genuinely have more than
     one active template pinned to it (non-default alternates a KAE can
     pick from) — the old ORDER BY created_at LIMIT 1 silently picked
@@ -235,13 +236,50 @@ async def _resolve_template(conn, tenant_id: str, client_id: Optional[str], dire
     client's own templates, falling back to the client's oldest only if
     none is marked (shouldn't happen post-migration, but never 400s over
     it). direction distinguishes the recruiter->KAE hop from the newer
-    KAE->client hop — each has its own independent default."""
+    KAE->client hop — each has its own independent default.
+
+    REAL FEATURE (2026-09-02, reported live: "make default for the
+    selected client and spoc or project wise"): resolution now checks 2
+    more, more-specific scopes before falling back to the plain client
+    default — requisition_id (one specific project/role) beats
+    client_contact_id (one specific SPOC) beats a plain client-wide
+    default beats the global fallback. Each optional param is None
+    unless the caller genuinely knows it (e.g. no requisition context at
+    all), so passing neither reproduces the exact original 2-tier
+    behavior unchanged.
+
+    REAL BUG FIX (2026-09-02, reported live: dozens of stray "QA S54
+    Client ..." test templates cluttering the real picker): a client-
+    pinned template whose client has since been soft-deleted is no
+    longer eligible to resolve as a default — it stays visible only to
+    an admin explicitly browsing "include inactive," matching the same
+    is_active-filter convention already used everywhere else in this
+    project. SPOC/requisition-pinned templates aren't separately checked
+    here since both FKs are ON DELETE SET NULL — a genuinely orphaned one
+    already falls through the tiers above it on its own."""
     row = None
-    if client_id:
+    if requisition_id:
+        row = await conn.fetchrow(
+            """SELECT tst.* FROM tracking_sheet_templates tst
+               JOIN requisitions r ON r.id = tst.requisition_id
+               WHERE tst.tenant_id=$1 AND tst.requisition_id=$2 AND tst.direction=$3 AND tst.is_active
+                 AND r.is_active IS NOT FALSE
+               ORDER BY tst.is_default DESC, tst.created_at LIMIT 1""",
+            tenant_id, requisition_id, direction)
+    if row is None and client_contact_id:
         row = await conn.fetchrow(
             """SELECT * FROM tracking_sheet_templates
-               WHERE tenant_id=$1 AND client_id=$2 AND direction=$3 AND is_active
+               WHERE tenant_id=$1 AND client_contact_id=$2 AND direction=$3 AND is_active
                ORDER BY is_default DESC, created_at LIMIT 1""",
+            tenant_id, client_contact_id, direction)
+    if row is None and client_id:
+        row = await conn.fetchrow(
+            """SELECT tst.* FROM tracking_sheet_templates tst
+               JOIN clients cl ON cl.id = tst.client_id
+               WHERE tst.tenant_id=$1 AND tst.client_id=$2 AND tst.direction=$3 AND tst.is_active
+                 AND tst.client_contact_id IS NULL AND tst.requisition_id IS NULL
+                 AND cl.is_active IS NOT FALSE
+               ORDER BY tst.is_default DESC, tst.created_at LIMIT 1""",
             tenant_id, client_id, direction)
     if row is None:
         row = await conn.fetchrow(
@@ -284,24 +322,41 @@ async def _resolve_client_contacts(conn, tenant_id: str, client_id: Optional[str
 class TemplateIn(BaseModel):
     name: str
     client_id: Optional[str] = None
+    # REAL FEATURE (2026-09-02): a template can now be pinned to a
+    # specific SPOC or a specific requisition/project within a client,
+    # not just the client as a whole — see _resolve_template()'s own
+    # docstring for the real resolution priority.
+    client_contact_id: Optional[str] = None
+    requisition_id: Optional[str] = None
     columns: list[dict]
     is_default: bool = False
     direction: str = "recruiter_to_kae"
 
 
-async def _unset_other_defaults(conn, tenant_id: str, client_id: Optional[str], direction: str, exclude_id: Optional[str] = None):
-    """A default is scoped to (tenant, direction, client_id-or-global) —
-    setting a new one only clears the OTHER template that shared that exact
-    scope, never a different client's or a different direction's default
-    (the real bug this feature's own audit found: the old single
-    tenant-wide UNIQUE let two different clients silently fight over one
-    "the" default)."""
-    if client_id is None:
+async def _unset_other_defaults(conn, tenant_id: str, client_id: Optional[str], direction: str,
+                                 client_contact_id: Optional[str] = None, requisition_id: Optional[str] = None,
+                                 exclude_id: Optional[str] = None):
+    """A default is scoped to exactly one tier — requisition, SPOC,
+    client, or global — setting a new one only clears the OTHER
+    template that shared that EXACT same scope, never a broader or
+    narrower tier's default (the real bug this feature's own audit
+    found for the client tier alone: the old single tenant-wide UNIQUE
+    let two different clients silently fight over one "the" default;
+    the same class of bug would recur here if a new SPOC-level default
+    accidentally cleared the client-level one, or vice versa)."""
+    if requisition_id:
+        q = "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND direction=$2 AND requisition_id=$3"
+        args = [tenant_id, direction, requisition_id]
+    elif client_contact_id:
+        q = "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND direction=$2 AND client_contact_id=$3"
+        args = [tenant_id, direction, client_contact_id]
+    elif client_id:
+        q = ("UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND direction=$2 AND client_id=$3 "
+             "AND client_contact_id IS NULL AND requisition_id IS NULL")
+        args = [tenant_id, direction, client_id]
+    else:
         q = "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND direction=$2 AND client_id IS NULL"
         args = [tenant_id, direction]
-    else:
-        q = "UPDATE tracking_sheet_templates SET is_default=false WHERE tenant_id=$1 AND direction=$2 AND client_id=$3"
-        args = [tenant_id, direction, client_id]
     if exclude_id:
         q += f" AND id != ${len(args) + 1}"
         args.append(exclude_id)
@@ -323,12 +378,50 @@ async def list_templates(direction: Optional[str] = None, include_inactive: bool
             args.append(direction)
         if not include_inactive:
             where.append("tst.is_active")
+        # REAL BUG FIX (2026-09-02, reported live): a client-pinned
+        # template whose client has since been soft-deleted stayed
+        # visible in the real picker forever — this tenant's own picker
+        # had accumulated 29 stray "QA S54 Client ..." test templates
+        # this way, since GET /clients (and every other list in this
+        # app) already filters soft-deleted rows but this one never did.
+        # Matches the same is_active-filter convention used everywhere
+        # else; `include_inactive` still shows them for an admin who
+        # genuinely wants to browse/clean up orphaned ones.
+        if not include_inactive:
+            where.append("(tst.client_id IS NULL OR cl.is_active IS NOT FALSE)")
         rows = await conn.fetch(
-            f"""SELECT tst.*, cl.name AS client_name
-                FROM tracking_sheet_templates tst LEFT JOIN clients cl ON cl.id = tst.client_id
+            f"""SELECT tst.*, cl.name AS client_name, cc.contact_name AS spoc_name, r.title AS requisition_title
+                FROM tracking_sheet_templates tst
+                LEFT JOIN clients cl ON cl.id = tst.client_id
+                LEFT JOIN client_contacts cc ON cc.id = tst.client_contact_id
+                LEFT JOIN requisitions r ON r.id = tst.requisition_id
                 WHERE {' AND '.join(where)} ORDER BY tst.is_default DESC, tst.name""",
             *args)
     return [_template_out(r) for r in rows]
+
+
+async def _validate_template_scope(conn, tenant_id: str, client_id: Optional[str],
+                                    client_contact_id: Optional[str], requisition_id: Optional[str]):
+    """A SPOC or a requisition pin must genuinely belong to the SAME
+    client the template is otherwise scoped to — a real, cheap guard
+    against a mismatched pin (e.g. picking a SPOC from a different
+    client than the one selected) silently resolving nothing at send
+    time, rather than failing loudly here where the mistake is easy to
+    see and fix."""
+    if client_contact_id:
+        owner_client = await conn.fetchval(
+            "SELECT client_id FROM client_contacts WHERE id=$1 AND tenant_id=$2", client_contact_id, tenant_id)
+        if not owner_client:
+            raise HTTPException(400, "Unknown SPOC (client contact)")
+        if client_id and str(owner_client) != str(client_id):
+            raise HTTPException(400, "That SPOC belongs to a different client than the one selected")
+    if requisition_id:
+        req_row = await conn.fetchrow(
+            "SELECT client_id FROM requisitions WHERE id=$1 AND tenant_id=$2", requisition_id, tenant_id)
+        if not req_row:
+            raise HTTPException(400, "Unknown requisition")
+        if client_id and req_row["client_id"] and str(req_row["client_id"]) != str(client_id):
+            raise HTTPException(400, "That requisition belongs to a different client than the one selected")
 
 
 @router.post("/submission-templates")
@@ -338,12 +431,16 @@ async def create_template(body: TemplateIn, actor: Actor = Depends(get_actor)):
     if not body.columns:
         raise HTTPException(400, "Template must include at least one column")
     async with db.tenant_conn(actor.tenant_id) as conn:
+        await _validate_template_scope(conn, actor.tenant_id, body.client_id, body.client_contact_id, body.requisition_id)
         if body.is_default:
-            await _unset_other_defaults(conn, actor.tenant_id, body.client_id, body.direction)
+            await _unset_other_defaults(conn, actor.tenant_id, body.client_id, body.direction,
+                                         client_contact_id=body.client_contact_id, requisition_id=body.requisition_id)
         row = await conn.fetchrow(
-            """INSERT INTO tracking_sheet_templates (tenant_id, client_id, name, columns, is_default, direction, created_by)
-               VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
-            actor.tenant_id, body.client_id, body.name, json.dumps(body.columns), body.is_default, body.direction, actor.user_id)
+            """INSERT INTO tracking_sheet_templates
+                 (tenant_id, client_id, client_contact_id, requisition_id, name, columns, is_default, direction, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
+            actor.tenant_id, body.client_id, body.client_contact_id, body.requisition_id,
+            body.name, json.dumps(body.columns), body.is_default, body.direction, actor.user_id)
     return _template_out(row)
 
 
@@ -358,13 +455,18 @@ async def update_template(template_id: str, body: TemplateIn, actor: Actor = Dep
             "SELECT id FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2", template_id, actor.tenant_id)
         if not existing:
             raise HTTPException(404, "Template not found")
+        await _validate_template_scope(conn, actor.tenant_id, body.client_id, body.client_contact_id, body.requisition_id)
         if body.is_default:
-            await _unset_other_defaults(conn, actor.tenant_id, body.client_id, body.direction, exclude_id=template_id)
+            await _unset_other_defaults(conn, actor.tenant_id, body.client_id, body.direction,
+                                         client_contact_id=body.client_contact_id, requisition_id=body.requisition_id,
+                                         exclude_id=template_id)
         row = await conn.fetchrow(
             """UPDATE tracking_sheet_templates
-               SET name=$1, client_id=$2, columns=$3, is_default=$4, direction=$5, updated_at=now()
-               WHERE id=$6 RETURNING *""",
-            body.name, body.client_id, json.dumps(body.columns), body.is_default, body.direction, template_id)
+               SET name=$1, client_id=$2, client_contact_id=$3, requisition_id=$4, columns=$5, is_default=$6,
+                   direction=$7, updated_at=now()
+               WHERE id=$8 RETURNING *""",
+            body.name, body.client_id, body.client_contact_id, body.requisition_id,
+            json.dumps(body.columns), body.is_default, body.direction, template_id)
     return _template_out(row)
 
 
@@ -1439,9 +1541,31 @@ async def set_contact_kae_assignments(contact_id: str, body: KaeAssignmentsIn, a
     return [dict(r) for r in rows]
 
 
+async def _client_tracking_sheet_rows(conn, tenant_id: str, requisition_id: str, auto_values: dict,
+                                       hidden_columns: Optional[list] = None):
+    """The real, cumulative per-requisition sheet — one row per candidate
+    already sent to this client for this role, plus the row this
+    preview/send represents. Shared by the real send (_do_client_
+    submission) and the read-only live preview below, so a KAE reviewing
+    the sheet before sending sees EXACTLY what will actually go out, not
+    an approximation."""
+    prior_rows = await conn.fetch(
+        """SELECT field_values FROM candidate_submissions
+           WHERE requisition_id=$1 AND direction='kae_to_client' ORDER BY sent_at""",
+        requisition_id)
+    sl_no = len(prior_rows) + 1
+    final_values = {**auto_values, "sl_no": str(sl_no)}
+    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    hidden_set = set(hidden_columns or [])
+    merge_rows = ([{k: ("" if k in hidden_set else v) for k, v in r.items()} for r in sheet_rows]
+                  if hidden_set else sheet_rows)
+    return sheet_rows, merge_rows, sl_no
+
+
 @router.get("/applications/{application_id}/submit-to-client/preview")
 async def submit_to_client_preview(
     application_id: str,
+    contact_id: Optional[str] = None,
     actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
 ):
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -1454,13 +1578,48 @@ async def submit_to_client_preview(
         # be enforceable in the UI but bypassable via this endpoint.
         kae_scope = actor.user_id if actor.role in ("kae", "kam") else None
         contacts = await _resolve_client_contacts(conn, actor.tenant_id, row["client_id"], kae_user_id=kae_scope)
-        template = await _resolve_template(conn, actor.tenant_id, row["client_id"], "kae_to_client")
+        primary_contact = next((c for c in contacts if c["is_primary"]), None)
+        # `contact_id`, when the caller has already picked a specific
+        # SPOC (not just accepted the primary), is what a SPOC-level
+        # template default actually resolves against — falls back to the
+        # primary contact so the very first load (before any explicit
+        # pick) still resolves correctly.
+        scope_contact_id = contact_id or (primary_contact["id"] if primary_contact else None)
+        template = await _resolve_template(
+            conn, actor.tenant_id, row["client_id"], "kae_to_client",
+            client_contact_id=scope_contact_id, requisition_id=row["requisition_id"])
+        # REAL BUG FIX (2026-09-02, reported live): this listing had the
+        # exact same "includes templates pinned to a soft-deleted client"
+        # clutter as GET /submission-templates, independently, since it's
+        # a separate inline query — this IS the query behind the picker
+        # in the reported screenshot showing dozens of stray "QA S54
+        # Client ..." rows. Same is_active-on-client filter, plus the
+        # SPOC/requisition names so the picker can show what each
+        # template is actually pinned to.
         templates = await conn.fetch(
-            """SELECT tst.id, tst.name, tst.client_id, tst.is_default, tst.template_type, tst.file_name, cl.name AS client_name
-               FROM tracking_sheet_templates tst LEFT JOIN clients cl ON cl.id = tst.client_id
+            """SELECT tst.id, tst.name, tst.client_id, tst.client_contact_id, tst.requisition_id,
+                      tst.is_default, tst.template_type, tst.file_name, cl.name AS client_name,
+                      cc.contact_name AS spoc_name, r.title AS requisition_title
+               FROM tracking_sheet_templates tst
+               LEFT JOIN clients cl ON cl.id = tst.client_id
+               LEFT JOIN client_contacts cc ON cc.id = tst.client_contact_id
+               LEFT JOIN requisitions r ON r.id = tst.requisition_id
                WHERE tst.tenant_id=$1 AND tst.direction='kae_to_client' AND tst.is_active
+                 AND (tst.client_id IS NULL OR cl.is_active IS NOT FALSE)
                ORDER BY tst.is_default DESC, tst.name""",
             actor.tenant_id)
+        # REAL FEATURE (2026-09-02, reported live: "Tracking sheet should
+        # be visible and display with TABLE sheet with all details to
+        # review before sharing with the client"): the modal previously
+        # only ever showed template NAME buttons with no way to see what
+        # the actual populated sheet contains — this is the real, live
+        # table (same data + same cumulative-row logic the real send
+        # uses), rendered for whichever template just resolved above.
+        tracking_html = None
+        if template:
+            columns = _jsonb(template["columns"], [])
+            sheet_rows, _, _ = await _client_tracking_sheet_rows(conn, actor.tenant_id, row["requisition_id"], auto_values)
+            tracking_html = _build_tracking_html_table(columns, sheet_rows)
         prior_count = await conn.fetchval(
             "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
             row["requisition_id"])
@@ -1472,20 +1631,70 @@ async def submit_to_client_preview(
             client_name = await conn.fetchval("SELECT name FROM clients WHERE id=$1", row["client_id"])
     return {
         "candidate_id": str(row["candidate_id"]),
+        "requisition_id": str(row["requisition_id"]) if row["requisition_id"] else None,
         "client_id": str(row["client_id"]) if row["client_id"] else None,
         "client_name": client_name,
-        "primary_contact": dict(contacts[0]) if contacts and contacts[0]["is_primary"] else None,
+        "primary_contact": dict(primary_contact) if primary_contact else None,
         "contacts": [dict(c) for c in contacts],
         "resolved_template": _template_out(template) if template else None,
         "templates": [_template_out(t) for t in templates],
+        "tracking_html": tracking_html,
         "auto_values": {**auto_values, "sl_no": str((prior_count or 0) + 1)},
         "has_resume_text": bool((row["resume_text"] or "").strip()),
         "stage": row["stage"],
     }
 
 
+@router.get("/applications/{application_id}/submit-to-client/tracking-preview")
+async def submit_to_client_tracking_preview(
+    application_id: str,
+    template_id: Optional[str] = None,
+    contact_id: Optional[str] = None,
+    hidden_columns: Optional[str] = None,
+    actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
+):
+    """Re-render the real, live tracking table whenever the KAE changes
+    which template/SPOC is selected or toggles a hidden column — called
+    on-change from the modal, separate from the main preview endpoint so
+    picking a different template doesn't re-fetch everything else
+    (contacts, resume text, etc). hidden_columns is a comma-separated
+    list, matching how a plain GET query param carries a list most
+    simply."""
+    hidden_list = [h for h in (hidden_columns or "").split(",") if h]
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row, auto_values = await _app_context(conn, application_id)
+        template = None
+        if template_id:
+            template = await conn.fetchrow(
+                "SELECT * FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2 AND direction='kae_to_client'",
+                template_id, actor.tenant_id)
+            if not template:
+                raise HTTPException(404, "Tracking sheet template not found")
+        else:
+            kae_scope = actor.user_id if actor.role in ("kae", "kam") else None
+            contacts = await _resolve_client_contacts(conn, actor.tenant_id, row["client_id"], kae_user_id=kae_scope)
+            primary_contact = next((c for c in contacts if c["is_primary"]), None)
+            scope_contact_id = contact_id or (primary_contact["id"] if primary_contact else None)
+            template = await _resolve_template(
+                conn, actor.tenant_id, row["client_id"], "kae_to_client",
+                client_contact_id=scope_contact_id, requisition_id=row["requisition_id"])
+        if not template:
+            raise HTTPException(400, "No client tracking sheet template available")
+        columns = _jsonb(template["columns"], [])
+        visible_columns = [c for c in columns if c["key"] not in hidden_list]
+        sheet_rows, _, _ = await _client_tracking_sheet_rows(
+            conn, actor.tenant_id, row["requisition_id"], auto_values, hidden_list)
+    return {
+        "tracking_html": _build_tracking_html_table(visible_columns, sheet_rows),
+        "row_count": len(sheet_rows),
+        "template_type": template["template_type"],
+        "file_name": template["file_name"],
+    }
+
+
 class SubmitToClientIn(BaseModel):
     template_id: Optional[str] = None
+    contact_id: Optional[str] = None
     to_emails: Optional[list[str]] = None
     columns: Optional[list[dict]] = None
     hidden_columns: list[str] = []
@@ -1496,6 +1705,11 @@ class SubmitToClientIn(BaseModel):
     logo_position: Optional[str] = None
     cc_self: bool = True
     save_as_default: bool = False
+    # REAL FEATURE (2026-09-02): which scope "save as default" pins to —
+    # 'client' (every SPOC/project for this client, the original, still-
+    # default behavior), 'contact' (this one SPOC only), or 'requisition'
+    # (this one project/role only).
+    default_scope: str = "client"
 
 
 async def _do_client_submission(
@@ -1503,21 +1717,25 @@ async def _do_client_submission(
     resume_bytes: bytes, resume_filename: str, resume_style: str, resume_style_label: str,
     template_id: Optional[str], columns_override: Optional[list], hidden_columns: list,
     field_values: Optional[dict], to_emails_override: Optional[list], cc_self: bool, save_as_default: bool,
-    trigger_source: str = "manual",
+    trigger_source: str = "manual", contact_id: Optional[str] = None, default_scope: str = "client",
 ) -> dict:
     """The KAE->Client hop: mirrors _do_kae_submission's shape (same
     _app_context, same resume attachment, same audit/outbox discipline) but
     resolves a client contact (not a KAE) as the recipient, a
-    direction='kae_to_client' template, and supports two real, independent
-    edits a KAE can make before sending without ever silently mutating the
-    saved default:
+    direction='kae_to_client' template, and supports three real,
+    independent edits a KAE can make before sending without ever silently
+    mutating an unrelated saved default:
       - hidden_columns: ALWAYS one-time — recorded on this submission row
         for audit, never written back to the template, regardless of
         save_as_default.
       - columns_override: the effective column list for THIS send. Only
         persisted if save_as_default=True, and even then only ever written
-        to a template row pinned to THIS client — a shared/global default
-        template is never silently repurposed by one client's edit."""
+        to a template pinned to the scope default_scope names (client,
+        this one SPOC, or this one requisition) — never a broader/
+        narrower scope's default.
+      - contact_id: which SPOC to address (and, when saving a default,
+        which SPOC to scope it to) — falls back to the primary contact
+        when not explicitly chosen."""
     async with db.tenant_conn(tenant_id) as conn:
         row, auto_values = await _app_context(conn, application_id)
         client_id = row["client_id"]
@@ -1530,9 +1748,17 @@ async def _do_client_submission(
         # seeing every SPOC on the client, unchanged).
         kae_scope = actor.user_id if actor.role in ("kae", "kam") else None
         contacts = await _resolve_client_contacts(conn, tenant_id, client_id, kae_user_id=kae_scope)
-        primary_contact = contacts[0] if contacts else None
+        # REAL BUG (found via genuine testing, not code review):
+        # c["id"] comes back from asyncpg as a native uuid.UUID object,
+        # never equal to the plain string contact_id from the request
+        # body via `==` — a real, explicit contact_id was silently
+        # treated as "not found," falling through to the misleading "No
+        # client contact is configured" error even with contacts on
+        # file. Compared as strings on both sides.
+        primary_contact = next((c for c in contacts if str(c["id"]) == str(contact_id)), None) if contact_id else (contacts[0] if contacts else None)
         if not to_emails_override and not primary_contact:
             raise HTTPException(400, "No client contact is configured — add one under Companies > this client > Contacts")
+        scope_contact_id = primary_contact["id"] if primary_contact else None
 
         template = None
         if template_id:
@@ -1542,52 +1768,77 @@ async def _do_client_submission(
             if not template:
                 raise HTTPException(404, "Tracking sheet template not found")
         else:
-            template = await _resolve_template(conn, tenant_id, client_id, "kae_to_client")
+            template = await _resolve_template(
+                conn, tenant_id, client_id, "kae_to_client",
+                client_contact_id=scope_contact_id, requisition_id=row["requisition_id"])
         if not template and not columns_override:
             raise HTTPException(400, "No client tracking sheet template available — create one under Ops Settings > Templates")
         columns = columns_override if columns_override else _jsonb(template["columns"], [])
         visible_columns = [c for c in columns if c["key"] not in (hidden_columns or [])]
 
-        prior_rows = await conn.fetch(
-            """SELECT field_values FROM candidate_submissions
-               WHERE requisition_id=$1 AND direction='kae_to_client' ORDER BY sent_at""",
-            row["requisition_id"])
         client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
         recruiter_email = actor.email
 
         if save_as_default and columns_override:
-            # Persists ONLY as a client-pinned template for this exact
-            # client — never overwrites a global/shared default, and never
-            # fires from hidden_columns (that stays a per-send redaction).
-            existing_client_default = await conn.fetchrow(
-                """SELECT id FROM tracking_sheet_templates
-                   WHERE tenant_id=$1 AND client_id=$2 AND direction='kae_to_client' AND is_default""",
-                tenant_id, client_id)
-            if existing_client_default:
+            # Real scope tuple this save targets — matches _resolve_
+            # template()/_unset_other_defaults()'s own tiering exactly, so
+            # a 'contact'-scoped save can never silently clobber (or get
+            # silently found instead of) the client-wide default.
+            scope_requisition_id = row["requisition_id"] if default_scope == "requisition" else None
+            scope_client_contact_id = scope_contact_id if default_scope == "contact" else None
+            if default_scope == "requisition":
+                existing_scoped_default = await conn.fetchrow(
+                    """SELECT id FROM tracking_sheet_templates
+                       WHERE tenant_id=$1 AND requisition_id=$2 AND direction='kae_to_client' AND is_default""",
+                    tenant_id, scope_requisition_id)
+                scope_label = f"{row['role_title'] or 'Role'} — Project Tracking Sheet"
+            elif default_scope == "contact":
+                existing_scoped_default = await conn.fetchrow(
+                    """SELECT id FROM tracking_sheet_templates
+                       WHERE tenant_id=$1 AND client_contact_id=$2 AND direction='kae_to_client' AND is_default""",
+                    tenant_id, scope_client_contact_id)
+                scope_label = f"{primary_contact['contact_name'] if primary_contact else 'SPOC'} — SPOC Tracking Sheet"
+            else:
+                existing_scoped_default = await conn.fetchrow(
+                    """SELECT id FROM tracking_sheet_templates
+                       WHERE tenant_id=$1 AND client_id=$2 AND direction='kae_to_client' AND is_default
+                         AND client_contact_id IS NULL AND requisition_id IS NULL""",
+                    tenant_id, client_id)
+                scope_label = f"{client_row['name'] if client_row else 'Client'} — Client Tracking Sheet"
+            if existing_scoped_default:
                 await conn.execute(
                     "UPDATE tracking_sheet_templates SET columns=$1, updated_at=now() WHERE id=$2",
-                    json.dumps(columns_override), existing_client_default["id"])
+                    json.dumps(columns_override), existing_scoped_default["id"])
+                template_id = template_id or str(existing_scoped_default["id"])
             else:
-                await _unset_other_defaults(conn, tenant_id, client_id, "kae_to_client")
+                await _unset_other_defaults(conn, tenant_id, client_id, "kae_to_client",
+                                             client_contact_id=scope_client_contact_id, requisition_id=scope_requisition_id)
                 new_tpl = await conn.fetchrow(
                     """INSERT INTO tracking_sheet_templates
-                         (tenant_id, client_id, name, columns, is_default, direction, created_by)
-                       VALUES ($1,$2,$3,$4,true,'kae_to_client',$5) RETURNING id""",
-                    tenant_id, client_id, f"{client_row['name'] if client_row else 'Client'} — Client Tracking Sheet",
-                    json.dumps(columns_override), actor.user_id)
+                         (tenant_id, client_id, client_contact_id, requisition_id, name, columns, is_default, direction, created_by)
+                       VALUES ($1,$2,$3,$4,$5,$6,true,'kae_to_client',$7) RETURNING id""",
+                    tenant_id, client_id, scope_client_contact_id, scope_requisition_id,
+                    scope_label, json.dumps(columns_override), actor.user_id)
                 template_id = template_id or str(new_tpl["id"])
 
-    sl_no = len(prior_rows) + 1
+        sheet_rows, merge_rows, sl_no = await _client_tracking_sheet_rows(
+            conn, tenant_id, row["requisition_id"], auto_values, hidden_columns)
+
     overrides = {k: v for k, v in (field_values or {}).items() if v not in (None, "")}
-    final_values = {**auto_values, **overrides, "sl_no": str(sl_no)}
-    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    # sl_no is always system-computed, never an editable override — this
+    # matches _do_kae_submission's own sibling logic exactly, guarding
+    # against a stray "sl_no" key in field_values (never expected, but
+    # never allowed to win either).
+    final_values = {**sheet_rows[-1], **overrides, "sl_no": sheet_rows[-1]["sl_no"]}
+    sheet_rows[-1] = final_values
     # Hidden columns must never leak into ANY output for this send — not
     # just the inline table. A file-template merge (xlsx/docx) reads
     # straight from a row dict by key, so the real fix is blanking the
     # hidden keys out of the dict itself before it ever reaches the merge
     # engine, not just filtering which columns get *listed*.
     hidden_set = set(hidden_columns or [])
-    merge_rows = [{k: ("" if k in hidden_set else v) for k, v in r.items()} for r in sheet_rows] if hidden_set else sheet_rows
+    if hidden_set:
+        merge_rows[-1] = {k: ("" if k in hidden_set else v) for k, v in final_values.items()}
 
     attachments = [(resume_filename, resume_bytes,
                      "pdf" if resume_filename.lower().endswith(".pdf") else
@@ -1619,7 +1870,14 @@ async def _do_client_submission(
         greeting = "Hi Team,"
     else:
         to_recipients = [primary_contact["email"]]
-        cc_recipients = [c["email"] for c in contacts[1:] if c["email"]] + \
+        # REAL BUG FIX (2026-09-02): this used to assume the "to" contact
+        # was always contacts[0] (true before contact_id existed, since
+        # the primary contact was the only one ever chosen) — now that a
+        # caller can explicitly pick a non-primary SPOC via contact_id,
+        # CC must exclude whichever contact actually ended up as "to",
+        # not just the first one, or that same person would be listed as
+        # both To and Cc on the real sent email.
+        cc_recipients = [c["email"] for c in contacts if c["id"] != primary_contact["id"] and c["email"]] + \
                          ([recruiter_email] if cc_self and recruiter_email else [])
         greeting = f"Hi {primary_contact['contact_name'] or ''},"
 
@@ -1778,6 +2036,8 @@ async def submit_to_client(
         raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID_THEMES)}")
     if body.logo_position is not None and body.logo_position not in _VALID_LOGO_POSITIONS:
         raise HTTPException(400, f"logo_position must be one of {sorted(_VALID_LOGO_POSITIONS)}")
+    if body.default_scope not in ("client", "contact", "requisition"):
+        raise HTTPException(400, "default_scope must be one of ('client', 'contact', 'requisition')")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row, _ = await _app_context(conn, application_id)
@@ -1806,5 +2066,5 @@ async def submit_to_client(
         _RESUME_LABELS.get(body.resume_style, body.resume_style),
         template_id=body.template_id, columns_override=body.columns, hidden_columns=body.hidden_columns,
         field_values=body.field_values, to_emails_override=body.to_emails, cc_self=body.cc_self,
-        save_as_default=body.save_as_default,
+        save_as_default=body.save_as_default, contact_id=body.contact_id, default_scope=body.default_scope,
     )
