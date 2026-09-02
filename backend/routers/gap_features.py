@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 import db
-from deps import Actor, get_actor, require_role_or_trusted_internal
+from deps import Actor, get_actor, require_role_or_trusted_internal, require_role
 
 _MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 from routers.nda import _send_email_with_pdf
@@ -231,6 +231,58 @@ async def referral_redirect(code: str):
         raise HTTPException(404, "Referral link not found")
     dest = f"{APP_URL}/careers/{row['requisition_id']}?ref={code}" if row["requisition_id"] else f"{APP_URL}/careers?ref={code}"
     return RedirectResponse(dest)
+
+
+@referral_router.patch("/{referral_id}/mark-bonus-paid")
+async def referral_mark_bonus_paid(referral_id: str, actor: Actor = Depends(require_role("admin","manager"))):
+    """Gap-audit fix (2026-09-02) — the real, human-confirmed second half
+    of the referral-hire lifecycle. `bonus_eligible` flips automatically
+    on a genuine placement (record_referral_hire, below); `bonus_paid`
+    only ever changes here, by an admin/manager explicitly confirming
+    the money actually went out — matching HARD RULE #10's HITL
+    principle for anything touching real payouts. Refuses to mark a
+    referral paid that was never even eligible, rather than silently
+    allowing an unearned bonus to be recorded as paid."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT bonus_eligible, bonus_paid FROM referral_links WHERE id=$1 AND tenant_id=$2",
+            referral_id, actor.tenant_id)
+        if not row:
+            raise HTTPException(404, "Referral not found")
+        if not row["bonus_eligible"]:
+            raise HTTPException(400, "This referral has no confirmed hire yet — nothing to mark as paid")
+        if row["bonus_paid"]:
+            raise HTTPException(400, "Already marked as paid")
+        updated = await conn.fetchrow(
+            "UPDATE referral_links SET bonus_paid=TRUE WHERE id=$1 RETURNING *",
+            referral_id)
+    return dict(updated)
+
+
+async def record_referral_hire(conn, tenant_id: str, candidate_id: str, placement_value) -> None:
+    """Gap-audit fix (2026-09-02): the click->candidate half of this
+    funnel already worked (candidate_ids array-append in p28_p32.py's
+    public_apply); nothing anywhere ever closed the loop on an actual
+    hire. Called from the same real placement hook offers.py already
+    uses for source_attribution — a candidate can legitimately appear in
+    more than one referral_links row (two different recruiters each
+    shared a link, the same person applied via both), so every matching
+    row is credited, not just the first. Only sets `bonus_eligible`
+    (an automatic, objective fact) - never `bonus_paid`, which stays a
+    real, separate, human-confirmed action (HARD RULE #10's HITL
+    principle - never fully autonomous on anything touching real money).
+    Best-effort: a candidate who never arrived via any referral link
+    correctly matches zero rows and this is a genuine no-op, not an
+    error."""
+    try:
+        await conn.execute(
+            """UPDATE referral_links SET
+                 hired_candidate_id=$2, hired_at=now(), placement_value=$3, bonus_eligible=TRUE
+               WHERE tenant_id=$1 AND $2::uuid = ANY(candidate_ids)""",
+            tenant_id, candidate_id, placement_value or 0,
+        )
+    except Exception as ex:
+        print(f"[referral] best-effort hire record failed for candidate {candidate_id}: {ex}")
 
 
 # ══════════════════════════════════════════════════ Reference Checks ═══

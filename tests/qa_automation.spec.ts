@@ -12163,3 +12163,154 @@ test.describe.serial('S90 Gap-audit quick wins: source-attribution auto-populati
     expect(html).toContain(`S90 GapAudit Role ${stamp}`);
   });
 });
+
+test.describe.serial('S91 Gap-audit: referral hire tracking (bonus_eligible auto-flips on placement, bonus_paid stays human-gated)', () => {
+  // 2026-09-02, direct continuation of S90 — closes the "Employee
+  // Referral Loop" item from the same gap-audit report. Live before this
+  // fix: 42 real referral links, 44 clicks, but referral_links.bonus_paid
+  // had zero code paths that ever set it, and there was no hired/placed
+  // signal at all — a referral converting into a real hire was
+  // completely invisible. `bonus_eligible` now flips automatically the
+  // instant a referred candidate is genuinely placed (offers.py's real
+  // accept-offer hook); `bonus_paid` stays a separate, human-confirmed,
+  // admin/manager-only action, matching HARD RULE #10 (high-stakes
+  // actions always pause for human approval).
+  let token = '';
+  let recruiterToken = '';
+  let recruiterId = '';
+  let reqId = '';
+  let candId = '';
+  let appId = '';
+  let refId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
+  const recruiterAuth = () => ({ Authorization: `Bearer ${recruiterToken}`, 'Content-Type': 'application/json' });
+  const stamp = Date.now();
+
+  test.afterAll(async ({ request }) => {
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: auth() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: auth() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: auth() }).catch(() => {});
+    if (recruiterId) {
+      await request.patch(`${API}/users/${recruiterId}/deactivate`, { headers: auth() }).catch(() => {});
+      // Real activity (the referral_links row itself) means this will
+      // correctly 409 rather than purge — expected, matches the
+      // established force-purge safety net; not treated as a failure.
+      await request.delete(`${API}/users/${recruiterId}/purge`, { headers: auth() }).catch(() => {});
+    }
+  });
+
+  test('setup: real admin token + a throwaway recruiter + a throwaway open requisition', async ({ request }) => {
+    token = await getApiToken(request);
+    const recR = await request.post(`${API}/users`, {
+      headers: auth(), data: { full_name: 'QA S91 Referral Recruiter', email: `qa.s91.referral.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    expect(recR.status()).toBe(200);
+    recruiterId = (await recR.json()).id;
+    const loginR = await request.post(`${API}/auth/login`, { data: { email: `qa.s91.referral.${stamp}@test.com`, password: 'TestPass123!' } });
+    recruiterToken = (await loginR.json()).access_token;
+
+    const reqR = await request.post(`${API}/requisitions`, {
+      headers: auth(), data: { title: `QA S91 Referral Role ${stamp}`, status: 'open', employment_type: 'fte', work_mode: 'remote' },
+    });
+    expect(reqR.status()).toBe(200);
+    reqId = (await reqR.json()).id;
+  });
+
+  test('the recruiter generates a real referral link, and a real click is tracked via the public redirect', async ({ request }) => {
+    const refR = await request.post(`${API}/referrals`, { headers: recruiterAuth(), data: {} });
+    expect(refR.status()).toBe(200);
+    const ref = await refR.json();
+    refId = ref.id;
+
+    const clickR = await request.get(`${API}/r/${ref.unique_code}`, { maxRedirects: 0 });
+    expect([301, 302, 307, 308]).toContain(clickR.status());
+
+    const listR = await request.get(`${API}/referrals/`, { headers: recruiterAuth() });
+    const mine = (await listR.json()).referrals.find((r: any) => r.id === refId);
+    expect(mine.click_count).toBeGreaterThanOrEqual(1);
+  });
+
+  test('a real candidate applies through the referral code and is correctly attributed to this referral link', async ({ request }) => {
+    const listR = await request.get(`${API}/referrals/`, { headers: recruiterAuth() });
+    const ref = (await listR.json()).referrals.find((r: any) => r.id === refId);
+
+    const applyR = await request.post(`${API}/public/jobs/apply`, {
+      form: {
+        job_id: reqId, tenant_id: TID,
+        full_name: `QA S91 Referred Candidate ${stamp}`, email: `qa.s91.referredcand.${stamp}@test.com`,
+        phone: `9${stamp}`.slice(0, 10), ref: ref.unique_code, consent_given: 'true',
+      },
+    });
+    expect(applyR.status()).toBe(200);
+
+    const afterR = await request.get(`${API}/referrals/`, { headers: recruiterAuth() });
+    const after = (await afterR.json()).referrals.find((r: any) => r.id === refId);
+    expect((after.candidate_ids || []).length).toBeGreaterThanOrEqual(1);
+    candId = after.candidate_ids[0];
+
+    // public_apply already created the real application — find it
+    // rather than POSTing a second one (which would correctly 409).
+    const boardR = await request.get(`${API}/requisitions/${reqId}/pipeline`, { headers: auth() });
+    const board = await boardR.json();
+    for (const stageApps of Object.values(board) as any[]) {
+      const match = (stageApps as any[]).find((a: any) => a.candidate_id === candId);
+      if (match) appId = match.id;
+    }
+    expect(appId).toBeTruthy();
+  });
+
+  test('BUG FIX: walking the real full offer HITL chain to acceptance auto-flips this referral to hired + bonus_eligible, with the real, exact CTC (was: no code path ever set this)', async ({ request }) => {
+    const offerR = await request.post(`${API}/offers`, { headers: auth(), data: { application_id: appId, ctc_offered: 850000, currency: 'INR', joining_date: '2026-10-15' } });
+    expect(offerR.status()).toBe(200);
+    const offerId = (await offerR.json()).id;
+
+    expect((await request.post(`${API}/offers/${offerId}/submit-for-approval`, { headers: auth() })).status()).toBe(200);
+    expect((await request.post(`${API}/offers/${offerId}/approve`, { headers: auth() })).status()).toBe(200);
+    expect((await request.post(`${API}/offers/${offerId}/issue`, { headers: auth() })).status()).toBe(200);
+    const acceptR = await request.post(`${API}/offers/${offerId}/respond`, { headers: auth(), data: { status: 'accepted' } });
+    expect(acceptR.status()).toBe(200);
+    expect((await acceptR.json()).status).toBe('accepted');
+
+    let mine: any = null;
+    for (let i = 0; i < 10; i++) {
+      const r = await request.get(`${API}/referrals/`, { headers: recruiterAuth() });
+      mine = (await r.json()).referrals.find((x: any) => x.id === refId);
+      if (mine.hired_candidate_id) break;
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    expect(mine.hired_candidate_id).toBe(candId);
+    expect(mine.hired_at).toBeTruthy();
+    expect(Number(mine.placement_value)).toBe(850000);
+    expect(mine.bonus_eligible).toBe(true);
+    expect(mine.bonus_paid).toBe(false);
+  });
+
+  test('BUG FIX: mark-bonus-paid is real, human-gated (HARD RULE #10) — a plain recruiter is blocked, admin can pay it, and paying twice is refused', async ({ request }) => {
+    const recruiterAttempt = await request.patch(`${API}/referrals/${refId}/mark-bonus-paid`, { headers: recruiterAuth() });
+    expect(recruiterAttempt.status()).toBe(403);
+
+    const adminPay = await request.patch(`${API}/referrals/${refId}/mark-bonus-paid`, { headers: auth() });
+    expect(adminPay.status()).toBe(200);
+    expect((await adminPay.json()).bonus_paid).toBe(true);
+
+    const rePay = await request.patch(`${API}/referrals/${refId}/mark-bonus-paid`, { headers: auth() });
+    expect(rePay.status()).toBe(400);
+  });
+
+  test('real headless UI: the Referrals tab on /candidate-engagement shows the real Hired + Bonus Paid badges for this exact referral', async ({ page }) => {
+    // GET /referrals/ is deliberately scoped to `referrer_user_id =
+    // actor.user_id` (confirmed by reading gap_features.py) — a personal
+    // "my referrals" list, not an admin-wide view even for an admin
+    // login. Must log in as the SAME recruiter who generated this
+    // referral link, not admin, or the row is correctly invisible.
+    await page.goto('/login');
+    await page.fill('input[type="email"]', `qa.s91.referral.${stamp}@test.com`);
+    await page.fill('input[type="password"]', 'TestPass123!');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+    await page.goto('/candidate-engagement');
+    await page.getByRole('button', { name: /Referrals/i }).click();
+    await expect(page.getByText(/Hired/).first()).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Bonus Paid').first()).toBeVisible();
+  });
+});

@@ -232,6 +232,13 @@ async def respond_offer(offer_id: str, body: OfferRespond, background_tasks: Bac
                 await source_attribution.mark_source_attribution_placed(
                     conn, actor.tenant_id, str(app_row["candidate_id"]), float(row["ctc_offered"] or 0),
                 )
+                # Real referral-loop close-out (2026-09-02 gap-audit fix) -
+                # same real hook, same reasoning as the source_attribution
+                # call right above it.
+                from routers.gap_features import record_referral_hire
+                await record_referral_hire(
+                    conn, actor.tenant_id, str(app_row["candidate_id"]), float(row["ctc_offered"] or 0),
+                )
             # 2026-08-11 audit finding: the onboarding module (real, working
             # CRUD, correct RLS) had nothing anywhere in this codebase ever
             # trigger it — offer acceptance is the natural, obvious moment,

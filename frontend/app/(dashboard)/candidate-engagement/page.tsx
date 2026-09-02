@@ -1,6 +1,7 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { getTokenPayload } from '@/lib/auth';
 import { Users2, Gift, Smile, Plus, Copy } from 'lucide-react';
 
 const TABS = [
@@ -45,7 +46,18 @@ function TalentPoolTab() {
 function ReferralsTab() {
   const { data, refetch } = useFetch<any>('/referrals/');
   const [creating, setCreating] = useState(false);
+  const [payingId, setPayingId] = useState('');
   const rows = data?.referrals || [];
+  // Real gap-audit fix (2026-09-02): the click->candidate half of this
+  // funnel already worked; nothing surfaced whether a referral ever
+  // actually turned into a hire, or whether the bonus was paid. Real,
+  // deferred role read so a plain recruiter never sees the Mark Paid
+  // action (server-side gated too — this is display-layer only).
+  const [canMarkPaid, setCanMarkPaid] = useState(false);
+  useEffect(() => {
+    const role = getTokenPayload()?.role;
+    setCanMarkPaid(role === 'admin' || role === 'super_admin' || role === 'manager');
+  }, []);
 
   const create = async () => {
     setCreating(true);
@@ -53,6 +65,12 @@ function ReferralsTab() {
     finally { setCreating(false); }
   };
   const copy = (url: string) => navigator.clipboard.writeText(url);
+  const markPaid = async (id: string) => {
+    setPayingId(id);
+    try { await apiFetch(`/referrals/${id}/mark-bonus-paid`, { method: 'PATCH' }); refetch(); }
+    catch (e: any) { alert(e?.message || 'Failed to mark as paid'); }
+    finally { setPayingId(''); }
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -61,12 +79,30 @@ function ReferralsTab() {
       </button>
       <div style={card}>
         {rows.map((r: any) => (
-          <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
-            <span style={{ flex: 1 }}>{r.requisition_title || 'General referral'}</span>
-            <span style={{ color: '#64748B' }}>{r.click_count} clicks · {(r.candidate_ids || []).length} referred</span>
-            <button onClick={() => copy(`${location.origin}/r/${r.unique_code}`)} style={{ display: 'flex', gap: 4, alignItems: 'center', fontSize: 11, fontWeight: 700, color: '#2563EB', background: 'none', border: 'none', cursor: 'pointer' }}>
-              <Copy size={12} /> Copy link
-            </button>
+          <div key={r.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '10px 0', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ flex: 1 }}>{r.requisition_title || 'General referral'}</span>
+              <span style={{ color: '#64748B' }}>{r.click_count} clicks · {(r.candidate_ids || []).length} referred</span>
+              <button onClick={() => copy(`${location.origin}/r/${r.unique_code}`)} style={{ display: 'flex', gap: 4, alignItems: 'center', fontSize: 11, fontWeight: 700, color: '#2563EB', background: 'none', border: 'none', cursor: 'pointer' }}>
+                <Copy size={12} /> Copy link
+              </button>
+            </div>
+            {r.hired_candidate_id && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#DCFCE7', color: '#166534' }}>✓ Hired{r.placement_value ? ` · ₹${Number(r.placement_value).toLocaleString('en-IN')}` : ''}</span>
+                {r.bonus_paid ? (
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#E0E7FF', color: '#3730A3' }}>Bonus Paid</span>
+                ) : r.bonus_eligible ? (
+                  canMarkPaid ? (
+                    <button onClick={() => markPaid(r.id)} disabled={payingId === r.id} style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#FEF3C7', color: '#92400E', border: 'none', cursor: 'pointer' }}>
+                      {payingId === r.id ? 'Marking…' : 'Bonus Eligible — Mark Paid'}
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#FEF3C7', color: '#92400E' }}>Bonus Eligible</span>
+                  )
+                ) : null}
+              </div>
+            )}
           </div>
         ))}
         {!rows.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No referral links yet.</div>}

@@ -19572,3 +19572,86 @@ pre-existing skip (Ollama check), 0 failed - confirming zero
 regressions in the KAE-submission engine, resume-intake pipeline,
 public-form intake, or JD-matching logic despite touching all of them.
 Zero-token audit: `CONFIRMED CLEAN` (440 files, 0 external API refs).
+
+## Gap-audit build, part 2: real referral hire tracking closes the loop, 2026-09-02
+Direct continuation of the same-day gap-audit build (part 1, commit
+0d74a0e) — closes the "Employee Referral Loop" item from the
+self-authored "AVIIN ATS Gap Audit" report. Confirmed live before
+touching anything: 42 real referral links existed with 44 real clicks,
+but `bonus_paid` had zero code paths anywhere in the backend that ever
+set it (grepped the whole repo — only the DDL default and SELECT/INSERT
+column lists ever touched it), and there was no `hired`/`placed_at`
+signal at all. A recruiter could refer a candidate, watch the click land,
+and then have zero visibility into whether that referral ever actually
+converted into a real hire.
+
+`sql/103_referral_hire_tracking.sql` — added `hired_candidate_id`,
+`hired_at`, `placement_value`, `bonus_eligible` to `referral_links`.
+Deliberately a 2-step lifecycle, not a single auto-set boolean:
+`bonus_eligible` flips automatically the instant a referred candidate is
+genuinely placed (an objective, computable fact); `bonus_paid` stays a
+real, separate, human-confirmed action — matching this project's own
+HARD RULE #10 (high-stakes actions always pause for human approval,
+never fully autonomous) for anything touching real money.
+
+`backend/routers/gap_features.py` gained `record_referral_hire(conn,
+tenant_id, candidate_id, placement_value)` — a real `UPDATE referral_links
+SET hired_candidate_id=$2, hired_at=now(), placement_value=$3,
+bonus_eligible=TRUE WHERE $2::uuid = ANY(candidate_ids) AND
+hired_candidate_id IS NULL`, best-effort (never blocks a real offer
+acceptance if it fails) — and `PATCH /referrals/{id}/mark-bonus-paid`
+(admin/manager-gated via `require_role`, validates the row is genuinely
+`bonus_eligible` and not already `bonus_paid` before flipping it, a
+clean 400 on either violation).
+
+`backend/routers/offers.py`'s `respond_offer()` acceptance branch —
+already the real, established hook point for `placements` and
+`source_attribution.mark_source_attribution_placed()` (part 1, same
+day) — gained one more call to `record_referral_hire()` right alongside
+them, passing the real accepted `ctc_offered` as `placement_value`.
+
+`frontend/app/(dashboard)/candidate-engagement/page.tsx`'s `ReferralsTab`
+— a real "✓ Hired · ₹<value>" badge once `hired_candidate_id` is set,
+plus either "Bonus Paid" (already paid), a clickable "Bonus Eligible —
+Mark Paid" button (admin/manager/super_admin only, via the established
+SSR-safe deferred `getTokenPayload()` read), or a plain "Bonus Eligible"
+badge for everyone else.
+
+Verified for real end-to-end, not code review: a full real cycle via a
+throwaway recruiter — generated a real referral link, a real click via
+the actual `GET /r/{code}` redirect, a real public apply through
+`/public/jobs/apply` with the ref code and DPDP consent (HARD RULE
+#12 — a real, live 400 hit on the first attempt without it, correct
+enforcement, not a bug), confirmed the candidate correctly array-appended
+to `referral_links.candidate_ids`, then walked a real offer through the
+COMPLETE HITL chain (submit-for-approval → approve → issue → respond
+accepted) — and confirmed the referral row flipped to
+`hired_candidate_id`/`hired_at`/`placement_value: 850000.0` (the exact
+real CTC)/`bonus_eligible: true`, all fully automatic. Confirmed
+`mark-bonus-paid`'s real role gate 3 ways: the referring recruiter
+themselves correctly 403'd (can't approve their own bonus), admin
+correctly 200'd (`bonus_paid` flips to `true`), and a re-attempt
+correctly 400'd ("already paid," not a silent no-op). All throwaway test
+data (2 requisitions, 1 candidate, 1 recruiter — deactivated; force-purge
+correctly 409'd on 2 of 3 throwaway recruiter accounts from repeated
+verification runs, each carrying real referral-click/candidate-
+attachment history — the established safety net working exactly as
+designed, not a bug) cleaned up via real APIs afterward.
+
+New permanent "S91" suite (6 tests) added to `qa_automation.spec.ts`,
+mirroring the real verification script's own steps end-to-end. **One
+real test-design mistake caught and fixed by the suite's own first
+run, not an app bug**: `GET /referrals/` is deliberately scoped to
+`referrer_user_id = actor.user_id` (confirmed by reading the code) — a
+real "my own referrals" list, not an admin-wide view even for an admin
+login. The UI test's first attempt logged in as admin and correctly saw
+nothing; fixed to log in as the same throwaway recruiter who actually
+generated the link. 6/6 passing in isolation. A broader regression sweep
+across S17/S30/S57/S71/S90/S91 together (50 tests) showed 44 clean
+passes plus 2 transient failures, both independently confirmed via
+direct backend-log correlation (2 real `429 Too Many Requests` responses
+in the exact same window) as this session's own well-documented per-IP
+login rate-limit artifact from today's heavy cumulative test volume —
+not a regression; S91 had already proven fully clean in isolation
+beforehand. Zero-token audit: `CONFIRMED CLEAN` (441 files, 0 external
+API refs).
