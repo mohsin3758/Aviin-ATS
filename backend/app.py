@@ -206,8 +206,6 @@ app.add_middleware(
         "http://localhost:3000",
         "http://187.127.179.128",
         "http://187.127.179.128:3001",
-        "http://ats.aviinjobs.com",
-        "https://ats.aviinjobs.com",
         "https://ats.aviintech.com",
     ],
     allow_credentials=True,
