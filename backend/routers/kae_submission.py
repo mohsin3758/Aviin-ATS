@@ -139,6 +139,47 @@ def _jsonb(v, default):
     return json.loads(v) if isinstance(v, str) else v
 
 
+def _format_skill_summary_default(rows) -> str:
+    """Real gap fix (2026-09-03): the tracking-sheet's "Skill Relevant
+    Exp / Support / Implementation / Projects" column (skill_summary,
+    COLUMN_REGISTRY) has always been a blank, purely-manual free-text
+    field for a recruiter/KAE to retype by hand on every single send —
+    even though the SAME information already lives, real and structured,
+    in candidate_skill_experience the moment auto_populate_skill_
+    experience() (services/skill_experience_parser.py) has run. Builds a
+    real, readable default line per stored row ("SAP FICO: 8 Yrs"),
+    including project/duration/role/last-used detail whenever a row
+    genuinely has it (most don't yet — the auto-populate path only ever
+    fills skill_name + relevant_experience; a recruiter can still add the
+    richer detail by hand, same as today). Never fabricates a value for a
+    field that's empty. Purely a computed DEFAULT into auto_values, still
+    fully free-text-editable in the actual send — matches this exact
+    same "auto-computed starting point, human can still change it" model
+    every other auto_values field already uses."""
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        parts = [r["skill_name"]]
+        detail = []
+        if r.get("project_name"):
+            detail.append(r["project_name"])
+        if r.get("duration_from") or r.get("duration_to"):
+            df = r["duration_from"].strftime("%b %Y") if r.get("duration_from") else "?"
+            dt = r["duration_to"].strftime("%b %Y") if r.get("duration_to") else "Present"
+            detail.append(f"{df} - {dt}")
+        if r.get("role_types"):
+            detail.append("/".join(r["role_types"]))
+        if r.get("last_used"):
+            detail.append(f"Last used: {r['last_used']}")
+        label = r["skill_name"]
+        if detail:
+            label += " (" + ", ".join(detail) + ")"
+        rel = r.get("relevant_experience") or ""
+        lines.append(f"{label}: {rel}" if rel else label)
+    return "\n".join(lines)
+
+
 def _template_out(row) -> dict:
     d = dict(row)
     d["columns"] = _jsonb(d.get("columns"), [])
@@ -177,6 +218,14 @@ async def _app_context(conn, application_id: str):
     if row is None:
         raise HTTPException(404, "Application not found")
 
+    skill_rows = await conn.fetch(
+        """SELECT skill_name, project_name, duration_from, duration_to, role_types,
+                  relevant_experience, last_used
+           FROM candidate_skill_experience
+           WHERE candidate_id=$1 ORDER BY sort_order""",
+        row["candidate_id"])
+    skill_summary_default = _format_skill_summary_default([dict(r) for r in skill_rows])
+
     notice = f"{row['notice_period_days']} days" if row["notice_period_days"] is not None else ""
     ai_score = f"{row['ai_score']:.0f}% ({row['ai_grade']})" if row["ai_score"] is not None and row["ai_grade"] else \
                (f"{row['ai_score']:.0f}%" if row["ai_score"] is not None else "")
@@ -198,6 +247,7 @@ async def _app_context(conn, application_id: str):
         "nda_status": (row["nda_status"] or "not_started").replace("_", " ").title(),
         "recruiter_name": row["recruiter_name"] or "",
         "ai_jd_score": ai_score,
+        "skill_summary": skill_summary_default,
     }
     return row, auto_values
 

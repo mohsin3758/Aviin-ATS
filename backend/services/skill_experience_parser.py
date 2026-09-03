@@ -54,6 +54,16 @@ def parse_skill_summary_text(raw_text: str) -> list[dict]:
         if not m:
             continue
         label, value = m.group(1).strip(), m.group(2).strip()
+        # Real, minor bug found 2026-09-03 while root-causing the missing-
+        # skills report below: a URL line like "https://www.linkedin.com/
+        # in/..." matches _LINE_RE too — its own scheme colon reads as a
+        # "Label: Value" pair (label="https", value="//www.linkedin...").
+        # looks_like_experience already filters this out for the auto-
+        # populate path (a URL never contains a real "N Yrs" figure), but
+        # it still showed up as visible garbage in the Paste & Parse tool's
+        # human-review list. Cheap, safe exclusion.
+        if label.lower() in ("http", "https", "ftp", "mailto"):
+            continue
         skill_name = _normalize_skill_label(label)
         key = skill_name.lower()
         if key in seen:
@@ -65,6 +75,33 @@ def parse_skill_summary_text(raw_text: str) -> list[dict]:
             "looks_like_experience": bool(_EXP_VALUE_RE.search(value)),
         })
     return rows
+
+
+def _recognized_taxonomy_skill(raw: str) -> Optional[str]:
+    """Real gap fix (2026-09-03), see auto_populate_skill_experience()'s
+    docstring for the full story. Checks whether `raw` is a genuinely
+    recognized skill per this codebase's real, curated taxonomy —
+    independent of any one candidate's own possibly-incomplete skills[]
+    array. Deliberately mirrors only skill_normalizer.normalize_skill()'s
+    steps 1-4 (noise-word rejection, exact DB-cache match, exact static-
+    fallback match, word-boundary partial match) and never its own
+    looser step 5 ("looks like a clean short term, keep it anyway") —
+    that step would also accept real non-skill noise from a tracking
+    sheet ("Support", "Migration", "Overall") and defeat the whole point
+    of this check. Returns the canonical skill name, or None."""
+    from services import skill_normalizer
+    norm = skill_normalizer._normalize_for_lookup(raw)
+    if not norm or norm in skill_normalizer.SKILL_NOISE_WORDS:
+        return None
+    if norm in skill_normalizer._CACHE:
+        return skill_normalizer._CACHE[norm]
+    if norm in _SKILL_LOOKUP:
+        return _SKILL_LOOKUP[norm]
+    for key, canonical in {**_SKILL_LOOKUP, **skill_normalizer._CACHE}.items():
+        if len(key) >= 4:
+            if re.search(r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])", norm):
+                return canonical
+    return None
 
 
 async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str,
@@ -103,7 +140,31 @@ async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str
     process_email_for_resume) passes it here directly, so this function
     scans the richer text without ever persisting it anywhere -- every
     other caller is unaffected, still reading resume_text from the DB
-    exactly as before."""
+    exactly as before.
+
+    Real, live gap fix (2026-09-03): the original acceptance rule
+    required the tracking-sheet skill name to ALSO appear in the
+    candidate's own `skills[]` array -- a real, reasonable-looking guard
+    against noise, but it silently assumed that array is a reliable,
+    independent signal. It isn't: `skills[]` comes from the SAME
+    resume-attachment parsing that, for a real, non-rare share of
+    candidates in this project's own history, fails outright (a
+    corrupted legacy .doc, OCR garbage, an unreadable scan) and produces
+    an incomplete or near-empty list. Confirmed live: a real candidate
+    ("HARI...") whose attachment parsing left `skills[]` at just 3 wrong-
+    ish entries had her genuinely real, explicitly-labeled tracking-sheet
+    line "SAP COPA : 3 Yrs" (and SAP ECC, SAP FSCM) silently dropped —
+    2 of 5 real skills kept, 3 lost, purely because the OTHER extraction
+    path had already failed. Now also accepts a skill name recognized by
+    the same real, curated taxonomy this codebase trusts everywhere else
+    (skill_normalizer's DB-backed cache + improved_parser's static
+    fallback), independent of that one candidate's own possibly-broken
+    skills[] array. Deliberately reuses only normalize_skill()'s steps
+    1-4 (noise-word rejection, exact match, word-boundary partial match)
+    via _recognized_taxonomy_skill() below -- never its own looser step 5
+    ("looks like a clean short term, keep it anyway"), which would also
+    accept genuine non-skill noise like "Support"/"Migration"/"Overall"
+    and defeat the whole point of this filter."""
     try:
         row = await conn.fetchrow(
             "SELECT resume_text, skills FROM candidates WHERE tenant_id=$1 AND id=$2",
@@ -114,14 +175,18 @@ async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str
         if not scan_text:
             return 0
         known_skills = {s.lower() for s in (row["skills"] or [])}
-        if not known_skills:
-            return 0
 
         proposed = parse_skill_summary_text(scan_text)
-        real_rows = [
-            p for p in proposed
-            if p["looks_like_experience"] and p["skill_name"].lower() in known_skills
-        ]
+        real_rows = []
+        for p in proposed:
+            if not p["looks_like_experience"]:
+                continue
+            if p["skill_name"].lower() in known_skills:
+                real_rows.append(p)
+                continue
+            canonical = _recognized_taxonomy_skill(p["skill_name"])
+            if canonical:
+                real_rows.append({**p, "skill_name": canonical})
         if not real_rows:
             return 0
 

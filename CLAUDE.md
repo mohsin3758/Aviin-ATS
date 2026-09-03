@@ -21692,3 +21692,122 @@ on both the main Dashboard and the P16 KAE Module page (Account
 Ownership, Leaderboard, Retention Bonuses tabs) was independently
 verified against the live database and/or the real backend endpoint
 response before and after — all confirmed correct.
+
+## Skill/Project Experience auto-extraction: a real filter bug found and fixed (2/5 skills kept, not 5/5) + Submit-to-Client's skill_summary now auto-fills from stored data, 2026-09-03
+Direct follow-up to a real Shivani.P screenshot comparison — user's
+initial framing (wrong designation/employer/location) turned out to be
+a false lead, corrected via their own mid-turn clarification: "Aviintech
+Business Solutions / Solution Architect" is genuinely her real, current
+employer per her own resume text (she works there, the same company
+operating this ATS — not a leaked-agency-name bug), and "British
+Petroleum" in the tracking sheet is the client/deployment site she's
+being proposed for, a different, also-real fact. Neither needed
+correcting. The user's real, explicit ask (given directly): the system
+should automatically extract Skills and Project Experience from a real
+tracking-sheet email (like Faisal's to Shahana) into the candidate
+profile, store it, and auto-fill the SAME data into the Submit-to-Client
+tracking sheet — reported as currently not working.
+
+**Investigated for real, not assumed working from the earlier same-
+session build.** Confirmed the auto-extraction pipeline (`resume_intake_
+service.py` → `auto_score_candidate_bg(..., skill_scan_text=full_text)`
+→ `auto_populate_skill_experience()`, built earlier the same day) is
+genuinely wired into the real email-intake path, not just WhatsApp —
+but Shivani's own 5 correct skill rows turned out to be from an earlier
+MANUAL backfill in this same session, not proof the automatic pipeline
+itself works. Found a genuinely untouched, comparable real candidate
+("Hari Babu Gorakala" — resume attachment extraction failed into OLE2
+binary garbage, `full_name: "Unknown Candidate"`, but the real email body
+from the same recruiter has an identical, genuine tracking-sheet table)
+and ran the REAL, deployed `auto_populate_skill_experience()` directly
+against her real combined resume+email text, inside the backend
+container — not a reimplementation, the actual live function.
+
+**Real, confirmed bug**: only 2 of her 5 real, explicitly-labeled skill
+lines (SAP FICO, SAP HANA) were kept — SAP COPA, SAP ECC, SAP FSCM were
+silently dropped. Root cause: the acceptance filter required each
+tracking-sheet skill name to ALSO appear in `candidates.skills[]` — a
+reasonable-looking guard against noise ("Total Projects: 6" shouldn't
+become a fake skill), but that array comes from the SAME resume-
+attachment parsing that had just failed for this candidate (a real,
+non-rare occurrence in this project's own history — corrupted legacy
+.doc files, OCR failures), leaving `skills[]` at just 3 incomplete
+entries. A real, human-typed, unambiguous "SAP COPA : 3 Yrs" line from
+the recruiter's own email was silently discarded purely because an
+UNRELATED extraction path had already failed for the same candidate.
+
+**Fixed** (`backend/services/skill_experience_parser.py`) — a new
+`_recognized_taxonomy_skill()` checks the SAME real, curated skill
+taxonomy this codebase already trusts everywhere else (`skill_
+normalizer`'s DB-backed cache + `improved_parser`'s static fallback),
+independent of any one candidate's own possibly-broken `skills[]` array.
+Deliberately reimplements only `normalize_skill()`'s steps 1-4 (noise-
+word rejection, exact match, word-boundary partial match) and
+NEVER its own looser step 5 ("looks like a clean short term, keep it
+anyway") — that step would also accept genuine tracking-sheet noise
+like "Support"/"Migration"/"Overall" and defeat the whole point of this
+filter (verified directly: `_recognized_taxonomy_skill("Overall")`
+correctly returns `None`, `_recognized_taxonomy_skill("SAP COPA")`
+correctly returns `"SAP COPA"`). Also removed the early `if not known_
+skills: return 0` bail-out — a candidate whose attachment parsing left
+`skills[]` completely empty should still benefit from a genuinely good
+tracking-sheet email, not be locked out entirely. A small, real, related
+bug fixed in the same pass: `_LINE_RE` (the "Label: Value" line matcher)
+also matched a `https://...` LinkedIn URL line as label="https", showing
+a nonsensical row in the human-facing "Paste & Parse" review tool —
+excluded `http`/`https`/`ftp`/`mailto` as recognized labels.
+
+**Second real gap, also closed**: `skill_summary` (COLUMN_REGISTRY's
+"Skill Relevant Exp / Support / Implementation / Projects" column — the
+exact tracking-sheet field name) has always been a blank, purely-manual
+free-text field on every Submit-to-KAE/Submit-to-Client send, even once
+the real structured data exists in `candidate_skill_experience`. New
+`_format_skill_summary_default()` (`kae_submission.py`) builds a real,
+readable default ("SAP FICO: 8 Yrs\nSAP COPA: 3 Yrs\n...", including
+project/duration/role/last-used detail whenever a row genuinely has it)
+from the stored rows, wired into the ONE shared `_app_context()` every
+real caller of this module already goes through (`submit_to_kae`/
+`submit_to_kae_preview`/`submit_to_client`/`submit_to_client_preview`/
+`_client_tracking_sheet_rows`/both `_do_*_submission()` functions) — one
+fix, not four. Still a real, freely-editable default, never a locked
+value — matches the exact same "auto-computed starting point, human can
+still change it" model every other `auto_values` field already uses.
+
+Verified for real end-to-end, not code review: re-ran the exact same
+real function call against Hari Babu Gorakala's real data after
+deploying — went from 2 rows to genuinely **5** (SAP FICO 13 Yrs, SAP
+COPA 3 Yrs, SAP HANA 5 Yrs, SAP ECC 8 Yrs, SAP FSCM 5 Yrs, all matching
+the real email exactly), and the raw parser output confirmed the "https"
+garbage row is gone too. Called both the real `GET .../submit-to-kae/
+preview` and `GET .../submit-to-client/preview` endpoints for Shivani's
+real, live application and confirmed `auto_values.skill_summary` now
+contains her real, correctly-formatted 5-skill summary in both — the
+exact field a recruiter/KAE would see pre-filled the moment they open
+either Submit tab. A full regression sweep across every suite touching
+either modified file (S14/S17/S29/S30/S37/S43/S54/S61/S65/S71/S72/S73/
+S90/S92/S96/S97/S98/S99/S100/S102, 150 tests) — 147 clean; the 2
+failures (S37's unrelated UI test, S102's setup) were confirmed, via a
+direct isolated re-run hitting the identical `429 Too Many login
+attempts` error, as this session's own well-documented per-IP login
+rate-limit artifact from today's very heavy cumulative test volume —
+neither suite touches either modified file, and every suite that
+directly exercises `kae_submission.py` (S14/S17/S54/S61/S65/S73/S98/
+S99/S100) passed 100% clean on the first attempt. Zero-token audit:
+`CONFIRMED CLEAN`.
+
+**Explicitly disclosed, not silently expanded into scope**: `linkedin_
+id`/`ctc`/`ectc_rate_card` are already real `auto:True` COLUMN_REGISTRY
+fields (correctly wired to `candidates.linkedin_url`/`current_ctc`/
+`expected_ctc` since this table was built) but stayed blank for both
+Shivani and Hari — because those specific tracking-sheet values (LinkedIn
+URL, CTC, ECTC) were never extracted INTO the underlying candidate
+record in the first place, a real, separate gap from the one this pass
+was asked to close (Skills and Project Experience specifically, the
+user's own explicit, repeated framing). Not attempted here — flagged
+honestly as a real, adjacent, still-open item for a future, explicit
+pass, not silently folded in or silently left unmentioned. A broader
+retroactive backfill sweep across every OTHER historical candidate with
+the same 2-of-5-style gap was also not attempted in this pass (Hari's
+own record was fixed as a direct, verified side effect of testing the
+fix, not a separate bulk operation) — matching this project's own
+established caution against blind, unreviewed bulk data changes.
