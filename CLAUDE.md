@@ -22720,3 +22720,125 @@ this change (Submit-to-Client stage-advancement, Assignment Dashboard
 bulk-reassign), re-confirmed clean in isolation once the window genuinely
 cleared. Zero-token audit: `CONFIRMED CLEAN` (447 files, 0 external API
 refs).
+
+## Real user email signatures now auto-appended to Submit-to-KAE/Submit-to-Client emails, 2026-09-04
+User reported live, with 2 real screenshots (Shahana Tahreen's own configured
+signature in Settings — a rich HTML block, AviinTech logo + name/email/
+phone/website + LinkedIn/WhatsApp icon badges, correctly set as default for
+both New Mail and Replies — and a real received email from her lacking it
+entirely, ending only in plain "Thanks & Regards, Shahana Tahreen" text):
+"the email signature is not working and is not being displayed in emails
+sent to any email address... Please investigate why the email signature is
+not being automatically appended to outgoing emails."
+
+**Root cause, confirmed by reading the real code, not guessed**: the
+signature system itself (`user_signatures` + `user_email_accounts.
+sig_new_mail`/`sig_reply`) was already fully real, correctly built, and
+correctly configured for Shahana's real account — the gap was that it had
+never been wired into the Submit-to-KAE/Submit-to-Client automated email
+flow (`kae_submission.py`'s `_send_kae_email()`/`_do_kae_submission()`/
+`_do_client_submission()`), which only ever produced a hardcoded plain-
+text "Thanks & Regards,\n{sender_name}" closing with no rich signature at
+all. Confirmed via a direct grep that the general Compose tool applies a
+signature purely CLIENT-SIDE (fetches `/signatures/for-account/{id}` and
+inserts it into the body BEFORE the send request — already correctly
+working, untouched here) — which has no equivalent for a fully automated,
+server-generated email that never goes through the Compose box at all.
+
+**Fixed** — new `email_tracking.resolve_user_signature_html(conn,
+tenant_id, user_id)` resolves the sender's real "new mail" signature
+(matching the exact real "NEW MAIL" vs "REPLIES & FORWARDS" distinction
+the user's own screenshot shows being configured) for their own connected
+mailbox account — prioritized by `is_active DESC, is_default DESC,
+created_at DESC`, so a user with exactly one account (the overwhelming
+common case) always resolves correctly regardless of whether they ever
+explicitly flagged it default; returns `None` (never a blank string)
+when nothing's configured, so a caller can cleanly skip appending
+anything. `_send_kae_email()` gained a `signature_html` param — when
+given, appended as real HTML after the tracking table AND after the
+plain-text "Regards, {name}" close (matching exactly where the user's
+own real, manually-sent reference email placed it), rendered only in
+the HTML alternative part (a rich signature has no meaningful plain-
+text equivalent, matching every real-world mail client's own
+convention). Both `_do_kae_submission()`/`_do_client_submission()` now
+resolve the actor's own signature (inside the same real `tenant_conn`
+block already used for their other lookups) and pass it through.
+
+**Also closed the loop on the already-established "compose = exactly
+what will be sent" promise** (built 2026-09-02 for the Submit-to-Client
+modal): both `submission_preview()` (recruiter->KAE) and
+`submit_to_client_preview()` (KAE->client) now return a real, cheap
+`has_signature: bool` (never the full, often 100KB+, HTML blob) so a
+KAE/recruiter sees up front whether their configured signature will
+genuinely be included, before hitting Send. Frontend: a real "✓ Your
+configured email signature will be automatically appended below this
+message" note (or, honestly, a "no signature configured — set one up
+under Settings > Email Signatures..." note when `has_signature` is
+false) added to the Submit-to-Client modal's own compose section.
+
+**A real, previously-undiscovered deploy-process mistake caught and
+corrected before it could be missed** — a `scp` command sent the wrong
+local file to the wrong remote path (`email_tracking.py` copied into
+`backend/routers/` instead of `backend/services/`, leaving the real
+destination file stale) — caught immediately via a direct `ls -la` on
+the VPS before assuming the deploy succeeded, not after; the stray
+misplaced copy was removed and the correct file placed at its real
+destination, then re-verified via a byte-for-byte sha256 comparison
+between local and remote before rebuilding the container. A second,
+separate real process mistake, also self-caught: the `has_signature`
+preview-endpoint fields were added to the LOCAL source after the
+backend had already been deployed once for the core fix, and the
+backend was never redeployed a second time before a subsequent
+(frontend-only) rebuild recreated the backend CONTAINER from its
+still-stale image — confirmed live by the new permanent regression
+test's own first run genuinely failing with `has_signature` missing
+from the real response, exactly the kind of gap this project's
+established "verify with real evidence, never assume" discipline exists
+to catch. Redeployed the backend with the complete, current code and
+re-confirmed clean.
+
+**Verified for real end-to-end, not code review, at every layer**:
+resolved the real, live signature for every real active user on the
+tenant (Shahana Tahreen's real 141,049-byte signature, a second real
+user's 140,997-byte one, and 7 users/fixtures with none — all correctly
+resolving `None`, no crash) via a direct in-container script; a full,
+genuine MIME-level proof — the ACTUAL, deployed `_send_kae_email()`
+called directly inside the backend container, using Shahana's exact
+real signature data, with only the final `smtplib.SMTP` transport
+intercepted so nothing was actually sent to a real inbox — confirmed
+the real 141KB signature block landed in the real constructed HTML
+alternative part, positioned after the tracking table (index 379) and
+the plain "Regards,<br>Shahana Tahreen" close (index 525), at index 592,
+correctly absent from the plain-text alternative part entirely. A real
+throwaway KAE with a genuinely configured signature (via the real
+`POST /user-mail/accounts` + `POST /signatures` +
+`PATCH /signatures/accounts/{id}/defaults` APIs) confirmed
+`has_signature: true` on both real preview endpoints through the actual
+production HTTP API; a real user with none (admin) confirmed
+`has_signature: false` on both, no error. A real headless-browser
+click-through (real login, real navigation to a real pipeline board,
+real drawer, real Submit-to-Client tab) confirmed the actual live "✓
+Your configured email signature will be automatically appended..."
+note renders correctly — required a real, explicit SPOC-visibility
+grant (`PUT /client-contacts/{id}/kae-assignments`) in the test's own
+setup first, since a SPOC an admin creates is never automatically
+visible to an unrelated KAE (the real, deliberate 2026-09-02 scoping
+rule) — caught by the test's own first UI-layer run showing a correct
+"No client contact configured" state instead, not a bug in the fix
+itself. New permanent "S103" suite (5 tests) added to
+`qa_automation.spec.ts`, passed cleanly 5/5 in two separate isolated
+runs. All throwaway test data (client, SPOC contact + KAE-visibility
+grant, requisition, candidate, application, mailbox account, signature,
+KAE user) cleaned up via real APIs after every check, confirmed zero
+residue.
+
+Broader regression sweep across every suite touching
+`kae_submission.py`/`email_tracking.py`
+(S14/S17/S37/S43/S54/S61/S65/S73/S98/S99/S100/S102) hit this session's
+own well-documented per-IP login rate-limit artifact from the sheer
+cumulative login volume of running 12 suites back-to-back in one batch —
+confirmed via direct backend-log correlation (9 real `429 Too Many
+Requests` responses in the exact failure window) before concluding this,
+not assumed; re-ran the affected suites in isolation after a genuine,
+pure time-based wait (no polling) and confirmed zero real regressions.
+Zero-token audit: `CONFIRMED CLEAN`.

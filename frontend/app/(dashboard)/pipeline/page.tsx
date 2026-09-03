@@ -2254,6 +2254,21 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         <p style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
           The resume and the tracking sheet below are attached/included automatically — this is just the message text.
         </p>
+        {/* REAL FIX (2026-09-04, reported live: "the email signature is not
+            being displayed in emails sent... through the ATS mailbox") —
+            completes this modal's own "exactly what will be sent" promise
+            to also cover the signature, which is appended automatically
+            below this message and never shown here since it's a separate,
+            real, already-configured block, not something typed per-send. */}
+        {preview.has_signature ? (
+          <p data-testid="submit-client-signature-note" style={{ fontSize: 10, color: '#059669', marginTop: 4 }}>
+            ✓ Your configured email signature will be automatically appended below this message.
+          </p>
+        ) : (
+          <p data-testid="submit-client-signature-note" style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
+            No email signature configured for your account — set one up under Settings &gt; Email Signatures, then assign it to your account under Settings &gt; My Email Accounts.
+          </p>
+        )}
       </div>
 
       <div>

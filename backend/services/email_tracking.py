@@ -184,6 +184,47 @@ async def bump_thread_activity(conn, thread_id, direction: str) -> None:
     )
 
 
+async def resolve_user_signature_html(conn, tenant_id: str, user_id: str) -> Optional[str]:
+    """REAL FIX (2026-09-04, reported live: "the email signature is not
+    working and is not being displayed in emails sent to any email
+    address... Please investigate why the email signature is not being
+    automatically appended to outgoing emails"). The real signature system
+    (user_signatures + user_email_accounts.sig_new_mail/sig_reply) has
+    always been fully real and correctly configured — the gap was that it
+    was never wired into anything server-side: the general Compose tool
+    only ever applies it client-side (fetches /signatures/for-account/{id}
+    and inserts it into the body BEFORE the send request is made — already
+    correctly working, confirmed by reading the actual frontend code, not
+    touched here), which has no equivalent for a fully automated,
+    server-generated email like Submit-to-KAE/Submit-to-Client, which never
+    goes through the Compose box at all.
+
+    Resolves the "new mail" signature (kae_submission.py's sends are a
+    genuinely new outbound message, not a reply — matching the exact real
+    "NEW MAIL" vs "REPLIES & FORWARDS" distinction a user configures in
+    Settings) for this user's own connected mailbox. A user can have more
+    than one connected account — prioritizes is_active, then is_default,
+    then most-recently-added, so a user with exactly one account (the
+    overwhelming common case) always resolves correctly regardless of
+    whether they ever explicitly flagged it default. Returns None — never
+    an empty string — when the user has no connected account with a real
+    signature assigned, so a caller can cleanly skip appending anything
+    rather than injecting a blank block."""
+    if not user_id:
+        return None
+    row = await conn.fetchrow(
+        """SELECT s.html
+           FROM user_email_accounts a
+           JOIN user_signatures s ON s.id = a.sig_new_mail
+           WHERE a.tenant_id=$1 AND a.user_id=$2
+           ORDER BY a.is_active DESC, a.is_default DESC, a.created_at DESC NULLS LAST
+           LIMIT 1""",
+        tenant_id, user_id,
+    )
+    html = row["html"] if row else None
+    return html.strip() if html and html.strip() else None
+
+
 # ── Engagement scoring ───────────────────────────────────────────────────────
 
 def _score_level(score: float) -> str:

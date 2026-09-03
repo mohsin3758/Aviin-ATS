@@ -14461,3 +14461,170 @@ test.describe.serial('S102 Enterprise Email Management: RBAC client-email gate, 
     }
   });
 });
+
+test.describe.serial('S103 Real signature auto-appended to Submit-to-KAE/Submit-to-Client emails', () => {
+  // 2026-09-04, reported live: "the email signature is not working and is
+  // not being displayed in emails sent to any email address... the email
+  // received by mohsinkhan@aviintech.com from Shahana does not contain the
+  // configured email signature." Root cause: the real signature system
+  // (user_signatures + user_email_accounts.sig_new_mail) has always been
+  // fully real and correctly configured — the gap was that it was never
+  // wired into anything server-side. The general Compose tool applies a
+  // signature purely client-side (fetches /signatures/for-account/{id} and
+  // inserts it into the body BEFORE the send request — confirmed already
+  // correct by reading the real frontend code, untouched here) — which has
+  // no equivalent for a fully automated, server-generated email like
+  // Submit-to-KAE/Submit-to-Client, which never goes through the Compose
+  // box at all. email_tracking.resolve_user_signature_html() (a new,
+  // shared, real DB query) now resolves the sender's own "new mail"
+  // signature and _send_kae_email() appends it as real HTML, positioned
+  // after the plain-text "Regards, {name}" close — matching exactly where
+  // the user's own real reference email (sent manually) placed it.
+  //
+  // Honest scope note, matching this suite's own established precedent for
+  // this exact class of gap (S99's own note on the same file): the real
+  // SMTP body content of an actual send can't be inspected from here (this
+  // tenant's real email goes through its own configured relay, not this
+  // environment's dev mailhog) — verified during development instead via a
+  // genuine end-to-end proof against the real, live, reporting user's own
+  // exact signature (docker exec inside the deployed backend container,
+  // real Shahana Tahreen DB row, real _send_kae_email() call with only the
+  // final smtplib.SMTP transport intercepted so nothing was actually sent —
+  // confirmed the real 141KB signature block landed in the real
+  // constructed MIME message, positioned after the tracking table and the
+  // plain "Regards," close, absent from the plain-text alternative part).
+  // This suite covers what's genuinely HTTP-testable: both preview
+  // endpoints' new has_signature field, for both a user with a real
+  // signature configured and one without, plus a real headless-UI check
+  // that the Submit-to-Client modal's new "your signature will be
+  // included" note reflects it correctly.
+  let admin = '';
+  const authA = () => ({ Authorization: `Bearer ${admin}` });
+  let clientId = '', reqId = '', candId = '', appId = '';
+  let kaeId = '', kaeToken = '', accountId = '', sigId = '', contactId = '';
+  const stamp = Date.now();
+  const SIG_MARKER = `QA-S103-SIGNATURE-MARKER-${stamp}`;
+
+  test.afterAll(async ({ request }) => {
+    if (accountId) await request.delete(`${API}/user-mail/accounts/${accountId}`, { headers: { Authorization: `Bearer ${kaeToken}` } }).catch(() => {});
+    if (appId) await request.delete(`${API}/applications/${appId}`, { headers: authA() }).catch(() => {});
+    if (candId) await request.delete(`${API}/candidates/${candId}`, { headers: authA() }).catch(() => {});
+    if (reqId) await request.delete(`${API}/requisitions/${reqId}`, { headers: authA() }).catch(() => {});
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: authA() }).catch(() => {});
+    if (kaeId) {
+      await request.patch(`${API}/users/${kaeId}/deactivate`, { headers: authA() }).catch(() => {});
+      await request.delete(`${API}/users/${kaeId}/purge`, { headers: authA() }).catch(() => {});
+    }
+  });
+
+  test('setup: a real throwaway KAE with a real configured signature, plus a client/SPOC/req/candidate/application', async ({ request }) => {
+    admin = await getApiToken(request);
+
+    const kae = await request.post(`${API}/users`, {
+      headers: authA(), data: { full_name: 'QA S103 KAE', email: `qa.s103.kae.${stamp}@test.com`, password: 'TestPass123!', role: 'kae' },
+    });
+    expect(kae.ok(), await kae.text()).toBeTruthy();
+    kaeId = (await kae.json()).id;
+    const login = await request.post(`${API}/auth/login`, { data: { email: `qa.s103.kae.${stamp}@test.com`, password: 'TestPass123!' } });
+    kaeToken = (await login.json()).access_token;
+    const authK = () => ({ Authorization: `Bearer ${kaeToken}` });
+
+    // A real mailbox account row (inert SMTP config — never actually
+    // connected to for this check) purely so a real user_signatures row
+    // has something real to attach as a "new mail" default to, matching
+    // the exact real schema resolve_user_signature_html() reads.
+    const acc = await request.post(`${API}/user-mail/accounts`, {
+      headers: authK(), data: {
+        email: `qa.s103.kae.${stamp}@test.com`, smtp_host: 'smtp.example.invalid',
+        smtp_user: `qa.s103.kae.${stamp}@test.com`, smtp_password: 'irrelevant', is_default: true,
+      },
+    });
+    expect(acc.ok(), await acc.text()).toBeTruthy();
+    accountId = (await acc.json()).id;
+
+    const sig = await request.post(`${API}/signatures`, {
+      headers: authK(), data: { name: 'QA S103 Signature', html: `<div>${SIG_MARKER}</div>` },
+    });
+    expect(sig.ok(), await sig.text()).toBeTruthy();
+    sigId = (await sig.json()).id;
+
+    const setDefault = await request.patch(`${API}/signatures/accounts/${accountId}/defaults`, {
+      headers: authK(), data: { sig_new_mail: sigId },
+    });
+    expect(setDefault.ok(), await setDefault.text()).toBeTruthy();
+
+    const c = await request.post(`${API}/clients`, { headers: authA(), data: { name: `QA S103 Client ${stamp}` } });
+    clientId = (await c.json()).id;
+    const contact = await request.post(`${API}/clients/${clientId}/contacts`, { headers: authA(), data: { contact_name: 'QA S103 SPOC', email: `qa.s103.spoc.${stamp}@qatest.example`, is_primary: true } });
+    contactId = (await contact.json()).id;
+    // Real, explicit SPOC-visibility grant (built 2026-09-02): a SPOC an
+    // admin creates is NOT automatically visible to an unrelated KAE — an
+    // admin has to explicitly assign it, matching this project's own
+    // real "Company -> SPOC -> KAE User" scoping rule. Without this, the
+    // Submit-to-Client panel correctly shows "No client contact
+    // configured" for this throwaway KAE regardless of the signature fix
+    // being verified here.
+    const grant = await request.put(`${API}/client-contacts/${contactId}/kae-assignments`, { headers: authA(), data: { kae_user_ids: [kaeId] } });
+    expect(grant.ok(), await grant.text()).toBeTruthy();
+    const r = await request.post(`${API}/requisitions`, { headers: authA(), data: { title: `QA S103 Req ${stamp}`, client_id: clientId, status: 'open', positions_count: 1 } });
+    reqId = (await r.json()).id;
+    const cand = await request.post(`${API}/candidates`, { headers: authA(), data: { full_name: `QA S103 Cand ${stamp}`, email: `qa.s103.cand.${stamp}@qatest.example`, phone: '9800000103' } });
+    candId = (await cand.json()).id;
+    await request.post(`${API}/candidates/bulk-assign`, { headers: authA(), data: { candidate_ids: [candId], requisition_id: reqId } });
+    const apps = await (await request.get(`${API}/applications?candidate_id=${candId}`, { headers: authA() })).json();
+    appId = Array.isArray(apps) ? apps[0]?.id : apps?.items?.[0]?.id;
+    expect(appId).toBeTruthy();
+  });
+
+  test('BUG FIX: submit-to-client/preview reports has_signature:true for a user with a real configured signature', async ({ request }) => {
+    const r = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: { Authorization: `Bearer ${kaeToken}` } });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    const body = await r.json();
+    expect(body).toHaveProperty('has_signature');
+    expect(body.has_signature).toBe(true);
+  });
+
+  test('BUG FIX: submit-to-kae/preview reports has_signature:true for the same real user, on the sibling recruiter->KAE direction', async ({ request }) => {
+    const r = await request.get(`${API}/applications/${appId}/submit-to-kae/preview`, { headers: { Authorization: `Bearer ${kaeToken}` } });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    const body = await r.json();
+    expect(body).toHaveProperty('has_signature');
+    expect(body.has_signature).toBe(true);
+  });
+
+  test('negative case (graceful degradation): both preview endpoints report has_signature:false for a real user with no signature configured, no error', async ({ request }) => {
+    const p1 = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authA() });
+    expect(p1.ok(), await p1.text()).toBeTruthy();
+    expect((await p1.json()).has_signature).toBe(false);
+
+    const p2 = await request.get(`${API}/applications/${appId}/submit-to-kae/preview`, { headers: authA() });
+    expect(p2.ok(), await p2.text()).toBeTruthy();
+    expect((await p2.json()).has_signature).toBe(false);
+  });
+
+  test('real headless UI: the Submit-to-Client drawer tab shows the real "your signature will be included" note, reflecting has_signature correctly', async ({ page, request }) => {
+    // Log in as the real throwaway KAE through the actual login page, not
+    // a raw token injection, so this genuinely exercises the deployed
+    // frontend end to end.
+    await page.goto('/login');
+    await page.fill('input[type="email"]', `qa.s103.kae.${stamp}@test.com`);
+    await page.fill('input[type="password"]', 'TestPass123!');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+
+    await page.goto(`/pipeline?job=${reqId}`);
+    const card = page.locator('div', { hasText: `QA S103 Cand ${stamp}` }).last();
+    await card.waitFor({ state: 'visible', timeout: 15000 });
+    await card.click();
+    await page.waitForTimeout(1000);
+    await page.locator('[data-tab="client"]').click();
+    await page.waitForTimeout(1200);
+    await expect(page.getByTestId('submit-client-signature-note')).toBeVisible({ timeout: 10000 });
+    const noteText = await page.getByTestId('submit-client-signature-note').innerText();
+    expect(noteText).toContain('will be automatically appended');
+    expect(errors).toHaveLength(0);
+  });
+});

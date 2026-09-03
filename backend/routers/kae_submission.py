@@ -1029,7 +1029,7 @@ def _default_client_email_text(role_title: str, contact_name: Optional[str], sen
 
 async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
                            body_text: str, attachments: list, body_html_extra: str = "",
-                           message_id_header: str = None) -> tuple:
+                           message_id_header: str = None, signature_html: str = None) -> tuple:
     """attachments: list of (filename, bytes, mime_subtype). body_html_extra,
     if given, is appended as real HTML below the plain-text intro (used for
     the inline tracking-sheet table) — the message becomes multipart/
@@ -1045,7 +1045,16 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
     what this function logs to candidate_messages — without this, every
     Submit-to-KAE/Submit-to-Client send was completely invisible to the
     real reply/bounce-correlation and Sent-folder/Mailbox-Dashboard
-    tracking this project already built for every other send path."""
+    tracking this project already built for every other send path.
+
+    signature_html (2026-09-04, reported live: "the email signature is not
+    being displayed in emails sent... through the ATS mailbox"): the
+    sender's real, configured signature block (email_tracking.resolve_
+    user_signature_html — already resolved by the caller, since that's
+    where the real actor.user_id and an open tenant connection both
+    already exist), appended verbatim after everything else. Only the
+    caller decides WHETHER a signature applies here — this function just
+    renders whatever real HTML it's handed, or nothing at all if None."""
     to_list = [to_emails] if isinstance(to_emails, str) else list(to_emails or [])
     cc_list = [cc_emails] if isinstance(cc_emails, str) else list(cc_emails or [])
     to_list = [e for e in to_list if e]
@@ -1075,7 +1084,7 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
             msg["Cc"] = ", ".join(cc_list)
             recipients.extend(cc_list)
 
-        if body_html_extra:
+        if body_html_extra or signature_html:
             alt = MIMEMultipart("alternative")
             alt.attach(MIMEText(body_text, "plain"))
             # REAL FIX (2026-09-03, reported live via real Outlook desktop
@@ -1123,6 +1132,18 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
             html_body = f'<div style="{_style}">{_html_lines(message_part)}</div>{_spacer}{body_html_extra}'
             if signature_part:
                 html_body += f'<div style="{_style}margin-top:14px;">{_html_lines(signature_part)}</div>'
+            # REAL FIX (2026-09-04, reported live via a real received email
+            # + a real Settings screenshot showing a genuine, configured
+            # signature that never appeared): the sender's actual signature
+            # block, rendered after the plain-text "Regards, {name}" close —
+            # matching exactly where the user's own real reference email
+            # (sent manually, not through this automated flow) placed it.
+            # A real signature is inherently rich HTML (a logo image, icon
+            # badges) with no meaningful plain-text equivalent, so — same as
+            # every real-world mail client's own convention — it only ever
+            # renders in the HTML alternative, never the plain-text one.
+            if signature_html:
+                html_body += f'<div style="margin-top:16px;">{signature_html}</div>'
             alt.attach(MIMEText(html_body, "html"))
             msg.attach(alt)
         else:
@@ -1165,10 +1186,18 @@ async def submission_preview(application_id: str, actor: Actor = Depends(get_act
             "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1", row["requisition_id"])
         screening = await conn.fetchrow(
             "SELECT to_emails, is_enabled FROM screening_notification_settings WHERE tenant_id=$1", actor.tenant_id)
+        # REAL FIX (2026-09-04, reported live: "the email signature is not
+        # being displayed in emails sent... through the ATS mailbox") — a
+        # cheap boolean, not the full (often 100KB+) signature HTML, so a
+        # KAE/recruiter can see up front whether their configured
+        # signature will genuinely be appended to the real send, without
+        # bloating this preview response.
+        has_signature = bool(await email_tracking.resolve_user_signature_html(conn, actor.tenant_id, actor.user_id))
     return {
         "candidate_id": str(row["candidate_id"]),
         "client_id": str(row["client_id"]) if row["client_id"] else None,
         "kae": dict(kaes[0]) if kaes else None,
+        "has_signature": has_signature,
         # Real fix (2026-08-19): a client can have more than one active KAE
         # (backup/secondary) — the old "kae" singular field silently hid
         # every KAE past the most-recently-assigned one.
@@ -1311,6 +1340,10 @@ async def _do_kae_submission(
             row["requisition_id"])
         client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
         recruiter_email = actor.email
+        # REAL FIX (2026-09-04): the sender's own real, configured
+        # signature — see email_tracking.resolve_user_signature_html's own
+        # docstring for the full story of what was missing and why.
+        signature_html = await email_tracking.resolve_user_signature_html(conn, tenant_id, actor.user_id)
 
     sl_no = (prior_count or 0) + 1
     overrides = {k: v for k, v in (field_values or {}).items() if v not in (None, "")}
@@ -1349,6 +1382,7 @@ async def _do_kae_submission(
         [(resume_filename, resume_bytes, subtype)],
         body_html_extra=tracking_html,
         message_id_header=message_id_header,
+        signature_html=signature_html,
     )
 
     async with db.tenant_conn(tenant_id) as conn:
@@ -1949,11 +1983,18 @@ async def submit_to_client_preview(
         # backend-only string the KAE never sees until it's already gone.
         default_subject, default_body = _default_client_email_text(
             row["role_title"], primary_contact["contact_name"] if primary_contact else None, actor.full_name)
+        # REAL FIX (2026-09-04, reported live: "the email signature is not
+        # being displayed in emails sent... through the ATS mailbox") —
+        # same cheap boolean signal as the sibling recruiter->KAE preview,
+        # completing this modal's own established "this is exactly what
+        # will be sent" promise (2026-09-02) to also cover the signature.
+        has_signature = bool(await email_tracking.resolve_user_signature_html(conn, actor.tenant_id, actor.user_id))
     return {
         "candidate_id": str(row["candidate_id"]),
         "requisition_id": str(row["requisition_id"]) if row["requisition_id"] else None,
         "client_id": str(row["client_id"]) if row["client_id"] else None,
         "client_name": client_name,
+        "has_signature": has_signature,
         "primary_contact": dict(primary_contact) if primary_contact else None,
         "contacts": [dict(c) for c in contacts],
         "resolved_template": _template_out(template) if template else None,
@@ -2117,6 +2158,12 @@ async def _do_client_submission(
 
         client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
         recruiter_email = actor.email
+        # REAL FIX (2026-09-04): the sender's own real, configured
+        # signature — see email_tracking.resolve_user_signature_html's own
+        # docstring for the full story of what was missing and why. This is
+        # the genuinely client-facing hop, the exact one the user's own
+        # live report was about.
+        signature_html = await email_tracking.resolve_user_signature_html(conn, tenant_id, actor.user_id)
 
         # REAL BUG (found via genuine testing, not code review, while
         # investigating an unrelated delete-fix on 2026-09-03): the final
@@ -2253,6 +2300,7 @@ async def _do_client_submission(
         tenant_id, to_recipients, cc_recipients, subject, body_text, attachments,
         body_html_extra=body_html_extra,
         message_id_header=message_id_header,
+        signature_html=signature_html,
     )
 
     async with db.tenant_conn(tenant_id) as conn:
