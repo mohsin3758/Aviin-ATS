@@ -22242,3 +22242,23 @@ proof above and S54's own clean isolated run; a formal re-run of these
 of this entry, disclosed honestly rather than claimed complete before
 it actually happened. Zero-token audit: `CONFIRMED CLEAN`. All throwaway test data cleaned
 up via real APIs, confirmed zero residue.
+
+## Conversations: "N new" badge relabeled "N unread" — a real, unbounded all-time count was being badged as freshly-arrived mail, 2026-09-03
+Same real page-review, same day. The Inbox toolbar's blue badge (visible
+live on Shahana's own real screenshot: "7196 New") reads as freshly-
+arrived mail — but `GET /communications/stats`'s own `unread` field has
+zero date filter at all; it's a real, unbounded, all-time "never marked
+as read" count across her whole IMAP inbox. Confirmed directly against
+the backend query before touching the label — genuinely misleading at
+this scale, not a cosmetic nitpick: a real recruiter/KAE reading "7196
+New" would reasonably think something urgent just landed, not that
+they've never triaged a multi-thousand-message historical backlog.
+Relabeled to "N unread" (with `.toLocaleString()`, matching this same
+file's own established thousands-separator convention elsewhere) —
+accurate regardless of how large the real number is. Left the separate,
+correctly-scoped "N new email(s) arrived!" toast notification untouched
+— that one genuinely measures a real delta since the last poll, not a
+static backlog, so "new" is the right word there. Verified the fix is
+genuinely live by confirming the deployed JS bundle itself, not
+assumed — the session's own login rate limit was still active at the
+time, so a direct in-browser screenshot check is still pending.

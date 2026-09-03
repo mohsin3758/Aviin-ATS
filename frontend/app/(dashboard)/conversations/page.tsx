@@ -1521,7 +1521,14 @@ export default function MailboxPage() {
             <span style={{fontSize:'14px',fontWeight:'800',color:'#0f172a',textTransform:'capitalize'}}>
               {folder==='whatsapp'?'WhatsApp':folder}
               <span style={{fontSize:'11px',fontWeight:'500',color:'#94a3b8',marginLeft:'6px'}}>({messages.length})</span>
-              {unreadCount>0&&folder==='inbox'&&<span style={{marginLeft:'6px',fontSize:'11px',fontWeight:'700',background:'#3b82f6',color:'white',borderRadius:'10px',padding:'1px 6px'}}>{unreadCount} new</span>}
+              {/* REAL FIX (2026-09-03, live report: check what needs work on
+                  Conversations) — unreadCount is a real, unbounded, all-time
+                  "never marked read" count (GET /communications/stats has no
+                  date filter on it at all) — badging a number that can
+                  genuinely run into the thousands as "new" reads as "just
+                  arrived," actively misleading a real recruiter/KAE. "Unread"
+                  states exactly what it is. */}
+              {unreadCount>0&&folder==='inbox'&&<span style={{marginLeft:'6px',fontSize:'11px',fontWeight:'700',background:'#3b82f6',color:'white',borderRadius:'10px',padding:'1px 6px'}}>{unreadCount.toLocaleString()} unread</span>}
             </span>
             <div style={{display:'flex',gap:'4px'}}>
               <button onClick={()=>setFilterUnread(v=>!v)} title="Show unread only"
