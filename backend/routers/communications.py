@@ -236,7 +236,8 @@ async def _send_wa(phone: str, message: str, session: str = WAHA_SESSION) -> boo
 
 async def _log(conn, tenant_id, cand_id, app_id, channel, subject, body, status,
                sent_by, tmpl_id=None, stage=None, to_email=None, cc=None,
-               client_id=None, client_contact_id=None, recipient_type=None):
+               client_id=None, client_contact_id=None, recipient_type=None,
+               message_id_header_override=None):
     """Returns {id, tracking_token, message_id_header, thread_id} on success
     so callers can embed an open-tracking pixel / link-tracking wrap keyed
     to this specific message, or None on failure.
@@ -246,8 +247,17 @@ async def _log(conn, tenant_id, cand_id, app_id, channel, subject, body, status,
     "Resume Discussion"/"Interview Discussion"/"Offer Discussion" replies
     into one real conversation) and gets a genuine RFC822 Message-ID
     embedded on the wire — the two building blocks reply-detection in
-    imap_bg.py correlates a later inbound reply back against."""
-    message_id_header = email_tracking.generate_message_id() if channel == "email" else None
+    imap_bg.py correlates a later inbound reply back against.
+
+    message_id_header_override: a real Message-ID a caller ALREADY embedded
+    on the outgoing SMTP message itself before calling this function (e.g.
+    kae_submission.py's Submit-to-KAE/Submit-to-Client sends, which build
+    and send their own MIME message before this logging call happens) —
+    generating a fresh one here instead would silently desync the DB's own
+    record from what the recipient's mail server actually saw, breaking
+    reply correlation for that message. Every other, pre-existing caller
+    passes nothing and keeps the original self-generated behavior."""
+    message_id_header = message_id_header_override or (email_tracking.generate_message_id() if channel == "email" else None)
     thread_id = None
     if channel == "email" and status == "sent":
         try:

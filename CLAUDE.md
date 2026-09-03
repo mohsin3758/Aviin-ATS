@@ -22141,3 +22141,104 @@ test data (2 clients, 1 KAE user — correctly left deactivated-not-
 purged by the established force-purge safety net once real activity
 landed on it, matching precedent throughout this project — 1 SPOC
 contact) cleaned up via real APIs, confirmed zero residue.
+
+## Conversations "Sent: 0" root-caused: an entire real send channel (KAE-submission emails) was invisible to the whole Mailbox Dashboard/Sent-folder/reply-tracking system since it was built, 2026-09-03
+Direct follow-up to a real, live screenshot of Shahana Tahreen's actual
+Conversations page — user asked to check what needs work on this page,
+no specific bug named. Investigated the visible numbers rather than
+guessed: "Sent: 0" for today, despite a real, dated (2026-09-03) "Profile
+Shared - SAP ABAP Developer" email clearly visible and genuinely sent by
+her, tagged "Received by Shahana" — a real, confirmable oddity worth
+tracing to a root cause, not dismissed as cosmetic.
+
+**Root cause, confirmed precisely, not guessed.** The "Received by
+Shahana" tag was itself correct, not a bug - the message genuinely
+arrived in her real IMAP inbox because she was CC'd on her own send (a
+real, deliberate cc_self option this feature already supports). The
+real bug was underneath: `kae_submission.py`'s whole Submit-to-KAE/
+Submit-to-Client feature has, since it was built, ONLY ever written its
+own send record to `candidate_submissions` - a completely separate
+table from `candidate_messages`, the one and only table the entire
+Mailbox Dashboard (built earlier this same day), Conversations Sent
+folder, reply/bounce-correlation, and open/click tracking system
+actually reads. **Every real recruiter->KAE and KAE->client submission
+send has been structurally invisible to all of that this whole time** -
+a KAE who spends their entire day submitting candidates would always
+show "Sent: 0," regardless of real volume, because that entire category
+of real outbound email was never logged where any of it looks.
+
+**Fixed by reusing the real, established engine, not building a second
+one.** `communications.py`'s `_log()` is already the single real choke
+point every OTHER send path in this codebase funnels through (thread
+resolution, real RFC822 Message-ID generation, candidate_activities
+logging, template sent_count) - widened with an optional
+`message_id_header_override` param (a caller that already embedded a
+real Message-ID on the actual outgoing SMTP message, as this one now
+does, must have `_log()` record that SAME id, not generate a second,
+different one that would never match what the recipient's mail server
+actually saw). `kae_submission.py`'s `_send_kae_email()` widened to
+accept and embed a real `message_id_header` on the wire (it never set
+one before at all). Both real send call sites
+(`_do_kae_submission`/`_do_client_submission`) now generate one real
+Message-ID up front, pass it through to both the actual SMTP send and a
+new `_log()` call inside the SAME transaction as the existing
+`candidate_submissions` INSERT - `_do_kae_submission` (internal,
+recruiter->KAE, never client-facing) logs with `client_id` unset and an
+explicit `recipient_type="internal"` (so `_log()`'s own default,
+"candidate" whenever a candidate_id is present, doesn't wrongly imply
+this went TO the candidate); `_do_client_submission` (genuinely
+client-facing) logs with the real `client_id`/`client_contact_id` set -
+exactly the kind of send the Client Health/SLA/engagement-score
+tracking already built the same day is meant to measure. A real,
+valuable side effect: a client's future REPLY to a Submit-to-Client
+email can now genuinely correlate back via the real Message-ID/thread,
+closing the same reply-invisibility gap for this send path too, not
+just the counting/Sent-folder visibility.
+
+Verified for real end-to-end, not code review: a full scripted real
+send (a genuine throwaway client + SPOC + requisition + candidate,
+moved to `screened` first - which correctly, independently triggered
+the pre-existing `_auto_notify_screening_team()` automation, exercising
+BOTH fixed call sites in one real test) confirmed `today_sent` on the
+real Mailbox Dashboard endpoint moved 68->70 (matching the 2 genuine
+outbound sends this one action produced), and a direct SQL read of the
+2 newest real `candidate_messages` rows confirmed both landed correctly
+- `"Candidate Submission - ..."` (recipient_type: internal, has real
+Message-ID, has real thread) and `"Profile Shared - ..."` (recipient_type:
+client, client_id correctly set, has real Message-ID, has real thread) -
+the second one's real subject format matching the exact live email
+already visible in the user's own original screenshot. Honest scope
+note: this is a forward-looking fix only - the specific historical
+"Profile Shared" email from the screenshot was never logged with a real
+Message-ID/thread at the time it was sent, and nothing here retroactively
+backfills that (there's no safe way to reconstruct a Message-ID that was
+never actually put on the wire) - every send from this point forward is
+correctly tracked.
+
+**A real, unrelated failure found via the regression sweep, fixed
+separately, not a consequence of this fix.** 2 pre-existing S54 tests
+had a hardcoded `columns.length` toBe(17) assumption about the tenant's
+own real, live global-default tracking-sheet template - broken (24, not
+17) as a direct, correct consequence of an EARLIER same-day fix (marking
+"New Aviin," a real 24-column template, as the tenant's genuine default,
+closing a real "no client can resolve Submit-to-Client at all" gap) -
+the exact same "test depended on ambient real tenant data instead of a
+controlled fixture" class already found and fixed once for a sibling
+S98 test. Fixed both to capture the real, current column count up front
+and assert it stays unchanged, rather than a hardcoded magic number tied
+to whatever template happens to be live right now.
+
+Full S54 suite re-run clean in isolation: 9/9. A broader 13-suite-pattern
+sweep (S11/S14/S17/S43/S52/S65/S66/S67/S73/S75/S99/S100/S102, ~90
+tests) showed 6 failures, all sharing the identical `{"detail":"Invalid
+or expired token"}` signature at the very first login step - confirmed
+via direct backend-log correlation (18 real 429 Too Many Requests
+responses in the exact failure window) as this session's own extensively
+documented per-IP login rate-limit artifact from very heavy cumulative
+test volume today, not a regression - the underlying core
+fix is independently confirmed correct regardless via the direct SQL
+proof above and S54's own clean isolated run; a formal re-run of these
+6 is still pending the real, required ~15-minute cooldown at the time
+of this entry, disclosed honestly rather than claimed complete before
+it actually happened. Zero-token audit: `CONFIRMED CLEAN`. All throwaway test data cleaned
+up via real APIs, confirmed zero residue.

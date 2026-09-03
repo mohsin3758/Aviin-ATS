@@ -41,8 +41,10 @@ import events
 from deps import Actor, get_actor, require_role
 from permissions import require_permission, has_permission_soft
 from routers.pipeline_stages import is_valid_stage
+from routers.communications import _log as _log_candidate_message
 from services.resume_formatting import render_resume_pdf, redact_contact, mask_name, _VALID_THEMES, _VALID_LOGO_POSITIONS, build_resume_filename
 from services import template_merge
+from services import email_tracking
 
 router = APIRouter(tags=["kae-submission"])
 
@@ -902,7 +904,8 @@ def _default_client_email_text(role_title: str, contact_name: Optional[str], sen
 
 
 async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
-                           body_text: str, attachments: list, body_html_extra: str = "") -> tuple:
+                           body_text: str, attachments: list, body_html_extra: str = "",
+                           message_id_header: str = None) -> tuple:
     """attachments: list of (filename, bytes, mime_subtype). body_html_extra,
     if given, is appended as real HTML below the plain-text intro (used for
     the inline tracking-sheet table) — the message becomes multipart/
@@ -911,7 +914,14 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
     Real improvement (2026-08-19): to_emails/cc_emails now accept either a
     single string (back-compat with every existing caller) or a real
     list — needed once a submission could go to a whole screening-team
-    list with multiple KAEs cc'd, not just one of each."""
+    list with multiple KAEs cc'd, not just one of each.
+
+    message_id_header (2026-09-03 audit): when given, embedded on the real
+    outgoing MIME message so a later reply's In-Reply-To genuinely matches
+    what this function logs to candidate_messages — without this, every
+    Submit-to-KAE/Submit-to-Client send was completely invisible to the
+    real reply/bounce-correlation and Sent-folder/Mailbox-Dashboard
+    tracking this project already built for every other send path."""
     to_list = [to_emails] if isinstance(to_emails, str) else list(to_emails or [])
     cc_list = [cc_emails] if isinstance(cc_emails, str) else list(cc_emails or [])
     to_list = [e for e in to_list if e]
@@ -932,6 +942,8 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
 
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
+        if message_id_header:
+            msg["Message-ID"] = message_id_header
         msg["From"] = f'{cfg["smtp_from_name"] or "AVIIN ATS"} <{cfg["smtp_from"] or cfg["smtp_user"]}>'
         msg["To"] = ", ".join(to_list)
         recipients = list(to_list)
@@ -1152,10 +1164,12 @@ async def _do_kae_submission(
     )
     ext = resume_filename.rsplit(".", 1)[-1].lower()
     subtype = "pdf" if ext == "pdf" else "vnd.openxmlformats-officedocument.wordprocessingml.document"
+    message_id_header = email_tracking.generate_message_id()
     email_sent, email_error = await _send_kae_email(
         tenant_id, to_recipients, cc_recipients, subject, body_text,
         [(resume_filename, resume_bytes, subtype)],
         body_html_extra=tracking_html,
+        message_id_header=message_id_header,
     )
 
     async with db.tenant_conn(tenant_id) as conn:
@@ -1169,6 +1183,23 @@ async def _do_kae_submission(
             template["id"], primary_kae["id"] if primary_kae else None, resume_style, json.dumps(final_values),
             list(dict.fromkeys(to_recipients + cc_recipients)),
             "sent" if email_sent else "failed", email_error, actor.user_id, generated_resume_id, trigger_source,
+        )
+        # REAL BUG FIX (2026-09-03, found investigating a live report of
+        # "Sent: 0" on a real KAE's own Mailbox Dashboard despite a genuine
+        # Submit-to-KAE send minutes earlier): this whole feature only ever
+        # wrote to candidate_submissions, a separate table the Conversations
+        # Sent folder / Mailbox Dashboard / reply-tracking system never
+        # reads — every real recruiter-to-KAE send was structurally
+        # invisible to all of it, regardless of volume. Internal team
+        # communication, not client-facing — client_id/client_contact_id
+        # stay unset; recipient_type explicit so _log()'s own default
+        # ("candidate" whenever cand_id is set) doesn't wrongly imply this
+        # was sent TO the candidate.
+        await _log_candidate_message(
+            conn, tenant_id, row["candidate_id"], application_id, "email", subject, body_text,
+            "sent" if email_sent else "failed", actor.user_id,
+            to_email=", ".join(to_recipients), cc=", ".join(cc_recipients) if cc_recipients else None,
+            recipient_type="internal", message_id_header_override=message_id_header,
         )
 
         # QA sweep (2026-09-01) — real, reproduced race condition, found
@@ -2030,9 +2061,11 @@ async def _do_client_submission(
         row["role_title"], contact_name_for_greeting, actor.full_name)
     subject = (subject_override or "").strip() or default_subject
     body_text = (body_override or "").strip() or default_body
+    message_id_header = email_tracking.generate_message_id()
     email_sent, email_error = await _send_kae_email(
         tenant_id, to_recipients, cc_recipients, subject, body_text, attachments,
         body_html_extra=body_html_extra,
+        message_id_header=message_id_header,
     )
 
     async with db.tenant_conn(tenant_id) as conn:
@@ -2048,6 +2081,22 @@ async def _do_client_submission(
             "sent" if email_sent else "failed", email_error, actor.user_id,
             hidden_columns or [], primary_contact["id"] if (primary_contact and not to_emails_override) else None,
             trigger_source,
+        )
+        # REAL BUG FIX (2026-09-03, same root cause as the sibling
+        # recruiter-to-KAE fix above): a genuinely client-facing send is
+        # even more consequential to have invisible — client_id/
+        # client_contact_id ARE set here (this is exactly the kind of real
+        # send the Client Health / SLA / engagement-score tracking built
+        # earlier the same day is meant to measure), and threading a real
+        # Message-ID through means a client's real reply now correlates
+        # back correctly too, not just the send itself becoming visible.
+        await _log_candidate_message(
+            conn, tenant_id, row["candidate_id"], application_id, "email", subject, body_text,
+            "sent" if email_sent else "failed", actor.user_id,
+            to_email=", ".join(to_recipients), cc=", ".join(cc_recipients) if cc_recipients else None,
+            client_id=client_id,
+            client_contact_id=primary_contact["id"] if (primary_contact and not to_emails_override) else None,
+            recipient_type="client", message_id_header_override=message_id_header,
         )
 
         await events.write_outbox(

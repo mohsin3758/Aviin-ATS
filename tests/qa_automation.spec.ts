@@ -7296,6 +7296,17 @@ test.describe.serial('S54 KAE -> Client/KAM Submission (2nd hop, file templates,
   });
 
   test('a real send: hidden_columns excludes the field from the actual output, recorded on the row, never touches the template', async ({ request }) => {
+    // Real, up-front column count for the tenant's OWN current global
+    // default — not a hardcoded magic number. A hardcoded `17` here once
+    // depended on ambient real tenant data (which template happens to be
+    // the live global default right now) rather than a controlled
+    // fixture; it broke, correctly, the day a real admin action legitimately
+    // changed which template is default (2026-09-03, same root class as
+    // the sibling fix already applied to S98's own equivalent test).
+    const beforeTplRes = await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: auth() });
+    const beforeDefault = (await beforeTplRes.json()).find((t: any) => t.client_id === null && t.is_default);
+    const beforeColumnCount = beforeDefault.columns.length;
+
     const send = await request.post(`${API}/applications/${appId}/submit-to-client`, {
       headers: auth(), data: { resume_style: 'clean_generated', hidden_columns: ['mobile_number'], cc_self: false },
     });
@@ -7307,13 +7318,21 @@ test.describe.serial('S54 KAE -> Client/KAM Submission (2nd hop, file templates,
     expect(row.status).toBe('sent');
 
     // The global default template must be completely untouched by a plain
-    // hide-only send with no save_as_default.
+    // hide-only send with no save_as_default — same real column count,
+    // whatever it genuinely is right now.
     const tplRes = await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: auth() });
     const globalDefault = (await tplRes.json()).find((t: any) => t.client_id === null && t.is_default);
-    expect(globalDefault.columns.length).toBe(17);
+    expect(globalDefault.columns.length).toBe(beforeColumnCount);
   });
 
   test('save_as_default with a real columns override persists a CLIENT-PINNED template, never mutates the global default', async ({ request }) => {
+    // Same real-fixture fix as the sibling test above — capture the
+    // tenant's own current global default column count up front, not a
+    // hardcoded magic number tied to ambient tenant state.
+    const beforeTplRes = await request.get(`${API}/submission-templates?direction=kae_to_client`, { headers: auth() });
+    const beforeDefault = (await beforeTplRes.json()).find((t: any) => t.client_id === null && t.is_default);
+    const beforeColumnCount = beforeDefault.columns.length;
+
     const columns = [{ key: 'sl_no', label: 'SL No' }, { key: 'candidate_name', label: 'Name' }, { key: 'email_id', label: 'Email' }];
     const send = await request.post(`${API}/applications/${appId}/submit-to-client`, {
       headers: auth(), data: { resume_style: 'clean_generated', columns, save_as_default: true, cc_self: false },
@@ -7329,7 +7348,7 @@ test.describe.serial('S54 KAE -> Client/KAM Submission (2nd hop, file templates,
     clientTplId = clientTpl.id;
 
     const globalDefault = templates.find((t: any) => t.client_id === null && t.is_default);
-    expect(globalDefault.columns.length).toBe(17); // still untouched
+    expect(globalDefault.columns.length).toBe(beforeColumnCount); // still untouched
 
     // From here on, preview must resolve the NEW client-pinned template, not the global one.
     const previewRes = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: auth() });
