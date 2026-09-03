@@ -13747,22 +13747,31 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     await page.locator('[data-testid="client-submission-move-only"]').click().catch(() => {});
   });
 
-  test('real headless UI: every real row is explicitly labeled "Already Sent" or "SENDING NOW" (2026-09-03 fix), and column min-widths keep long real values from being crushed', async ({ page }) => {
+  test('real headless UI: the preview shows exactly the current candidate ("SENDING NOW"), never a previously-sent candidate\'s row (2026-09-03 second fix), and column min-widths keep long real values from being crushed', async ({ page }) => {
     // 2026-09-03, direct follow-up to a real report ("why Bhagender.S
     // details are adding? i only moved swarna... check swarna sai sumanth
     // is not showing the full name correctly"). Investigated with real DOM
-    // measurements first: the cumulative history is genuine, real prior
-    // history (not a bug) — this test proves the actual fix, an
+    // measurements first: the cumulative history WAS genuine, real prior
+    // history (not a display bug) — the original fix here was an
     // un-missable per-row label distinguishing already-sent history from
     // the row this action will send, plus real per-column widths (only
     // skill_summary had one before) so long real values like a full name
-    // or an email address wrap instead of being silently crushed. By the
-    // time this test runs (S99 is .serial()), appId2's candidate has
-    // already been genuinely, really submitted by an earlier test in this
-    // same block ("BUG FIX (compose email): a real explicit subject/body
-    // override...") — a real, already-sent row to assert "Already Sent"
-    // against, with appId's own candidate still unsent to assert
-    // "SENDING NOW" against.
+    // or an email address wrap instead of being silently crushed.
+    //
+    // REAL FIX, SAME DAY, SUPERSEDES THE ABOVE (reported live: "I do not
+    // want the system to repeatedly send the same tracking sheets to the
+    // client or to mohsinkhan@aviintech.com... Send only the tracking
+    // sheet related to the current candidate(s)"): the user explicitly
+    // asked for the cumulative-history behavior itself to STOP, not just
+    // be better-labeled. Fixed at the source (kae_submission.py's 3
+    // cumulative-fetch sites) — the preview/send now shows ONLY the
+    // current candidate's row, never a previously-sent one, even though
+    // appId2's candidate genuinely was submitted moments earlier by an
+    // earlier test in this same .serial() block. sl_no still correctly
+    // continues as a real count (proven by S98's own dedicated test), so
+    // this test proves the CONTENT no longer carries history: exactly one
+    // row, labeled "SENDING NOW", containing only appId's own candidate —
+    // never appId2's "QA S99 Cand2" name anywhere in the table.
     await page.goto(`${BASE}/pipeline?job=${reqId}`, { waitUntil: 'networkidle' });
     const card = page.locator('div', { hasText: `QA S99 Cand ${stamp}` }).last();
     await card.waitFor({ state: 'visible', timeout: 15000 });
@@ -13774,14 +13783,16 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     const table = page.locator('[data-testid="tracking-sheet-editable-table"]');
     await expect(table).toBeVisible({ timeout: 10000 });
 
-    // The genuinely already-sent row (Cand2) carries the "Already Sent"
-    // badge and its full name is complete, not truncated.
-    const alreadySentRow = table.locator('tr', { has: page.locator('[data-testid="tracking-row-status-sent"]') });
-    await expect(alreadySentRow).toContainText(`QA S99 Cand2 ${stamp}`);
-    await expect(alreadySentRow.locator('[data-testid="tracking-row-status-sent"]')).toHaveText('✓ Already Sent');
+    // Real fix: no previously-sent candidate's row is ever re-attached —
+    // appId2's own "QA S99 Cand2" name must be nowhere in the table.
+    await expect(table).not.toContainText(`QA S99 Cand2 ${stamp}`);
+    // No "Already Sent" badge should exist at all — every real send now
+    // shows exactly the one row it's actually about.
+    await expect(table.locator('[data-testid="tracking-row-status-sent"]')).toHaveCount(0);
+    await expect(table.locator('tbody tr')).toHaveCount(1);
 
-    // The row about to be sent (Cand, the not-yet-sent one) carries the
-    // "SENDING NOW" badge — real, not the same as an "Already Sent" one.
+    // The one row shown carries the real "SENDING NOW" badge and the
+    // real current candidate's own name — not history.
     const newRow = table.locator('tr', { has: page.locator('[data-testid="tracking-row-status-new"]') });
     await expect(newRow.locator('[data-testid="tracking-row-status-new"]')).toHaveText('SENDING NOW');
     const nameCell = newRow.locator('[data-testid="tracking-cell-candidate_name"]');
@@ -13800,6 +13811,22 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
 
     // Close without sending — this test only exercises the display fix.
     await page.locator('[data-testid="client-submission-move-only"]').click().catch(() => {});
+  });
+
+  test('real API: sl_no still keeps counting across candidates even though the sheet itself only ever shows the current one', async ({ request }) => {
+    // Direct, deterministic proof (not dependent on real DOM timing) that
+    // the fix above didn't also quietly break sl_no — it's a real,
+    // continuing count computed via a lightweight COUNT(*), not derived
+    // from the (now single-row) sheet content. appId2 was submitted before
+    // appId in this same .serial() block, so appId's own real send here
+    // must land at sl_no >= 2, never reset to 1.
+    const prev = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authA() });
+    expect(prev.ok(), await prev.text()).toBeTruthy();
+    const body = await prev.json();
+    expect(Number(body.auto_values.sl_no)).toBeGreaterThanOrEqual(2);
+    expect((body.rows || []).length).toBe(1);
+    const rowNames = JSON.stringify(body.rows);
+    expect(rowNames).not.toContain('Cand2');
   });
 });
 

@@ -2285,47 +2285,52 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       </div>
 
       <div>
-        <span style={lbl}>TRACKING SHEET PREVIEW {trackingLoading && '(updating…)'} — rows marked <b style={{ color: '#64748B' }}>✓ Already Sent</b> are real, past submissions to this client for this role (a permanent record — never rewritten here); only the row marked <b style={{ color: '#1D4ED8' }}>SENDING NOW</b> is what this action will add or send.</span>
+        <span style={lbl}>TRACKING SHEET PREVIEW {trackingLoading && '(updating…)'} — the row marked <b style={{ color: '#1D4ED8' }}>SENDING NOW</b> is exactly what this action will send. Previously-shared candidates for this role are never re-attached to a new email — only the candidate(s) being submitted or moved right now.</span>
         {/* REAL FEATURE (2026-09-02, reported live: "keep the option to
             editable in the tracking sheet, if i want i can edit or
             mention the matter and content") — a real React table (not a
-            read-only pre-rendered HTML blob) so the LAST row — the one
-            this send actually represents, not yet sent — can be edited
-            directly in place, bound to the same `fields` state the
-            "TRACKING SHEET ROW" section below already uses (typing in
-            either place updates the other). Every earlier row is a real,
-            already-sent submission — an honest audit record, kept
-            read-only rather than silently rewritable.
+            read-only pre-rendered HTML blob) so the one row this send
+            actually represents can be edited directly in place, bound to
+            the same `fields` state the "TRACKING SHEET ROW" section
+            below already uses (typing in either place updates the
+            other). The isLast/"Already Sent" per-row distinction below
+            is kept as a defensive fallback (harmless if this endpoint
+            ever legitimately returns more than one row again), but the
+            real, current backend behavior (fixed 2026-09-03, see below)
+            means `rows` now always contains exactly one row.
 
-            REAL FIX (2026-09-03, reported live: "why Bhagender.S details
-            are adding? i only moved swarna... check swarna sai sumanth
-            is not showing the full name correctly... if long content
-            then it should be auto correct it as per content and
-            matter"). Investigated with real DOM measurements before
-            touching anything: Bhagender.S's own row is 100% genuine,
-            real history — confirmed via pipeline_movements that this
-            exact recruiter genuinely submitted him to this exact client
-            for this exact role the day before ("Already Sent" rows are
-            never fabricated or leaked-in, they are the client's real
-            submission log, matching a real staffing-agency Excel
-            convention this feature was deliberately built to match on
-            2026-07-29) — this was never a bug, just under-explained in
-            the UI, closed above with an explicit, un-missable label per
-            row rather than a caption someone has to notice on their own.
-            The name-truncation half WAS real: only skill_summary ever
-            got a real minWidth, so the browser's own auto table layout
-            crushed every other column (Name measured 82px, Role 71px,
-            Email a mere 62px — nowhere near enough for "Swarna Sai
-            Sumanth" or a real email address) — every candidate's own
-            stored full_name was always complete; this was purely a
-            rendering width problem, not data loss. TRACKING_COL_MIN_WIDTH
-            gives every real column (not just skill_summary) a sensible
+            REAL FIX (2026-09-03, reported live: "I do not want the
+            system to repeatedly send the same tracking sheets to the
+            client or to mohsinkhan@aviintech.com... Send only the
+            tracking sheet related to the current candidate(s)"). The
+            cumulative-history design (2026-07-29, matching a real
+            staffing-agency Excel convention) had been re-attaching
+            every previously-shared candidate's full row into every new
+            email — real, deliberate history, but the user explicitly
+            asked for this to stop: a fresh send should only ever show
+            the candidate(s) it's actually about. Fixed at the source
+            (backend/routers/kae_submission.py's 3 real cumulative-fetch
+            sites) — sl_no stays a real, continuing count via a
+            lightweight COUNT (so a client can still tell "candidate #6
+            for this role"), but the visible/attached sheet itself is
+            now just the current row, never history.
+
+            REAL FIX (2026-09-03, reported live: "check swarna sai
+            sumanth is not showing the full name correctly... if long
+            content then it should be auto correct it"). Investigated
+            with real DOM measurements before touching anything: only
+            skill_summary ever got a real minWidth, so the browser's own
+            auto table layout crushed every other column (Name measured
+            82px, Role 71px, Email a mere 62px — nowhere near enough for
+            "Swarna Sai Sumanth" or a real email address) — every
+            candidate's own stored full_name was always complete; this
+            was purely a rendering width problem, not data loss.
+            TRACKING_COL_MIN_WIDTH gives every real column a sensible
             floor sized to its real content, so text wraps onto 1-2
             readable lines instead of being crushed — the wrapper's
-            existing overflowX:'auto' (already correct) picks up the
-            slack by scrolling horizontally, matching this whole
-            codebase's own established "wide content scrolls in its own
-            container, never silently truncated" convention. */}
+            existing overflowX:'auto' picks up the slack by scrolling
+            horizontally, matching this codebase's established "wide
+            content scrolls in its own container" convention. */}
         {trackingPreview?.columns?.length ? (
           <div data-testid="tracking-sheet-editable-table" style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, opacity: trackingLoading ? 0.6 : 1 }}>
             <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 11 }}>

@@ -22331,3 +22331,143 @@ immediately after. A full 83-test regression sweep across every suite
 that performs a real send through this exact function
 (S14/S17/S37/S43/S54/S61/S65/S73/S98/S99/S100) passed clean.
 Zero-token audit: `CONFIRMED CLEAN`.
+## Cumulative tracking-sheet history stopped -- every send now shows only the current candidate(s), never previously-shared ones, 2026-09-03
+
+Direct follow-up to the same-day tracking-sheet work above. User's exact,
+explicit ask, quoted in full since it's a direct behavior-change request,
+not a bug report to investigate: "Why am I receiving all previously
+shared tracking sheets along with the current email, such as the Ragha
+candidates' tracking sheets? I do not want the system to repeatedly send
+the same tracking sheets to the client or to mohsinkhan@aviintech.com...
+Send only the tracking sheet related to the current candidate(s) being
+submitted or updated. Do not attach previously shared tracking sheets."
+
+**Root cause, confirmed by reading the real code, not guessed**: 3 real
+functions in `kae_submission.py` (`tracking_sheet_preview_for_compose`,
+`_do_kae_submission`, and the shared `_client_tracking_sheet_rows()` used
+by both the KAE->Client preview and the real send) all built their
+tracking-sheet table as `[every prior candidate_submissions row for this
+requisition] + [the current candidate's row]` -- the deliberate,
+cumulative-history design shipped 2026-07-29 to match a real staffing-
+agency Excel convention. That design was always meant to give a client a
+running record over time -- but re-attaching the full historical table
+into every single new email, every time, is a materially different thing
+from "here's the running log if you want it," and the user's own
+repeated, explicit ask made clear the former needed to stop.
+
+**Fixed at the source, both directions (recruiter->KAE and KAE->client),
+not just the reported client-facing one** -- the user specifically named
+"mohsinkhan@aviintech.com" (a recruiter->KAE recipient), confirming both
+hops needed the same fix: each of the 3 real cumulative-fetch sites now
+builds `sheet_rows` from ONLY the current candidate's row. `sl_no` stays
+a real, meaningful, continuing count (so a client can still tell "this is
+the 6th candidate submitted for this role over time") -- computed via a
+lightweight `SELECT count(*)` instead of a full `SELECT field_values ...
+ORDER BY sent_at` fetch of every historical row, since those rows are no
+longer rendered into the new email at all. The already-built multi-
+candidate batch-send feature (`POST /applications/{id}/submit-to-client
+/batch`, built the same day) needed no separate fix -- confirmed it
+already calls `_do_client_submission()` once per candidate, so it
+inherits the fix automatically: each candidate in a batch gets their own
+email showing only their own row, never an unrelated earlier candidate's.
+Swept the whole backend for any other `field_values`-cumulative pattern
+outside these 3 sites -- confirmed none exists; also cleaned up 4 more
+stale comments elsewhere in the same file (and one in the sibling
+`template_merge.py`) that still described the old cumulative behavior as
+current, so the code's own documentation doesn't quietly mislead the next
+reader.
+
+Frontend (`pipeline/page.tsx`): the tracking-sheet preview's caption and
+surrounding comment (which explained the OLD "Already Sent" badge
+distinction built 2026-09-03 earlier the same day) were rewritten to
+describe the real, current behavior -- a preview now always shows exactly
+one row (the row this action represents), never a mix of historical and
+current rows. The underlying isLast/badge rendering logic was
+deliberately left in place as a harmless defensive fallback rather than
+removed, since it still renders correctly if `rows` ever legitimately
+contains more than one entry again.
+
+**Verified for real end-to-end, not code review, on both directions
+independently** -- reproduced the exact reported scenario against
+production: created 2 real "Ragha"-named throwaway candidates, submitted
+both to a real throwaway client (KAE->client direction), then confirmed
+via the live `GET .../submit-to-client/preview` endpoint that a 3rd,
+completely different candidate's preview contained ZERO trace of either
+Ragha candidate -- exactly 1 row, containing only the new candidate's own
+data, with `sl_no` correctly reading 3 (the real, continuing count). Then
+sent it for real and independently confirmed via a direct database read
+(not just the API's own response) that each of the 3 real
+`candidate_submissions` rows' own stored `field_values` snapshot contains
+ONLY that one candidate's data -- Ragha's rows show Ragha, the new
+candidate's row shows only the new candidate, with `sl_no` 1/2/3
+correctly sequential. Repeated the identical proof for the recruiter->KAE
+direction (a separate real throwaway client/requisition/3 candidates,
+assigned to a real throwaway KAE) -- the general Compose tool's own
+tracking-sheet-preview endpoint and the real send both independently
+confirmed clean via the same before/after DB check: sl_no 1/2/3, zero
+cross-contamination between rows.
+
+**A real mistake made and corrected during the same verification pass,
+disclosed rather than glossed over.** Cleaning up the throwaway test data
+afterward, a cleanup script called `GET /users?search=...` to locate the
+2 real throwaway KAE test accounts it had created -- but `list_users()`
+(`users.py`) has no `search` parameter at all (only `department`, `role`,
+`is_active`), and FastAPI silently drops an unrecognized query parameter
+rather than rejecting it, so the call behaved as a bare, unfiltered
+`GET /users` and returned every user on the tenant. The script's loop
+then deactivated (and attempted to purge) every user in that full list --
+harmless for the ~600 already-inactive accounts already documented
+elsewhere in this file's own extensive test-data-hygiene history (a
+deactivate-on-an-already-inactive-user is a no-op, and the purge
+endpoint's own established safety net correctly refused permanent
+deletion for anyone with real referencing activity, leaving them exactly
+as they already were) -- but it also deactivated 3 real, currently-active
+staff members who happened to be in that same unfiltered list: Ashwini,
+khan mer, and Shahana Tahreen (this tenant's one real KAE, the person at
+the center of this whole day's worth of fixes).
+
+Caught immediately by directly querying the database for these 4 known
+real staff accounts right after the cleanup script finished, before any
+further action -- confirmed via a direct SQL read, not assumed safe.
+Fixed at once via the real `PATCH /users/{id}/activate` API (the same,
+already-established recovery pattern this project has used for this
+exact class of incident before) -- all 3 reactivated and independently
+re-confirmed `is_active:true` immediately after. A broader sweep
+confirmed no other real, non-test account on the tenant was affected --
+6 more already-known, already-inactive real historical accounts
+(documented elsewhere in this file's own history as deliberately
+excluded from earlier mass-purge sweeps) were untouched, still correctly
+inactive, not newly harmed -- and confirmed the secondary tenant was
+never touched at all (the underlying SQL query is correctly tenant-
+scoped by design regardless of which params are recognized, so this
+incident's blast radius was structurally confined to the one tenant my
+own admin session was authenticated against). This was entirely a
+test-script mistake -- using a query parameter that was never real -- not
+a backend bug; every other cleanup call in the same script (candidates,
+requisitions, the client) used endpoints with genuine, working `search`
+parameters, independently confirmed correct by reading their real route
+definitions, and behaved exactly as intended.
+
+A second, small, self-inflicted mistake caught and fixed in the same
+pass, the identical recurring class already documented many times
+elsewhere in this file: editing `template_merge.py` (genuinely LF-only in
+HEAD) silently flipped it to CRLF -- caught via the established byte-
+count comparison before deploying, converted back to pure LF, re-verified
+via `ast.parse()` and a proportional `git diff --stat` before it ever
+reached the VPS.
+
+New/updated permanent test coverage in the existing "S99" suite: the
+pre-existing "every row is explicitly labeled Already Sent or SENDING
+NOW" test -- written the same day for the OLD cumulative-history design
+-- was rewritten to assert the new, correct behavior instead (exactly one
+row, never a previously-sent candidate's name anywhere in the table, no
+"Already Sent" badge at all), and a new API-level test added confirming
+`sl_no` still correctly keeps counting across candidates even though the
+visible sheet itself only ever shows the current one.
+
+A scoped Playwright regression sweep across every suite that performs a
+real send through this exact shared engine
+(S14/S17/S37/S43/S54/S61/S65/S73/S98/S99/S100, 84 tests total, including
+both rewritten S99 tests) passed fully clean: 84 passed, 0 failed, 0
+flaky, 0 did-not-run. Zero-token audit: `CONFIRMED CLEAN` (447 files, 0
+external API refs).

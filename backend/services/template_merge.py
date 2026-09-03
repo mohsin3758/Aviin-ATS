@@ -22,9 +22,11 @@ Two real, distinct merge strategies:
     row's value — a cover-letter-style document, not a cumulative sheet.
   - Row-block templates (.xlsx: a single spreadsheet row containing tokens;
     .docx: a single table row containing tokens): that row is genuinely
-    duplicated once per real submission row and each copy's tokens are
-    replaced with that row's own values — a real cumulative tracking sheet,
-    matching what the existing inline-HTML tracking table already does.
+    duplicated once per real row passed in and each copy's tokens are
+    replaced with that row's own values. A caller sending a single row
+    (the real, current default for every KAE-submission send since
+    2026-09-03 — one candidate's own tracking row per email, never a
+    growing history of prior candidates) fills exactly one row here too.
 """
 import io
 import re

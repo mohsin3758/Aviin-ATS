@@ -1049,7 +1049,7 @@ async def submission_preview(application_id: str, actor: Actor = Depends(get_act
 @router.get("/applications/{application_id}/tracking-sheet-preview")
 async def tracking_sheet_preview_for_compose(application_id: str, actor: Actor = Depends(get_actor)):
     """Real, populated tracking-sheet HTML for a given application — reuses
-    the exact same cumulative-sheet logic (recruiter->KAE direction, sl_no
+    the exact same row-building logic (recruiter->KAE direction, sl_no
     counted the same way) as Submit-to-KAE, but read-only: never sends
     anything, never writes candidate_submissions, never bumps sl_no for
     real. Built so the general Compose tool's "Insert Tracking Sheet"
@@ -1061,12 +1061,15 @@ async def tracking_sheet_preview_for_compose(application_id: str, actor: Actor =
         if not template:
             raise HTTPException(400, "No tracking sheet template available — create one under Ops Settings > Templates")
         columns = _jsonb(template["columns"], [])
-        prior_rows = await conn.fetch(
-            "SELECT field_values FROM candidate_submissions WHERE requisition_id=$1 AND direction='recruiter_to_kae' ORDER BY sent_at",
+        # Real fix (2026-09-03, reported live): only this candidate's own
+        # row, never every prior candidate re-sent into each new preview —
+        # sl_no stays a real, continuing count via a lightweight COUNT.
+        prior_count = await conn.fetchval(
+            "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='recruiter_to_kae'",
             row["requisition_id"])
-    sl_no = len(prior_rows) + 1
+    sl_no = (prior_count or 0) + 1
     final_values = {**auto_values, "sl_no": str(sl_no)}
-    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    sheet_rows = [final_values]
     tracking_html = _build_tracking_html_table(columns, sheet_rows)
     return {
         "tracking_html": tracking_html,
@@ -1109,8 +1112,8 @@ async def _do_kae_submission(
     override_to_emails: Optional[list] = None, trigger_source: str = "manual",
 ) -> dict:
     """Shared submission-tracking core (2026-08-12 audit fix): resolves the
-    KAE + tracking-sheet template, builds the real cumulative tracking
-    sheet, sends the email with the GIVEN resume attachment, writes
+    KAE + tracking-sheet template, builds the real tracking sheet for
+    this send, sends the email with the GIVEN resume attachment, writes
     candidate_submissions, bumps the application stage, and writes audit/
     outbox. Used by both submit_to_kae() below (the 6 legacy fixed styles)
     AND resume_generator.py's Generate & Submit (the new compositional
@@ -1151,25 +1154,33 @@ async def _do_kae_submission(
             raise HTTPException(400, "No tracking sheet template available — create one under Ops Settings > Templates")
         columns = _jsonb(template["columns"], [])
 
-        # Real bug fix, found while building the KAE->Client hop: this query
-        # had no direction filter at all — once a requisition had BOTH
-        # recruiter->KAE and KAE->client submissions, the two directions'
-        # sl_no sequences bled into each other (a requisition's 1st real
-        # recruiter->KAE send could land as "SL No 5" purely because 4
-        # unrelated KAE->client sends had already happened on the same
-        # requisition). Each direction is its own cumulative sheet with its
-        # own independent sl_no count, matching how _do_client_submission's
-        # own query was already correctly scoped from the start.
-        prior_rows = await conn.fetch(
-            "SELECT field_values FROM candidate_submissions WHERE requisition_id=$1 AND direction='recruiter_to_kae' ORDER BY sent_at",
+        # Real bug fix, found while building the KAE->Client hop: this
+        # count had no direction filter at all — once a requisition had
+        # BOTH recruiter->KAE and KAE->client submissions, the two
+        # directions' sl_no sequences bled into each other (a
+        # requisition's 1st real recruiter->KAE send could land as "SL No
+        # 5" purely because 4 unrelated KAE->client sends had already
+        # happened on the same requisition). Each direction is its own
+        # sequence with its own independent sl_no count, matching how
+        # _do_client_submission's own query was already correctly scoped
+        # from the start.
+        # Real fix (2026-09-03, reported live: "I do not want the system
+        # to repeatedly send the same tracking sheets... to
+        # mohsinkhan@aviintech.com"): a lightweight COUNT for a real,
+        # continuing sl_no — not a full fetch of every prior row's
+        # field_values, since the resulting sheet below now shows only
+        # this candidate's own row, never re-attaching every earlier
+        # candidate's data into each new email.
+        prior_count = await conn.fetchval(
+            "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='recruiter_to_kae'",
             row["requisition_id"])
         client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
         recruiter_email = actor.email
 
-    sl_no = len(prior_rows) + 1
+    sl_no = (prior_count or 0) + 1
     overrides = {k: v for k, v in (field_values or {}).items() if v not in (None, "")}
     final_values = {**auto_values, **overrides, "sl_no": str(sl_no)}
-    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    sheet_rows = [final_values]
     tracking_html = _build_tracking_html_table(columns, sheet_rows)
 
     kae_emails = [k["email"] for k in kaes if k["email"]]
@@ -1691,19 +1702,27 @@ async def set_contact_kae_assignments(contact_id: str, body: KaeAssignmentsIn, a
 
 async def _client_tracking_sheet_rows(conn, tenant_id: str, requisition_id: str, auto_values: dict,
                                        hidden_columns: Optional[list] = None):
-    """The real, cumulative per-requisition sheet — one row per candidate
-    already sent to this client for this role, plus the row this
-    preview/send represents. Shared by the real send (_do_client_
-    submission) and the read-only live preview below, so a KAE reviewing
-    the sheet before sending sees EXACTLY what will actually go out, not
-    an approximation."""
-    prior_rows = await conn.fetch(
-        """SELECT field_values FROM candidate_submissions
-           WHERE requisition_id=$1 AND direction='kae_to_client' ORDER BY sent_at""",
+    """The real per-send sheet — the row this preview/send represents,
+    and ONLY that row. Real bug fix (2026-09-03, reported live): this
+    used to re-attach every historical candidate's full row into every
+    new email ("I do not want the system to repeatedly send the same
+    tracking sheets to the client... Send only the tracking sheet
+    related to the current candidate(s) being submitted"), which is what
+    the cumulative design shipped 2026-07-29 always intended for the
+    inbox-side reading experience but not for what actually lands in a
+    fresh email every time. sl_no stays a real, continuing count (the
+    client can still tell this is the Nth candidate submitted for this
+    role over time) via a lightweight COUNT rather than re-fetching every
+    prior row's field_values just to throw them away. Shared by the real
+    send (_do_client_submission) and the read-only live preview below,
+    so a KAE reviewing the sheet before sending sees EXACTLY what will
+    actually go out, not an approximation."""
+    prior_count = await conn.fetchval(
+        "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
         requisition_id)
-    sl_no = len(prior_rows) + 1
+    sl_no = (prior_count or 0) + 1
     final_values = {**auto_values, "sl_no": str(sl_no)}
-    sheet_rows = [_jsonb(r["field_values"], {}) for r in prior_rows] + [final_values]
+    sheet_rows = [final_values]
     hidden_set = set(hidden_columns or [])
     merge_rows = ([{k: ("" if k in hidden_set else v) for k, v in r.items()} for r in sheet_rows]
                   if hidden_set else sheet_rows)
@@ -1761,7 +1780,7 @@ async def submit_to_client_preview(
         # review before sharing with the client"): the modal previously
         # only ever showed template NAME buttons with no way to see what
         # the actual populated sheet contains — this is the real, live
-        # table (same data + same cumulative-row logic the real send
+        # table (same data + same row-building logic the real send
         # uses), rendered for whichever template just resolved above.
         tracking_html = None
         tracking_columns = None
@@ -2302,10 +2321,14 @@ async def submit_to_client_batch(
     """Real feature (2026-09-03, reported live on the tracking-sheet
     preview: "option to add new row" -- clarified via direct back-and-
     forth to mean submitting several DIFFERENT real candidates for the
-    same role to the same client in one action, each appearing as a
-    genuine new row (its own SL No) in the cumulative tracking sheet,
-    instead of repeating the whole Submit-to-Client flow once per
-    candidate.
+    same role to the same client in one action, each getting their own
+    real send (a genuine new SL No, matching the tracking sheet's own
+    continuing count), instead of repeating the whole Submit-to-Client
+    flow once per candidate. Real fix, same day, later: each send now
+    shows only ITS OWN candidate's row (see _client_tracking_sheet_rows'
+    own docstring) -- so a batch of 3 produces 3 separate real emails,
+    each showing exactly 1 row, never all 3 candidates combined into one
+    shared table.
 
     Deliberately a thin batch WRAPPER around the exact same, already-
     proven _do_client_submission() -- called once per candidate,
