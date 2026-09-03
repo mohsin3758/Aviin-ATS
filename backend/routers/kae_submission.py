@@ -946,9 +946,16 @@ def _build_tracking_html_table(columns: list, rows: list) -> str:
     # drift the same way the first one already did.
     def _header_nowrap(label: str, w: int) -> bool:
         return len(label) * 6.3 <= w
+    # REAL, EXPLICIT ASK (2026-09-04, reported live via a real screenshot
+    # of the actual sent sheet): center every cell both horizontally and
+    # vertically — was text-align:left / vertical-align:top throughout.
+    # Applied to both header and data cells, matching the visible request
+    # exactly (a real Excel-style tracking sheet convention, not just this
+    # one field), on top of, not instead of, the real width/wrap fix
+    # shipped the same day — centering doesn't change which columns wrap.
     thead = "".join(
         f'<th width="{w}" style="width:{w}px;padding:6px 8px;background:#1e3a8a;color:#ffffff;'
-        f'font-size:11px;text-align:left;border:1px solid #cbd5e1;'
+        f'font-size:11px;text-align:center;vertical-align:middle;border:1px solid #cbd5e1;'
         + ("white-space:nowrap;"
            if _header_nowrap(str(c.get("label", c.get("key"))), w) else
            "white-space:normal;word-break:break-word;overflow-wrap:break-word;")
@@ -960,7 +967,7 @@ def _build_tracking_html_table(columns: list, rows: list) -> str:
         bg = "#f8fafc" if i % 2 else "#ffffff"
         cells = "".join(
             f'<td width="{w}" style="width:{w}px;padding:6px 8px;font-size:11px;'
-            f'border:1px solid #cbd5e1;vertical-align:top;background:{bg};'
+            f'border:1px solid #cbd5e1;text-align:center;vertical-align:middle;background:{bg};'
             + ("white-space:nowrap;"
                if c["key"] in _EMAIL_COL_NOWRAP else
                "white-space:normal;word-break:break-word;overflow-wrap:break-word;")

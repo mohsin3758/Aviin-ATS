@@ -22587,3 +22587,43 @@ this exact shared engine (S14/S17/S37/S43/S54/S61/S65/S73/S98/S99/S100,
 84 tests) passed fully clean before this last fix round, with the S99
 addition re-verified in isolation afterward. Zero-token audit:
 `CONFIRMED CLEAN` (447 files, 0 external API refs).
+## Tracking-sheet email: real center-alignment (both axes), 2026-09-04
+
+Direct follow-up to the same-day column-width/wrap fix. User's exact,
+explicit ask, off a real screenshot of the live sheet: "Center-align
+all tracking sheet data horizontally and vertically. Currently, data is
+aligned to the top-left."
+
+A real, simple styling change on top of the same-day fix, not a new
+investigation — `_build_tracking_html_table()`'s headers had
+`text-align:left` (with no explicit `vertical-align`, defaulting to the
+browser's own baseline), and data cells had `vertical-align:top` with no
+`text-align` at all (defaulting to left). Both changed to
+`text-align:center` + `vertical-align:middle`, applied identically to
+every header and every data cell — the same real width/wrap decisions
+shipped the same day are untouched, centering doesn't change which
+columns wrap or how wide they are.
+
+Verified for real, not code review: built a real throwaway client/SPOC/
+requisition/candidate matching the same reported scenario used to verify
+the earlier fix ("Associate Managing Consultant - SAP FICO", "Rahul K Y",
+"Acme Staffing India"), called the real `submit-to-client/preview`
+endpoint, and rendered the actual returned HTML in a real headless
+browser — confirmed via genuine computed styles
+(`getComputedStyle(...).textAlign === 'center'`,
+`verticalAlign === 'middle'` on both a header and a multi-line data
+cell), not just the raw HTML string, then pulled a screenshot and
+visually confirmed every header and every value — including the 2-line
+"Associate Managing Consultant - SAP FICO" role and the 2-line email
+address — is genuinely centered on both axes. All throwaway test data
+cleaned up via the real DELETE APIs afterward, confirmed zero residue.
+
+New permanent test added to the existing "S99" suite: asserts every real
+`<th>` and `<td>` in the live preview HTML carries both
+`text-align:center` and `vertical-align:middle`, and that neither of the
+old top-left defaults (`text-align:left`, `vertical-align:top`) appears
+anywhere in the output. S99 suite re-run clean in isolation: 11/11
+passing. A broader scoped regression sweep across every suite that
+performs a real send through this exact shared engine
+(S14/S17/S37/S43/S54/S61/S65/S73/S98/S100, 75 tests) passed fully clean.
+Zero-token audit: `CONFIRMED CLEAN` (447 files, 0 external API refs).

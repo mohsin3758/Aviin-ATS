@@ -13886,6 +13886,28 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     const tdMatches = [...html.matchAll(/<td width="\d+"[^>]*>([\s\S]*?)<\/td>/g)];
     expect(tdMatches[jobTypeColIdx][0]).toContain('white-space:nowrap');
   });
+
+  test('real, explicit ask (2026-09-04, reported live via a real screenshot): every tracking-sheet header AND data cell is centered both horizontally and vertically, not top-left', async ({ request }) => {
+    const prev = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authA() });
+    expect(prev.ok(), await prev.text()).toBeTruthy();
+    const html = (await prev.json()).tracking_html as string;
+
+    const thMatches = [...html.matchAll(/<th width="\d+"[^>]*>/g)];
+    expect(thMatches.length).toBeGreaterThan(5);
+    for (const m of thMatches) {
+      expect(m[0]).toContain('text-align:center');
+      expect(m[0]).toContain('vertical-align:middle');
+    }
+    const tdMatches2 = [...html.matchAll(/<td width="\d+"[^>]*>/g)];
+    expect(tdMatches2.length).toBeGreaterThan(5);
+    for (const m of tdMatches2) {
+      expect(m[0]).toContain('text-align:center');
+      expect(m[0]).toContain('vertical-align:middle');
+    }
+    // Never left over from the old top-left default.
+    expect(html).not.toContain('text-align:left');
+    expect(html).not.toContain('vertical-align:top');
+  });
 });
 
 test.describe.serial('S100 Tracking-sheet template delete: real FK-block fix (ON DELETE SET NULL) + a real used_template_id audit-trail bug found along the way', () => {
