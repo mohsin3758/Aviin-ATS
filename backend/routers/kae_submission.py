@@ -954,7 +954,40 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
         if body_html_extra:
             alt = MIMEMultipart("alternative")
             alt.attach(MIMEText(body_text, "plain"))
-            html_body = f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#0f172a;white-space:pre-wrap;">{_esc(body_text)}</div>{body_html_extra}'
+            # REAL FIX (2026-09-03, reported live via real Outlook desktop
+            # screenshots): 2 genuine issues with every one of these real
+            # sent emails, both confirmed against the actual rendered
+            # message, not guessed. (1) relying on CSS white-space:
+            # pre-wrap to preserve the real \n\n paragraph breaks already
+            # present in body_text doesn't work in Outlook desktop - its
+            # HTML rendering engine is Word's own, a well-known, long-
+            # standing quirk where that CSS property is not reliably
+            # respected - the real greeting/message/sign-off ran together
+            # onto one crammed line with zero visible spacing. Every real
+            # \n now converts to an explicit <br>, the standard, portable
+            # workaround for exactly this. (2) the closing "Regards,
+            # {name}" block always rendered BEFORE the tracking-sheet
+            # table, sandwiched awkwardly ahead of the actual data -
+            # moved to render AFTER it instead, matching both where a
+            # real signature naturally belongs and the real reference
+            # email the user provided as the correct example. Split on
+            # the LAST genuine \n\n boundary - a structural rule, not a
+            # keyword match on "Regards"/"Thanks & Regards" specifically -
+            # so this holds for both this module's own real templates AND
+            # any custom text a KAE actually types into the compose box;
+            # if the whole message has no \n\n boundary at all, nothing
+            # splits and the full text renders before the table exactly
+            # as it always has, a safe, unchanged fallback.
+            if "\n\n" in body_text.strip():
+                message_part, _, signature_part = body_text.rpartition("\n\n")
+            else:
+                message_part, signature_part = body_text, ""
+            def _html_lines(t: str) -> str:
+                return _esc(t).replace("\n", "<br>")
+            _style = "font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#0f172a;"
+            html_body = f'<div style="{_style}">{_html_lines(message_part)}</div>{body_html_extra}'
+            if signature_part:
+                html_body += f'<div style="{_style}margin-top:14px;">{_html_lines(signature_part)}</div>'
             alt.attach(MIMEText(html_body, "html"))
             msg.attach(alt)
         else:

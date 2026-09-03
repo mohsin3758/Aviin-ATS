@@ -22263,3 +22263,71 @@ headless-browser session once the ~15-minute cooldown genuinely
 cleared — the actual rendered badge reads "41 unread" (a real,
 different number from the screenshot, checked against the admin
 account, not Shahana's own).
+
+## Real email formatting bug fixed: crammed-together text and a mispositioned signature, confirmed via real Outlook screenshots, 2026-09-03
+Same day, direct follow-up. User sent 2 real screenshots comparing the
+ACTUAL live "Profile Shared" email (from AVIIN ATS, opened in Outlook
+desktop) against a real, correctly-formatted reference email sent
+manually by the same real KAE for a different candidate. The actual
+live email showed "Hi Mohsin, Please find the attached profile...
+Thanks & Regards, Shahana Tahreen" all crammed onto one continuous
+run with zero visible line breaks, with the tracking-sheet table
+appearing after the whole message including the sign-off; the
+reference email correctly showed real paragraph spacing and the
+signature positioned after the table.
+
+Root-caused precisely, not guessed. The real plain-text email body
+(built by _default_client_email_text() in kae_submission.py) already,
+and always had, correct paragraph breaks between the greeting,
+message, and sign-off - the bug was purely in how _send_kae_email()
+converted that to HTML: it relied on CSS white-space:pre-wrap on a
+plain div to preserve those breaks - a well-known, long-standing
+Outlook-desktop quirk, since Outlook renders HTML email through
+Word's own engine, which does not reliably respect that CSS property.
+Separately, the closing "Regards" sign-off line was always
+concatenated directly before the tracking-sheet HTML table in the
+same block, with no way to render it after.
+
+Fixed properly, not patched around. Every real line break now
+converts to an explicit HTML line-break tag - the standard, portable
+workaround for exactly this Outlook quirk, rather than depending on a
+CSS property a major real-world client does not honor. The message is
+split on the LAST genuine blank-line boundary - a structural rule,
+not a keyword match on "Regards"/"Thanks & Regards" specifically - so
+it correctly holds for both real send-path templates (the client-
+facing default, and the internal recruiter-to-KAE one, which has a
+different sign-off and an optional extra "KAE cc'd:" note) and any
+custom text a KAE actually types into the compose box built earlier
+this same session - the message part renders before the tracking
+table, the signature part renders after it in its own block with real
+visual spacing, matching the real reference example exactly. A
+message with no real blank-line boundary at all (no natural paragraph
+break to find) falls back safely to rendering the whole thing before
+the table, unchanged from today's existing behavior - never an empty
+or broken signature block.
+
+Verified for real, not code review: ran the actual deployed logic
+directly inside the backend container (importing the real, live
+HTML-escaping function from the real module, not a reconstruction)
+against 3 real scenarios - the exact default client-submission
+template text, the recruiter-to-KAE template's more complex body
+(including a real "KAE cc'd:" note), and a message with no paragraph
+structure at all - confirmed all 3 produce exactly the intended HTML:
+real line-break tags where blank lines exist, the signature genuinely
+split into its own block positioned after the table placeholder, and
+the no-boundary case safely falling back to the original, unchanged
+layout with no broken empty block. Honest verification limit,
+disclosed rather than glossed over: there is no accessible real inbox
+to visually confirm the actual rendered email in a live Outlook
+client from this environment (the same class of gap already
+documented elsewhere in this project for WAHA/Telegram delivery) - a
+temporary in-container debug-print approach was considered and
+deliberately abandoned as unnecessarily risky (editing the live
+container's source directly, outside this project's established scp/
+hash-verify/rebuild discipline) once the direct-logic verification
+above already gave strong, real confidence - the container was
+confirmed byte-for-byte back in sync with the real deployed source
+immediately after. A full 83-test regression sweep across every suite
+that performs a real send through this exact function
+(S14/S17/S37/S43/S54/S61/S65/S73/S98/S99/S100) passed clean.
+Zero-token audit: `CONFIRMED CLEAN`.
