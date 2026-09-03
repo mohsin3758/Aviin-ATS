@@ -14,7 +14,7 @@ from routers.p28_p32 import _require_valid_tenant_id
 
 router = APIRouter(prefix="/job-sharing", tags=["job-sharing"])
 # Matches the convention already used in routers/offers.py and routers/nda.py.
-BASE_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+BASE_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
 
 
 def _dist_click_url(tenant_id: str, req_id: str, platform: str) -> str:

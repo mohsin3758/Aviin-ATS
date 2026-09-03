@@ -172,7 +172,7 @@ async def _apply_extra_public_fields(
         except Exception:
             pass
 
-APP_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+APP_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
 
 
 @router.get("/me")

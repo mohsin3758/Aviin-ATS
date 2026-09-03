@@ -53,7 +53,7 @@ async def send_push(subscription: dict, title: str, body: str, url: str = "/remi
                 subscription_info=subscription,
                 data=json.dumps({"title": title, "body": body, "url": url}),
                 vapid_private_key=_private_pem().decode(),
-                vapid_claims={"sub": os.environ.get("VAPID_SUBJECT", "mailto:noreply@aviinjobs.com")},
+                vapid_claims={"sub": os.environ.get("VAPID_SUBJECT", "mailto:noreply@aviintech.com")},
                 ttl=86400,
             )
 

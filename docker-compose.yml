@@ -63,7 +63,7 @@ services:
       ERP_ENCRYPT_KEY: ${ERP_ENCRYPT_KEY:-erp_demo_key_change_in_prod}
       VAPID_PRIVATE_KEY_PEM_B64: ${VAPID_PRIVATE_KEY_PEM_B64:-}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
-      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:noreply@aviinjobs.com}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:noreply@aviintech.com}
     volumes:
       - resume_uploads:/app/uploads
     ports:

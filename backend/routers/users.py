@@ -179,7 +179,7 @@ async def create_user(body: UserCreate, actor: Actor = Depends(require_role("adm
                         "Your AVIIN ATS account has been created.",
                         "",
                         "Login Details:",
-                        "Website : https://ats.aviinjobs.com/login",
+                        "Website : https://ats.aviintech.com/login",
                         "Email   : " + to,
                         "Password: " + pa,
                         "Role    : " + rl,
@@ -188,7 +188,7 @@ async def create_user(body: UserCreate, actor: Actor = Depends(require_role("adm
                         "",
                         "Best regards,",
                         "AVIIN Jobs Services",
-                        "https://ats.aviinjobs.com",
+                        "https://ats.aviintech.com",
                     ]
                     txt = chr(10).join(lines)
                     msg.attach(_MIMEText(txt,"plain"))

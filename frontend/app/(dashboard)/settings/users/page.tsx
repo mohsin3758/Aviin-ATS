@@ -358,7 +358,7 @@ export default function UsersPage() {
         )}
         <FormRow>
           <FormField label="Full Name" required><input style={inputStyle} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))} /></FormField>
-          <FormField label="Email" required><input type="email" style={inputStyle} placeholder="rahul@aviinjobs.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))} /></FormField>
+          <FormField label="Email" required><input type="email" style={inputStyle} placeholder="rahul@aviintech.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))} /></FormField>
         </FormRow>
         <FormRow>
           <FormField label="Role" required>

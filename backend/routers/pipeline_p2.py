@@ -21,7 +21,7 @@ async def send_stage_email(email: str, name: str, stage: str):
     try:
         msg = MIMEMultipart()
         msg["Subject"] = subject
-        msg["From"] = os.environ.get("SMTP_FROM","noreply@aviinjobs.com")
+        msg["From"] = os.environ.get("SMTP_FROM","noreply@aviintech.com")
         msg["To"] = email
         msg.attach(MIMEText(body,"plain"))
         with smtplib.SMTP(os.environ.get("SMTP_HOST","mailhog"), int(os.environ.get("SMTP_PORT","1025")), timeout=5) as s:

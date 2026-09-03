@@ -15,7 +15,7 @@ def make_ics(title, start, end, desc="", loc="", uid="", attendees=[]):
     dts  = start.strftime("%Y%m%dT%H%M%SZ")
     dte  = end.strftime("%Y%m%dT%H%M%SZ")
     dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    uid  = uid or str(_uuid.uuid4()) + "@aviinjobs.com"
+    uid  = uid or str(_uuid.uuid4()) + "@aviintech.com"
     att  = "\n".join(f"ATTENDEE;RSVP=TRUE:mailto:{a}" for a in attendees if a)
     return f"""BEGIN:VCALENDAR
 VERSION:2.0
@@ -48,7 +48,7 @@ class CalIn(BaseModel):
 async def create_event(body: CalIn, actor: Actor = Depends(get_actor)):
     start = datetime.fromisoformat(body.start_at.replace("Z",""))
     end   = start + timedelta(minutes=body.duration_mins)
-    uid   = str(_uuid.uuid4()) + "@aviinjobs.com"
+    uid   = str(_uuid.uuid4()) + "@aviintech.com"
     desc  = (body.description or "") + (f"\nMeeting: {body.meeting_link}" if body.meeting_link else "")
     ics   = make_ics(body.title, start, end, desc, body.location or body.meeting_link or "",
                      uid, body.attendees)
@@ -91,7 +91,7 @@ async def from_interview(interview_id: str, actor: Actor = Depends(get_actor)):
         title = f"Interview: {iv['cn']} for {iv['role'] or 'position'}"
         desc  = f"Type: {iv['interview_type']} | Mode: {iv['mode']}"
         if iv["meeting_link"]: desc += f"\nLink: {iv['meeting_link']}"
-        uid   = f"iv-{interview_id}@aviinjobs.com"
+        uid   = f"iv-{interview_id}@aviintech.com"
         att   = [e for e in [iv["ce"], iv["ie"]] if e]
         ics   = make_ics(title, start, end, desc, iv["location"] or "", uid, att)
         row = await conn.fetchrow("""
@@ -206,7 +206,7 @@ async def calendar_feed(token: str):
         dts = start.strftime("%Y%m%dT%H%M%SZ")
         dte = end.strftime("%Y%m%dT%H%M%SZ")
         events_ics.append(f"""BEGIN:VEVENT
-UID:iv-{iv['id']}@aviinjobs.com
+UID:iv-{iv['id']}@aviintech.com
 DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}
 DTSTART:{dts}
 DTEND:{dte}

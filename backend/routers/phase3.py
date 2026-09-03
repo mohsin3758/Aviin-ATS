@@ -49,7 +49,7 @@ async def send_email(to: str, subject: str, body: str):
     from email.mime.multipart import MIMEMultipart
     smtp_host = os.environ.get("SMTP_HOST","mailhog")
     smtp_port = int(os.environ.get("SMTP_PORT","1025"))
-    smtp_from = os.environ.get("SMTP_FROM","noreply@aviinjobs.com")
+    smtp_from = os.environ.get("SMTP_FROM","noreply@aviintech.com")
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject

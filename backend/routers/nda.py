@@ -404,7 +404,7 @@ async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Dep
             f"NDA sent for e-signature via {body.sign_method} method on {date.today().isoformat()}",
         )
 
-    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
     sign_url = f"{base}/sign-nda/{token}"
     if attach_bytes is None:
         attach_bytes = _build_nda_pdf(final_text, ctx["candidate_name"], ctx.get("company_name", "AVIIN Jobs Services"))

@@ -673,7 +673,7 @@ async def request_offer_signature(offer_id: str, actor: Actor = Depends(require_
             " WHERE offer_id=$2::uuid AND tenant_id=$3::uuid",
             token, offer_id, actor.tenant_id
         )
-    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
     return {'token': token, 'url': f'{base}/sign-offer/{token}',
             'message': 'Share this link with the candidate to collect their e-signature'}
 

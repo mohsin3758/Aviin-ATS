@@ -451,7 +451,7 @@ async def public_jobs_feed(tenant_id: str):
     path that skips it."""
     _require_valid_tenant_id(tenant_id)
     import xml.sax.saxutils as sx
-    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
     async with _db_public.tenant_conn(tenant_id) as conn:
         tenant_name = await conn.fetchval("SELECT name FROM tenants WHERE id=$1::uuid", tenant_id) or "AVIIN Jobs Services"
         rows = await conn.fetch("""
@@ -756,7 +756,7 @@ async def public_apply(
                 INSERT INTO candidate_status_tokens (tenant_id, candidate_id, token)
                 VALUES ($1::uuid, $2, $3) ON CONFLICT DO NOTHING
             """, tenant_id, cand['id'], status_token)
-            base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+            base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
             status_url = f"{base}/my-status?token={status_token}"
         except Exception:
             status_url = None

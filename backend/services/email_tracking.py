@@ -44,7 +44,7 @@ def is_forward_subject(subject: Optional[str]) -> bool:
     return bool(subject) and bool(re.match(r"^\s*(fw|fwd)\s*:", subject, re.I))
 
 
-def generate_message_id(domain: str = "ats.aviinjobs.com") -> str:
+def generate_message_id(domain: str = "ats.aviintech.com") -> str:
     """A real RFC822 Message-ID for an outbound send — needed so a later
     inbound reply's own In-Reply-To header can be correlated back to this
     exact message. Embedded in the actual SMTP send via the msg["Message-ID"]

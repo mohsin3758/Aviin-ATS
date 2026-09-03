@@ -331,7 +331,7 @@ function AccountModal({
                 {[
                   ['Professional','<b>Your Name</b><br>Job Title | Company<br>email@company.com | +91 98765 43210<br><a href="https://company.com" style="color:#1e40af">company.com</a>'],
                   ['Simple','<b>Your Name</b><br>Job Title | Company'],
-                  ['Recruitment','<b>Your Name</b><br>Senior Recruiter - AVIIN Jobs<br>📧 email@aviinjobs.com | 📱 +91 98765 43210<br><i style="color:#64748b;font-size:12px">Connecting Talent with Opportunity</i>'],
+                  ['Recruitment','<b>Your Name</b><br>Senior Recruiter - AVIIN Jobs<br>📧 email@aviintech.com | 📱 +91 98765 43210<br><i style="color:#64748b;font-size:12px">Connecting Talent with Opportunity</i>'],
                   ['Minimal','Best regards,<br><b>Your Name</b>'],
                 ].map(([name,html])=>(
                   <button key={name} onMouseDown={e=>{e.preventDefault();if(sigRef.current){sigRef.current.innerHTML=html;setSigHtml(html);}}}

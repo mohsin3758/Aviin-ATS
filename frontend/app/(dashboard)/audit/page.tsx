@@ -10,7 +10,7 @@ export default function AuditPage() {
   // anywhere) and switched .xlsx to .csv (the payload was always CSV).
   const downloadCsv = (path: string, filename: string) => {
     const token = localStorage.getItem('ats_token') || '';
-    const API = process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviinjobs.com/api';
+    const API = process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviintech.com/api';
     fetch(API + path, { headers: { Authorization: 'Bearer ' + token } })
       .then(r => r.blob()).then(b => {
         const a = document.createElement('a'); a.href = URL.createObjectURL(b);

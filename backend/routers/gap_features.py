@@ -24,7 +24,7 @@ _MGMT_ROLES = ("admin", "super_admin", "manager", "lead_recruiter")
 from routers.nda import _send_email_with_pdf
 
 TENANT_ID = os.environ.get("DEFAULT_TENANT_ID", "a92d7fd7-fb72-47d8-881e-2493c61717ce")
-APP_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+APP_URL = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
 
 nps_router = APIRouter(prefix="/nps", tags=["nps"])
 gdpr_new_router = APIRouter(prefix="/gdpr", tags=["gdpr"])  # kept empty: real /gdpr lives in final_features.py

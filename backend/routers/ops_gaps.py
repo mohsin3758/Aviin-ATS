@@ -609,7 +609,7 @@ async def create_agency_user(body: AgencyUserIn, actor: Actor = Depends(require_
                VALUES ($1,$2,$3,$4) RETURNING *""",
             actor.tenant_id, body.agency_id, body.email, body.full_name,
         )
-    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviinjobs.com")
+    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
     return {**dict(row), "portal_url": f"{base}/agency-submit/{row['token']}"}
 
 

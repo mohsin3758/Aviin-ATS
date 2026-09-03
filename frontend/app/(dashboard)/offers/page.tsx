@@ -338,7 +338,8 @@ export default function OffersPage() {
     try {
       const r = await apiFetch(`/self-schedule/generate/${appId}`, { method:'POST' });
       setGenLink(prev=>({...prev,[appId]:r.link}));
-      await navigator.clipboard.writeText(`https://ats.aviinjobs.com${r.link}`);
+      const _appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ats.aviintech.com';
+      await navigator.clipboard.writeText(`${_appUrl}${r.link}`);
       showT('Self-scheduling link copied to clipboard!');
     } catch { showT('Failed to generate link'); }
   };

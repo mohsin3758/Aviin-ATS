@@ -144,7 +144,7 @@ async def send_test_email(to_email: str = Query(None, description="Recipient ema
                 f"SMTP Host: {row['smtp_host']}:{row['smtp_port']}\n"
                 f"From: {row['smtp_from']}\n\n"
                 f"Your email configuration is working!\n\n"
-                f"Best regards,\nAVIIN ATS\nhttps://ats.aviinjobs.com"
+                f"Best regards,\nAVIIN ATS\nhttps://ats.aviintech.com"
             )
             msg.attach(mt.MIMEText(body, "plain"))
             with smtplib.SMTP(row["smtp_host"], row["smtp_port"], timeout=10) as s:

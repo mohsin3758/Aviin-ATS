@@ -456,7 +456,7 @@ async def send_interview_reminder(interview_id: str, actor: Actor=Depends(requir
                         body_parts.append(f"Location    : {row['location']}")
                     if row['notes']:
                         body_parts += ["", f"Notes: {row['notes']}"]
-                    body_parts += ["", "Best regards,", "AVIIN Jobs Services", "https://ats.aviinjobs.com"]
+                    body_parts += ["", "Best regards,", "AVIIN Jobs Services", "https://ats.aviintech.com"]
                     _em.attach(MIMEText(chr(10).join(body_parts), "plain"))
                     with smtplib.SMTP(_h, _p, timeout=10) as _s:
                         _s.ehlo()

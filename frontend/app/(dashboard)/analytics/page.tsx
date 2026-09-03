@@ -97,7 +97,7 @@ export default function AnalyticsPage() {
           <button
             onClick={() => {
               const token = localStorage.getItem('ats_token') || '';
-              const API = process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviinjobs.com/api';
+              const API = process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviintech.com/api';
               fetch(API + '/export/candidates', { headers: { Authorization: 'Bearer ' + token } })
                 .then(r => r.blob()).then(b => {
                   const a = document.createElement('a'); a.href = URL.createObjectURL(b);

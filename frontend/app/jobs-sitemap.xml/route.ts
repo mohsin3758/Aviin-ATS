@@ -11,7 +11,7 @@
 // convention (e.g. WAHA_URL=http://waha:3000).
 const TENANT_ID = 'a92d7fd7-fb72-47d8-881e-2493c61717ce';
 const INTERNAL_API_URL = process.env.INTERNAL_API_URL || 'http://backend:8080';
-const SITE_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://ats.aviinjobs.com';
+const SITE_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://ats.aviintech.com';
 
 export async function GET() {
   let jobs: any[] = [];

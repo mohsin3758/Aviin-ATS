@@ -388,7 +388,7 @@ async def _resolve_template_vars(conn, tenant_id: str, candidate_id: Optional[st
     }
 
 
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://ats.aviinjobs.com")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://ats.aviintech.com")
 
 
 def _with_tracking_pixel(body_text: str, tracking_token) -> str:

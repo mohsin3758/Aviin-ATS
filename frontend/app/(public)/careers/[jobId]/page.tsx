@@ -7,7 +7,7 @@ const TENANT_ID = 'a92d7fd7-fb72-47d8-881e-2493c61717ce';
 // there. Hit the backend container directly over the internal Docker
 // network rather than round-tripping through the public domain/nginx.
 const INTERNAL_API_URL = process.env.INTERNAL_API_URL || 'http://backend:8080';
-const PUBLIC_APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://ats.aviinjobs.com';
+const PUBLIC_APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://ats.aviintech.com';
 
 interface RelatedJob {
   id: string;

@@ -99,7 +99,7 @@ export default function ReportsPage() {
           </select>
           <button onClick={() => {
             const token = localStorage.getItem('ats_token') || '';
-            const url = (process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviinjobs.com/api') + '/export/candidates';
+            const url = (process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviintech.com/api') + '/export/candidates';
             fetch(url, { headers: { Authorization: 'Bearer ' + token } })
               .then(r => r.blob()).then(b => {
                 const a = document.createElement('a'); a.href = URL.createObjectURL(b);
@@ -110,7 +110,7 @@ export default function ReportsPage() {
           </button>
           <button onClick={() => {
             const token = localStorage.getItem('ats_token') || '';
-            const url = (process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviinjobs.com/api') + '/export/kpi-report?month=' + m + '&year=' + y;
+            const url = (process.env.NEXT_PUBLIC_API_URL || 'https://ats.aviintech.com/api') + '/export/kpi-report?month=' + m + '&year=' + y;
             fetch(url, { headers: { Authorization: 'Bearer ' + token } })
               .then(r => r.blob()).then(b => {
                 const a = document.createElement('a'); a.href = URL.createObjectURL(b);

@@ -702,7 +702,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _em["From"]=f"{_fn} <{_f}>"
                     _em["To"]=email
                     _greeting = "" if _already_has_greeting(msg_text) else ("Dear " + str(name) + "," + chr(10) + chr(10))
-                    _body = _greeting + str(msg_text) + jd_block + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviinjobs.com"
+                    _body = _greeting + str(msg_text) + jd_block + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviintech.com"
 
                     # Log to candidate_messages so it shows in Conversations
                     # and so open-tracking has a row to key against — stage-
@@ -717,7 +717,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _tracked_body = _body
                     if _logged and _logged["tracking_token"]:
                         import html as _html
-                        _pixel = f'<img src="https://ats.aviinjobs.com/track/open/{_logged["tracking_token"]}.gif" width="1" height="1" style="display:none" alt="" />'
+                        _pixel = f'<img src="https://ats.aviintech.com/track/open/{_logged["tracking_token"]}.gif" width="1" height="1" style="display:none" alt="" />'
                         _tracked_body = (
                             f'<html><body style="font-family:sans-serif;font-size:14px;color:#1e293b;">'
                             f'{_html.escape(_body).replace(chr(10), "<br>")}{_pixel}</body></html>'
