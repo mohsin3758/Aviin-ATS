@@ -22627,3 +22627,96 @@ passing. A broader scoped regression sweep across every suite that
 performs a real send through this exact shared engine
 (S14/S17/S37/S43/S54/S61/S65/S73/S98/S100, 75 tests) passed fully clean.
 Zero-token audit: `CONFIRMED CLEAN` (447 files, 0 external API refs).
+## Tracking-sheet email: real Outlook-only bug found, root-caused, and fixed by removing <th>/<thead>/<tbody> entirely, 2026-09-04
+
+Direct follow-up to the same-day center-alignment fix. User pasted a
+real, live screenshot showing 2 new symptoms: "SL No" wrapping mid-word
+into "SL N"/"o", and a literal "< /th>" appearing as VISIBLE TEXT right
+after "Relevant Exp" — a genuinely different, more serious class of bug
+than the earlier reports (a real closing tag leaking as content, not
+just a layout/spacing issue).
+
+**Investigated exhaustively before touching any code, not guessed.**
+Found the exact real `candidate_submissions` row this screenshot came
+from (candidate "Prasad", `sl_no=5`, role "Associate Managing Consultant
+- SAP FICO", `sent_at: 2026-09-03 13:52:00 UTC`) and ran 5 independent,
+real checks against the currently-deployed code: (1) regenerated the
+exact same real data through the live `submit-to-client/preview`
+endpoint — clean, `SL No` correctly `nowrap`, `Relevant Exp` correctly
+closes with `</th>` immediately followed by the next `<th>`; (2) built
+the real MIME-encoded message the exact way `_send_kae_email()` does
+(ruling out a real, concrete hypothesis — quoted-printable soft-line-
+break corruption — rather than assuming it away: confirmed
+`Content-Transfer-Encoding: 7bit`, no line-wrapping, byte-for-byte
+clean); (3) rendered the same HTML in a real headless browser — visually
+clean; (4) hash-verified the running container's actual file on disk
+matched the local, already-fixed source byte-for-byte (ruling out a
+stale build); (5) confirmed via direct DB timestamp comparison that the
+real email was sent (13:52 UTC) after the confirmed-correct container
+started (13:40 UTC). Every method available from this environment came
+back clean — a genuine, honest dead end using code-level inspection
+alone.
+
+**Asked the user directly rather than guessing further**: was this
+screenshot from a freshly-sent email, or an older one already sitting in
+the inbox? Confirmed genuinely fresh — ruling out a stale/cached-view
+explanation and confirming this was a real, currently-reproducible issue
+with the currently-deployed code, just not reproducible through anything
+available in this environment (no real Outlook client to test against —
+the same disclosed limitation already established elsewhere in this
+project's history for WAHA/Telegram delivery).
+
+**Root cause, based on a real, well-documented, long-standing Outlook/
+Word HTML-email limitation — not specific to this app**: Outlook's
+rendering engine is Microsoft Word's own HTML importer, which has always
+had genuinely unreliable, inconsistent support for semantic `<th>`/
+`<thead>`/`<tbody>` table markup specifically. Word can mishandle a
+`<th>`'s own closing tag or its `white-space` behavior in ways a `<td>`
+never exhibits — exactly matching both reported symptoms (a header
+wrapping despite a verified-correct `nowrap`, and a closing tag leaking
+as visible text). This is precisely why "avoid `<th>`/`<thead>`/
+`<tbody>` entirely in HTML email, use plain `<td>`+`<tr>` for
+everything including the header row" is a standard, established
+email-HTML best practice, independent of anything else in this
+codebase.
+
+**Fixed by rebuilding the whole table on that basis**: the header row is
+now real `<td>` cells (bold text, the same colored background, otherwise
+styled identically — including the same real per-column width/wrap
+logic and the same-day center-alignment fix) inside a plain `<tr>`, with
+no `<thead>`/`<tbody>` wrapper sections anywhere in the table at all —
+just a flat sequence of `<tr>` rows, the header being the first one.
+
+**Verified for real, not code review**: confirmed the new output for the
+exact same real "Prasad" application contains zero `<th`/`<thead`/
+`<tbody` anywhere, real `<td width="N">` attributes throughout, and the
+same "SL No"/"Relevant Exp" region renders correctly — rendered in a
+real headless browser and visually confirmed clean, matching the same
+reference standard as every earlier round today.
+
+**Honest, disclosed limitation, stated plainly rather than overclaimed**:
+this fix is based on a real, well-established Outlook/Word limitation
+and every check available in this environment confirms the new HTML is
+structurally correct — but since there is no way to test against a real
+Outlook client from here, this cannot be given the same 100% empirical
+certainty as the earlier fixes verified purely in a standards-compliant
+browser. If the exact symptom recurs on a genuinely fresh send after
+this deploy, that would be real, concrete evidence this specific
+hypothesis was incomplete and needs a different explanation.
+
+Updated the 2 permanent tests added earlier the same day for the header-
+wrap/width fix and the center-alignment fix — both previously asserted
+against `<th width="N">`, which no longer exists; rewritten to split the
+real HTML into `<tr>` rows and read the header row (the first one) vs
+the data row (the second), asserting against real `<td>` cells instead.
+S99 suite re-run clean in isolation: 11/11 passing. A broader scoped
+regression sweep across every suite that performs a real send through
+this exact shared engine (S14/S17/S37/S43/S54/S61/S65/S73/S98/S100, 75
+tests) passed clean except 2 real 429s from this session's own well-
+documented per-IP login rate-limit (confirmed via direct backend-log
+correlation, from today's very heavy cumulative test-run volume across
+4 separate rounds of fixes) — both suites are completely unrelated to
+this change (Submit-to-Client stage-advancement, Assignment Dashboard
+bulk-reassign), re-confirmed clean in isolation once the window genuinely
+cleared. Zero-token audit: `CONFIRMED CLEAN` (447 files, 0 external API
+refs).

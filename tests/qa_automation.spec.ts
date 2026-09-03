@@ -13829,7 +13829,7 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     expect(rowNames).not.toContain('Cand2');
   });
 
-  test('real bug fix (2026-09-04, reported live via a real Outlook screenshot): every real tracking-sheet email column gets an explicit, Outlook-safe width, and every header wraps/nowraps correctly based on its OWN real label length, never overflowing into a neighbor', async ({ request }) => {
+  test('real bug fix (2026-09-04, reported live via a real Outlook screenshot): every real tracking-sheet email column gets an explicit, Outlook-safe width, and the header row wraps/nowraps correctly based on each column\'s OWN real label length, never overflowing into a neighbor', async ({ request }) => {
     // Root-caused via 3 rounds of actually rendering the real HTML in a
     // headless browser and looking at it, not code review — the first 2
     // attempts each fixed one real, distinct bug the previous one missed:
@@ -13838,11 +13838,20 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     // for HEADERS too -> a genuinely long real label ("Job Type (Full
     // Time / Contract / C2H / Freelancer)", "RTR (Right To Represent)")
     // on a short-DATA (so nowrap-for-data) column overflowed straight
-    // past its own <th> and garbled into the next header's text. This
-    // test asserts the final, working state: every <th>/<td> carries a
-    // real explicit width attribute, and a header's own wrap/nowrap is
-    // computed from its real label length vs its real column width, not
-    // borrowed from an unrelated data-shape decision.
+    // past its own header cell and garbled into the next header's text.
+    //
+    // A FOURTH round (2026-09-04, reported live off a genuinely FRESH
+    // send, confirmed with the user directly it wasn't a stale/cached
+    // view before concluding anything) found "SL No" still wrapping
+    // mid-word despite a verified-correct nowrap, and a literal "</th>"
+    // leaking as visible text — reproducible in real Outlook but NOT in
+    // this suite's own headless-browser rendering, real MIME-encoding
+    // inspection, or a byte-for-byte hash check of the deployed file
+    // (all genuinely clean) — matching a real, well-documented Outlook/
+    // Word limitation with <th>/<thead>/<tbody> specifically. The whole
+    // table was rebuilt on plain <td>+<tr> only (the header row is now
+    // real <td> cells styled bold, the FIRST <tr> in the table) — this
+    // test now asserts against that real, current structure.
     const prev = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authA() });
     expect(prev.ok(), await prev.text()).toBeTruthy();
     const html = (await prev.json()).tracking_html as string;
@@ -13852,39 +13861,49 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     expect(html).toContain('table-layout:fixed');
     expect(html).not.toMatch(/width:100%/);
 
-    // Every real <th> carries a genuine width="N" HTML attribute (the
-    // one Outlook's Word rendering engine honors reliably) — not just a
-    // CSS width, which Word can silently ignore.
-    const thWidths = [...html.matchAll(/<th width="(\d+)"/g)].map(m => Number(m[1]));
-    expect(thWidths.length).toBeGreaterThan(10);
-    expect(thWidths.every(w => w > 0)).toBe(true);
+    // Real, established Outlook/Word fix: no <th>/<thead>/<tbody>
+    // anywhere — plain <td> cells (bold for the header row) inside
+    // plain <tr> rows only.
+    expect(html).not.toContain('<th');
+    expect(html).not.toContain('<thead');
+    expect(html).not.toContain('<tbody');
+
+    const rowMatches = [...html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)];
+    expect(rowMatches.length).toBeGreaterThanOrEqual(2);
+    const headerRow = rowMatches[0][1];
+    const dataRow = rowMatches[1][1];
+    const headerCells = [...headerRow.matchAll(/<td width="(\d+)"[^>]*>([\s\S]*?)<\/td>/g)];
+
+    // Every real header cell carries a genuine width="N" HTML attribute
+    // (the one Outlook's Word rendering engine honors reliably) and real
+    // bold styling, distinguishing it from a plain data cell.
+    expect(headerCells.length).toBeGreaterThan(10);
+    expect(headerCells.every(m => Number(m[1]) > 0)).toBe(true);
+    expect(headerRow).toContain('font-weight:bold');
 
     // "Date" (a genuinely short label on a real, narrow column) stays
     // nowrap — the common, expected case, unaffected by either fix.
-    const dateThMatch = html.match(/<th[^>]*>Date<\/th>/);
-    expect(dateThMatch).toBeTruthy();
-    expect(dateThMatch![0]).toContain('white-space:nowrap');
+    const dateCell = headerCells.find(m => m[2] === 'Date');
+    expect(dateCell).toBeTruthy();
+    expect(dateCell![0]).toContain('white-space:nowrap');
 
     // "Job Type (Full Time / Contract / C2H / Freelancer)" — the exact
     // real column whose SHORT data ("Contract") made it a nowrap DATA
     // column, but whose LONG label broke the first fix attempt. Its own
-    // <th> must wrap (never nowrap), and must never bleed past its own
-    // closing </th> tag into "NDA Status"/"Recruiter Name" the way the
+    // header cell must wrap (never nowrap), and must never bleed past
+    // its own closing tag into "NDA Status"/"Recruiter Name" the way the
     // real reported screenshot showed.
-    const jobTypeThMatch = html.match(/<th[^>]*>Job Type \(Full Time \/ Contract \/ C2H \/ Freelancer\)<\/th>/);
-    expect(jobTypeThMatch).toBeTruthy();
-    expect(jobTypeThMatch![0]).toContain('white-space:normal');
-    expect(jobTypeThMatch![0]).not.toContain('white-space:nowrap');
+    const jobTypeIdx = headerCells.findIndex(m => m[2].startsWith('Job Type'));
+    expect(jobTypeIdx).toBeGreaterThanOrEqual(0);
+    expect(headerCells[jobTypeIdx][0]).toContain('white-space:normal');
+    expect(headerCells[jobTypeIdx][0]).not.toContain('white-space:nowrap');
 
-    // The real DATA cell for job_type (this candidate's actual value,
-    // e.g. "Not specified" or a real job type) still stays nowrap —
-    // confirming the fix only changed the HEADER decision, not the
-    // deliberate, unrelated data-wrap policy for this same column.
-    const jobTypeColIdx = [...html.matchAll(/<th width="\d+"[^>]*>([^<]*)<\/th>/g)]
-      .findIndex(m => m[1].startsWith('Job Type'));
-    expect(jobTypeColIdx).toBeGreaterThanOrEqual(0);
-    const tdMatches = [...html.matchAll(/<td width="\d+"[^>]*>([\s\S]*?)<\/td>/g)];
-    expect(tdMatches[jobTypeColIdx][0]).toContain('white-space:nowrap');
+    // The real DATA cell for job_type (this candidate's actual value)
+    // still stays nowrap — confirming the fix only changed the HEADER
+    // decision, not the deliberate, unrelated data-wrap policy for this
+    // same column. Same column index in the data row as in the header.
+    const dataCells = [...dataRow.matchAll(/<td width="\d+"[^>]*>([\s\S]*?)<\/td>/g)];
+    expect(dataCells[jobTypeIdx][0]).toContain('white-space:nowrap');
   });
 
   test('real, explicit ask (2026-09-04, reported live via a real screenshot): every tracking-sheet header AND data cell is centered both horizontally and vertically, not top-left', async ({ request }) => {
@@ -13892,15 +13911,9 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     expect(prev.ok(), await prev.text()).toBeTruthy();
     const html = (await prev.json()).tracking_html as string;
 
-    const thMatches = [...html.matchAll(/<th width="\d+"[^>]*>/g)];
-    expect(thMatches.length).toBeGreaterThan(5);
-    for (const m of thMatches) {
-      expect(m[0]).toContain('text-align:center');
-      expect(m[0]).toContain('vertical-align:middle');
-    }
-    const tdMatches2 = [...html.matchAll(/<td width="\d+"[^>]*>/g)];
-    expect(tdMatches2.length).toBeGreaterThan(5);
-    for (const m of tdMatches2) {
+    const tdMatches = [...html.matchAll(/<td width="\d+"[^>]*>/g)];
+    expect(tdMatches.length).toBeGreaterThan(10);
+    for (const m of tdMatches) {
       expect(m[0]).toContain('text-align:center');
       expect(m[0]).toContain('vertical-align:middle');
     }

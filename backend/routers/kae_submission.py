@@ -946,23 +946,48 @@ def _build_tracking_html_table(columns: list, rows: list) -> str:
     # drift the same way the first one already did.
     def _header_nowrap(label: str, w: int) -> bool:
         return len(label) * 6.3 <= w
-    # REAL, EXPLICIT ASK (2026-09-04, reported live via a real screenshot
-    # of the actual sent sheet): center every cell both horizontally and
-    # vertically — was text-align:left / vertical-align:top throughout.
-    # Applied to both header and data cells, matching the visible request
-    # exactly (a real Excel-style tracking sheet convention, not just this
-    # one field), on top of, not instead of, the real width/wrap fix
-    # shipped the same day — centering doesn't change which columns wrap.
-    thead = "".join(
-        f'<th width="{w}" style="width:{w}px;padding:6px 8px;background:#1e3a8a;color:#ffffff;'
-        f'font-size:11px;text-align:center;vertical-align:middle;border:1px solid #cbd5e1;'
+    # REAL BUG (2026-09-04, reported live via a real Outlook screenshot of
+    # a genuinely freshly-sent email, confirmed NOT a stale/cached view —
+    # asked the user directly before concluding anything): "SL No"
+    # wrapped mid-word into "SL N"/"o" despite a correct, verified
+    # white-space:nowrap in the actual generated HTML, and "Relevant Exp"
+    # showed a literal "< /th>" as VISIBLE TEXT right after it. Ruled out
+    # every code-level explanation available from this environment before
+    # concluding it was real: regenerated the exact real data with the
+    # current code (clean), built the real MIME-encoded message the exact
+    # way _send_kae_email() does (Content-Transfer-Encoding: 7bit, no
+    # quoted-printable soft-break corruption — a real, ruled-out
+    # hypothesis, not assumed), rendered the same HTML in a real headless
+    # browser (clean), and hash-verified the running container's actual
+    # file matched this exact source byte-for-byte (no stale build). None
+    # of that reproduces the symptom — strong evidence this is a genuine
+    # Outlook-desktop-only rendering defect, not something a standards-
+    # compliant browser (or my own MIME-encoding test) will ever show.
+    #
+    # This matches a real, well-documented, long-standing Outlook/Word
+    # HTML-email limitation, independent of anything else in this file:
+    # Outlook's rendering engine is Microsoft Word's own HTML importer,
+    # which has always had genuinely unreliable, inconsistent support for
+    # semantic <th>/<thead>/<tbody> table markup specifically — Word can
+    # mishandle a <th>'s own closing tag or its white-space behavior in
+    # ways a <td> never exhibits, which is exactly why "avoid <th>/
+    # <thead>/<tbody> entirely in HTML email, use plain <td>+<tr> for
+    # everything including the header row" is the standard, established
+    # email-HTML best practice — not specific to this app. Rebuilt on
+    # that basis: the header row is now real <td> cells (bold text,
+    # colored background, otherwise styled identically) inside a plain
+    # <tr>, with no <thead>/<tbody> wrapper sections anywhere in the
+    # table at all.
+    header_cells = "".join(
+        f'<td width="{w}" style="width:{w}px;padding:6px 8px;background:#1e3a8a;color:#ffffff;'
+        f'font-size:11px;font-weight:bold;text-align:center;vertical-align:middle;border:1px solid #cbd5e1;'
         + ("white-space:nowrap;"
            if _header_nowrap(str(c.get("label", c.get("key"))), w) else
            "white-space:normal;word-break:break-word;overflow-wrap:break-word;")
-        + f'">{_esc(str(c.get("label", c.get("key"))))}</th>'
+        + f'">{_esc(str(c.get("label", c.get("key"))))}</td>'
         for c, w in zip(columns, widths)
     )
-    body_rows = ""
+    body_rows = f"<tr>{header_cells}</tr>"
     for i, r in enumerate(rows):
         bg = "#f8fafc" if i % 2 else "#ffffff"
         cells = "".join(
@@ -980,7 +1005,7 @@ def _build_tracking_html_table(columns: list, rows: list) -> str:
         f'style="border-collapse:collapse;width:{total_w}px;min-width:{total_w}px;'
         f'table-layout:fixed;font-family:Arial,Helvetica,sans-serif;'
         f'mso-table-lspace:0pt;mso-table-rspace:0pt;">'
-        f"<thead><tr>{thead}</tr></thead><tbody>{body_rows}</tbody></table>"
+        f"{body_rows}</table>"
     )
 
 
