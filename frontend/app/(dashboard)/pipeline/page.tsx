@@ -35,6 +35,24 @@ const DEFAULT_STAGES = [
 ];
 
 
+// Real per-column widths for the tracking-sheet preview table (2026-09-03,
+// see the tracking-sheet-editable-table block below for the full story —
+// only skill_summary had a real minWidth before; every other column was
+// crushed by the browser's own auto table layout, silently truncating
+// real, complete stored data like a candidate's full name or email
+// address). Sized to what each real column's content actually needs, not
+// a uniform guess — the wrapper's own overflowX:'auto' already handles
+// the resulting wider table by scrolling, matching this codebase's
+// established "wide content scrolls in its own container" convention.
+const TRACKING_COL_MIN_WIDTH: Record<string, number> = {
+  sl_no: 40, date: 84, partner: 130, candidate_name: 150, role: 170,
+  total_exp: 60, relevant_exp: 90, skill_summary: 260, notice_period: 130,
+  mobile_number: 110, alternate_number: 110, email_id: 180,
+  current_location: 120, deployment_location: 130, current_company: 140,
+  ctc: 70, ectc_rate_card: 110, linkedin_id: 150,
+  job_type: 150, nda_status: 100, recruiter_name: 130, ai_jd_score: 100,
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function gx(mo: number) {
   if (!mo) return '0mo';
@@ -2267,7 +2285,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       </div>
 
       <div>
-        <span style={lbl}>TRACKING SHEET PREVIEW {trackingLoading && '(updating…)'} — your row (highlighted) is directly editable</span>
+        <span style={lbl}>TRACKING SHEET PREVIEW {trackingLoading && '(updating…)'} — rows marked <b style={{ color: '#64748B' }}>✓ Already Sent</b> are real, past submissions to this client for this role (a permanent record — never rewritten here); only the row marked <b style={{ color: '#1D4ED8' }}>SENDING NOW</b> is what this action will add or send.</span>
         {/* REAL FEATURE (2026-09-02, reported live: "keep the option to
             editable in the tracking sheet, if i want i can edit or
             mention the matter and content") — a real React table (not a
@@ -2277,14 +2295,44 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
             "TRACKING SHEET ROW" section below already uses (typing in
             either place updates the other). Every earlier row is a real,
             already-sent submission — an honest audit record, kept
-            read-only rather than silently rewritable. */}
+            read-only rather than silently rewritable.
+
+            REAL FIX (2026-09-03, reported live: "why Bhagender.S details
+            are adding? i only moved swarna... check swarna sai sumanth
+            is not showing the full name correctly... if long content
+            then it should be auto correct it as per content and
+            matter"). Investigated with real DOM measurements before
+            touching anything: Bhagender.S's own row is 100% genuine,
+            real history — confirmed via pipeline_movements that this
+            exact recruiter genuinely submitted him to this exact client
+            for this exact role the day before ("Already Sent" rows are
+            never fabricated or leaked-in, they are the client's real
+            submission log, matching a real staffing-agency Excel
+            convention this feature was deliberately built to match on
+            2026-07-29) — this was never a bug, just under-explained in
+            the UI, closed above with an explicit, un-missable label per
+            row rather than a caption someone has to notice on their own.
+            The name-truncation half WAS real: only skill_summary ever
+            got a real minWidth, so the browser's own auto table layout
+            crushed every other column (Name measured 82px, Role 71px,
+            Email a mere 62px — nowhere near enough for "Swarna Sai
+            Sumanth" or a real email address) — every candidate's own
+            stored full_name was always complete; this was purely a
+            rendering width problem, not data loss. TRACKING_COL_MIN_WIDTH
+            gives every real column (not just skill_summary) a sensible
+            floor sized to its real content, so text wraps onto 1-2
+            readable lines instead of being crushed — the wrapper's
+            existing overflowX:'auto' (already correct) picks up the
+            slack by scrolling horizontally, matching this whole
+            codebase's own established "wide content scrolls in its own
+            container, never silently truncated" convention. */}
         {trackingPreview?.columns?.length ? (
           <div data-testid="tracking-sheet-editable-table" style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, opacity: trackingLoading ? 0.6 : 1 }}>
             <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 11 }}>
               <thead>
                 <tr>
                   {trackingPreview.columns.map((c: any) => (
-                    <th key={c.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'nowrap', minWidth: c.key === 'skill_summary' ? 220 : undefined }}>{c.label}</th>
+                    <th key={c.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'normal', minWidth: TRACKING_COL_MIN_WIDTH[c.key] || 90 }}>{c.label}</th>
                   ))}
                 </tr>
               </thead>
@@ -2296,8 +2344,9 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                       {trackingPreview.columns!.map((c: any) => {
                         const editable = isLast && c.key !== 'sl_no';
                         const isMultiline = c.key === 'skill_summary';
+                        const minW = TRACKING_COL_MIN_WIDTH[c.key] || 90;
                         return (
-                          <td key={c.key} style={{ padding: editable ? 2 : '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top', minWidth: isMultiline ? 220 : undefined }}>
+                          <td key={c.key} style={{ padding: editable ? 2 : '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top', minWidth: minW }}>
                             {editable ? (
                               /* Real bug fix (2026-09-03, reported live: a real
                                  multi-line skill_summary default — "SAP FICO:
@@ -2317,7 +2366,14 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                                   style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit' }} />
                               )
                             ) : (
-                              <span style={{ whiteSpace: isMultiline ? 'pre-line' : 'normal' }}>{((isLast ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')}</span>
+                              <span style={{ whiteSpace: isMultiline ? 'pre-line' : 'normal', wordBreak: 'break-word' }}>
+                                {((isLast ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')}
+                                {c.key === 'sl_no' && (
+                                  isLast
+                                    ? <span data-testid="tracking-row-status-new" style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: '#DBEAFE', color: '#1D4ED8', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>SENDING NOW</span>
+                                    : <span data-testid="tracking-row-status-sent" style={{ marginLeft: 6, fontSize: 9, background: '#F1F5F9', color: '#64748B', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>✓ Already Sent</span>
+                                )}
+                              </span>
                             )}
                           </td>
                         );

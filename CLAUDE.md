@@ -21933,3 +21933,81 @@ CLEAN`. All throwaway test data (6 candidates, 2 requisitions, 1 client,
 including one leftover from an earlier failed test-setup attempt caught
 by a final direct-DB residue check rather than assumed clean) removed
 via the real APIs, confirmed zero residue.
+
+## Tracking-sheet preview: "why is Bhagender.S in the sheet?" investigated to a real root cause (not a bug), plus a real column-truncation bug fixed, 2026-09-03
+Same day, direct follow-up. User pasted 2 more screenshots — the
+tracking-sheet preview now correctly showing "Bhagender.S" (fixed
+earlier the same day) alongside "Swarna Sai Sumanth" — with a new,
+genuine question: "why Bhagender.S details are adding? i only moved
+swarna sai sumanth candidate in the stage to submit to client not a
+bhagender.S... check swarna sai sumanth is not showing the full name
+correctly and if any details add it like name or other details, if it
+long content then it should be auto correct it as per content and
+matter in the sheet." Investigated both claims against real data before
+touching anything, per this project's own established discipline.
+
+**Bhagender.S's presence — confirmed 100% genuine, real history, not a
+bug.** Queried `pipeline_movements` directly: his application moved
+`screened→submitted` at `2026-09-02 13:11:46 UTC` with `reason='submit_
+to_client'`, triggered by the SAME real user id as Shahana Tahreen's own
+account — meaning Shahana herself genuinely, legitimately submitted him
+to this exact client (Invenio) for this exact role (SAP ABAP Developer)
+the day before. This is the tracking sheet's own deliberate, long-
+standing cumulative-history design (built 2026-07-29 to match a real
+staffing-agency Excel convention): every row is a real, permanent record
+of an actual prior submission to this client for this role, not just the
+candidates in the CURRENT action — the same caption text already stated
+this ("Earlier rows are the client's real submission history and can't
+be changed") but evidently wasn't un-missable enough to prevent genuine
+confusion about why an unrelated-seeming name kept showing up.
+
+**Swarna's name — confirmed the STORED value was always complete**
+("Swarna Sai Sumanth", verified via a direct DB query) — the visual
+cut-off in the screenshot was a real rendering bug, not data loss.
+Root-caused with real DOM measurements (a headless-browser script
+reading every cell's actual computed width) before touching any code:
+only the `skill_summary` column had ever been given a real `minWidth` —
+every OTHER column relied on the browser's own default auto-table-
+layout algorithm, which measured out genuinely tiny widths for the rest
+(Name 82px, Role 71px, Email a mere 62px — nowhere near enough for
+"Swarna Sai Sumanth," "SAP ABAP Developer," or a real email address).
+
+**Two real fixes, not one**:
+1. **`TRACKING_COL_MIN_WIDTH`** (`pipeline/page.tsx`) — a real, per-
+   column minimum width for all 17+ real tracking-sheet columns (not
+   just skill_summary), sized to what each column's actual content
+   needs (Name 150px, Role 170px, Email 180px, etc.). The wrapper's own
+   pre-existing `overflowX:'auto'` (already correct) absorbs the wider
+   resulting table by scrolling horizontally — matching this
+   codebase's own established "wide content scrolls in its own
+   container, never silently truncated" convention, rather than
+   cramming 17 columns into a fixed, too-narrow space.
+2. **A real, un-missable per-row status label**, directly answering the
+   "why is this here" confusion rather than relying on a caption alone:
+   every historical row's SL No cell now carries a small "✓ Already
+   Sent" badge; the one row this action will actually add/send carries
+   "SENDING NOW" — the caption above the table was also rewritten to
+   state the same distinction in plain language. A recruiter looking at
+   the sheet now sees, unambiguously, which rows are real permanent
+   history and which one is new.
+
+Verified for real end-to-end, not code review, at every layer: a
+scripted real headless-browser check against the exact live requisition
+from the user's own screenshots confirmed Name/Role/Email header widths
+now measure 150px/170px/180px (were 82px/71px/62px), and that Bhagender.
+S's row genuinely carries the "✓ Already Sent" badge while Swarna's row
+carries "SENDING NOW" — with her real `<input>` field value confirmed,
+via `.inputValue()`, to genuinely contain the complete "Swarna Sai
+Sumanth," not truncated. A pulled screenshot visually confirmed the same
+— both names fully legible, both badges rendering exactly as designed. A
+new permanent test added to the existing "S99" suite (now 8 tests) —
+reuses a real already-sent row created by an earlier test in the same
+`.serial()` block (no new fixture needed) to assert both the badge
+distinction and the real column-width floor together; passed clean on
+its first run. Full S99 suite (8/8) plus a broader regression sweep
+across every suite touching `pipeline/page.tsx`
+(S14/S17/S29/S37/S43/S54/S61/S65/S98/S100, 88 tests total including S99)
+passed clean — the one failure seen (`S1`'s "embeddings return 384
+dims") was confirmed as a pure local-tunnel limitation (this session's
+SSH tunnel never forwarded port 8081, the embed service's own port),
+unrelated to this change. Zero-token audit: `CONFIRMED CLEAN`.

@@ -13667,6 +13667,61 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     // Close without sending — this test only exercises the resize UX.
     await page.locator('[data-testid="client-submission-move-only"]').click().catch(() => {});
   });
+
+  test('real headless UI: every real row is explicitly labeled "Already Sent" or "SENDING NOW" (2026-09-03 fix), and column min-widths keep long real values from being crushed', async ({ page }) => {
+    // 2026-09-03, direct follow-up to a real report ("why Bhagender.S
+    // details are adding? i only moved swarna... check swarna sai sumanth
+    // is not showing the full name correctly"). Investigated with real DOM
+    // measurements first: the cumulative history is genuine, real prior
+    // history (not a bug) — this test proves the actual fix, an
+    // un-missable per-row label distinguishing already-sent history from
+    // the row this action will send, plus real per-column widths (only
+    // skill_summary had one before) so long real values like a full name
+    // or an email address wrap instead of being silently crushed. By the
+    // time this test runs (S99 is .serial()), appId2's candidate has
+    // already been genuinely, really submitted by an earlier test in this
+    // same block ("BUG FIX (compose email): a real explicit subject/body
+    // override...") — a real, already-sent row to assert "Already Sent"
+    // against, with appId's own candidate still unsent to assert
+    // "SENDING NOW" against.
+    await page.goto(`${BASE}/pipeline?job=${reqId}`, { waitUntil: 'networkidle' });
+    const card = page.locator('div', { hasText: `QA S99 Cand ${stamp}` }).last();
+    await card.waitFor({ state: 'visible', timeout: 15000 });
+    await card.click();
+    await page.waitForTimeout(800);
+    await page.click('button:has-text("Submit to Client")', { timeout: 10000 });
+    await page.waitForTimeout(2000);
+
+    const table = page.locator('[data-testid="tracking-sheet-editable-table"]');
+    await expect(table).toBeVisible({ timeout: 10000 });
+
+    // The genuinely already-sent row (Cand2) carries the "Already Sent"
+    // badge and its full name is complete, not truncated.
+    const alreadySentRow = table.locator('tr', { has: page.locator('[data-testid="tracking-row-status-sent"]') });
+    await expect(alreadySentRow).toContainText(`QA S99 Cand2 ${stamp}`);
+    await expect(alreadySentRow.locator('[data-testid="tracking-row-status-sent"]')).toHaveText('✓ Already Sent');
+
+    // The row about to be sent (Cand, the not-yet-sent one) carries the
+    // "SENDING NOW" badge — real, not the same as an "Already Sent" one.
+    const newRow = table.locator('tr', { has: page.locator('[data-testid="tracking-row-status-new"]') });
+    await expect(newRow.locator('[data-testid="tracking-row-status-new"]')).toHaveText('SENDING NOW');
+    const nameCell = newRow.locator('[data-testid="tracking-cell-candidate_name"]');
+    await expect(nameCell).toHaveValue(`QA S99 Cand ${stamp}`);
+
+    // Real per-column widths — Name/Role/Email were measured at a mere
+    // 82px/71px/62px before this fix (crushing "Swarna Sai Sumanth" and
+    // any real email address); now each has a real, sensible floor.
+    const widths = await table.evaluate((t) => {
+      const th = (label: string) => [...t.querySelectorAll('thead th')].find(el => el.textContent?.trim() === label)?.getBoundingClientRect().width || 0;
+      return { name: th('Name'), role: th('Role'), email: th('Email Id') };
+    });
+    expect(widths.name).toBeGreaterThanOrEqual(150);
+    expect(widths.role).toBeGreaterThanOrEqual(170);
+    expect(widths.email).toBeGreaterThanOrEqual(180);
+
+    // Close without sending — this test only exercises the display fix.
+    await page.locator('[data-testid="client-submission-move-only"]').click().catch(() => {});
+  });
 });
 
 test.describe.serial('S100 Tracking-sheet template delete: real FK-block fix (ON DELETE SET NULL) + a real used_template_id audit-trail bug found along the way', () => {
