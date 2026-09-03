@@ -133,6 +133,20 @@ function ClientContactsRow({ client, isKaeUser }: { client: any; isKaeUser: bool
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
+  // REAL FEATURE (2026-09-03, reported live: "admin should have option
+  // for spoc add, edit and other details") — Add/Set-Primary/Remove all
+  // already existed, but there was genuinely NO way to change an
+  // existing SPOC's name/email/role_label at all short of deleting and
+  // re-adding it (losing its real KAE-visibility assignments and
+  // submission history attribution in the process). The backend
+  // (PUT /client-contacts/{id}) already fully supported this — including
+  // a real kae/kam fallback letting a KAE edit a SPOC genuinely assigned
+  // to them, not just admin/manager — this closes the missing UI for it.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<{ contact_name: string; email: string; role_label: string }>({ contact_name: '', email: '', role_label: '' });
+  const [editSaving, setEditSaving] = useState(false);
+  const [editErr, setEditErr] = useState('');
+
   const add = async () => {
     if (!form.contact_name.trim() || !form.email.trim()) { setErr('Name and email are required'); return; }
     setSaving(true); setErr('');
@@ -164,24 +178,68 @@ function ClientContactsRow({ client, isKaeUser }: { client: any; isKaeUser: bool
     } catch (e: any) { setErr(e.message || 'Failed to remove'); }
   };
 
+  const startEdit = (c: any) => {
+    setEditingId(c.id);
+    setEditForm({ contact_name: c.contact_name || '', email: c.email || '', role_label: c.role_label || '' });
+    setEditErr('');
+  };
+
+  const saveEdit = async (c: any) => {
+    if (!editForm.contact_name.trim() || !editForm.email.trim()) { setEditErr('Name and email are required'); return; }
+    setEditSaving(true); setEditErr('');
+    try {
+      // Preserve the real, current is_primary status — a plain edit must
+      // never silently promote/demote which SPOC is primary; that's its
+      // own separate, explicit "Set Primary" action.
+      await apiFetch(`/client-contacts/${c.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ contact_name: editForm.contact_name, email: editForm.email, role_label: editForm.role_label || null, is_primary: c.is_primary }),
+      });
+      setEditingId(null);
+      refetch();
+    } catch (e: any) { setEditErr(e.message || 'Failed to save changes'); }
+    finally { setEditSaving(false); }
+  };
+
   return (
     <div data-testid="client-contacts-row" style={{ padding: '16px', borderBottom: '1px solid #f1f5f9' }}>
       <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#94a3b8', marginBottom: '10px' }}>
         Client SPOCs {isKaeUser && <span style={{ textTransform: 'none', fontWeight: 500, color: '#c084fc' }}>(showing only SPOCs assigned to you)</span>}
       </div>
       {(contacts || []).map((c: any) => (
-        <div key={c.id} style={{ padding: '7px 9px', background: c.is_primary ? '#eff6ff' : '#f8fafc', border: `1px solid ${c.is_primary ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 8, marginBottom: 6 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b' }}>
-                {c.contact_name}{c.role_label ? ` · ${c.role_label}` : ''} {c.is_primary && <span style={{ fontSize: 9, fontWeight: 800, color: '#1d4ed8' }}>PRIMARY</span>}
+        <div key={c.id} data-testid={`spoc-row-${c.id}`} style={{ padding: '7px 9px', background: c.is_primary ? '#eff6ff' : '#f8fafc', border: `1px solid ${c.is_primary ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 8, marginBottom: 6 }}>
+          {editingId === c.id ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <input data-testid={`spoc-edit-name-${c.id}`} placeholder="SPOC name" value={editForm.contact_name} onChange={e => setEditForm({ ...editForm, contact_name: e.target.value })}
+                style={{ padding: '5px 7px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+              <input data-testid={`spoc-edit-email-${c.id}`} placeholder="Email" value={editForm.email} onChange={e => setEditForm({ ...editForm, email: e.target.value })}
+                style={{ padding: '5px 7px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+              <input data-testid={`spoc-edit-role-${c.id}`} placeholder="Role / handles — optional" value={editForm.role_label} onChange={e => setEditForm({ ...editForm, role_label: e.target.value })}
+                style={{ padding: '5px 7px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+              {editErr && <div style={{ color: '#dc2626', fontSize: 11 }}>{editErr}</div>}
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button data-testid={`spoc-edit-save-${c.id}`} onClick={() => saveEdit(c)} disabled={editSaving} style={{ padding: '4px 10px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                  {editSaving ? 'Saving…' : 'Save'}
+                </button>
+                <button onClick={() => setEditingId(null)} disabled={editSaving} style={{ padding: '4px 10px', background: '#f1f5f9', color: '#475569', border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
               </div>
-              <div style={{ fontSize: 11, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email}</div>
             </div>
-            {!c.is_primary && <button onClick={() => setPrimary(c)} title="Make primary" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#2563eb' }}>Set Primary</button>}
-            {!isKaeUser && <button onClick={() => remove(c)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}><Trash2 size={13} /></button>}
-          </div>
-          <KaeVisibilityPicker contactId={c.id} canManage={!isKaeUser} />
+          ) : (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b' }}>
+                    {c.contact_name}{c.role_label ? ` · ${c.role_label}` : ''} {c.is_primary && <span style={{ fontSize: 9, fontWeight: 800, color: '#1d4ed8' }}>PRIMARY</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email}</div>
+                </div>
+                <button data-testid={`spoc-edit-${c.id}`} onClick={() => startEdit(c)} title="Edit SPOC" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', flexShrink: 0 }}><Edit size={13} /></button>
+                {!c.is_primary && <button onClick={() => setPrimary(c)} title="Make primary" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700, color: '#2563eb', flexShrink: 0 }}>Set Primary</button>}
+                {!isKaeUser && <button onClick={() => remove(c)} title="Remove SPOC" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', flexShrink: 0 }}><Trash2 size={13} /></button>}
+              </div>
+              <KaeVisibilityPicker contactId={c.id} canManage={!isKaeUser} />
+            </>
+          )}
         </div>
       ))}
       {!contacts?.length && <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>{isKaeUser ? "No SPOCs assigned to you for this client yet — ask an admin to assign one, or add a new one below." : "No SPOCs yet — add this client's point(s) of contact below. A client can have several SPOCs (e.g. one per role type); the KAE/KAM picks the right one when sending."}</div>}

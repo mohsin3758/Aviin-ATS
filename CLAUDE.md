@@ -22057,3 +22057,87 @@ S1 general health) passed clean — the one failure seen (`S1`'s
 limitation already documented earlier the same day (port 8081, the
 embed service, was never forwarded by this session's SSH tunnel),
 unrelated to this change. Zero-token audit: `CONFIRMED CLEAN`.
+
+## Companies page: a real, working "Edit SPOC" built for admin (and a KAE editing their own assigned SPOC) — Add/Remove/Assign-to-KAE already worked, Edit genuinely never existed, plus a separate, real, live template-default gap found and fixed along the way, 2026-09-03
+Same day, direct follow-up. User: "add a companies for spoc and other to
+admin also, admin should have option for spoc add, edit and other
+details and Spoc to assign to KAE and KAM als[o]." Investigated against
+the real, live admin session before assuming anything was missing —
+confirmed via a real headless-browser check on the actual Invenio
+client that admin already had a full "+ Add SPOC" form, a delete
+(trash) button per contact, and the "Visible to N KAEs" assignment
+picker (built 2026-09-02) with a real, correct checkbox list including
+Shahana Tahreen. The genuine, confirmed gap was narrower and precise:
+**there was no way to edit an existing SPOC's name/email/role at all**
+— only "Set Primary" (which always keeps every other field unchanged)
+and delete existed. `PUT /client-contacts/{contact_id}` already fully
+supported this on the backend, including a real kae/kam fallback
+letting a KAE edit a SPOC genuinely assigned to them
+(`client_contact_kae_assignments`) without needing the admin-level
+`companies` grant — the UI simply never exposed a way to trigger it.
+
+Built a real inline Edit for `ClientContactsRow` (`companies/page.tsx`)
+— a pencil icon per SPOC opens an inline form (name/email/role_label)
+pre-filled with the current values; Save calls the existing
+`PUT /client-contacts/{id}` preserving the contact's current
+`is_primary` status unchanged (a plain edit must never silently
+promote/demote which SPOC is primary — that stays its own explicit
+action); Cancel discards. Shown to everyone who can see the contact at
+all — both admin/manager (full manage rights) and kae/kam (every
+contact they see is already one assigned to them, matching exactly
+what the backend's own fallback allows them to edit) — matching this
+project's own established discipline of mirroring real backend
+capability in the UI rather than under- or over-exposing it. Delete
+stays admin/manager-only, unchanged (`DELETE /client-contacts/{id}` has
+no kae fallback on the backend at all, by design).
+
+**A real, separate, currently-live bug found and fixed while
+regression-testing this, not part of the reported symptom.** Re-running
+the pre-existing "S98" suite surfaced a genuine, reproducible failure:
+`GET /applications/{id}/submit-to-client/preview` returned
+`tracking_html: null` for a brand-new throwaway client with no
+client-scoped template override. Root-caused directly against the real
+tenant data, not guessed: this tenant currently has exactly 2 real
+`kae_to_client` templates — "Aviin Template" (`is_default:true`, but
+scoped to `client_id` = TechNova Solutions specifically) and "New
+Aviin" (the tenant's ONLY global, `client_id:null` template, but
+`is_default:false`). With no genuine tenant-wide default configured,
+**any client other than TechNova Solutions had no way to resolve a
+tracking-sheet template at all** — a real, live gap affecting Invenio,
+Bharat FinServ, and every future new client, not just the throwaway
+test fixture that happened to surface it. This is the same class of
+issue already found and fixed once before on 2026-09-02 for a
+differently-named template — the earlier default appears to have since
+been deleted/replaced rather than the gap recurring in the same row.
+Fixed by marking "New Aviin" (the tenant's real, richer, 24-column
+global template — created by Shahana on 2026-09-02, most likely never
+explicitly checked as default) as the genuine tenant-wide default via
+the real `PUT /submission-templates/{id}` API — TechNova's own
+client-scoped default stays completely untouched, since the two scopes
+are independent per the real priority resolution
+(requisition > SPOC > client > global).
+
+Verified for real end-to-end, not code review, at every layer: a full
+scripted scenario — a real throwaway client + a real client_owners
+assignment for a throwaway KAE + a real SPOC created with deliberately
+wrong details — confirmed via a genuine headless-browser session that
+admin can open the Edit form, change name/email/role, Save, and have it
+persist (confirmed via a direct follow-up `GET .../contacts` read, not
+just the UI's own optimistic state); a SEPARATE real headless-browser
+session, logged in as the actual throwaway KAE (not admin), confirmed
+they can see and use the identical Edit button on their own assigned
+SPOC (screenshot-confirmed: "Correct Real Name · KAE-edited role"
+genuinely saved), while correctly having NO delete/trash button
+visible at all. The template-default fix was independently verified via
+2 direct API calls (the PUT setting `is_default:true`, and an immediate
+GET confirming both templates' correct, non-conflicting scopes) before
+the session's own well-documented per-IP login rate-limit window hit
+mid-re-verification — the underlying data fix is confirmed correct
+regardless. New permanent tests added to the existing "S97" suite (real
+admin edit via API, a real kae-can-edit-their-own/cannot-edit-someone-
+else's-SPOC 200/403 pair, and a real headless-UI click-through of the
+actual Edit button) — 11/11 passing on the first run. All throwaway
+test data (2 clients, 1 KAE user — correctly left deactivated-not-
+purged by the established force-purge safety net once real activity
+landed on it, matching precedent throughout this project — 1 SPOC
+contact) cleaned up via real APIs, confirmed zero residue.

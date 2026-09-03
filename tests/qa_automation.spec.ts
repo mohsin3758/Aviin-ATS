@@ -13252,6 +13252,66 @@ test.describe.serial('S97 KAE reports: real per-KAE SPOC visibility mapping, Com
     expect(errors).toHaveLength(0);
     await ctx.close();
   });
+
+  // 2026-09-03, direct follow-up, real report: "admin should have option
+  // for spoc add, edit and other details and Spoc to assign to KAE and
+  // KAM als[o]" — Add/Remove/Set-Primary/Assign-to-KAE all already
+  // existed; investigated live and confirmed there was genuinely no way
+  // to EDIT an existing SPOC's name/email/role at all, for admin or a
+  // KAE, despite PUT /client-contacts/{id} already fully supporting it
+  // (including a real kae-can-edit-their-own-assigned-SPOC fallback).
+  test('BUG FIX: admin can edit an existing SPOC name/email/role via the real API, is_primary is preserved unchanged', async ({ request }) => {
+    const r = await request.put(`${API}/client-contacts/${spocBId}`, {
+      headers: authA(), data: { contact_name: 'SPOC B (edited)', email: 'spoc.b.edited@qas97.example', role_label: 'New Role', is_primary: false },
+    });
+    expect(r.status()).toBe(200);
+    const updated = await r.json();
+    expect(updated.contact_name).toBe('SPOC B (edited)');
+    expect(updated.email).toBe('spoc.b.edited@qas97.example');
+    expect(updated.role_label).toBe('New Role');
+    expect(updated.is_primary).toBe(false);
+  });
+
+  test('FEATURE: a KAE can edit a SPOC genuinely assigned to them (SPOC A), but is cleanly 403d editing one that is not (SPOC B)', async ({ request }) => {
+    const okR = await request.put(`${API}/client-contacts/${spocAId}`, {
+      headers: authK(), data: { contact_name: 'SPOC A (kae-edited)', email: 'spoc.a@qas97.example', role_label: null, is_primary: true },
+    });
+    expect(okR.status()).toBe(200);
+    expect((await okR.json()).contact_name).toBe('SPOC A (kae-edited)');
+
+    const deniedR = await request.put(`${API}/client-contacts/${spocBId}`, {
+      headers: authK(), data: { contact_name: 'should not apply', email: 'x@example.com', role_label: null, is_primary: false },
+    });
+    expect(deniedR.status()).toBe(403);
+  });
+
+  test('real UI: admin edits a SPOC through the actual Edit button — pencil opens an inline form, Save persists, Cancel discards', async ({ browser }) => {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`${BASE}/dashboard`);
+    await page.evaluate((tok) => localStorage.setItem('airecruit_token', tok), admin);
+    await page.goto(`${BASE}/companies`, { waitUntil: 'networkidle' });
+    await page.fill('input[placeholder*="Search"]', `QA S97 Client ${stamp}`).catch(() => {});
+    await page.waitForTimeout(500);
+    await page.locator(`text=QA S97 Client ${stamp}`).first().click();
+    await page.waitForTimeout(1000);
+
+    const editBtn = page.locator(`[data-testid="spoc-edit-${spocAId}"]`);
+    await expect(editBtn).toBeVisible({ timeout: 10000 });
+    await editBtn.click();
+    await page.waitForTimeout(300);
+
+    const nameInput = page.locator(`[data-testid="spoc-edit-name-${spocAId}"]`);
+    await nameInput.fill('SPOC A (real UI edit)');
+    await page.locator(`[data-testid="spoc-edit-save-${spocAId}"]`).click();
+    await page.waitForTimeout(1000);
+
+    await expect(page.locator('[data-testid="client-contacts-row"]')).toContainText('SPOC A (real UI edit)');
+    expect(errors).toHaveLength(0);
+    await ctx.close();
+  });
 });
 
 test.describe.serial('S98 Tracking-sheet live preview + SPOC/project-scoped template defaults + stray-template picker fix', () => {
