@@ -22011,3 +22011,49 @@ passed clean — the one failure seen (`S1`'s "embeddings return 384
 dims") was confirmed as a pure local-tunnel limitation (this session's
 SSH tunnel never forwarded port 8081, the embed service's own port),
 unrelated to this change. Zero-token audit: `CONFIRMED CLEAN`.
+
+## Sidebar: Companies link fixed for KAE/KAM — the backend already fully supported adding/editing a SPOC on your own assigned client, but the sidebar link itself never appeared, 2026-09-03
+Same day, direct follow-up. Real user report: "how to add spoc details in
+the assigned client, option is not showing here and not in admin panel
+also, already filled some details and not able to check again and
+edit." Investigated against the live database before touching anything,
+not guessed: confirmed the current, real `kae` role permission set
+genuinely has no `companies` key at all — so the Sidebar's own dynamic,
+per-feature `hasFeatureAccess()` gate (built 2026-08-31) correctly, but
+too bluntly, hid the "Companies" link for this role entirely. The
+backend was NOT the gap — `POST /clients/{id}/contacts` and
+`PUT /client-contacts/{id}` (`kae_submission.py`, built 2026-09-02)
+already have a real, deliberate ownership-scoped fallback specifically
+for kae/kam: without the hard `companies` grant, they can still add a
+real SPOC for any client they genuinely own (`client_owners`) and edit
+one already assigned to them (`client_contact_kae_assignments`) — the
+backend was fully ready the whole time, there was simply no way to
+click into the page and reach it.
+
+Fixed with a narrow, explicit carve-out in `Sidebar.tsx`'s `itemVisible`
+— `companies` is now shown to `kae`/`kam` regardless of the hard grant,
+matching the backend's own already-built fallback exactly (not a
+blanket permission change — a plain `recruiter`, which has no such
+backend fallback, still correctly has no path in, and the Companies
+page's own real per-role view already correctly scopes a KAE to just
+their own assigned clients once they're on it). Deliberately did not
+touch `recruiter`'s missing `companies` grant in this pass — that's a
+separate, distinct question the user didn't raise, not silently folded
+into a fix aimed at the reported KAE scenario.
+
+Verified for real, not code review: a genuine throwaway `kae`-role
+account (created via the real admin API, not by touching the reporting
+user's own credentials) logged in through the actual live login page —
+confirmed via a real headless-browser session that "Companies" now
+renders in the sidebar (previously absent entirely), clicking it lands
+on `/companies` with zero console errors, and the page correctly shows
+its real, already-built role-aware empty state ("0 clients assigned to
+you... Ask an admin to assign you as the KAE/KAM on a client account")
+for a fresh account with no real ownership yet — proving the full chain
+(link -> page -> correct scoped view) works end to end, not just the
+link itself. A scoped regression sweep (S97 SPOC/KAE-visibility suite +
+S1 general health) passed clean — the one failure seen (`S1`'s
+"embeddings return 384 dims") is the same pre-existing local-tunnel
+limitation already documented earlier the same day (port 8081, the
+embed service, was never forwarded by this session's SSH tunnel),
+unrelated to this change. Zero-token audit: `CONFIRMED CLEAN`.

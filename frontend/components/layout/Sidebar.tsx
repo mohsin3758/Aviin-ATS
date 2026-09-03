@@ -200,6 +200,22 @@ export function Sidebar({ mobileOpen = false, onClose }: SidebarProps = {}) {
   // matrix) with the real, dynamic per-feature check above.
   const itemVisible = (item: any) => {
     if (item.roles && (!_mounted2 || !item.roles.includes(userRole))) return false;
+    // Real fix (2026-09-03, reported live: "how to add spoc details in the
+    // assigned client, option is not showing here and not in admin panel
+    // also") — confirmed directly against production that no non-admin
+    // role currently holds a `companies` grant, so this link never
+    // rendered for anyone, kae included. That's specifically wrong for
+    // kae/kam: backend/routers/kae_submission.py's contact endpoints
+    // (POST/PUT .../contacts) and clients.py's GET /clients both already
+    // have a real, deliberate ownership-scoped fallback for these two
+    // roles (has_permission_soft() false -> falls back to a real
+    // client_owners/client_contact_kae_assignments check) — a KAE was
+    // always able to view/add/edit SPOCs for a client they're genuinely
+    // assigned to, they just had no sidebar link to ever reach the page.
+    // Not extended to any other role here — that fallback only exists
+    // for kae/kam on the backend, so a plain recruiter still correctly
+    // has no path in until a real grant decision is made for them.
+    if (item.feature === 'companies' && (userRole === 'kae' || userRole === 'kam')) return true;
     return hasFeatureAccess(item.feature);
   };
 
