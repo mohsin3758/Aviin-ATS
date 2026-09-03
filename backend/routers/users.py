@@ -187,7 +187,7 @@ async def create_user(body: UserCreate, actor: Actor = Depends(require_role("adm
                         "Please login and change your password after first login.",
                         "",
                         "Best regards,",
-                        "AVIIN Jobs Services",
+                        "Aviin Tech",
                         "https://ats.aviintech.com",
                     ]
                     txt = chr(10).join(lines)

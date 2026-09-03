@@ -95,7 +95,7 @@ async def _get_or_create_nda(conn, tenant_id: str, application_id: str):
     draft = _default_nda_text(
         ctx.get("candidate_name") or "Candidate",
         ctx.get("job_title") or "the role",
-        ctx.get("company_name") or "AVIIN Jobs Services",
+        ctx.get("company_name") or "Aviin Technology Business Solutions Pvt Ltd",
     )
     return await conn.fetchrow(
         f"""INSERT INTO nda_documents (tenant_id, application_id, candidate_id, draft_text, status)
@@ -276,7 +276,7 @@ async def download_nda_pdf(application_id: str, actor: Actor = Depends(get_actor
         nda = await _get_or_create_nda(conn, actor.tenant_id, application_id)
         ctx = await _nda_context(conn, application_id)
     text = nda["final_text"] or nda["draft_text"]
-    pdf_bytes = _build_nda_pdf(text, ctx.get("candidate_name", "Candidate"), ctx.get("company_name", "AVIIN Jobs Services"))
+    pdf_bytes = _build_nda_pdf(text, ctx.get("candidate_name", "Candidate"), ctx.get("company_name", "Aviin Technology Business Solutions Pvt Ltd"))
     fname = f"nda_{application_id[:8]}.pdf"
     return StreamingResponse(BytesIO(pdf_bytes), media_type='application/pdf',
                               headers={'Content-Disposition': f'attachment; filename="{fname}"'})
@@ -288,7 +288,7 @@ async def download_nda_docx(application_id: str, actor: Actor = Depends(get_acto
         nda = await _get_or_create_nda(conn, actor.tenant_id, application_id)
         ctx = await _nda_context(conn, application_id)
     text = nda["final_text"] or nda["draft_text"]
-    docx_bytes = _build_nda_docx(text, ctx.get("candidate_name", "Candidate"), ctx.get("company_name", "AVIIN Jobs Services"))
+    docx_bytes = _build_nda_docx(text, ctx.get("candidate_name", "Candidate"), ctx.get("company_name", "Aviin Technology Business Solutions Pvt Ltd"))
     fname = f"nda_{application_id[:8]}.docx"
     return StreamingResponse(
         BytesIO(docx_bytes),
@@ -407,18 +407,18 @@ async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Dep
     base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
     sign_url = f"{base}/sign-nda/{token}"
     if attach_bytes is None:
-        attach_bytes = _build_nda_pdf(final_text, ctx["candidate_name"], ctx.get("company_name", "AVIIN Jobs Services"))
+        attach_bytes = _build_nda_pdf(final_text, ctx["candidate_name"], ctx.get("company_name", "Aviin Technology Business Solutions Pvt Ltd"))
     body_text = (
         f'Dear {ctx["candidate_name"]},\n\n'
         f'As part of our recruitment process for {ctx.get("job_title", "this role")}, please review and '
         f'sign the attached NDA / Pre-Contract Agreement.\n\n'
         f'Sign online here: {sign_url}\n\n'
-        f'Best regards,\n{ctx.get("company_name", "AVIIN Jobs Services")}'
+        f'Best regards,\n{ctx.get("company_name", "Aviin Technology Business Solutions Pvt Ltd")}'
     )
     import asyncio
     asyncio.create_task(_send_email_with_pdf(
         actor.tenant_id, ctx["candidate_email"], ctx["candidate_name"],
-        f'{ctx.get("company_name", "AVIIN Jobs Services")} - NDA / Pre-Contract Agreement',
+        f'{ctx.get("company_name", "Aviin Technology Business Solutions Pvt Ltd")} - NDA / Pre-Contract Agreement',
         body_text, attach_bytes, attach_filename, attach_mime,
     ))
     return {"sent": True, "sign_url": sign_url, "recipient": ctx["candidate_email"]}

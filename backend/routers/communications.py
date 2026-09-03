@@ -331,7 +331,7 @@ async def _resolve_template_vars(conn, tenant_id: str, candidate_id: Optional[st
     anywhere in the schema at all.
     """
     tenant = await conn.fetchrow("SELECT name FROM tenants WHERE id=$1", tenant_id)
-    company = (tenant["name"] if tenant else None) or "AVIIN Jobs Services"
+    company = (tenant["name"] if tenant else None) or "Aviin Tech"
 
     row = None
     if application_id:
@@ -969,7 +969,7 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
             if not to_email: results["email"] = "no_email"
             elif not smtp: results["email"] = "smtp_not_configured"
             else:
-                subj = subj_p or "AVIIN Jobs Services"
+                subj = subj_p or "Aviin Tech"
                 logged = await _log(conn, actor.tenant_id, body.candidate_id, body.application_id,
                            "email", subj, msg_p, "sent", str(actor.user_id),
                            body.template_id, body.stage, to_email, body.cc,
@@ -1050,7 +1050,7 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
             if body.channel in ("email","both"):
                 if not cand["email"] or not smtp: skipped += 1
                 else:
-                    subj = _personalize(body.subject, cvars) or "AVIIN Jobs - Update"
+                    subj = _personalize(body.subject, cvars) or "Aviin Tech - Update"
                     # Log first so the send can embed a pixel keyed to this
                     # exact message row; candidate_messages.body stays the
                     # clean original text, the pixel only rides on the SMTP copy.

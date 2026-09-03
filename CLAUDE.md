@@ -16,10 +16,18 @@ feature/UI parity-or-better vs top ATS/recruitment-automation
 competitors, delivered with 5 selectable UI templates.
 
 VPS: 187.127.179.128 (srv1747263.hstgr.cloud) | OS: Ubuntu 24.04
-DOMAIN: ats.aviinjobs.com (confirmed, live in production since P14).
-Still never use finstack.aviinjobs.com for this product — that subdomain
-is used by an unrelated FinStack HR/Payroll deployment for the same
-company.
+DOMAIN: ats.aviintech.com (migrated 2026-09-03 from the original
+ats.aviinjobs.com — a 301 redirect on the old domain preserves every
+already-distributed link, path included). Still never use
+finstack.aviinjobs.com for this product — that subdomain is used by an
+unrelated FinStack HR/Payroll deployment for the same company.
+
+BRAND: the company/legal identity is "Aviin Technology Business
+Solutions Pvt Ltd" (short form "Aviin Tech" — used wherever the full
+legal name doesn't fit: SMS/WhatsApp templates, subject lines, UI
+chrome). Renamed 2026-09-03 from "Aviin Jobs Services"/"AVIIN Jobs" —
+that old name should not appear in any new code, UI text, or generated
+document; the product name "AVIIN ATS" is separate and unaffected.
 
 ## UI TEMPLATES (5 selectable — defined, P4 unblocked)
 Full spec: docs/ui_templates.md — Enterprise Classic, Modern SaaS,
@@ -175,7 +183,7 @@ P17 views:
 - [✅]    P11: WhatsApp + WAHA (14-language, DPDP) — DONE (34/34)
 - [✅]    P12: ERP Timesheet + Payroll (pgcrypto) — DONE (40/40)
 - [✅]    P13: BGV + Trust Intelligence — DONE (46/46)
-- [✅]    P14: VPS Deploy (nginx/SSL, domain=ats.aviinjobs.com) — DONE (52/52)
+- [✅]    P14: VPS Deploy (nginx/SSL, domain=ats.aviintech.com — migrated 2026-09-03, see DOMAIN note above) — DONE (52/52)
 - [NEXT] P15: Recruiter Performance & Incentive Engine
 - [ ]     P16: KAE Module & Account Ownership
 - [ ]     P17: Account Financial Framework & CEO Dashboard Extensions

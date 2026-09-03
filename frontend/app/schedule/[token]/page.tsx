@@ -64,7 +64,7 @@ export default function SelfSchedulePage() {
         {/* Header */}
         <div style={{background:'#0f172a',borderRadius:'16px',padding:'28px',marginBottom:'20px',color:'white',textAlign:'center'}}>
           <div style={{fontSize:'40px',marginBottom:'8px'}}>A</div>
-          <div style={{fontWeight:'800',fontSize:'18px',marginBottom:'4px'}}>AVIIN Jobs</div>
+          <div style={{fontWeight:'800',fontSize:'18px',marginBottom:'4px'}}>Aviin Tech</div>
           <div style={{fontSize:'13px',color:'rgba(255,255,255,0.6)'}}>AI Staffing OS</div>
         </div>
 

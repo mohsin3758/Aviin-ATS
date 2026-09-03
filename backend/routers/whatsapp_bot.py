@@ -13,7 +13,7 @@ WAHA_KEY  = os.getenv("WAHA_API_KEY", "")
 SESSION   = "default"
 
 HELP_LINES = [
-    "*AVIIN Jobs Bot*",
+    "*Aviin Tech Bot*",
     "",
     "Commands:",
     "STATUS — Check application status",

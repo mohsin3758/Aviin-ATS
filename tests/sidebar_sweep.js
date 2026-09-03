@@ -100,7 +100,7 @@ function isVisibleFor(route, role) {
   const browser = await chromium.launch();
   const page = await browser.newPage();
 
-  await page.goto('https://ats.aviinjobs.com/login');
+  await page.goto('https://ats.aviintech.com/login');
   await page.fill('input[type="email"]', creds.email);
   await page.fill('input[type="password"]', creds.password);
   await page.click('button[type="submit"]');
@@ -123,7 +123,7 @@ function isVisibleFor(route, role) {
     let hasErrorText = false;
     let navError = null;
     try {
-      const resp = await page.goto('https://ats.aviinjobs.com' + route.href, { waitUntil: 'networkidle', timeout: 20000 });
+      const resp = await page.goto('https://ats.aviintech.com' + route.href, { waitUntil: 'networkidle', timeout: 20000 });
       httpStatus = resp ? resp.status() : null;
       await page.waitForTimeout(600);
       const bodyText = await page.locator('body').innerText().catch(() => '');

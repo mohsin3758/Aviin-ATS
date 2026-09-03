@@ -399,7 +399,7 @@ export default function SignaturesPage() {
                   </div>
                   <div>
                     <label style={LBL}>Company</label>
-                    <input value={fields.company} onChange={e => set('company', e.target.value)} placeholder="AVIIN Jobs Services" style={INP} />
+                    <input value={fields.company} onChange={e => set('company', e.target.value)} placeholder="Aviin Technology Business Solutions Pvt Ltd" style={INP} />
                   </div>
                   <div>
                     <label style={LBL}>Email</label>

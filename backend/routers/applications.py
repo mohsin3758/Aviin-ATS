@@ -414,19 +414,19 @@ MSGS = {
     "rejected":       f"Thank you for your interest and the time you invested in this process. After careful consideration, we are unable to move forward with your application for this particular role at this time. We encourage you to stay connected as we regularly have new opportunities.",
 }
 SUBJS = {
-    "contacted":      "AVIIN Jobs - We Have Reviewed Your Profile",
-    "interested":     "AVIIN Jobs - Moving Forward with Your Application",
-    "nda":            "AVIIN Jobs - NDA / Pre-Contract Agreement Required",
-    "screened":       "AVIIN Jobs - Profile Shortlisted",
-    "submitted":      "AVIIN Jobs - Your Profile Has Been Submitted to Client",
-    "l1_interview":   "AVIIN Jobs - L1 Interview Scheduled - Congratulations!",
-    "l2_interview":   "AVIIN Jobs - L2 Final Interview - You Are Almost There!",
-    "interview":      "AVIIN Jobs - Interview Scheduled",
-    "offer":          "AVIIN Jobs - Offer in Progress - Congratulations!",
-    "offer_accepted": "AVIIN Jobs - Offer Accepted - Welcome Aboard!",
-    "placed":         "AVIIN Jobs - Placement Confirmation - Congratulations!",
-    "hold":           "AVIIN Jobs - Application Status Update",
-    "rejected":       "AVIIN Jobs - Update on Your Application",
+    "contacted":      "Aviin Tech - We Have Reviewed Your Profile",
+    "interested":     "Aviin Tech - Moving Forward with Your Application",
+    "nda":            "Aviin Tech - NDA / Pre-Contract Agreement Required",
+    "screened":       "Aviin Tech - Profile Shortlisted",
+    "submitted":      "Aviin Tech - Your Profile Has Been Submitted to Client",
+    "l1_interview":   "Aviin Tech - L1 Interview Scheduled - Congratulations!",
+    "l2_interview":   "Aviin Tech - L2 Final Interview - You Are Almost There!",
+    "interview":      "Aviin Tech - Interview Scheduled",
+    "offer":          "Aviin Tech - Offer in Progress - Congratulations!",
+    "offer_accepted": "Aviin Tech - Offer Accepted - Welcome Aboard!",
+    "placed":         "Aviin Tech - Placement Confirmation - Congratulations!",
+    "hold":           "Aviin Tech - Application Status Update",
+    "rejected":       "Aviin Tech - Update on Your Application",
 }
 
 
@@ -691,7 +691,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _f=_cfg["smtp_from"] or _u; _fn=_cfg["smtp_from_name"] or "AVIIN ATS"
                     _tls=_cfg["smtp_tls"] if _cfg["smtp_tls"] is not None else True
                     _em=MIMEMultipart()
-                    _subj = _apply_placeholders(email_tmpl_subj or SUBJS.get(stage,"AVIIN Jobs - Update"), pmap)
+                    _subj = _apply_placeholders(email_tmpl_subj or SUBJS.get(stage,"Aviin Tech - Update"), pmap)
                     # BUG FIX (2026-08-22): {name} was substituted for WhatsApp
                     # (see wa_text.replace above) but never for email — any
                     # stage template using {name} (the settings page's own
@@ -702,7 +702,7 @@ async def _notify_stage_change_bg(candidate_id, stage, email, name, tenant_id, c
                     _em["From"]=f"{_fn} <{_f}>"
                     _em["To"]=email
                     _greeting = "" if _already_has_greeting(msg_text) else ("Dear " + str(name) + "," + chr(10) + chr(10))
-                    _body = _greeting + str(msg_text) + jd_block + chr(10) + chr(10) + "Best regards," + chr(10) + "AVIIN Jobs Services" + chr(10) + "https://ats.aviintech.com"
+                    _body = _greeting + str(msg_text) + jd_block + chr(10) + chr(10) + "Best regards," + chr(10) + "Aviin Tech" + chr(10) + "https://ats.aviintech.com"
 
                     # Log to candidate_messages so it shows in Conversations
                     # and so open-tracking has a row to key against — stage-
@@ -781,7 +781,7 @@ async def stage_email_preview(
     jd_block = await _compute_jd_block(actor.tenant_id, stage, app["requisition_id"])
     tmpl_subj, tmpl_msg, attachment = await _resolve_email_template(actor.tenant_id, stage)
     pmap = await _build_placeholder_map(actor.tenant_id, app["candidate_id"], name, app["requisition_id"], application_id)
-    subject = _apply_placeholders(tmpl_subj or SUBJS.get(stage, "AVIIN Jobs - Update"), pmap)
+    subject = _apply_placeholders(tmpl_subj or SUBJS.get(stage, "Aviin Tech - Update"), pmap)
     message = _apply_placeholders(tmpl_msg or MSGS.get(stage, ""), pmap)
     # Same greeting rule the real send applies (_already_has_greeting) —
     # a preview that omitted this looked shorter/different from the real

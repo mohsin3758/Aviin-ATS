@@ -453,7 +453,7 @@ async def public_jobs_feed(tenant_id: str):
     import xml.sax.saxutils as sx
     base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
     async with _db_public.tenant_conn(tenant_id) as conn:
-        tenant_name = await conn.fetchval("SELECT name FROM tenants WHERE id=$1::uuid", tenant_id) or "AVIIN Jobs Services"
+        tenant_name = await conn.fetchval("SELECT name FROM tenants WHERE id=$1::uuid", tenant_id) or "Aviin Tech"
         rows = await conn.fetch("""
             SELECT r.id, r.title, r.location, r.employment_type, r.description,
                    r.skills_required, r.created_at, t.name AS company_name

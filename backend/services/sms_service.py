@@ -29,10 +29,10 @@ async def send_sms(to_phone: str, message: str, template: str = "general") -> di
         return {"status": "failed", "error": str(e)}
 
 SMS_TEMPLATES = {
-    "interview_reminder": "Hi {name}, interview for {role} on {date} at {time}. Link: {link}. -AVIIN Jobs",
-    "shortlist": "Hi {name}, you are shortlisted for {role} at {company}. Team will contact you. -AVIIN Jobs",
-    "offer": "Congratulations {name}! Offer for {role} at {company}. CTC: Rs.{ctc}. -AVIIN Jobs",
-    "placement_confirm": "Hi {name}, joining confirmed on {date} at {company}. HR: {hr_phone}. -AVIIN Jobs",
+    "interview_reminder": "Hi {name}, interview for {role} on {date} at {time}. Link: {link}. -Aviin Tech",
+    "shortlist": "Hi {name}, you are shortlisted for {role} at {company}. Team will contact you. -Aviin Tech",
+    "offer": "Congratulations {name}! Offer for {role} at {company}. CTC: Rs.{ctc}. -Aviin Tech",
+    "placement_confirm": "Hi {name}, joining confirmed on {date} at {company}. HR: {hr_phone}. -Aviin Tech",
 }
 
 def render_template(name: str, vars: dict) -> str:

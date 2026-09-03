@@ -114,7 +114,7 @@ function MyStatusPageInner() {
       {/* Header */}
       <div style={{textAlign:'center',marginBottom:'28px',color:'white'}}>
         <div style={{fontSize:'32px',marginBottom:'8px'}}>🏢</div>
-        <div style={{fontWeight:'800',fontSize:'22px',letterSpacing:'-0.5px'}}>AVIIN JOBS</div>
+        <div style={{fontWeight:'800',fontSize:'22px',letterSpacing:'-0.5px'}}>AVIIN TECH</div>
         <div style={{fontSize:'13px',opacity:0.75,marginTop:'2px'}}>Application Status Portal</div>
       </div>
 

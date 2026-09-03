@@ -3,11 +3,11 @@ import json, uuid
 import asyncio, logging
 
 STAGE_EMAIL_TEMPLATES = {
-    "screened": ("Application Shortlisted - AVIIN Jobs", "Dear {name},\n\nYour profile has been shortlisted. A recruiter will contact you soon.\n\nBest,\nAVIIN Jobs"),
-    "submitted": ("Profile Submitted to Client - AVIIN Jobs", "Dear {name},\n\nYour profile has been submitted to the client for review. We will update you shortly.\n\nBest,\nAVIIN Jobs"),
-    "interview": ("Interview Scheduled - AVIIN Jobs", "Dear {name},\n\nCongratulations! You have been selected for an interview. Check your email for interview details.\n\nBest,\nAVIIN Jobs"),
-    "offer": ("Offer Letter - AVIIN Jobs", "Dear {name},\n\nWe are pleased to inform you that an offer has been prepared for you! Our team will contact you with details.\n\nBest,\nAVIIN Jobs"),
-    "placed": ("Placement Confirmed - AVIIN Jobs", "Dear {name},\n\nCongratulations on your successful placement! Wishing you great success in your new role.\n\nBest,\nAVIIN Jobs"),
+    "screened": ("Application Shortlisted - Aviin Tech", "Dear {name},\n\nYour profile has been shortlisted. A recruiter will contact you soon.\n\nBest,\nAviin Tech"),
+    "submitted": ("Profile Submitted to Client - Aviin Tech", "Dear {name},\n\nYour profile has been submitted to the client for review. We will update you shortly.\n\nBest,\nAviin Tech"),
+    "interview": ("Interview Scheduled - Aviin Tech", "Dear {name},\n\nCongratulations! You have been selected for an interview. Check your email for interview details.\n\nBest,\nAviin Tech"),
+    "offer": ("Offer Letter - Aviin Tech", "Dear {name},\n\nWe are pleased to inform you that an offer has been prepared for you! Our team will contact you with details.\n\nBest,\nAviin Tech"),
+    "placed": ("Placement Confirmed - Aviin Tech", "Dear {name},\n\nCongratulations on your successful placement! Wishing you great success in your new role.\n\nBest,\nAviin Tech"),
 }
 
 async def send_stage_email(email: str, name: str, stage: str):

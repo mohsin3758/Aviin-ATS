@@ -551,27 +551,27 @@ async def seed_default_sequences(actor: Actor = Depends(get_actor)):
             "name": "Post-Interview Follow-up",
             "trigger_event": "interview_scheduled",
             "steps": [
-                {"day": 1, "type": "whatsapp", "template": "Thank you for the interview for {role}. We will update you within 2 business days. - AVIIN Jobs"},
-                {"day": 3, "type": "whatsapp", "template": "Hi {name}, any update on your interview feedback? The client is keen. - AVIIN Jobs"},
-                {"day": 7, "type": "sms", "template": "Hi {name}, final update on {role} role. Please call us at your earliest. - AVIIN Jobs"},
+                {"day": 1, "type": "whatsapp", "template": "Thank you for the interview for {role}. We will update you within 2 business days. - Aviin Tech"},
+                {"day": 3, "type": "whatsapp", "template": "Hi {name}, any update on your interview feedback? The client is keen. - Aviin Tech"},
+                {"day": 7, "type": "sms", "template": "Hi {name}, final update on {role} role. Please call us at your earliest. - Aviin Tech"},
             ]
         },
         {
             "name": "Offer Drop Prevention",
             "trigger_event": "offer_made",
             "steps": [
-                {"day": 0, "type": "whatsapp", "template": "Congratulations {name}! Your offer for {role} at Rs.{ctc} is ready. Please confirm by {deadline}. - AVIIN Jobs"},
-                {"day": 2, "type": "whatsapp", "template": "Hi {name}, just checking on the offer for {role}. Any questions? We are here to help. - AVIIN Jobs"},
-                {"day": 4, "type": "sms", "template": "Urgent: Offer for {role} expires in 2 days. Please respond. AVIIN Jobs: {recruiter_phone}"},
+                {"day": 0, "type": "whatsapp", "template": "Congratulations {name}! Your offer for {role} at Rs.{ctc} is ready. Please confirm by {deadline}. - Aviin Tech"},
+                {"day": 2, "type": "whatsapp", "template": "Hi {name}, just checking on the offer for {role}. Any questions? We are here to help. - Aviin Tech"},
+                {"day": 4, "type": "sms", "template": "Urgent: Offer for {role} expires in 2 days. Please respond. Aviin Tech: {recruiter_phone}"},
             ]
         },
         {
             "name": "Passive Candidate Warm-up",
             "trigger_event": "manual",
             "steps": [
-                {"day": 0, "type": "whatsapp", "template": "Hi {name}, hope you are doing well! We have an exciting {role} opportunity that matches your profile. Interested? - AVIIN Jobs"},
-                {"day": 3, "type": "whatsapp", "template": "Hi {name}, following up on the {role} opportunity. The client is actively hiring. 5 mins call? - AVIIN Jobs"},
-                {"day": 7, "type": "sms", "template": "Hi {name}, last follow-up on {role} at {company}. CTC: Rs.{ctc}. Call us: {recruiter_phone} - AVIIN Jobs"},
+                {"day": 0, "type": "whatsapp", "template": "Hi {name}, hope you are doing well! We have an exciting {role} opportunity that matches your profile. Interested? - Aviin Tech"},
+                {"day": 3, "type": "whatsapp", "template": "Hi {name}, following up on the {role} opportunity. The client is actively hiring. 5 mins call? - Aviin Tech"},
+                {"day": 7, "type": "sms", "template": "Hi {name}, last follow-up on {role} at {company}. CTC: Rs.{ctc}. Call us: {recruiter_phone} - Aviin Tech"},
             ]
         },
     ]

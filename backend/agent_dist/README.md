@@ -30,7 +30,7 @@ backend confirms the extended consent record is on file for that user.
 
 ```
 pip install -r requirements.txt
-python aviin_device_agent.py enroll https://ats.aviinjobs.com/api <CODE>
+python aviin_device_agent.py enroll https://ats.aviintech.com/api <CODE>
 python aviin_device_agent.py run
 ```
 

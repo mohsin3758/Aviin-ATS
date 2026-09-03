@@ -5,7 +5,7 @@ const BASE = 'http://localhost:3001';
 const API  = 'http://localhost:8080';
 const EMAIL = process.env.QA_EMAIL || 'admin@example.com';
 const PASS  = process.env.QA_PASSWORD || 'changeme';
-const TID   = process.env.TENANT_ID || 'a92d7fd7-fb72-47d8-881e-2493c61717ce';  // AVIIN Jobs Services tenant
+const TID   = process.env.TENANT_ID || 'a92d7fd7-fb72-47d8-881e-2493c61717ce';  // primary tenant (Acme Staffing India)
 
 // Every `page`-based test in this file reuses the session global-setup
 // already established, instead of re-submitting the login form per
@@ -6199,7 +6199,7 @@ test.describe.serial('S49 Reminder & Follow-Up Management System', () => {
     const stamp = Date.now();
     const res = await request.post(`${API}/users`, {
       headers: { Authorization: `Bearer ${token}` },
-      data: { full_name: `QA S49 Recruiter ${stamp}`, email: `qa_s49_${stamp}@aviinjobs.com`, role: 'recruiter' },
+      data: { full_name: `QA S49 Recruiter ${stamp}`, email: `qa_s49_${stamp}@aviintech.com`, role: 'recruiter' },
     });
     expect(res.status()).toBe(200);
     const u = await res.json();
@@ -6556,7 +6556,7 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     await request.patch(`${API}/users/${referenced.id}/deactivate`, { headers: { Authorization: `Bearer ${token}` } });
     const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: { Authorization: `Bearer ${token}` } });
     const reqId = (await reqRes.json())[0].id;
-    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Purge Ref Candidate ${stamp4}`, email: `qa_s51_purgerefcand_${stamp4}@aviinjobs.com`, phone: `999000${String(stamp4).slice(-4)}` } })).json();
+    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Purge Ref Candidate ${stamp4}`, email: `qa_s51_purgerefcand_${stamp4}@aviintech.com`, phone: `999000${String(stamp4).slice(-4)}` } })).json();
     const app = await (await request.post(`${API}/applications`, { headers: { Authorization: `Bearer ${token}` }, data: { candidate_id: cand.id, requisition_id: reqId, assigned_recruiter_id: referenced.id } })).json();
     const refPurgeRes = await request.delete(`${API}/users/${referenced.id}/purge`, { headers: { Authorization: `Bearer ${token}` } });
     expect(refPurgeRes.status()).toBe(409);
@@ -6600,7 +6600,7 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
 
     const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: { Authorization: `Bearer ${token}` } });
     const reqId = (await reqRes.json())[0].id;
-    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Force Del Candidate ${stamp}`, email: `qa_s51_forcedelcand_${stamp}@aviinjobs.com`, phone: `999002${String(stamp).slice(-4)}` } })).json();
+    const cand = await (await request.post(`${API}/candidates`, { headers: { Authorization: `Bearer ${token}` }, data: { full_name: `QA S51 Force Del Candidate ${stamp}`, email: `qa_s51_forcedelcand_${stamp}@aviintech.com`, phone: `999002${String(stamp).slice(-4)}` } })).json();
     const app = await (await request.post(`${API}/applications`, { headers: { Authorization: `Bearer ${token}` }, data: { candidate_id: cand.id, requisition_id: reqId, assigned_recruiter_id: recruiter.id } })).json();
     expect(app.assigned_recruiter_id).toBe(recruiter.id);
 
@@ -6654,7 +6654,7 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     // first bug for free; the assignment_event row itself covers the second.
     const reqRes = await request.get(`${API}/requisitions?status=open&limit=1`, { headers: auth });
     const reqId = (await reqRes.json())[0].id;
-    const cand = await (await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S51 FK Repro Cand ${stamp}`, email: `qa_s51_fkrepro_cand_${stamp}@aviinjobs.com`, phone: `999003${String(stamp).slice(-4)}` } })).json();
+    const cand = await (await request.post(`${API}/candidates`, { headers: auth, data: { full_name: `QA S51 FK Repro Cand ${stamp}`, email: `qa_s51_fkrepro_cand_${stamp}@aviintech.com`, phone: `999003${String(stamp).slice(-4)}` } })).json();
     const assignRes = await request.post(`${API}/requisitions/${reqId}/assign`, {
       headers: auth, data: { recruiter_id: u.id },
     }).catch(() => null);
@@ -6713,7 +6713,7 @@ test.describe.serial('S51 Users & Roles: non-default-role invite fix + bulk sele
     await page.click('button:has-text("Invite User")');
     await page.waitForTimeout(500);
     await page.getByPlaceholder('e.g. Rahul Sharma').fill('Someone New');
-    await page.getByPlaceholder('rahul@aviinjobs.com').fill(existing.email);
+    await page.getByPlaceholder('rahul@aviintech.com').fill(existing.email);
     await page.locator('button:has-text("Send Invitation")').click();
     await page.waitForTimeout(1500);
 
@@ -6756,7 +6756,7 @@ test.describe.serial('S52 Per-Stage Email Send Mode (Automatic vs Manual)', () =
     reqId = (await reqRes.json())[0].id;
     const cand = await (await request.post(`${API}/candidates`, {
       headers: { Authorization: `Bearer ${token}` },
-      data: { full_name: `QA S52 SendMode ${stamp}`, email: `qa_s52_sendmode_${stamp}@aviinjobs.com`, phone: `999006${String(stamp).slice(-4)}` },
+      data: { full_name: `QA S52 SendMode ${stamp}`, email: `qa_s52_sendmode_${stamp}@aviintech.com`, phone: `999006${String(stamp).slice(-4)}` },
     })).json();
     candId = cand.id;
     const app = await (await request.post(`${API}/applications`, {
@@ -12888,7 +12888,7 @@ test.describe.serial('S95 Job Board & Distribution: real pagination/filters/bran
 
     const clickR = await request.get(`${API}/job-sharing/go/${TENANT_ID}/${reqBId}/facebook`, { maxRedirects: 0 });
     expect(clickR.status()).toBe(307);
-    expect(clickR.headers()['location']).toBe(`https://ats.aviinjobs.com/careers/${reqBId}?dsrc=facebook`);
+    expect(clickR.headers()['location']).toBe(`https://ats.aviintech.com/careers/${reqBId}?dsrc=facebook`);
 
     const after = await (await request.get(`${API}/job-sharing/analytics/${reqBId}`, { headers: auth() })).json();
     const fbAfter = after.find((r: any) => r.platform === 'facebook');

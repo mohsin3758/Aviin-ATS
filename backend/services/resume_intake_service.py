@@ -872,14 +872,14 @@ async def send_auto_reply(from_email: str, candidate_name: str, smtp_acc: dict):
         from email.mime.multipart import MIMEMultipart as _MM
 
         msg = _MM('alternative')
-        msg['Subject'] = 'Thank you for your application — AVIIN Jobs'
-        msg['From'] = f"{smtp_acc.get('display_name','AVIIN Jobs')} <{smtp_acc['email']}>"
+        msg['Subject'] = 'Thank you for your application — Aviin Tech'
+        msg['From'] = f"{smtp_acc.get('display_name','Aviin Tech')} <{smtp_acc['email']}>"
         msg['To'] = from_email
         body = (f'Dear {candidate_name},\n\n'
                 'Thank you for your application. We have received your profile and our '
                 'recruitment team will review it shortly.\n\n'
                 'If your profile matches our current requirements, we will contact you within 2-3 working days.\n\n'
-                'Best regards,\nAVIIN Jobs Recruitment Team')
+                'Best regards,\nAviin Tech Recruitment Team')
         msg.attach(MIMEText(body, 'plain'))
 
         def _send():
@@ -1365,7 +1365,7 @@ async def _process_pending_batch_locked(tenant_id: str, limit: int, ollama_url: 
             imap_pw = raw_pw
         smtp_acc = {
             'email': row['smtp_email'],
-            'display_name': row['display_name'] or 'AVIIN Jobs',
+            'display_name': row['display_name'] or 'Aviin Tech',
             'smtp_host': row['smtp_host'] or '',
             'smtp_port': row['smtp_port'] or 587,
             'smtp_user': row['smtp_user'] or '',

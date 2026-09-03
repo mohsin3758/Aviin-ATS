@@ -20,7 +20,7 @@ async function wahaPost(path: string) {
 }
 
 const STAGE_MSGS = [
-  { stage: 'Screened',  color: '#2563eb', msg: 'Hi [Name], your profile has been shortlisted by AVIIN Jobs. Our recruiter will contact you soon.' },
+  { stage: 'Screened',  color: '#2563eb', msg: 'Hi [Name], your profile has been shortlisted by Aviin Tech. Our recruiter will contact you soon.' },
   { stage: 'Interview', color: '#d97706', msg: 'Hi [Name], you have been selected for an interview. Please check your email for details.' },
   { stage: 'Offer',     color: '#0891b2', msg: 'Hi [Name], great news - an offer is being prepared for you. Our team will call you shortly.' },
   { stage: 'Placed',    color: '#16a34a', msg: 'Hi [Name], congratulations on your placement! Wishing you great success in your new role.' },

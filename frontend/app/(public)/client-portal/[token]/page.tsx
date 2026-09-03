@@ -209,7 +209,7 @@ export default function ClientPortalPage({ params }: { params: { token: string }
       <div style={{ background: 'linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)', color: '#fff', padding: '24px 28px' }}>
         <div style={{ maxWidth: 860, margin: '0 auto' }}>
           <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', opacity: 0.8, marginBottom: 6 }}>
-            AVIIN JOBS · CANDIDATE SHORTLIST
+            AVIIN TECH · CANDIDATE SHORTLIST
           </div>
           <h1 style={{ fontSize: 24, fontWeight: 900, margin: '0 0 6px' }}>{req.title}</h1>
           {req.client_name && (
@@ -336,7 +336,7 @@ export default function ClientPortalPage({ params }: { params: { token: string }
         })}
 
         <div style={{ marginTop: 32, textAlign: 'center', fontSize: 11, color: '#94a3b8' }}>
-          Powered by AVIIN Jobs Services · This link is confidential and intended for authorized viewing only.
+          Powered by Aviin Tech · This link is confidential and intended for authorized viewing only.
         </div>
       </div>
 

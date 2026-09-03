@@ -183,7 +183,7 @@ async def generate_call_letter(body: CallLetterIn, actor: Actor = Depends(get_ac
             raise HTTPException(404, "Application not found")
 
         pdf_bytes = _build_call_letter_pdf(
-            row["full_name"], row["role_title"], row["client_name"], row["tenant_name"] or "AVIIN Jobs Services",
+            row["full_name"], row["role_title"], row["client_name"], row["tenant_name"] or "Aviin Technology Business Solutions Pvt Ltd",
             body.interview_date, body.interview_time, body.venue, body.mode, body.notes)
         safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", row["full_name"] or "candidate")
         filename = f"Call_Letter_{safe_name}.pdf"
@@ -196,7 +196,7 @@ async def generate_call_letter(body: CallLetterIn, actor: Actor = Depends(get_ac
                 subject = f"Interview Call Letter — {row['role_title']}"
                 body_text = (
                     f"Dear {row['full_name']},\n\nPlease find attached your interview call letter for "
-                    f"{row['role_title']}. Details are in the attached PDF.\n\nBest regards,\n{row['tenant_name'] or 'AVIIN Jobs Services'}"
+                    f"{row['role_title']}. Details are in the attached PDF.\n\nBest regards,\n{row['tenant_name'] or 'Aviin Technology Business Solutions Pvt Ltd'}"
                 )
                 email_sent, email_error = await _send_call_letter_email(
                     actor.tenant_id, row["email"], subject, body_text, pdf_bytes, filename)
@@ -249,7 +249,7 @@ async def preview_call_letter(body: CallLetterPreviewIn, actor: Actor = Depends(
         if not row:
             raise HTTPException(404, "Application not found")
     pdf_bytes = _build_call_letter_pdf(
-        row["full_name"], row["role_title"], row["client_name"], row["tenant_name"] or "AVIIN Jobs Services",
+        row["full_name"], row["role_title"], row["client_name"], row["tenant_name"] or "Aviin Technology Business Solutions Pvt Ltd",
         body.interview_date, body.interview_time, body.venue, body.mode, body.notes)
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", row["full_name"] or "candidate")
     return StreamingResponse(

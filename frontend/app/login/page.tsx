@@ -96,7 +96,7 @@ function LoginForm() {
         </div>
 
         <p style={{ textAlign:'center', marginTop:'24px', fontSize:'11px', color:'rgba(255,255,255,0.18)' }}>
-          AVIIN Jobs Services © 2026 · AI Staffing Operating System
+          Aviin Tech © 2026 · AI Staffing Operating System
         </p>
       </div>
     </div>

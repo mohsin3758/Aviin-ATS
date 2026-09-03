@@ -1050,7 +1050,7 @@ async def send_interview_reminders():
                                 body_parts.append(f"Meeting Link: {iv['meeting_link']}")
                             if iv['location']:
                                 body_parts.append(f"Location    : {iv['location']}")
-                            body_parts += ["", "Best regards,", "AVIIN Jobs Services"]
+                            body_parts += ["", "Best regards,", "Aviin Tech"]
                             _em = MIMEMultipart()
                             _em['Subject'] = f"Interview Reminder: {iv['interview_type'].title()} Interview Tomorrow"
                             _em['From'] = f"{_fn} <{_f}>"
@@ -2422,7 +2422,7 @@ async def process_nurture_dispatch():
                         ctx = {
                             "name": r["full_name"] or "there",
                             "role": (role_row["title"] if role_row else "") or "",
-                            "company": r["company_name"] or "AVIIN Jobs",
+                            "company": r["company_name"] or "Aviin Tech",
                         }
                         message = _render_nurture_template(step.get("template", ""), ctx)
                         channel = step.get("type", "email")

@@ -2040,7 +2040,7 @@ export default function CandidateProfilePage() {
                     </a>
                   )}
                   {candidate?.email && (
-                    <a href={`mailto:${candidate.email}?subject=Your Application Status&body=${encodeURIComponent('Hi ' + (candidate.full_name?.split(' ')[0]||'') + ',\n\nYou can track your application status here:\n' + statusLink + '\n\nBest regards,\nAVIIN Jobs')}`}
+                    <a href={`mailto:${candidate.email}?subject=Your Application Status&body=${encodeURIComponent('Hi ' + (candidate.full_name?.split(' ')[0]||'') + ',\n\nYou can track your application status here:\n' + statusLink + '\n\nBest regards,\nAviin Tech')}`}
                       style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:'6px',
                         padding:'9px',borderRadius:'8px',background:'#1e40af',color:'white',
                         textDecoration:'none',fontSize:'13px',fontWeight:'600'}}>

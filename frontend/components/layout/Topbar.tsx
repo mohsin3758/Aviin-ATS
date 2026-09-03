@@ -161,7 +161,7 @@ export function Topbar({ onOpenMobileMenu }: { onOpenMobileMenu?: () => void } =
               <div className="px-4 py-3" style={{ background:'linear-gradient(135deg, var(--primary), var(--primary-light))' }}>
                 <div className="font-semibold text-sm text-white">{displayName}</div>
                 <div className="text-xs text-blue-200">{_tok?.email || ''}</div>
-                <div className="text-xs mt-1 text-blue-200">AVIIN Jobs Services</div>
+                <div className="text-xs mt-1 text-blue-200">Aviin Tech</div>
               </div>
               <div className="py-1">
                 {[

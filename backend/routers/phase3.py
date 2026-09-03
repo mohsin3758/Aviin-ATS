@@ -219,7 +219,7 @@ async def auto_schedule_interview(body: InterviewScheduleIn, bg: BackgroundTasks
             msg = (f"Hi {app['full_name']}, your interview for {app['job_title'] or 'the position'} "
                    f"is scheduled on {dt_fmt}. Mode: {body.mode.replace('_',' ').title()}. "
                    + (f"Join here: {body.meeting_link}" if body.meeting_link else "")
-                   + " - AVIIN Jobs")
+                   + " - Aviin Tech")
             bg.add_task(send_whatsapp, app["phone"], msg)
 
         return {
@@ -298,7 +298,7 @@ async def send_interview_reminder(schedule_id: str, bg: BackgroundTasks, actor: 
         dt_fmt = s["scheduled_at"].strftime("%d %b at %I:%M %p") if s["scheduled_at"] else "TBD"
         msg = (f"Reminder: Hi {s['full_name']}, your interview for {s['job_title'] or 'the position'} "
                f"is tomorrow {dt_fmt}. " + (f"Join: {s['meeting_link']}" if s["meeting_link"] else "") +
-               " Good luck! - AVIIN Jobs")
+               " Good luck! - Aviin Tech")
         bg.add_task(send_whatsapp, s["phone"], msg)
         await conn.execute("UPDATE interview_schedules SET reminder_sent_at=NOW() WHERE id=$1", schedule_id)
         return {"sent": True, "to": s["phone"], "candidate": s["full_name"]}
@@ -332,7 +332,7 @@ async def auto_generate_offer(body: OfferIn, actor: Actor = Depends(get_actor)):
         offer_text = None
         exp_y = round((app["total_exp_mo"] or 0) / 12, 1)
         ctc_formatted = f"Rs. {body.ctc_offered/100000:.2f} Lakhs per annum" if body.ctc_offered else "As discussed"
-        company = "AVIIN Jobs"
+        company = "Aviin Tech"
 
         if body.generate_letter:
             prompt = f"""Write a professional job offer letter for the following:

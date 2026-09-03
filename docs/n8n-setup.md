@@ -1,6 +1,6 @@
 # n8n Webhook Setup for AVIIN ATS
 
-Access n8n at: https://ats.aviinjobs.com/n8n/ or http://187.127.179.128:5678
+Access n8n at: https://ats.aviintech.com/n8n/ or http://187.127.179.128:5678
 (dashboard basic auth: see docker-compose.yml `WAHA_API_KEY`-style secrets —
 ask the team, not committed here)
 

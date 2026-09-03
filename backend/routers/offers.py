@@ -330,7 +330,7 @@ import asyncpg
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "aviintech-logo.png")
 
 
-def _build_offer_pdf(offer: dict, candidate: dict, company_name: str = "AVIIN Jobs Services") -> bytes:
+def _build_offer_pdf(offer: dict, candidate: dict, company_name: str = "Aviin Technology Business Solutions Pvt Ltd") -> bytes:
     """Generate a professional offer letter PDF using reportlab."""
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
@@ -528,7 +528,7 @@ async def download_offer_letter_pdf(offer_id: str, actor: Actor = Depends(get_ac
             app_row['candidate_id'])
         company_row = await conn.fetchrow(
             "SELECT name FROM tenants WHERE id=$1", actor.tenant_id)
-    company_name = company_row['name'] if company_row else 'AVIIN Jobs Services'
+    company_name = company_row['name'] if company_row else 'Aviin Technology Business Solutions Pvt Ltd'
     pdf_bytes = _build_offer_pdf(dict(offer), dict(candidate), company_name)
     fname = f"offer_{offer_id[:8]}_{str(candidate['full_name']).replace(' ','_')}.pdf"
     return StreamingResponse(
@@ -568,7 +568,7 @@ async def send_offer_letter(offer_id: str, actor: Actor = Depends(require_permis
     if not candidate['email']:
         raise HTTPException(400, "Candidate has no email address")
 
-    company_name = company_row['name'] if company_row else 'AVIIN Jobs Services'
+    company_name = company_row['name'] if company_row else 'Aviin Technology Business Solutions Pvt Ltd'
     pdf_bytes = _build_offer_pdf(dict(offer), dict(candidate), company_name)
 
     # Fetch SMTP settings

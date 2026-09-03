@@ -710,7 +710,7 @@ async def share_links(req_id: str, actor: Actor = Depends(get_actor)):
     # this backend (verified correct UTF-8 bytes at every stage up to the
     # HTTP response) - it happens on WhatsApp's own infrastructure during
     # the redirect, outside anything fixable here. Plain text is reliable.
-    wa_msg  = f"*{title}*\nLocation: {loc} | {req['employment_type']}\nSkills: {', '.join(skills[:4])}\nApply: {job_url}\n\n_AVIIN Jobs - AI Staffing_"
+    wa_msg  = f"*{title}*\nLocation: {loc} | {req['employment_type']}\nSkills: {', '.join(skills[:4])}\nApply: {job_url}\n\n_Aviin Tech - AI Staffing_"
     share = build_share_links(job_url, title, desc, loc, skills, wa_msg)
     return {
         "job_url": job_url,

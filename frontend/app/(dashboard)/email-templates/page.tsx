@@ -68,7 +68,7 @@ export default function EmailTemplatesPage() {
   async function runPreview(t: Tmpl) {
     const sample: Record<string, string> = {
       candidate_name: 'Ravi Kumar', role: 'Senior Backend Developer', client_name: 'Acme Corp',
-      company: 'AVIIN Jobs Services', recruiter_name: 'Neha Joshi', recruiter_phone: '+91-98765-43210',
+      company: 'Aviin Tech', recruiter_name: 'Neha Joshi', recruiter_phone: '+91-98765-43210',
       ctc: '12,00,000', date: '15 Aug 2026', time: '03:30 PM', mode: 'Video', meeting_link: 'https://meet.google.com/abc-defg',
       interviewer_name: 'Amit Shah', joining_date: '01 Sep 2026', location: 'Bangalore',
     };
