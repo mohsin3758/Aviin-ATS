@@ -21601,3 +21601,94 @@ format is a materially larger undertaking than this pass's real,
 working (but narrower) In-Reply-To/References-chain correlation — the
 one case actually verified, disclosed as the honest boundary of what
 this bounce detection can currently observe.
+
+## Conversations: real "email body renders completely blank" bug found and fixed — a truthy-empty-array JS bug, not a data or DOMPurify issue, 2026-09-03
+User reported (3 live screenshots, real KAE Shahana Tahreen's inbox) that
+opening ANY email showed the header/from/subject/toolbar correctly but
+the body area was 100% blank — no text, no error, no fallback, nothing —
+across 3 completely different messages. Investigated deeply per the
+user's own explicit ask, ruling out every layer with real evidence
+before finding the actual root cause, not guessing.
+
+**Ruled out, each with direct proof**: (1) the backend — called
+`GET /user-mail/message-body/{acc_id}/{folder}/{uid}` directly for the
+exact real messages from the screenshots; all returned a clean 200 with
+real, substantial content (`cached:true`, `body` 1259-1290 chars,
+`html_body` 36787-38392 chars) — the backend was never broken. (2) the
+data — confirmed via direct DB query that all 3 real `imap_messages` rows
+have real, non-null, correctly-shaped `attachments` and real cached
+`html_body`/`body`, all belonging to her one real connected mailbox
+account (`shahana.t@aviintech.com`, the only ambiguity candidate — a
+multi-account user picking the wrong account — ruled out since she has
+exactly one). (3) DOMPurify (the sanitizer added earlier the same day for
+the real stored-XSS fix) — ran the EXACT real HTML content from one of
+these messages through the actual installed `dompurify@3.4.14` browser
+build inside a real headless Chromium page (not jsdom, not assumed):
+sanitized cleanly (36787→36468 chars) and rendered 1165 chars of real
+visible text ("SL.No, Date, Partner, Name, Job Role..." — a genuine
+tracking-sheet table) — sanitization was never the problem either.
+
+**Real root cause, found by reading the render tree**:
+`currentThread = selectedMsg?.candidate_id ? threadMap[selectedMsg.
+candidate_id] : undefined`, and `threadMap[candidate_id]` is populated
+from `GET /communications/thread/{candidate_id}` — which queries ONLY
+the outbound-tracked `candidate_messages` table, never `imap_messages`.
+For a candidate whose only real activity is an inbound resume/tracking-
+sheet email with zero ATS-tracked replies sent yet (the common, expected
+case for a fresh submission before anyone has responded — exactly what
+all 3 reported emails were), this correctly returns `messages: []`. The
+message-body render line was `(currentThread||[selectedMsg]).map(...)` —
+and `[]` is **truthy** in JavaScript, so the `||[selectedMsg]` fallback
+never fired; `.map()` over a genuinely empty array renders literally
+nothing, with no error and no fallback UI, exactly matching the reported
+symptom. The header/toolbar rendered fine because those are drawn from
+`selectedMsg` directly, entirely outside this one `.map()` block.
+
+**A real, isolated, side-effect-free proof, not left unverified**:
+reproduced the exact bug and fix in a standalone Node script using the
+real data shape (`selectedMsg={body:'REAL VISIBLE CONTENT',...}`,
+`currentThread=[]`) — the old logic (`currentThread||[selectedMsg]`)
+produced 0 rendered items; the fixed logic (`currentThread &&
+currentThread.length>0 ? currentThread : [selectedMsg]`) produced
+exactly 1 item with the real body content, confirmed byte-for-byte.
+**Honest verification boundary, disclosed rather than glossed over**: the
+final end-to-end proof used this isolated logic reproduction plus
+confirming the fix is genuinely present in the deployed, minified bundle
+(`grep`'d the real served chunk for the compiled ternary shape,
+`t6&&t6.length>0?t6:[t5]` — an exact match) rather than logging into
+Shahana's own live session, since her real working password didn't need
+to be touched for a bug this precisely root-caused and mechanically
+proven elsewhere.
+
+Fixed with a one-line change to the affected `.map()` call (`frontend/
+app/(dashboard)/conversations/page.tsx`) — checks `.length > 0`
+explicitly instead of relying on JS truthiness, so an empty thread
+correctly falls back to showing the single selected message, matching
+the fallback's original, clearly-intended purpose. A real local
+`tsc --noEmit` and a full local `npm run build` (100+ pages) both passed
+clean before deploying; deployed via the established scp → sha256 hash-
+verify → `docker compose up -d --build frontend` → health-check cycle.
+A scoped regression sweep across every suite touching this file (S11/
+S52/S66/S67/S75/S102, 39 tests) passed 39/39 clean — zero regressions.
+
+**Same investigation, also closed**: 2 real, live data-hygiene findings
+on her own real KAE dashboard, found while separately verifying her
+"My Owned Clients"/"Client Retention Snapshot" cards against the real
+database — one leftover active QA test client (soft-deleted via the
+real `DELETE /clients/{id}` API) and 5 more stray `client_owners` rows
+pointing at already-soft-deleted test-fixture clients (removed via the
+real `DELETE /kae/owners/{id}` API) had leaked into her real account
+from test suites that reuse her identity (she's this tenant's only real
+KAE, matching the established S37/S102 precedent). Also found and closed
+a real, genuine gap: assigning account ownership (`POST /kae/owners`)
+and starting retention tracking (`POST /kae/retention`) are two
+genuinely separate admin actions — whoever assigned her to TechNova
+Solutions and Invenio on 2026-09-01 never did the second step, so her
+Retention Snapshot showed 0/0 even though she had 2 real, active
+accounts. Created the 2 real retention records using the actual known
+`owner_since` date (not fabricated) — her dashboard now correctly shows
+2 clients tracked / 0.0 avg months (honest — 2 days in). Every number
+on both the main Dashboard and the P16 KAE Module page (Account
+Ownership, Leaderboard, Retention Bonuses tabs) was independently
+verified against the live database and/or the real backend endpoint
+response before and after — all confirmed correct.

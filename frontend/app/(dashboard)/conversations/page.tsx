@@ -1921,7 +1921,20 @@ export default function MailboxPage() {
 
             {/* Message body */}
             <div style={{flex:1,overflowY:'auto',padding:'20px 24px',background:'#f8fafc',minHeight:0}}>
-              {(currentThread||[selectedMsg]).map((m:any,i:number)=>{
+              {/* Real, previously-invisible bug (2026-09-03): `currentThread`
+                  comes from GET /communications/thread/{candidate_id}, which
+                  only ever queries the OUTBOUND-tracked candidate_messages
+                  table — a candidate whose only real activity is an inbound
+                  IMAP email with zero ATS-tracked replies yet (the common,
+                  expected case for a fresh resume submission before anyone
+                  has responded) correctly gets back messages:[], and `[]` is
+                  truthy in JS, so `currentThread||[selectedMsg]` NEVER fell
+                  back to the single selected message — .map() over an empty
+                  array renders nothing at all, with no error, no fallback,
+                  no spinner: exactly the "header/toolbar render, body area is
+                  completely blank" symptom this was reported as. Fixed by
+                  checking .length explicitly instead of relying on falsy. */}
+              {(currentThread && currentThread.length > 0 ? currentThread : [selectedMsg]).map((m:any,i:number)=>{
                 const displayBody = (m.id===selectedMsg?.id && loadedEmailBody) ? loadedEmailBody : (m.body || '');                const isHtml2 = displayBody.includes('<') && displayBody.includes('>');
                 const isHtml = displayBody.includes('<')&&displayBody.includes('>');
                 return (
