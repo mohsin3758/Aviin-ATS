@@ -118,6 +118,7 @@ FEATURE_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
     ]),
     ("communication", "Communication", [
         ("email_communication", "Email Communication"),
+        ("email_reports", "Email Reports & Analytics"),
         ("whatsapp_bot", "WhatsApp Bot"),
         ("whatsapp_stage_notifications", "WhatsApp Stage Notifications"),
         ("whatsapp_setup", "WhatsApp Setup"),

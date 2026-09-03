@@ -76,6 +76,7 @@ from routers import assignment_dashboard
 from routers import personal_links
 from routers import rediscovery
 from routers import user_whatsapp
+from routers import email_reports
 
 # GAP features (1-10) — job-distribution and bgv-api were retired (see
 # gap_features.py module docstring): both duplicated real functionality
@@ -356,6 +357,7 @@ app.include_router(personal_links.job_router)
 app.include_router(personal_links.public_job_router)
 app.include_router(rediscovery.router)
 app.include_router(user_whatsapp.router)
+app.include_router(email_reports.router)
 
 
 @app.get("/health")

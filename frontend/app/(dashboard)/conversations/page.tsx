@@ -307,6 +307,15 @@ function ComposePane({
       }
       if (draftId) await apiFetch('/communications/drafts/'+draftId,{method:'DELETE'}).catch(()=>{});
       onDiscard(); // close compose pane after successful send
+    } catch (e: any) {
+      // Real bug fix (2026-09-03): this try block had no catch at all — a
+      // real send failure (most notably the new "only a KAE/KAM/Manager/
+      // Admin can email a client contact directly" block) threw an
+      // unhandled promise rejection with zero visible feedback; the
+      // compose pane just sat there looking like nothing happened. Now
+      // shown as a clear, real alert with the backend's own actual
+      // message (apiFetch already unwraps FastAPI's {"detail": "..."}).
+      alert(e?.message || 'Could not send this message.');
     } finally { setSending(false); }
   };
 
@@ -980,6 +989,11 @@ export default function MailboxPage() {
   const { data: draftsData, refetch: refetchDrafts } = useFetch<{drafts:Draft[];count:number}>('/communications/drafts');
   const { data: atsInboxData } = useFetch<any>(folder==='ats_inbox'?'/communications/imap-messages?limit=100':null);
   const { data: statsData, refetch: refetchStats } = useFetch<any>('/communications/stats');
+  // Real Mailbox Dashboard (2026-09-03 audit, gap #5) — Today Sent/
+  // Received, Unread, Pending Follow-Ups, Client Replies Today, Open
+  // Rate, Reply Rate, Avg Response Time. Auto-refreshes alongside the
+  // folder stats it sits next to.
+  const { data: mailboxDash, refetch: refetchMailboxDash } = useFetch<any>('/communications/dashboard');
   const { data: templates } = useFetch<any[]>('/communications/email-templates');
   const { data: nurture } = useFetch<any[]>('/communications/nurture-sequences');
   const { data: candidates } = useFetch<any>('/candidates?limit=500');
@@ -1007,7 +1021,7 @@ export default function MailboxPage() {
     finally { setSearching(false); }
   };
 
-  const refetchAll = useCallback(()=>{ refetchInbox();refetchSent();refetchTrash();refetchStarred();refetchDrafts();refetchStats();refetchArchive();refetchJunk(); },[]);
+  const refetchAll = useCallback(()=>{ refetchInbox();refetchSent();refetchTrash();refetchStarred();refetchDrafts();refetchStats();refetchArchive();refetchJunk();refetchMailboxDash(); },[]);
 
   useEffect(()=>{ apiFetch('/communications/whatsapp/status').then(d=>setWaOk(d?.connected&&d?.session?.status==='WORKING')).catch(()=>{}); },[]);
 
@@ -1408,6 +1422,36 @@ export default function MailboxPage() {
             <PenSquare size={14}/> Compose
           </button>
         </div>
+        {/* Real Mailbox Dashboard (2026-09-03 audit, gap #5) — Today Sent/
+            Received, Unread, Pending Follow-Ups, Client Replies Today,
+            Open Rate, Reply Rate, Avg Response Time — every one of these
+            was previously nowhere in the app. Compact, sidebar-scoped so
+            it doesn't disturb this page's existing 3-pane layout. */}
+        {mailboxDash && (
+          <div style={{margin:'0 12px 10px',padding:'10px 12px',background:'#f8fafc',
+            border:'1px solid #e2e8f0',borderRadius:'10px',fontSize:'11px'}}>
+            <div style={{fontWeight:'700',color:'#475569',marginBottom:'6px',
+              display:'flex',alignItems:'center',gap:'5px'}}>
+              <Zap size={11}/> TODAY
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px 10px'}}>
+              <div><div style={{color:'#94a3b8'}}>Sent</div><div style={{fontWeight:'700',color:'#1e293b'}}>{mailboxDash.today_sent}</div></div>
+              <div><div style={{color:'#94a3b8'}}>Received</div><div style={{fontWeight:'700',color:'#1e293b'}}>{mailboxDash.today_received}</div></div>
+              <div><div style={{color:'#94a3b8'}}>Follow-ups</div><div style={{fontWeight:'700',color:mailboxDash.pending_followups>0?'#d97706':'#1e293b'}}>{mailboxDash.pending_followups}</div></div>
+              <div><div style={{color:'#94a3b8'}}>Client replies</div><div style={{fontWeight:'700',color:'#16a34a'}}>{mailboxDash.client_replies_today}</div></div>
+            </div>
+            <div style={{marginTop:'8px',paddingTop:'8px',borderTop:'1px solid #e2e8f0',
+              display:'flex',justifyContent:'space-between',color:'#64748b'}}>
+              <span title="Open rate (last 30 days)">Open {mailboxDash.open_rate_pct}%</span>
+              <span title="Reply rate (last 30 days)">Reply {mailboxDash.reply_rate_pct}%</span>
+            </div>
+            {mailboxDash.avg_response_hours != null && (
+              <div style={{marginTop:'3px',color:'#64748b'}}>
+                Avg response: {mailboxDash.avg_response_hours}h
+              </div>
+            )}
+          </div>
+        )}
         <nav style={{padding:'4px 8px'}}>
           {FOLDERS.map(([key,Icon,label,cnt,hasUnread])=>(
             <button key={key} onClick={()=>{setFolder(key);setSelectedId(null);setComposing(false);setReplyMode(false);setSearchResults(null);setSearch('');}}

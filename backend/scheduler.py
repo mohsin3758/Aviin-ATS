@@ -1795,6 +1795,277 @@ async def rebump_stale_job_postings():
             logger.error(f"rebump_stale_job_postings failed for tenant {tid}: {e}")
 
 
+# ── Enterprise Email Management System — scheduler jobs (2026-09-03) ────────
+# Closes 4 of the real gaps found in the same-day audit: real scheduled
+# send, real "no client reply after N days" follow-up escalation, real
+# client engagement scoring on a cadence (not just on-demand), and real
+# scheduled report delivery.
+
+async def process_scheduled_email_sends():
+    """Every 5 min: sends any message_drafts row whose scheduled_send_at
+    has arrived. Reuses the exact same _log()/_send_email_bg()/_get_smtp()
+    machinery communications.py's own real /send endpoint already uses —
+    one shared send path, not a second one — and applies the identical
+    client-contact RBAC gate at send time (using the draft's own creator's
+    real role), since a scheduled draft could be addressed to anyone by
+    the time it fires, same as a live send."""
+    logger.info("scheduler: processing scheduled email sends")
+    try:
+        from routers.communications import _get_smtp, _log, _send_email_bg, _with_tracking_pixel, _wrap_links_for_tracking
+        from services import email_tracking
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    due = await conn.fetch(
+                        """SELECT d.*, u.role AS creator_role FROM message_drafts d
+                           LEFT JOIN users u ON u.id = d.created_by
+                           WHERE d.tenant_id=$1 AND d.is_scheduled=TRUE AND d.sent_at IS NULL
+                             AND d.scheduled_send_at IS NOT NULL AND d.scheduled_send_at <= now()""",
+                        tid)
+                    smtp = await _get_smtp(conn, tid)
+                    for draft in due:
+                        try:
+                            if not draft["to_email"] and not draft["candidate_id"]:
+                                await conn.execute(
+                                    "UPDATE message_drafts SET sent_at=now(), send_error=$2 WHERE id=$1",
+                                    draft["id"], "No recipient")
+                                continue
+                            to_email = draft["to_email"]
+                            cand_id = draft["candidate_id"]
+                            if cand_id and not to_email:
+                                cand = await conn.fetchrow(
+                                    "SELECT email FROM candidates WHERE id=$1 AND tenant_id=$2", cand_id, tid)
+                                to_email = cand["email"] if cand else None
+                            if not to_email:
+                                await conn.execute(
+                                    "UPDATE message_drafts SET sent_at=now(), send_error=$2 WHERE id=$1",
+                                    draft["id"], "Candidate has no email on file")
+                                continue
+                            client_id = client_contact_id = None
+                            if not cand_id:
+                                match = await email_tracking.resolve_client_contact_match(
+                                    conn, tid, to_email, draft["cc"])
+                                if match:
+                                    role = draft["creator_role"]
+                                    if role and role not in email_tracking.CLIENT_EMAIL_ROLES:
+                                        await conn.execute(
+                                            "UPDATE message_drafts SET sent_at=now(), send_error=$2 WHERE id=$1",
+                                            draft["id"],
+                                            f"Blocked at send time: only KAE/KAM/Manager/Admin can email a client contact ({match['client_name']}).")
+                                        continue
+                                    client_id = match["client_id"]
+                                    client_contact_id = match["contact_id"]
+                            if not smtp:
+                                await conn.execute(
+                                    "UPDATE message_drafts SET sent_at=now(), send_error=$2 WHERE id=$1",
+                                    draft["id"], "SMTP not configured for this tenant")
+                                continue
+                            logged = await _log(
+                                conn, tid, cand_id, draft["application_id"], "email",
+                                draft["subject"], draft["body"], "sent",
+                                str(draft["created_by"]) if draft["created_by"] else None,
+                                draft["template_id"], draft["stage"], to_email, draft["cc"],
+                                client_id, client_contact_id)
+                            tracked = _with_tracking_pixel(draft["body"], logged["tracking_token"] if logged else None)
+                            tracked = _wrap_links_for_tracking(tracked, logged["tracking_token"] if logged else None)
+                            _send_email_bg(smtp, to_email, draft["subject"] or "(no subject)", tracked,
+                                            draft["cc"], None, logged["message_id_header"] if logged else None)
+                            await conn.execute(
+                                "UPDATE message_drafts SET sent_at=now() WHERE id=$1", draft["id"])
+                        except Exception as e:
+                            logger.warning(f"Scheduled send failed for draft {draft['id']}: {e}")
+                            try:
+                                await conn.execute(
+                                    "UPDATE message_drafts SET send_error=$2 WHERE id=$1", draft["id"], str(e)[:500])
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.error(f"Scheduled send processing failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_scheduled_email_sends error: {e}")
+
+
+_FOLLOWUP_TIERS = (3, 7, 15, 30)
+
+
+async def generate_client_email_followup_reminders():
+    """Daily 06:30 IST — real "no client reply after 3/7/15/30 days" tiered
+    follow-up escalation (2026-09-03 audit, gap #6). Finds real client
+    threads whose most recent outbound message is still unreplied and old
+    enough to cross one of the 4 tiers, and creates a real recruiter_task
+    for the KAE who sent it (matching the existing _create_ai_task shape —
+    same real dashboard/escalation machinery any manually-created follow-
+    up already has). Deduped per (thread, tier) via follow_up_reason, so
+    each tier fires exactly once per thread, not once per day past it."""
+    logger.info("scheduler: generating client email follow-up reminders")
+    try:
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    threads = await conn.fetch(
+                        """SELECT et.id AS thread_id, et.client_id, et.subject, et.created_by,
+                                  cl.name AS client_name,
+                                  cm.id AS last_msg_id, cm.created_at AS last_sent_at, cm.sent_by
+                           FROM email_threads et
+                           JOIN clients cl ON cl.id = et.client_id
+                           JOIN LATERAL (
+                               SELECT * FROM candidate_messages
+                               WHERE thread_id = et.id AND direction='outbound'
+                               ORDER BY created_at DESC LIMIT 1
+                           ) cm ON true
+                           WHERE et.tenant_id=$1 AND et.thread_type='client'
+                             AND et.last_direction='outbound' AND et.reply_count = 0""",
+                        tid)
+                    for t in threads:
+                        days_pending = (datetime.now(timezone.utc) - t["last_sent_at"]).days
+                        tier = None
+                        for d in _FOLLOWUP_TIERS:
+                            if days_pending >= d:
+                                tier = d
+                        if tier is None:
+                            continue
+                        reason = f"client_no_reply_{tier}d"
+                        exists = await conn.fetchval(
+                            """SELECT 1 FROM recruiter_tasks
+                               WHERE tenant_id=$1 AND related_thread_id=$2 AND follow_up_reason=$3""",
+                            tid, t["thread_id"], reason)
+                        if exists:
+                            continue
+                        recruiter_id = t["sent_by"] or t["created_by"]
+                        if not recruiter_id:
+                            continue
+                        priority = "critical" if tier >= 15 else ("high" if tier >= 7 else "medium")
+                        await conn.execute(
+                            """INSERT INTO recruiter_tasks
+                                 (tenant_id, recruiter_id, client_id, related_thread_id, task_type,
+                                  title, description, follow_up_reason, priority, due_at, status, ai_suggested)
+                               VALUES ($1,$2,$3,$4,'general',$5,$6,$7,$8, now() + INTERVAL '1 day', 'pending', true)""",
+                            tid, recruiter_id, t["client_id"], t["thread_id"],
+                            f"Follow up: {t['client_name']} — no reply in {tier}+ days",
+                            f"\"{t['subject'] or '(no subject)'}\" was sent to {t['client_name']} "
+                            f"{days_pending} days ago with no reply yet.",
+                            reason, priority,
+                        )
+                        try:
+                            await _reminder_notify(
+                                conn, tid, recruiter_id,
+                                f"No reply from {t['client_name']} in {tier}+ days",
+                                f"\"{t['subject'] or '(no subject)'}\" is still unanswered.",
+                                "recruiter_task", str(t["thread_id"]),
+                                "critical" if tier >= 15 else "warning",
+                            )
+                        except Exception as e:
+                            logger.warning(f"Follow-up notify failed for thread {t['thread_id']}: {e}")
+            except Exception as e:
+                logger.error(f"Client follow-up generation failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"generate_client_email_followup_reminders error: {e}")
+
+
+async def compute_client_engagement_scores_weekly():
+    """Weekly, Monday 03:45 IST — real client engagement scoring
+    (High/Medium/Low/Inactive) over the trailing 30 days, per tenant. The
+    same real function is also reachable on-demand via POST
+    /email-reports/engagement/compute (admin/manager) — this is the
+    scheduled cadence so the numbers stay current without anyone having
+    to remember to click Recompute, matching client_health_scores' own
+    established on-demand + implied-recompute pattern."""
+    logger.info("scheduler: computing client email engagement scores")
+    try:
+        from services import email_tracking
+        async with db.system_conn() as sconn:
+            tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+        period_end = date.today()
+        period_start = period_end - timedelta(days=30)
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await email_tracking.compute_client_engagement_scores(conn, tid, period_start, period_end)
+            except Exception as e:
+                logger.error(f"Engagement scoring failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"compute_client_engagement_scores_weekly error: {e}")
+
+
+async def _send_one_scheduled_email_report(period_label: str):
+    """Shared body for the daily/weekly/monthly scheduled-report jobs
+    below — real numbers (from executive_dashboard's own real queries,
+    inlined here since scheduler.py can't import a FastAPI-dependency-
+    bound route function directly), emailed via phase3.send_email to
+    whichever recipients this tenant configured, with a real
+    email_report_snapshots audit row either way (delivered or failed)."""
+    from routers.phase3 import send_email
+    async with db.system_conn() as sconn:
+        tenant_ids = [str(r["id"]) for r in await sconn.fetch("SELECT id FROM tenants")]
+    period_end = date.today()
+    period_start = period_end - (
+        timedelta(days=1) if period_label == "daily" else
+        timedelta(days=7) if period_label == "weekly" else timedelta(days=30))
+    for tid in tenant_ids:
+        try:
+            async with db.tenant_conn(tid) as conn:
+                cfg = await conn.fetchrow(
+                    "SELECT * FROM email_report_schedule_config WHERE tenant_id=$1", tid)
+                enabled = cfg and cfg[f"{period_label}_enabled"] and cfg["recipient_emails"]
+                if not enabled:
+                    continue
+                stats = await conn.fetchrow("""
+                    SELECT COUNT(*) FILTER (WHERE direction='outbound') AS sent,
+                           COUNT(*) FILTER (WHERE email_open_count > 0) AS opened,
+                           COUNT(*) FILTER (WHERE replied_at IS NOT NULL) AS replied
+                    FROM candidate_messages
+                    WHERE tenant_id=$1 AND channel='email' AND is_deleted IS NOT TRUE
+                      AND created_at::date BETWEEN $2 AND $3""", tid, period_start, period_end)
+                sent = stats["sent"] or 0
+                open_rate = round((stats["opened"] or 0) / sent * 100, 1) if sent else 0.0
+                reply_rate = round((stats["replied"] or 0) / sent * 100, 1) if sent else 0.0
+                snapshot = {
+                    "emails_sent": sent, "opened": stats["opened"] or 0, "replied": stats["replied"] or 0,
+                    "open_rate_pct": open_rate, "reply_rate_pct": reply_rate,
+                }
+                body = (
+                    f"AVIIN ATS — {period_label.title()} Email Report "
+                    f"({period_start} to {period_end})\n\n"
+                    f"Emails sent: {sent}\nOpen rate: {open_rate}%\nReply rate: {reply_rate}%\n"
+                )
+                delivered = []
+                for addr in cfg["recipient_emails"]:
+                    try:
+                        await send_email(addr, f"AVIIN ATS {period_label.title()} Email Report", body)
+                        delivered.append(addr)
+                    except Exception as e:
+                        logger.warning(f"Scheduled report send failed to {addr} for tenant {tid}: {e}")
+                await conn.execute(
+                    """INSERT INTO email_report_snapshots
+                         (tenant_id, report_type, period_start, period_end, snapshot_data,
+                          delivered_to, delivery_status)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                    tid, period_label, period_start, period_end,
+                    __import__("json").dumps(snapshot), delivered,
+                    "delivered" if delivered else "failed")
+        except Exception as e:
+            logger.error(f"Scheduled {period_label} report failed for tenant {tid}: {e}")
+
+
+async def send_daily_email_report():
+    logger.info("scheduler: daily email report")
+    await _send_one_scheduled_email_report("daily")
+
+
+async def send_weekly_email_report():
+    logger.info("scheduler: weekly email report")
+    await _send_one_scheduled_email_report("weekly")
+
+
+async def send_monthly_email_report():
+    logger.info("scheduler: monthly email report")
+    await _send_one_scheduled_email_report("monthly")
+
+
 def start_scheduler():
     """Register and start all jobs.
 
@@ -1904,6 +2175,21 @@ def start_scheduler():
     # weekly KPI summary.
     scheduler.add_job(rebump_stale_job_postings, "cron", day_of_week="mon", hour=5, minute=15,
                       id="rebump_stale_job_postings", replace_existing=True)
+    # Enterprise Email Management System (2026-09-03) — real scheduled
+    # send, no-reply follow-up escalation, engagement scoring cadence,
+    # and scheduled report delivery.
+    scheduler.add_job(process_scheduled_email_sends, "interval", minutes=5,
+                      id="scheduled_email_sends", replace_existing=True)
+    scheduler.add_job(generate_client_email_followup_reminders, "cron", hour=6, minute=30,
+                      id="client_email_followups", replace_existing=True)
+    scheduler.add_job(compute_client_engagement_scores_weekly, "cron", day_of_week="mon", hour=3, minute=45,
+                      id="client_engagement_scores", replace_existing=True)
+    scheduler.add_job(send_daily_email_report, "cron", hour=7, minute=15,
+                      id="daily_email_report", replace_existing=True)
+    scheduler.add_job(send_weekly_email_report, "cron", day_of_week="mon", hour=7, minute=30,
+                      id="weekly_email_report", replace_existing=True)
+    scheduler.add_job(send_monthly_email_report, "cron", day=1, hour=7, minute=45,
+                      id="monthly_email_report", replace_existing=True)
     scheduler.start()
     logger.info("APScheduler started: retention_bank, loyalty, kae_retention, monthly_summary, pipeline_auto_move")
 

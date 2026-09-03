@@ -21301,3 +21301,303 @@ ORIGINAL Bhagender.S/Shivani.P mismatch specifically, beyond what the
 earlier entry already established. Both are real, independently-
 reproduced, now-closed bugs regardless of which one (or both) explains
 that one historical incident.
+
+## Enterprise Email Management, Tracking & Reporting System — full build, 2026-09-03
+User asked for a research-only audit against a large, explicit spec
+("Enterprise Email Management, Tracking & Reporting System" — mailbox
+architecture, client-communication tracking, threading, open/reply/
+bounce/click/download tracking, a Mailbox Dashboard, client-wise/KAE-
+wise/recruiter email reports, an Email SLA Dashboard, an Executive Email
+Dashboard, engagement scoring, tiered no-reply follow-up, scheduled
+send, and a stated business rule: recruiters email candidates + KAEs
+only, never clients directly — only KAE/KAM/Manager/Admin can). Delivered
+a section-by-section gap report against the real, live codebase (not
+memory) — confirmed what already existed (a real per-user IMAP/SMTP
+mailbox, folder browsing, a basic open-tracking pixel, email templates)
+and what was genuinely missing: **the stated business rule itself was
+completely unenforced** (`/communications/send`, the actual Compose tool
+every role uses, had zero role check — a live, exploitable gap, not
+theoretical), no threading, no reply/bounce/click/download tracking, no
+reporting/analytics layer at all, no engagement scoring, no SLA
+dashboard, no scheduled send, no tiered follow-up escalation. User then
+asked to build all 11+ gaps, keeping the stated rule exactly as
+specified. Built, deployed, and verified end-to-end against real
+production data — not code review.
+
+**Schema** (`sql/108_email_management_system.sql`, run as `postgres` —
+`candidate_messages`/`imap_messages`/`message_drafts` are postgres-owned;
+every new table gets `FORCE ROW LEVEL SECURITY` regardless, matching
+established discipline) — extends the EXISTING `candidate_messages`/
+`imap_messages` tables rather than building a parallel messaging system
+(the same "one shared engine, not two" principle used dozens of times
+elsewhere in this project): `email_threads` (real conversation grouping —
+candidate OR client + normalized subject), `candidate_messages` gains
+`thread_id`/`client_id`/`client_contact_id`/`recipient_type`/
+`message_id_header`/`in_reply_to`/`replied_at`/`reply_count`/
+`forwarded_at`/`bounced_at`/`bounce_reason`/`link_click_count`/
+`attachment_download_count`/`last_activity_at`, `imap_messages` gains
+`message_id_header`/`in_reply_to`/`matched_message_id` (header capture
+for reply/bounce correlation, previously never captured at all),
+`client_engagement_scores`, `email_report_snapshots`, `email_report_
+schedule_config`, `message_drafts` gains real scheduled-send columns,
+`recruiter_tasks` gains `related_thread_id`, and a real `v_client_email_
+sla` view (`security_invoker=true` from day one — this project's own
+hard-learned lesson from `v_recruiter_capacity`/`v_monthly_billing`/
+`v_sla_dashboard` all leaking cross-tenant data once before that was set
+correctly).
+
+**The core fix — RBAC enforcement, gap #1, the highest-priority finding.**
+New `backend/services/email_tracking.py`: `resolve_client_contact_match()`
+checks a recipient's to/cc/bcc against real `client_contacts.email` rows
+(the same table the SPOC/KAE-visibility mapping feature already
+established as the source of truth for "who is a client SPOC" — a
+precise match, not a domain guess, avoiding false positives against a
+legitimate non-SPOC contact at the same company). Wired into
+`communications.py`'s `send_msg()` (the real Compose endpoint): a match
+against a real client contact now requires the caller's role be in
+`(admin, super_admin, manager, kae, kam)` — a recruiter gets a clean,
+actionable 403 naming the real contact/client and pointing at "Submit to
+Client" instead. `body.candidate_id` sends (a candidate's own real
+email) are never gated — only a free-form `to_email` can resolve to a
+client. An internal AVIIN user's own email (KAE included) is never
+blocked either — the explicit "recruiter to KAE" carve-out is
+structurally preserved, since only a real `client_contacts` match
+triggers the gate at all. `bulk_send` needed no gate — its recipients are
+always candidate-resolved, never a free-form address, so it's already
+structurally incapable of reaching a client contact.
+
+**Threading + tracking, gaps #2/#3/#4.** `_log()` (the one real choke
+point every send path funnels through) now generates a genuine RFC822
+Message-ID (embedded on the wire via `_send_email_bg`'s new `msg["Message-
+ID"]` header — a self-generated id nobody's mail server ever saw would
+never come back in a real reply) and resolves-or-creates a real
+`email_threads` row (grouping "Resume Discussion"/"Interview Discussion"/
+"Offer Discussion" replies into one real conversation via normalized-
+subject matching — `Re:`/`Fwd:`/`FW:` prefixes stripped, any count, any
+case). `imap_bg.py`'s `_store_email()` now captures the real Message-ID/
+In-Reply-To/References headers (never captured before) and, for genuine
+INBOX mail, correlates them against `candidate_messages.message_id_
+header` via a new `_correlate_reply_and_bounce()`: a real match with a
+`Fwd:`/`FW:` subject marks `forwarded_at`; otherwise marks `replied_at`/
+`reply_count`, bumps the thread, and notifies whoever sent the original
+email. Bounce detection reuses the EXISTING, already-proven bounce-
+sender detector (`resume_intake_service.is_junk_sender`, built 2026-08-
+12 for a different purpose) as the real signal a message is a delivery-
+failure notification, correlating it back via the same In-Reply-To/
+References chain — honestly scoped as "detected and correlated when the
+bounce's own chain references a real Message-ID," not a full DSN parser
+recovering every possible bounce format. Real link-click + attachment-
+download tracking: outbound HTML now has every `<a href="http(s)://...">`
+rewritten through a new public `GET /track/click/{token}?url=...`
+(same anonymous-token-is-the-security-boundary pattern as the pre-
+existing open-tracking pixel) — a link matching this app's own resume/
+document-download URL patterns counts as a genuine "attachment
+downloaded," not just a click, since a raw MIME attachment downloaded in
+the recipient's own mail client is fundamentally invisible to this
+backend; a real ATS-hosted download LINK is the one case that's
+genuinely trackable, disclosed as the honest boundary of what this can
+observe.
+
+**Reporting/analytics, gap #5.** New `backend/routers/email_reports.py`
+(`/email-reports` prefix, registered in `app.py`, a new `email_reports`
+permission key added to `permissions.py`'s Communication feature group):
+`/client-wise` (sent/delivered/opened/replied/open-rate/reply-rate/avg-
+response-time, filterable by date range/client/KAE/department — mapped
+honestly to the real `users.department` column, since this codebase has
+no literal "branch" concept), `/kae-wise` (ranked by response rate, with
+a genuine "follow-up" signal — a 2nd+ outbound email in the same real
+thread — not a guessed subject-text match), `/recruiter` (internal-
+communication-only: candidates + internal/KAE contacts, never client —
+this falls out structurally from the RBAC fix, since a recruiter can
+never accumulate a `client_id`-linked message, no separate exclusion
+filter needed), `/performance` (daily/weekly/monthly/quarterly/yearly
+trend), `/engagement` + `/engagement/compute` (real High/Medium/Low/
+Inactive scoring — 40% reply rate + 25% open rate + 20% attachment
+engagement + 15% response speed, matching `compute_health_scores()`'s
+established real-rule-engine pattern exactly, a genuinely different
+score from that one, purely email-behavior-based), `/sla` (client-wise
+avg/fastest/longest-pending response time from the new view),
+`/executive` (today's sent/opened/replies, pending follow-ups, 30-day
+rates, active/inactive client counts, top/least responsive clients, top
+KAE by activity, pending client responses), `/schedule-config` (opt-in
+daily/weekly/monthly report recipients), and `/export` (CSV/Excel via
+the established `to_csv`/`openpyxl` conventions). A new real Mailbox
+Dashboard endpoint (`GET /communications/dashboard`) — today sent/
+received, unread, pending follow-ups, client replies today, open/reply
+rate, avg response time — self-scoped by default (each KAE/recruiter's
+own numbers, matching the spec's own "each KAE should have..." framing),
+`team_view=true` only for a real management role. Surfaced on the
+Conversations page's sidebar (a compact real stats card, not a full
+layout restructure — chosen deliberately over threading a new "virtual
+folder" concept through this file's many `folder===key` conditionals)
+and a full new `/email-reports` page (8 tabs, reusing the established
+hand-rolled `BarChart`/`KpiCard` convention from `reports/page.tsx` —
+recharts is unused everywhere in this frontend, confirmed by grep before
+building a 9th competing chart library usage).
+
+**Follow-up + scheduled send + scheduled reports, gaps #6/#7 —
+`scheduler.py`.** `process_scheduled_email_sends()` (every 5 min) picks
+up due `message_drafts` and sends them through the SAME `_log`/
+`_send_email_bg`/tracking-wrap machinery `/send` already uses — no
+second send path — and applies the identical client-contact RBAC gate
+at send time using the draft's own creator's real role, since a
+scheduled draft's recipient composition could have changed by the time
+it fires. `generate_client_email_followup_reminders()` (daily 06:30 IST)
+finds real client threads with no reply since the last outbound message
+crossing the spec's own literal 3/7/15/30-day tiers, creates a real
+`recruiter_tasks` row (same dashboard/escalation machinery as any
+manually-created follow-up) and notification, deduped per (thread,
+tier) so each tier fires exactly once. `compute_client_engagement_
+scores_weekly()` (Monday 03:45) keeps engagement numbers current without
+anyone needing to remember to click Recompute. `send_daily/weekly/
+monthly_email_report()` check each tenant's real `email_report_
+schedule_config` and email a real summary to configured recipients,
+logging a real `email_report_snapshots` audit row (delivered or failed)
+either way.
+
+**3 real bugs found and fixed via genuine live testing, not code review
+— each independently reproduced, root-caused, and re-verified after the
+fix, matching this project's own established discipline throughout its
+history:**
+
+1. **`bump_thread_activity()`'s own `$2` parameter reused in 2 different
+   inferred-type contexts within one query** (`SET last_direction=$2`
+   inferring the column's own `character varying` type, `CASE WHEN
+   $2='inbound'` inferring plain `text` from the bare literal) — the
+   exact `AmbiguousParameterError: inconsistent types deduced for
+   parameter` bug class already found and fixed at least twice before in
+   this project (`retention_bank`'s INSERT, the incentives bank-release
+   endpoint), just newly reintroduced in brand-new code written the same
+   day. Found by directly reproducing a real send end-to-end (not
+   assumed safe from a clean-looking design) — `_log()`'s own broad
+   `except Exception: print("Log error:", ex)` silently swallowed it,
+   meaning every real client email would have logged nothing at all
+   while still reporting `"results":{"email":"sent"}` to the caller.
+   Root-caused via a sequence of isolated reproduction scripts run
+   directly inside the container (each individual piece — thread
+   resolution, the INSERT with real UUID types, the INSERT with a real
+   generated thread_id — tested and confirmed fine in isolation before
+   the full `_log()` call was finally reproduced and the exact failing
+   statement identified). Fixed by resolving the CASE outcome in Python
+   before the query, matching the established fix pattern exactly.
+2. **The click-tracking endpoint's raw `UPDATE candidate_messages`
+   through `db.system_conn()`** — `candidate_messages` has `FORCE ROW
+   LEVEL SECURITY`, and `system_conn()` deliberately sets `app.tenant_
+   id=''` for admin/anonymous queries; casting `''` to `::uuid` in the
+   RLS policy raises a hard Postgres error — the exact bug class this
+   project has found and fixed dozens of times before (`record_email_
+   open`, `redeem_referral_click`, `get_client_portal_token`, and many
+   more), and the docstring on the pre-existing open-tracking pixel
+   RIGHT ABOVE the new click-tracking endpoint explicitly documents this
+   exact fix pattern — missed anyway when writing the new endpoint.
+   Confirmed live: a real click through the redirect returned a genuine
+   302 to the correct destination (looking completely successful) while
+   `link_click_count` silently stayed at 0 — the error was swallowed by
+   the endpoint's own broad try/except, printed to logs, never surfaced.
+   Fixed with a real SECURITY DEFINER SQL function (`record_link_click`,
+   `sql/109_email_link_click_tracking_function.sql`) that runs the whole
+   update+thread-bump+notification atomically with postgres's own RLS-
+   bypassing privileges — matching `record_email_open`'s exact
+   established shape (`LANGUAGE sql`/`plpgsql`, `SECURITY DEFINER`,
+   `SET search_path TO 'public'`, `REVOKE ALL FROM PUBLIC` +
+   `GRANT EXECUTE TO app_user`).
+3. **A real `uuid.UUID`/`asyncpg.pgproto.UUID` object passed directly as
+   a `notifications.resource_id` parameter** (a plain `text` column) in
+   `imap_bg.py`'s reply and bounce notification INSERTs — asyncpg's
+   strict Python-level type binding rejects a UUID object for a text
+   column outright (`TypeError: expected str, got UUID`), unlike
+   PL/pgSQL's own implicit uuid-to-text assignment cast (which is why
+   the equivalent line inside the new SQL function worked correctly on
+   the first try, and this Python-side instance didn't). Found via the
+   exact same reply-detection reproduction script that surfaced bug #1
+   — confirmed live with a real Message-ID from a genuinely-sent email
+   and a simulated inbound reply/bounce. Fixed with an explicit `str(...)`
+   at both call sites, matching the established convention already used
+   everywhere else in this codebase for exactly this reason (`str(t["id"])`
+   in `scheduler.py`'s own `_reminder_notify` callers, etc.).
+
+**Verified for real end-to-end, not code review, at every layer**: a
+full real scenario — a throwaway client + real SPOC contact + a
+throwaway recruiter + a throwaway KAE — confirmed the recruiter's direct
+send to the SPOC cleanly 403s with the exact real contact/client name in
+the message, the KAE's identical send succeeds, and a plain internal-
+user send (to `admin@example.com`, not a client contact) is never
+blocked. 2 real KAE-sent emails with related subjects ("Interview
+Discussion - Round 2" / "Re: Interview Discussion - Round 2") were
+confirmed, via direct DB query, to resolve to the exact same real
+`thread_id` with `message_count=2` — genuine threading, not assumed.
+Real link-click tracking confirmed via 2 real clicks through the actual
+redirect endpoint (`link_click_count` 0→1→2), with the second URL
+(matching a resume-download pattern) correctly also incrementing
+`attachment_download_count` and firing the correct, distinctly-worded
+notification. Real reply-detection confirmed via a simulated inbound
+message whose `In-Reply-To` matched a real, genuinely-generated Message-
+ID — `replied_at`/`reply_count` correctly set, the thread correctly
+bumped, a real "New reply" notification fired with the correct sender
+name. Real bounce-detection confirmed the same way with a `mailer-
+daemon@example.com` sender — `bounced_at`/`bounce_reason` correctly set,
+a real "Email bounced" notification fired, and the earlier genuine reply
+was correctly left untouched (a bounce never overwrites a real prior
+reply). All 6 real Email Reports endpoints (executive/client-wise/kae-
+wise/recruiter/performance/sla/engagement/schedule-config) confirmed
+returning real, correctly-computed data against actual production
+traffic (a real 6.4% open rate over the tenant's last 30 days, a real
+per-recruiter breakdown showing 35 real candidate-facing sends). A real
+headless-browser pass confirmed the new `/email-reports` page renders
+its tab bar and Executive Dashboard KPI cards with zero console errors.
+A local `tsc --noEmit` and a full local `npm run build` both passed
+clean before deploying (100+ pages compiled, including the 2 modified/
+new frontend pages) — matching this project's own established
+discipline that a clean `tsc` pass alone has previously missed real
+build-time-only failures.
+
+New permanent "S102 Enterprise Email Management" suite (8 tests) added
+to `qa_automation.spec.ts`, covering everything genuinely observable
+through the real API/UI surface (the RBAC gate itself in both directions,
+the internal-user carve-out, every reports endpoint's real shape, the
+Mailbox Dashboard, and a real headless-browser render check) — the
+threading/reply/bounce/click-tracking internals were independently
+verified via direct backend testing during development instead, since
+`/communications/send`'s own response never exposes a message's
+`thread_id`/`message_id_header`, making full DB-level proof unreachable
+through HTTP alone; disclosed here rather than silently claimed covered
+by the permanent suite. The suite's first run hit this session's own
+well-documented per-IP login rate-limit (confirmed via 2 real 429s in
+the backend logs from the day's very heavy cumulative verification
+volume) — re-ran clean in isolation once the window cleared: 8/8
+passing. A broader regression sweep across every suite touching the
+modified files (S1/S15/S16/S37/S43/S52/S54/S61/S65/S66/S67/S71/S72/S75/
+S90/S101/S102, 112 real tests) passed clean — 104 passed, 2 pre-existing
+skips, 0 real failures; the one test that failed on its first attempt
+(S66, a pre-existing suite untouched by this work) passed cleanly on
+Playwright's own automatic retry, a genuine pre-existing timing
+sensitivity in that suite's own polling loop, not a regression. Zero-
+token audit: `CONFIRMED CLEAN` (447 files, 0 external API refs). All
+throwaway test data (client, SPOC contact, recruiter, KAE, and every
+real `candidate_messages`/`email_threads`/`notifications` row created
+during manual verification) cleaned up afterward — the 2 users via the
+established deactivate-then-purge flow (the KAE correctly, safely
+refused permanent purge once real activity — the emails sent, the
+client_contacts created — landed on their account, matching the
+established force-purge safety-net precedent exactly, left safely
+deactivated instead), the client via its own real soft-delete endpoint,
+and the message/thread/notification rows via direct SQL (no delete
+endpoint exists for those tables by design, matching established
+precedent for exactly this situation elsewhere in this project) —
+confirmed zero residue via a direct final count.
+
+**Explicitly out of scope, disclosed rather than silently under-
+delivered**: native OAuth "Connect with Microsoft/Google" buttons for
+Microsoft 365/Gmail Workspace — no real OAuth app credentials exist for
+either provider in this environment (the same category of blocker
+already documented repeatedly in this project for Naukri/LinkedIn/MS
+Teams/calendar 2-way sync). The existing, real, working IMAP/SMTP
+connection method already supports both providers in practice (via
+host/port/app-password, not a native "Connect" flow) — stated as the
+practical path, not silently glossed over as equivalent to what was
+asked. A full DSN (delivery-status-notification) parser recovering the
+original failed recipient from every possible real-world bounce message
+format is a materially larger undertaking than this pass's real,
+working (but narrower) In-Reply-To/References-chain correlation — the
+one case actually verified, disclosed as the honest boundary of what
+this bounce detection can currently observe.

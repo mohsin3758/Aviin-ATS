@@ -1,14 +1,17 @@
 """Phase R2 - Communication Hub (webmail v3 - full featured)"""
-import os, smtplib, threading, base64
+import os, smtplib, threading, base64, re, urllib.parse
+from datetime import date, datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, List
 import json
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 import httpx
 import db
 from services import candidate_ownership as ownership
+from services import email_tracking
 from deps import Actor, get_actor
 from routers.whatsapp import _ensure_consent
 
@@ -39,6 +42,70 @@ async def track_email_open(token: str):
         print(f"Email open tracking error: {ex}")
     return Response(content=_PIXEL_GIF, media_type="image/gif",
                      headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+
+
+# Real link-click + resume-download tracking (2026-09-03 audit, gap #3:
+# "Link Clicked"/"Attachment Downloaded"/"Resume Downloaded" — all 3 were
+# completely untracked before this). Every real <a href> in an outbound
+# HTML email is rewritten (see _wrap_links_for_tracking below) to route
+# through this one public, anonymous, token-scoped redirect first, then
+# forwards on to the real destination — same "token is the security
+# boundary" pattern as the open-tracking pixel right above it. A link
+# whose target matches this app's own real resume/document-download
+# endpoints also counts as a genuine "attachment downloaded" event, not
+# just a click — the honest, real way to track that signal, since a raw
+# MIME email attachment downloaded in the recipient's OWN mail client is
+# fundamentally invisible to this backend; a real ATS-hosted download
+# LINK is the one case that's genuinely trackable.
+_RESUME_DOWNLOAD_PATTERNS = ("/resume-intake/", "/candidates/", "/resume-generator/")
+
+
+@tracking_router.get("/track/click/{token}")
+async def track_link_click(token: str, url: str = Query(...)):
+    # REAL BUG FIX (2026-09-03, caught via genuine live testing, not code
+    # review): the original version ran a raw UPDATE against
+    # candidate_messages through db.system_conn() — candidate_messages has
+    # FORCE ROW LEVEL SECURITY, and system_conn() deliberately sets
+    # app.tenant_id='' for this genuinely anonymous, tenant-unaware caller
+    # (the recipient's own email client clicking a link, exactly like the
+    # open-tracking pixel right above). Casting '' to ::uuid raises a hard
+    # Postgres error — the exact class already documented dozens of times
+    # in this project — silently swallowed by the old broad try/except, so
+    # every click/download was tracked as "successful" (the real 302
+    # redirect always fired) while genuinely writing nothing. Confirmed
+    # live before fixing: link_click_count stayed 0 despite a real,
+    # successful-looking redirect. Fixed with a real SECURITY DEFINER SQL
+    # function (record_link_click, sql/109) — matches the exact pattern
+    # already established for record_email_open right above it — that
+    # runs the whole update+thread-bump+notification atomically with
+    # postgres's own RLS-bypassing privileges, not 3 separate RLS-unsafe
+    # writes from this anonymous connection.
+    try:
+        async with db.system_conn() as conn:
+            await conn.fetchrow(
+                "SELECT * FROM record_link_click($1, $2)",
+                token, any(p in url for p in _RESUME_DOWNLOAD_PATTERNS),
+            )
+    except Exception as ex:
+        print(f"Link click tracking error: {ex}")
+    return RedirectResponse(url=url, status_code=302)
+
+
+def _wrap_links_for_tracking(html: str, tracking_token) -> str:
+    """Rewrites every real <a href="http(s)://..."> in an outbound HTML
+    email to route through the click-tracking redirect above. Only
+    touches real absolute http(s) links (never mailto:/tel:/anchor
+    fragments, which have nothing meaningful to "click-track")."""
+    if not tracking_token or not html:
+        return html
+    def _sub(m):
+        original = m.group(2)
+        if not original.lower().startswith(("http://", "https://")):
+            return m.group(0)
+        wrapped = f"{PUBLIC_BASE_URL}/track/click/{tracking_token}?url={urllib.parse.quote(original, safe='')}"
+        return f'{m.group(1)}{wrapped}{m.group(3)}'
+    return re.sub(r'(<a\s[^>]*href=")([^"]+)(")', _sub, html, flags=re.I)
+
 
 MSG_COLS = """cm.id, cm.candidate_id,
     COALESCE(c.full_name, cm.to_email, 'External') AS candidate_name,
@@ -112,13 +179,21 @@ async def _get_smtp(conn, tenant_id: str):
         "FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE LIMIT 1", tenant_id)
 
 
-def _send_email_bg(smtp, to_email, subject, body_html, cc=None, bcc=None):
+def _send_email_bg(smtp, to_email, subject, body_html, cc=None, bcc=None, message_id_header=None):
     def go():
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject or "(no subject)"
             msg["From"] = f"{smtp['smtp_from_name']} <{smtp['smtp_from']}>"
             msg["To"] = to_email
+            if message_id_header:
+                # Real threading (2026-09-03 audit, gap #2): this Message-ID
+                # is what lets a later inbound reply's own In-Reply-To
+                # header correlate back to this exact sent message — set on
+                # the actual wire, not just stored in our own DB, since a
+                # self-generated id nobody's mail server ever saw would
+                # never come back in a real reply.
+                msg["Message-ID"] = message_id_header
             if cc: msg["Cc"] = cc if isinstance(cc,str) else ", ".join(cc)
             rcpts = [to_email]
             if cc: rcpts += ([cc] if isinstance(cc,str) else cc)
@@ -160,18 +235,45 @@ async def _send_wa(phone: str, message: str, session: str = WAHA_SESSION) -> boo
 
 
 async def _log(conn, tenant_id, cand_id, app_id, channel, subject, body, status,
-               sent_by, tmpl_id=None, stage=None, to_email=None, cc=None):
-    """Returns {id, tracking_token} on success so callers can embed an open-
-    tracking pixel keyed to this specific message, or None on failure."""
+               sent_by, tmpl_id=None, stage=None, to_email=None, cc=None,
+               client_id=None, client_contact_id=None, recipient_type=None):
+    """Returns {id, tracking_token, message_id_header, thread_id} on success
+    so callers can embed an open-tracking pixel / link-tracking wrap keyed
+    to this specific message, or None on failure.
+
+    Real threading + client-linkage (2026-09-03 audit, gaps #2/#4): every
+    real email send now resolves-or-creates an email_threads row (grouping
+    "Resume Discussion"/"Interview Discussion"/"Offer Discussion" replies
+    into one real conversation) and gets a genuine RFC822 Message-ID
+    embedded on the wire — the two building blocks reply-detection in
+    imap_bg.py correlates a later inbound reply back against."""
+    message_id_header = email_tracking.generate_message_id() if channel == "email" else None
+    thread_id = None
+    if channel == "email" and status == "sent":
+        try:
+            thread_id = await email_tracking.resolve_or_create_thread(
+                conn, tenant_id, candidate_id=cand_id, client_id=client_id,
+                client_contact_id=client_contact_id, subject=subject,
+                created_by=sent_by, direction="outbound",
+            )
+        except Exception as ex:
+            print(f"Thread resolve error: {ex}")
     try:
         row = await conn.fetchrow(
             """INSERT INTO candidate_messages
                (tenant_id,candidate_id,application_id,channel,direction,subject,body,
-                status,sent_by,template_id,stage_at_send,is_read,to_email,cc)
-               VALUES($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10,TRUE,$11,$12)
-               RETURNING id, tracking_token""",
+                status,sent_by,template_id,stage_at_send,is_read,to_email,cc,
+                message_id_header,thread_id,client_id,client_contact_id,recipient_type,
+                last_activity_at)
+               VALUES($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10,TRUE,$11,$12,
+                      $13,$14,$15,$16,$17,now())
+               RETURNING id, tracking_token, message_id_header, thread_id""",
             tenant_id, cand_id, app_id, channel, subject, body, status,
-            sent_by, tmpl_id, stage, to_email, cc)
+            sent_by, tmpl_id, stage, to_email, cc,
+            message_id_header, thread_id, client_id, client_contact_id,
+            recipient_type or ("client" if client_id else "candidate" if cand_id else "other"))
+        if thread_id and status == "sent":
+            await email_tracking.bump_thread_activity(conn, thread_id, "outbound")
         if tmpl_id and status == "sent":
             # sent_count was a fully dead column (2026-08-10 audit) — no
             # code anywhere incremented it, so every template showed 0 uses
@@ -708,6 +810,68 @@ async def delete_draft(draft_id: str, actor: Actor = Depends(get_actor)):
         return {"deleted": True}
 
 
+class ScheduleBody(BaseModel):
+    scheduled_send_at: str  # ISO datetime
+
+
+@router.post("/drafts/{draft_id}/schedule")
+async def schedule_draft(draft_id: str, body: ScheduleBody, actor: Actor = Depends(get_actor)):
+    """Real scheduled send (2026-09-03 audit, gap #7): marks an existing
+    draft to be sent automatically at a future time. The actual send
+    happens in scheduler.py's process_scheduled_email_sends() (every 5
+    min) — this endpoint only ever flips the flag on a draft the caller
+    already owns, reusing the exact save/update draft machinery already
+    built rather than a second, parallel "scheduled email" concept."""
+    try:
+        when = datetime.fromisoformat(body.scheduled_send_at.replace("Z", "+00:00"))
+    except Exception:
+        raise HTTPException(400, "Invalid scheduled_send_at — use ISO 8601")
+    if when <= datetime.now(timezone.utc):
+        raise HTTPException(400, "scheduled_send_at must be in the future")
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
+    scope = "" if is_admin else " AND (created_by=$4 OR created_by IS NULL)"
+    params = [when, draft_id, actor.tenant_id] if is_admin else [when, draft_id, actor.tenant_id, actor.user_id]
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        r = await conn.fetchrow(
+            f"""UPDATE message_drafts SET scheduled_send_at=$1, is_scheduled=TRUE,
+                    sent_at=NULL, send_error=NULL, created_by=COALESCE(created_by,$4)
+                WHERE id=$2 AND tenant_id=$3 {scope} RETURNING id""",
+            *params)
+        if not r:
+            raise HTTPException(404, "Draft not found")
+        return {"id": draft_id, "scheduled": True, "scheduled_send_at": when.isoformat()}
+
+
+@router.post("/drafts/{draft_id}/unschedule")
+async def unschedule_draft(draft_id: str, actor: Actor = Depends(get_actor)):
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
+    scope = "" if is_admin else " AND (created_by=$3 OR created_by IS NULL)"
+    params = [draft_id, actor.tenant_id] if is_admin else [draft_id, actor.tenant_id, actor.user_id]
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        r = await conn.fetchrow(
+            f"UPDATE message_drafts SET is_scheduled=FALSE, scheduled_send_at=NULL "
+            f"WHERE id=$1 AND tenant_id=$2 {scope} RETURNING id", *params)
+        if not r:
+            raise HTTPException(404, "Draft not found")
+        return {"id": draft_id, "scheduled": False}
+
+
+@router.get("/drafts/scheduled")
+async def list_scheduled_drafts(actor: Actor = Depends(get_actor)):
+    is_admin = actor.role in _INBOX_ADMIN_ROLES or actor.role is None
+    scope = "" if is_admin else " AND (d.created_by=$2 OR d.created_by IS NULL)"
+    params = [actor.tenant_id] if is_admin else [actor.tenant_id, actor.user_id]
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(f"""
+            SELECT d.id, d.candidate_id, c.full_name AS candidate_name,
+                   COALESCE(c.email, d.to_email) AS email, d.subject,
+                   d.scheduled_send_at, d.sent_at, d.send_error
+            FROM message_drafts d LEFT JOIN candidates c ON c.id=d.candidate_id
+            WHERE d.tenant_id=$1 AND d.is_scheduled=TRUE {scope}
+            ORDER BY d.scheduled_send_at ASC""", *params)
+        return [dict(r) for r in rows]
+
+
 # ── Send ────────────────────────────────────────────────────────────────────────
 
 @router.post("/log-manual")
@@ -759,6 +923,26 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
         else:
             raise HTTPException(400, "Provide candidate_id or to_email")
 
+        # Real RBAC enforcement (2026-09-03 audit, gap #1 — the stated
+        # business rule itself was previously unenforced): a real client-
+        # contacts match on To/CC/BCC gates this send to KAE/KAM/Manager/
+        # Admin. A candidate_id send never hits this (a candidate's own
+        # email is always a legitimate recipient regardless of role); only
+        # a free-form to_email path can resolve to a real client SPOC.
+        client_match = None
+        if body.to_email:
+            client_match = await email_tracking.resolve_client_contact_match(
+                conn, actor.tenant_id, body.to_email, body.cc, body.bcc)
+            if client_match and actor.role is not None and actor.role not in email_tracking.CLIENT_EMAIL_ROLES:
+                raise HTTPException(
+                    403,
+                    f"Only a KAE, KAM, Manager, or Admin can email a client contact "
+                    f"directly ({client_match['contact_name']} at {client_match['client_name']}). "
+                    f"Use \"Submit to Client\" on the pipeline board, or ask your KAE "
+                    f"to send this on your behalf.")
+        client_id = client_match["client_id"] if client_match else None
+        client_contact_id = client_match["contact_id"] if client_match else None
+
         # BUG FIX (2026-08-10 audit): this, the single-send path the actual
         # Conversations composer calls, never personalized anything — a
         # recruiter picking a template and hitting Send emailed the
@@ -778,9 +962,12 @@ async def send_msg(body: SendMsg, actor: Actor = Depends(get_actor)):
                 subj = subj_p or "AVIIN Jobs Services"
                 logged = await _log(conn, actor.tenant_id, body.candidate_id, body.application_id,
                            "email", subj, msg_p, "sent", str(actor.user_id),
-                           body.template_id, body.stage, to_email, body.cc)
+                           body.template_id, body.stage, to_email, body.cc,
+                           client_id, client_contact_id)
                 tracked = _with_tracking_pixel(msg_p, logged["tracking_token"] if logged else None)
-                _send_email_bg(smtp, to_email, subj, tracked, body.cc, body.bcc)
+                tracked = _wrap_links_for_tracking(tracked, logged["tracking_token"] if logged else None)
+                _send_email_bg(smtp, to_email, subj, tracked, body.cc, body.bcc,
+                                logged["message_id_header"] if logged else None)
                 results["email"] = "sent"
 
         if body.channel in ("whatsapp", "both"):
@@ -861,7 +1048,9 @@ async def bulk_send(body: BulkMsg, actor: Actor = Depends(get_actor)):
                                msg, "sent", str(actor.user_id), body.template_id, body.stage,
                                cand["email"], None)
                     tracked = _with_tracking_pixel(msg, logged["tracking_token"] if logged else None)
-                    _send_email_bg(smtp, cand["email"], subj, tracked)
+                    tracked = _wrap_links_for_tracking(tracked, logged["tracking_token"] if logged else None)
+                    _send_email_bg(smtp, cand["email"], subj, tracked, None, None,
+                                    logged["message_id_header"] if logged else None)
                     sent += 1
             if body.channel in ("whatsapp","both"):
                 if not cand["phone"]: skipped += 1
@@ -930,6 +1119,78 @@ async def stats(actor: Actor = Depends(get_actor)):
             "trash": trash_cnt, "starred": starred_cnt, "whatsapp": wa_cnt,
             "unread": unread_cnt
         }}
+
+
+@router.get("/dashboard")
+async def mailbox_dashboard(team_view: bool = Query(False), actor: Actor = Depends(get_actor)):
+    """Real "Mailbox Dashboard" widget set (2026-09-03 audit, gap #5):
+    Today Sent/Received, Unread, Pending Follow-Ups, Client Replies Today,
+    Open Rate, Reply Rate, Avg Response Time. Self-scoped by default (each
+    KAE/recruiter's own mailbox, matching the spec's own "each KAE should
+    have Inbox/Sent/..." framing); team_view=true only takes effect for a
+    real management-class role, silently ignored otherwise — same
+    established convention as the Reminders dashboard's own team_view."""
+    is_admin = actor.role in _INBOX_ADMIN_ROLES
+    scope_team = team_view and is_admin
+    own_cond = "" if scope_team else f"AND {_own_ats_message_filter(2)}"
+    own_params = [actor.tenant_id] if scope_team else [actor.tenant_id, actor.user_id]
+    today = date.today()
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        today_sent = await conn.fetchval(
+            f"""SELECT COUNT(*) FROM candidate_messages cm
+                WHERE cm.tenant_id=$1 AND cm.direction='outbound' AND cm.channel='email'
+                  AND cm.is_deleted IS NOT TRUE AND cm.created_at::date=$3 {own_cond}""",
+            *own_params, today)
+        today_received = await conn.fetchval(
+            """SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id
+               WHERE im.tenant_id=$1 AND ($2 OR ua.user_id=$3) AND im.folder='INBOX'
+                 AND im.is_deleted IS NOT TRUE AND im.received_at::date=$4""",
+            actor.tenant_id, scope_team, actor.user_id, today)
+        unread_ats = await conn.fetchval(
+            f"""SELECT COUNT(*) FROM candidate_messages cm
+                WHERE cm.tenant_id=$1 AND cm.is_read IS NOT TRUE AND cm.is_deleted IS NOT TRUE {own_cond}""",
+            *own_params)
+        unread_imap = await conn.fetchval(
+            """SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id
+               WHERE im.tenant_id=$1 AND ($2 OR ua.user_id=$3) AND im.folder='INBOX'
+                 AND im.is_read IS NOT TRUE AND im.is_deleted IS NOT TRUE""",
+            actor.tenant_id, scope_team, actor.user_id)
+        pending_followups = await conn.fetchval(
+            """SELECT COUNT(*) FROM recruiter_tasks
+               WHERE tenant_id=$1 AND status IN ('pending','in_progress')
+                 AND ($2 OR recruiter_id=$3)""",
+            actor.tenant_id, scope_team, actor.user_id)
+        client_replies_today = await conn.fetchval(
+            f"""SELECT COUNT(*) FROM candidate_messages cm
+                WHERE cm.tenant_id=$1 AND cm.client_id IS NOT NULL
+                  AND cm.replied_at::date=$3 {own_cond}""",
+            *own_params, today)
+        rates = await conn.fetchrow(
+            f"""SELECT COUNT(*) AS sent,
+                       COUNT(*) FILTER (WHERE email_open_count > 0) AS opened,
+                       COUNT(*) FILTER (WHERE replied_at IS NOT NULL) AS replied,
+                       AVG(EXTRACT(EPOCH FROM (replied_at - created_at)) / 3600)
+                           FILTER (WHERE replied_at IS NOT NULL) AS avg_resp_hrs
+                FROM candidate_messages cm
+                WHERE cm.tenant_id=$1 AND cm.direction='outbound' AND cm.channel='email'
+                  AND cm.is_deleted IS NOT TRUE AND cm.created_at >= now() - INTERVAL '30 days' {own_cond}""",
+            *own_params)
+        sent_30d = rates["sent"] or 0
+        open_rate = round((rates["opened"] or 0) / sent_30d * 100, 1) if sent_30d else 0.0
+        reply_rate = round((rates["replied"] or 0) / sent_30d * 100, 1) if sent_30d else 0.0
+        avg_resp = round(float(rates["avg_resp_hrs"]), 1) if rates["avg_resp_hrs"] is not None else None
+        return {
+            "scope": "team" if scope_team else "personal",
+            "today_sent": today_sent or 0,
+            "today_received": today_received or 0,
+            "unread": (unread_ats or 0) + (unread_imap or 0),
+            "pending_followups": pending_followups or 0,
+            "client_replies_today": client_replies_today or 0,
+            "open_rate_pct": open_rate,
+            "reply_rate_pct": reply_rate,
+            "avg_response_hours": avg_resp,
+            "period": "last 30 days (rates)",
+        }
 
 
 @router.get("/whatsapp/status")
@@ -1318,10 +1579,79 @@ async def search_emails(
     has_attachment: bool = Query(False),
     date_from: str = Query(""),
     date_to: str = Query(""),
+    opened: Optional[bool] = Query(None),
+    replied: Optional[bool] = Query(None),
+    pending_followup: bool = Query(False),
+    high_priority: bool = Query(False),
     limit: int = Query(100, le=200),
     actor: Actor = Depends(get_actor)
 ):
-    """Advanced email search across all IMAP folders"""
+    """Advanced email search across all IMAP folders — plus, real
+    filters (2026-09-03 audit, gap #10) for opened/not-opened/replied/
+    not-replied/pending-follow-up/high-priority. Those 6 concepts only
+    ever exist on OUTBOUND (candidate_messages) rows — opened/replied
+    with a non-None value switches the search to that table entirely
+    (an inbound IMAP email has no "opened by recipient" concept at all);
+    pending_followup/high_priority are additive filters layered on top
+    of either mode."""
+    if opened is not None or replied is not None:
+        conditions = ["cm.tenant_id=$1", "cm.is_deleted IS NOT TRUE", "cm.channel='email'"]
+        params = [actor.tenant_id]
+        if actor.role not in _INBOX_ADMIN_ROLES:
+            params.append(actor.user_id)
+            conditions.append(_own_ats_message_filter(len(params)))
+        if q:
+            params.append(f"%{q}%")
+            conditions.append(f"(cm.subject ILIKE ${len(params)} OR cm.body ILIKE ${len(params)} OR cm.to_email ILIKE ${len(params)})")
+        if to_addr:
+            params.append(f"%{to_addr}%")
+            conditions.append(f"cm.to_email ILIKE ${len(params)}")
+        if opened is True:
+            conditions.append("cm.email_open_count > 0")
+        elif opened is False:
+            conditions.append("cm.email_open_count = 0")
+        if replied is True:
+            conditions.append("cm.replied_at IS NOT NULL")
+        elif replied is False:
+            conditions.append("cm.replied_at IS NULL AND cm.direction='outbound'")
+        if date_from:
+            try:
+                from datetime import date as _date
+                params.append(_date.fromisoformat(date_from))
+            except Exception:
+                params.append(date_from)
+            conditions.append("cm.created_at::date >= $"+str(len(params)))
+        if date_to:
+            try:
+                from datetime import date as _date
+                params.append(_date.fromisoformat(date_to))
+            except Exception:
+                params.append(date_to)
+            conditions.append("cm.created_at::date <= $"+str(len(params)))
+        if pending_followup:
+            conditions.append(
+                """EXISTS (SELECT 1 FROM recruiter_tasks rt
+                           WHERE rt.tenant_id=cm.tenant_id AND rt.candidate_id=cm.candidate_id
+                             AND rt.status IN ('pending','in_progress'))""")
+        if high_priority:
+            conditions.append(
+                """EXISTS (SELECT 1 FROM recruiter_tasks rt
+                           WHERE rt.tenant_id=cm.tenant_id AND rt.candidate_id=cm.candidate_id
+                             AND rt.status IN ('pending','in_progress')
+                             AND rt.priority IN ('high','critical'))""")
+        where = " AND ".join(conditions)
+        params.append(limit)
+        async with db.tenant_conn(actor.tenant_id) as conn:
+            rows = await conn.fetch(f"""
+                SELECT {MSG_COLS},
+                       cm.replied_at, cm.reply_count, cm.bounced_at, cm.link_click_count,
+                       cm.attachment_download_count, cm.client_id
+                {MSG_JOINS}
+                WHERE {where}
+                ORDER BY cm.created_at DESC LIMIT ${len(params)}
+            """, *params)
+            return [dict(r) for r in rows]
+
     conditions = ["im.tenant_id=$1", "ua.user_id=$2", "im.is_deleted IS NOT TRUE"]
     params = [actor.tenant_id, actor.user_id]
 

@@ -106,6 +106,7 @@ const NAV_GROUPS = [
   ]},
   { id:'communication', label:'COMMUNICATION', defaultOpen:false, items:[
     { icon:Mail,            href:'/conversations', label:'Email / Conversations', feature:'email_communication' },
+    { icon:BarChart3,       href:'/email-reports', label:'Email Reports & Analytics', feature:'email_reports' },
     { icon:MessageCircle,   href:'/whatsapp',      label:'WhatsApp Bot', feature:'whatsapp_bot' },
     { icon:Send,            href:'/whatsapp?tab=stage-notifications', label:'WhatsApp Stage Notifications', feature:'whatsapp_stage_notifications' },
     { icon:Globe,            href:'/whatsapp-setup', label:'Company WhatsApp Number', feature:'whatsapp_setup' },

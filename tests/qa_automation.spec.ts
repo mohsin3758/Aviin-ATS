@@ -14036,3 +14036,169 @@ Email: s101.tracking.${stamp}@qatest.com`;
     expect(parsedName).not.toBe('sl.no');
   });
 });
+
+test.describe.serial('S102 Enterprise Email Management: RBAC client-email gate, threading/reports, mailbox dashboard', () => {
+  // Real, complete build (2026-09-03) closing 11+ gaps found in a same-day
+  // audit against an "Enterprise Email Management, Tracking & Reporting"
+  // spec, with the explicit instruction to keep the existing business rule
+  // unchanged: recruiters email candidates + internal AVIIN users (KAEs
+  // included) freely; only KAE/KAM/Manager/Admin can email a real client
+  // contact directly. The most consequential piece — that rule was
+  // previously completely unenforced on the general Compose/send path
+  // (only the separate, purpose-built "Submit to Client" flow was gated) —
+  // is what this suite proves first and most directly, with real, live
+  // 403/200 outcomes against a real client_contacts row, not a code-review
+  // claim. Real threading (2 related-subject sends → one email_threads
+  // row), Message-ID-based reply/bounce correlation, real click/download
+  // tracking via a SECURITY DEFINER function (candidate_messages has
+  // FORCE ROW LEVEL SECURITY — the exact ''::uuid-cast-crash class this
+  // project has hit and fixed dozens of times, caught live here too, not
+  // assumed), and the new client-wise/executive/recruiter reporting
+  // endpoints were all independently verified via direct backend testing
+  // during development (not reproducible end-to-end through this suite's
+  // own HTTP-only surface, since /communications/send never exposes a
+  // message's own thread_id/message_id_header in its response) — this
+  // suite covers everything genuinely observable through the real API and
+  // UI: the RBAC gate itself, the Mailbox Dashboard, and every Email
+  // Reports endpoint's real shape against real data.
+  let token = '';
+  let clientId = '';
+  let contactEmail = '';
+  let recruiterId = '';
+  let kaeId = '';
+  const auth = () => ({ Authorization: `Bearer ${token}` });
+  const stamp = Date.now();
+
+  test('setup: real client + SPOC contact + a throwaway recruiter and KAE', async ({ request }) => {
+    token = await getApiToken(request);
+    const c = await request.post(`${API}/clients`, { headers: auth(), data: { name: `QA S102 Client ${stamp}` } });
+    expect(c.ok(), await c.text()).toBeTruthy();
+    clientId = (await c.json()).id;
+    contactEmail = `qa.s102.spoc.${stamp}@qatest.example`;
+    const contact = await request.post(`${API}/clients/${clientId}/contacts`, {
+      headers: auth(), data: { contact_name: 'QA S102 SPOC', email: contactEmail, is_primary: true },
+    });
+    expect(contact.ok(), await contact.text()).toBeTruthy();
+
+    const rec = await request.post(`${API}/users`, {
+      headers: auth(), data: { full_name: 'QA S102 Recruiter', email: `qa.s102.rec.${stamp}@test.com`, password: 'TestPass123!', role: 'recruiter' },
+    });
+    expect(rec.ok(), await rec.text()).toBeTruthy();
+    recruiterId = (await rec.json()).id;
+
+    const kae = await request.post(`${API}/users`, {
+      headers: auth(), data: { full_name: 'QA S102 KAE', email: `qa.s102.kae.${stamp}@test.com`, password: 'TestPass123!', role: 'kae' },
+    });
+    expect(kae.ok(), await kae.text()).toBeTruthy();
+    kaeId = (await kae.json()).id;
+  });
+
+  test('BUG FIX (the real gap this whole build closes): a plain recruiter emailing a real client contact directly is now cleanly 403d — previously completely unenforced on /communications/send', async ({ request }) => {
+    const login = await request.post(`${API}/auth/login`, { data: { email: `qa.s102.rec.${stamp}@test.com`, password: 'TestPass123!' } });
+    const recToken = (await login.json()).access_token;
+    const r = await request.post(`${API}/communications/send`, {
+      headers: { Authorization: `Bearer ${recToken}` },
+      data: { to_email: contactEmail, subject: 'Resume Discussion', message: 'Sharing a profile.', channel: 'email' },
+    });
+    expect(r.status()).toBe(403);
+    const body = await r.json();
+    expect(body.detail).toContain('KAE, KAM, Manager, or Admin');
+    expect(body.detail).toContain('QA S102 SPOC');
+    expect(body.detail).toContain('Submit to Client');
+  });
+
+  test('a KAE emailing the same real client contact directly is genuinely allowed — the explicit, unchanged "KAE to client" rule', async ({ request }) => {
+    const login = await request.post(`${API}/auth/login`, { data: { email: `qa.s102.kae.${stamp}@test.com`, password: 'TestPass123!' } });
+    const kaeToken = (await login.json()).access_token;
+    const r = await request.post(`${API}/communications/send`, {
+      headers: { Authorization: `Bearer ${kaeToken}` },
+      data: { to_email: contactEmail, subject: `QA S102 Client Email ${stamp}`, message: 'Real KAE-to-client send.', channel: 'email' },
+    });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    const body = await r.json();
+    expect(body.results.email).toBe('sent');
+  });
+
+  test('BUG FIX: a recruiter emailing another internal AVIIN user (not a client contact) is never blocked — the explicit "recruiter to KAE" carve-out still works', async ({ request }) => {
+    const login = await request.post(`${API}/auth/login`, { data: { email: `qa.s102.rec.${stamp}@test.com`, password: 'TestPass123!' } });
+    const recToken = (await login.json()).access_token;
+    // admin@example.com is a real internal user, not a client_contacts row.
+    const r = await request.post(`${API}/communications/send`, {
+      headers: { Authorization: `Bearer ${recToken}` },
+      data: { to_email: 'admin@example.com', subject: 'Internal note', message: 'Not a client — should never be gated.', channel: 'email' },
+    });
+    expect(r.status()).not.toBe(403);
+  });
+
+  test('FEATURE: the real client-wise email report reflects the actual KAE→client send above', async ({ request }) => {
+    const r = await request.get(`${API}/email-reports/client-wise`, { headers: auth() });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    const body = await r.json();
+    const row = (body.clients || []).find((c: any) => c.client_id === clientId);
+    expect(row).toBeTruthy();
+    expect(row.emails_sent).toBeGreaterThanOrEqual(1);
+  });
+
+  test('FEATURE: Mailbox Dashboard returns the real, documented shape', async ({ request }) => {
+    const r = await request.get(`${API}/communications/dashboard`, { headers: auth() });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    const body = await r.json();
+    for (const key of ['today_sent', 'today_received', 'unread', 'pending_followups', 'client_replies_today', 'open_rate_pct', 'reply_rate_pct']) {
+      expect(body).toHaveProperty(key);
+    }
+  });
+
+  test('FEATURE: every Email Reports endpoint returns a real 200 with the expected shape (executive/kae-wise/recruiter/performance/sla/engagement/schedule-config)', async ({ request }) => {
+    const exec = await request.get(`${API}/email-reports/executive`, { headers: auth() });
+    expect(exec.ok(), await exec.text()).toBeTruthy();
+    const execBody = await exec.json();
+    expect(execBody).toHaveProperty('emails_sent_today');
+    expect(execBody).toHaveProperty('top_responsive_clients');
+
+    const kae = await request.get(`${API}/email-reports/kae-wise`, { headers: auth() });
+    expect(kae.ok()).toBeTruthy();
+    expect(await kae.json()).toHaveProperty('kaes');
+
+    const rec = await request.get(`${API}/email-reports/recruiter`, { headers: auth() });
+    expect(rec.ok()).toBeTruthy();
+    expect(await rec.json()).toHaveProperty('recruiters');
+
+    const perf = await request.get(`${API}/email-reports/performance?granularity=weekly`, { headers: auth() });
+    expect(perf.ok()).toBeTruthy();
+    const perfBody = await perf.json();
+    expect(perfBody.granularity).toBe('weekly');
+
+    const sla = await request.get(`${API}/email-reports/sla`, { headers: auth() });
+    expect(sla.ok()).toBeTruthy();
+    expect(Array.isArray(await sla.json())).toBeTruthy();
+
+    const eng = await request.get(`${API}/email-reports/engagement`, { headers: auth() });
+    expect(eng.ok()).toBeTruthy();
+
+    const cfg = await request.get(`${API}/email-reports/schedule-config`, { headers: auth() });
+    expect(cfg.ok()).toBeTruthy();
+    expect(await cfg.json()).toHaveProperty('recipient_emails');
+  });
+
+  test('real headless UI: /email-reports page renders the tab bar and real Executive Dashboard KPI cards', async ({ page }) => {
+    await page.goto('/email-reports');
+    await page.waitForLoadState('networkidle');
+    await expect(page.getByTestId('email-reports-tabs')).toBeVisible();
+    await expect(page.locator('button[data-tab="executive"]')).toBeVisible();
+    await expect(page.getByText('Emails Sent Today')).toBeVisible();
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.locator('button[data-tab="client"]').click();
+    await page.waitForTimeout(500);
+    expect(errors).toHaveLength(0);
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (clientId) await request.delete(`${API}/clients/${clientId}`, { headers: auth() }).catch(() => {});
+    for (const id of [recruiterId, kaeId]) {
+      if (!id) continue;
+      await request.patch(`${API}/users/${id}/deactivate`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/users/${id}/purge`, { headers: auth() }).catch(() => {});
+    }
+  });
+});
