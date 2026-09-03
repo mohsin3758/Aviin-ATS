@@ -14,6 +14,7 @@ import {
   KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
   FileSignature, Upload, ShieldCheck, Copy, CheckSquare, Printer,
   Columns3, GripVertical, Trash2, Building2, Eye, EyeOff, ArrowLeft, Lock, Bell,
+  Maximize2, Minimize2,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -1953,6 +1954,48 @@ function SubmitKaeTab({ appId, showToast, onSubmitted }: any) {
   );
 }
 
+// Real feature (2026-09-03, reported live on the Submit-to-Client tracking
+// sheet: "option to add new row") — a small, self-contained candidate
+// search scoped to the SAME requisition (reuses the already-fetched-
+// elsewhere GET /requisitions/{id}/pipeline shape: a.id/a.candidate_id/
+// c.full_name AS candidate_name — the exact same field names the Kanban
+// board itself already relies on, no new endpoint needed), so a KAE can
+// add a 2nd, different real candidate to the same client send without
+// leaving this modal.
+function AddAnotherCandidatePicker({ requisitionId, excludeApplicationIds, onAdd, onClose }: any) {
+  // GET /requisitions/{id}/pipeline returns a dict KEYED BY STAGE
+  // (board: {sourced: [...], screened: [...], ...}), the same shape the
+  // Kanban board itself renders directly — flatten every stage's list
+  // into one real, searchable pool.
+  const { data: pipeline, loading: isLoading } = useFetch<Record<string, any[]>>(`/requisitions/${requisitionId}/pipeline`);
+  const [q, setQ] = useState('');
+  const candidates = (Object.values(pipeline || {}).flat() as any[])
+    .filter((a: any) => a && a.id && !excludeApplicationIds.includes(a.id))
+    .filter((a: any) => !q.trim() || (a.candidate_name || '').toLowerCase().includes(q.trim().toLowerCase()));
+  return (
+    <div data-testid="batch-candidate-picker" style={{ marginTop: 6, padding: 8, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8 }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+        <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="Search candidates on this role…"
+          style={{ flex: 1, padding: '6px 8px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12 }} />
+        <button onClick={onClose} style={{ padding: '4px 8px', background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8' }}><X size={14} /></button>
+      </div>
+      <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+        {isLoading ? (
+          <div style={{ fontSize: 11, color: '#94A3B8', padding: 6 }}>Loading candidates…</div>
+        ) : candidates.length === 0 ? (
+          <div style={{ fontSize: 11, color: '#94A3B8', padding: 6 }}>No other candidates found on this role.</div>
+        ) : candidates.slice(0, 30).map((a: any) => (
+          <button key={a.id} data-testid={`batch-candidate-option-${a.id}`} onClick={() => onAdd(a.id, a.candidate_name)}
+            style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 8px', background: 'none', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, color: '#1E293B' }}
+            onMouseEnter={e => (e.currentTarget.style.background = '#EFF6FF')} onMouseLeave={e => (e.currentTarget.style.background = 'none')}>
+            {a.candidate_name} <span style={{ color: '#94A3B8', fontSize: 10 }}>· {(a.stage || '').replace(/_/g, ' ')}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // REAL BUG FIX (2026-09-01, reported live: "Submit to client... still
   // loading"): the previous version destructured only `data`/`refetch`
@@ -2009,6 +2052,13 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // honest default (same wording the send would otherwise silently use).
   const [emailSubject, setEmailSubject] = useState('');
   const [emailBody, setEmailBody] = useState('');
+  // Real feature (2026-09-03, reported live: "option to add new row" —
+  // clarified via direct back-and-forth: submitting a 2nd, different
+  // candidate to the same client in one go, instead of repeating the
+  // whole Submit-to-Client flow per person. Each addition appears as a
+  // genuine new row (its own SL No) in the cumulative tracking sheet.
+  const [additionalCandidates, setAdditionalCandidates] = useState<{ application_id: string; candidate_name: string }[]>([]);
+  const [showAddPicker, setShowAddPicker] = useState(false);
 
   useEffect(() => {
     if (preview && !initialized) {
@@ -2093,26 +2143,42 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
 
   const send = async () => {
     if (resumeStyle === 'manual' && !manualDraft) return;
+    if (resumeStyle === 'manual' && additionalCandidates.length) {
+      showToast('Manual Editing only describes one person — remove the extra candidates or pick a different resume format', false);
+      return;
+    }
     setSending(true);
     try {
       const visibleColumns = (selectedTemplate?.columns || []).filter((c: any) => !hiddenKeys.includes(c.key));
-      const r = await apiFetch(`/applications/${appId}/submit-to-client`, {
-        method: 'POST',
-        body: JSON.stringify({
-          template_id: templateId || undefined,
-          contact_id: toContactId || undefined,
-          to_emails: toEmail ? [toEmail] : undefined,
-          columns: saveAsDefault && hiddenKeys.length ? visibleColumns : undefined,
-          hidden_columns: hiddenKeys,
-          field_values: fields, cc_self: ccSelf, save_as_default: saveAsDefault, default_scope: defaultScope,
-          email_subject: emailSubject || undefined, email_body: emailBody || undefined,
-          resume_style: resumeStyle,
-          manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
-          visual_theme: resumeStyle !== 'manual' ? visualTheme : undefined,
-          logo_position: resumeStyle !== 'manual' ? logoPosition : undefined,
-        }),
-      });
-      showToast(r.email_sent ? `Sent to ${r.recipient_name} ✓` : `Logged, but email failed: ${r.email_error || 'SMTP error'}`, !!r.email_sent);
+      const body: any = {
+        template_id: templateId || undefined,
+        contact_id: toContactId || undefined,
+        to_emails: toEmail ? [toEmail] : undefined,
+        columns: saveAsDefault && hiddenKeys.length ? visibleColumns : undefined,
+        hidden_columns: hiddenKeys,
+        field_values: fields, cc_self: ccSelf, save_as_default: saveAsDefault, default_scope: defaultScope,
+        email_subject: emailSubject || undefined, email_body: emailBody || undefined,
+        resume_style: resumeStyle,
+        manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
+        visual_theme: resumeStyle !== 'manual' ? visualTheme : undefined,
+        logo_position: resumeStyle !== 'manual' ? logoPosition : undefined,
+      };
+      let stageBumped: boolean;
+      if (additionalCandidates.length) {
+        const r = await apiFetch(`/applications/${appId}/submit-to-client/batch`, {
+          method: 'POST',
+          body: JSON.stringify({ ...body, additional_application_ids: additionalCandidates.map(c => c.application_id) }),
+        });
+        const ok = r.sent, total = r.total;
+        showToast(ok === total ? `Sent all ${total} ✓` : `Sent ${ok}/${total} — check individual results`, ok > 0);
+        const anchorResult = (r.results || []).find((x: any) => x.application_id === appId);
+        stageBumped = !!anchorResult?.stage_bumped_to_submitted;
+        setAdditionalCandidates([]);
+      } else {
+        const r = await apiFetch(`/applications/${appId}/submit-to-client`, { method: 'POST', body: JSON.stringify(body) });
+        showToast(r.email_sent ? `Sent to ${r.recipient_name} ✓` : `Logged, but email failed: ${r.email_error || 'SMTP error'}`, !!r.email_sent);
+        stageBumped = !!r.stage_bumped_to_submitted;
+      }
       setInitialized(false);
       setHiddenKeys([]);
       setSaveAsDefault(false);
@@ -2124,7 +2190,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       // in the response) — pass that through so callers (the drawer tab AND
       // the board's own "move into Submit to Client" modal) reflect the
       // real resulting stage instead of assuming nothing moved.
-      onSubmitted?.(r.stage_bumped_to_submitted);
+      onSubmitted?.(stageBumped);
     } catch (e: any) {
       showToast(String(e?.message || 'Submission failed'), false);
     } finally {
@@ -2180,7 +2246,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
               direct path to the real management page (upload a file,
               add/rename columns, set a client/SPOC/project default),
               not just a flat row of name buttons here. */}
-          <a href="/ops-settings?tab=templates" target="_blank" rel="noreferrer" style={{ fontSize: 10, fontWeight: 700, color: '#2563EB' }}>Manage Templates →</a>
+          <a href="/ops-settings?tab=templates" target="_blank" rel="noreferrer" style={{ fontSize: 10, fontWeight: 700, color: '#2563EB' }}>+ Add/Edit Columns →</a>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {(preview.templates || []).map((t: any) => (
@@ -2218,7 +2284,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
               <thead>
                 <tr>
                   {trackingPreview.columns.map((c: any) => (
-                    <th key={c.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'nowrap' }}>{c.label}</th>
+                    <th key={c.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'nowrap', minWidth: c.key === 'skill_summary' ? 220 : undefined }}>{c.label}</th>
                   ))}
                 </tr>
               </thead>
@@ -2229,13 +2295,29 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                     <tr key={i} style={{ background: isLast ? '#EFF6FF' : (i % 2 ? '#F8FAFC' : '#fff') }}>
                       {trackingPreview.columns!.map((c: any) => {
                         const editable = isLast && c.key !== 'sl_no';
+                        const isMultiline = c.key === 'skill_summary';
                         return (
-                          <td key={c.key} style={{ padding: editable ? 2 : '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top' }}>
+                          <td key={c.key} style={{ padding: editable ? 2 : '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top', minWidth: isMultiline ? 220 : undefined }}>
                             {editable ? (
-                              <input data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
-                                style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit' }} />
+                              /* Real bug fix (2026-09-03, reported live: a real
+                                 multi-line skill_summary default — "SAP FICO:
+                                 8 Yrs\nSAP COPA: 3 Yrs\n..." — was rendered
+                                 in a single-line <input>, which silently
+                                 collapses every newline, so it displayed as
+                                 one unreadable run-together string. A plain
+                                 skill_summary is genuinely multi-line by
+                                 design (see kae_submission.py's
+                                 _format_skill_summary_default); every other
+                                 column here is genuinely one line. */
+                              isMultiline ? (
+                                <textarea data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                                  rows={4} style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit', resize: 'vertical' }} />
+                              ) : (
+                                <input data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                                  style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit' }} />
+                              )
                             ) : (
-                              ((isLast ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')
+                              <span style={{ whiteSpace: isMultiline ? 'pre-line' : 'normal' }}>{((isLast ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')}</span>
                             )}
                           </td>
                         );
@@ -2253,8 +2335,44 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         )}
         <p style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
           This is the exact table that will be sent — including every real candidate already submitted to this client
-          for this role. Earlier rows are the client's real submission history and can't be changed.
+          for this role. Earlier rows are the client's real submission history and can't be changed. Need a different
+          or extra column? <a href="/ops-settings?tab=templates" target="_blank" rel="noreferrer" style={{ fontWeight: 700, color: '#2563EB' }}>Add/Edit Columns →</a>
         </p>
+      </div>
+
+      {/* Real feature (2026-09-03, reported live: "option to add new
+          row") — submit 2+ candidates for this same role to the client in
+          one action; each appears as its own genuine new row, not just
+          this one. */}
+      <div>
+        <span style={lbl}>ALSO SUBMIT THESE CANDIDATES (optional)</span>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+          {additionalCandidates.map(c => (
+            <span key={c.application_id} data-testid={`batch-candidate-chip-${c.application_id}`} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 8px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 6, fontSize: 11, color: '#1E40AF', fontWeight: 600 }}>
+              {c.candidate_name}
+              <button onClick={() => setAdditionalCandidates(prev => prev.filter(x => x.application_id !== c.application_id))}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#1E40AF', padding: 0, lineHeight: 1 }}><X size={11} /></button>
+            </span>
+          ))}
+          <button data-testid="batch-add-candidate-toggle" onClick={() => setShowAddPicker(v => !v)}
+            style={{ padding: '4px 10px', background: showAddPicker ? '#EFF6FF' : '#F1F5F9', border: '1px dashed #CBD5E1', borderRadius: 6, fontSize: 11, fontWeight: 700, color: '#475569', cursor: 'pointer' }}>
+            + Add another candidate
+          </button>
+        </div>
+        {showAddPicker && preview.requisition_id && (
+          <AddAnotherCandidatePicker
+            requisitionId={preview.requisition_id}
+            excludeApplicationIds={[appId, ...additionalCandidates.map(c => c.application_id)]}
+            onAdd={(applicationId: string, candidateName: string) => {
+              setAdditionalCandidates(prev => [...prev, { application_id: applicationId, candidate_name: candidateName }]);
+              setShowAddPicker(false);
+            }}
+            onClose={() => setShowAddPicker(false)}
+          />
+        )}
+        {additionalCandidates.length > 0 && resumeStyle === 'manual' && (
+          <p style={{ fontSize: 10, color: '#B45309', marginTop: 4 }}>Manual Editing only describes one person — pick a different resume format below to send this batch.</p>
+        )}
       </div>
 
       <div>
@@ -2424,6 +2542,15 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
 // chooses to move without sending).
 function ClientSubmissionMoveModal({ appId, candidateName, stageLabel, showToast, onCancel, onSent }: any) {
   const [sending, setSending] = useState(false);
+  // Real feature (2026-09-03, reported live: "option should be there to
+  // enlarge the sheet") — a one-click toggle to a near-fullscreen size,
+  // on top of (not instead of) the existing native `resize:both` drag
+  // handle below: manually dragging is easy to miss as an affordance,
+  // this gives the same result in one click. Toggling never fights a
+  // manual drag — it's just swapping the panel's own starting width/
+  // height, still bounded by the same real min/max the resize handle
+  // already respects.
+  const [enlarged, setEnlarged] = useState(false);
   return (
     <div data-testid="client-submission-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
       {/* REAL FEATURE (2026-09-02, reported live: "size should drag resize
@@ -2435,7 +2562,7 @@ function ClientSubmissionMoveModal({ appId, candidateName, stageLabel, showToast
           height and overflow != visible — both already true here (was
           already overflowY:auto; width/maxHeight are now real starting
           dimensions, not just an upper bound). */}
-      <div data-testid="client-submission-modal-panel" style={{ width: 640, height: 620, minWidth: 420, minHeight: 320, maxWidth: '95vw', maxHeight: '92vh', resize: 'both', overflow: 'auto', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+      <div data-testid="client-submission-modal-panel" style={{ width: enlarged ? '95vw' : 640, height: enlarged ? '92vh' : 620, minWidth: 420, minHeight: 320, maxWidth: '95vw', maxHeight: '92vh', resize: 'both', overflow: 'auto', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
           <div>
             {/* Real bug fix (2026-08-25) — was a hardcoded "Client
@@ -2446,7 +2573,13 @@ function ClientSubmissionMoveModal({ appId, candidateName, stageLabel, showToast
             <div data-testid="client-submission-modal-title" style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Submit to Client — Moving to {stageLabel || 'Client Submission'}</div>
             <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{candidateName} — review the resume, tracking sheet and SPOC before sending.</div>
           </div>
-          <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 4 }}><X size={16} /></button>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button data-testid="client-submission-modal-enlarge" onClick={() => setEnlarged(v => !v)} title={enlarged ? 'Restore size' : 'Enlarge'}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 4 }}>
+              {enlarged ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </button>
+            <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 4 }}><X size={16} /></button>
+          </div>
         </div>
         <div style={{ marginTop: 14 }}>
           <SubmitClientTab appId={appId} showToast={showToast} onSubmitted={(bumped: boolean) => onSent(bumped)} />

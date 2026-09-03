@@ -2206,3 +2206,119 @@ async def submit_to_client(
         save_as_default=body.save_as_default, contact_id=body.contact_id, default_scope=body.default_scope,
         subject_override=body.email_subject, body_override=body.email_body,
     )
+
+
+class SubmitToClientBatchIn(SubmitToClientIn):
+    additional_application_ids: list[str] = []
+
+
+@router.post("/applications/{application_id}/submit-to-client/batch")
+async def submit_to_client_batch(
+    application_id: str, body: SubmitToClientBatchIn,
+    actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
+):
+    """Real feature (2026-09-03, reported live on the tracking-sheet
+    preview: "option to add new row" -- clarified via direct back-and-
+    forth to mean submitting several DIFFERENT real candidates for the
+    same role to the same client in one action, each appearing as a
+    genuine new row (its own SL No) in the cumulative tracking sheet,
+    instead of repeating the whole Submit-to-Client flow once per
+    candidate.
+
+    Deliberately a thin batch WRAPPER around the exact same, already-
+    proven _do_client_submission() -- called once per candidate,
+    SEQUENTIALLY, never concurrently: each call's own sl_no computation
+    (_client_tracking_sheet_rows) reads the real, just-committed prior
+    row, so sequencing is what keeps SL Nos correctly consecutive across
+    the whole batch. Never a second, parallel send engine -- every real
+    safeguard the single-candidate path already has (HITL role gate,
+    SPOC-visibility scoping, hidden-column redaction, stage-bump race
+    safety, notification dispatch) applies identically to every
+    candidate in the batch, for free.
+
+    manual_resume is deliberately not supported here -- one hand-typed
+    summary can't correctly describe several different real people;
+    batch callers must use a real style that renders from each
+    candidate's own profile. field_values (any manual cell overrides
+    the KAE typed for the row they were looking at) and
+    columns_override/save_as_default (template-level, not per-
+    candidate) apply ONLY to the first (anchor) candidate -- applying
+    one person's specific override text to someone else's row would be
+    wrong, and the template-save side effect only needs to happen once.
+    One candidate's real failure (a missing client contact, an
+    unrelated requisition, a transient send error) never aborts the
+    rest of the batch -- each result is independently captured."""
+    if body.resume_style == "manual":
+        raise HTTPException(400, "resume_style 'manual' is not supported for a batch submission — pick a style that renders from each candidate's own profile, or remove the extra candidates")
+    if body.resume_style not in _RESUME_STYLES:
+        raise HTTPException(400, f"resume_style must be one of {', '.join(_RESUME_STYLES)}")
+    if body.visual_theme is not None and body.visual_theme not in _VALID_THEMES:
+        raise HTTPException(400, f"visual_theme must be one of {sorted(_VALID_THEMES)}")
+    if body.logo_position is not None and body.logo_position not in _VALID_LOGO_POSITIONS:
+        raise HTTPException(400, f"logo_position must be one of {sorted(_VALID_LOGO_POSITIONS)}")
+    if body.default_scope not in ("client", "contact", "requisition"):
+        raise HTTPException(400, "default_scope must be one of ('client', 'contact', 'requisition')")
+
+    all_ids = [application_id] + [a for a in dict.fromkeys(body.additional_application_ids) if a and a != application_id]
+    if len(all_ids) > 20:
+        raise HTTPException(400, "A single batch send is capped at 20 candidates")
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        anchor_row, _ = await _app_context(conn, application_id)
+    anchor_req_id = anchor_row["requisition_id"]
+
+    results = []
+    for i, app_id in enumerate(all_ids):
+        try:
+            async with db.tenant_conn(actor.tenant_id) as conn:
+                row, _ = await _app_context(conn, app_id)
+            # Real safety guard: every candidate in the batch must be a
+            # real applicant on the SAME requisition (same client, same
+            # role) the anchor was opened for -- never silently include
+            # someone from an unrelated role just because a caller passed
+            # a stray id.
+            if row["requisition_id"] != anchor_req_id:
+                results.append({"application_id": app_id, "candidate_id": str(row["candidate_id"]),
+                                 "candidate_name": row["full_name"], "email_sent": False,
+                                 "error": "Not on the same requisition as the anchor candidate — skipped"})
+                continue
+            candidate = {
+                "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
+                "location": row["location"], "current_employer": row["current_employer"],
+                "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
+                "skills": row["skills"], "resume_text": row["resume_text"],
+            }
+            cfg = {**_STYLE_CONFIGS[body.resume_style]}
+            if body.visual_theme:
+                cfg["visual_theme"] = body.visual_theme
+            if body.logo_position:
+                cfg["logo_position"] = body.logo_position
+            resume_bytes = render_resume_pdf(candidate, cfg)
+            filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
+
+            is_anchor = (i == 0)
+            result = await _do_client_submission(
+                actor.tenant_id, app_id, actor, resume_bytes, filename, body.resume_style,
+                _RESUME_LABELS.get(body.resume_style, body.resume_style),
+                template_id=body.template_id, columns_override=body.columns if is_anchor else None,
+                hidden_columns=body.hidden_columns, field_values=body.field_values if is_anchor else {},
+                to_emails_override=body.to_emails, cc_self=body.cc_self,
+                save_as_default=body.save_as_default if is_anchor else False,
+                contact_id=body.contact_id, default_scope=body.default_scope,
+                subject_override=body.email_subject, body_override=body.email_body,
+            )
+            results.append({
+                "application_id": app_id, "candidate_id": str(row["candidate_id"]),
+                "candidate_name": row["full_name"], "email_sent": result["email_sent"],
+                "email_error": result.get("email_error"),
+                "stage_bumped_to_submitted": result["stage_bumped_to_submitted"],
+                "submission_id": str(result["id"]),
+            })
+        except HTTPException as he:
+            results.append({"application_id": app_id, "candidate_id": None, "candidate_name": None,
+                             "email_sent": False, "error": str(he.detail)})
+        except Exception as ex:
+            results.append({"application_id": app_id, "candidate_id": None, "candidate_name": None,
+                             "email_sent": False, "error": str(ex)})
+
+    return {"results": results, "total": len(results), "sent": sum(1 for r in results if r.get("email_sent"))}

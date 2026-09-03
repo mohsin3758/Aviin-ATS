@@ -13442,7 +13442,12 @@ test.describe.serial('S98 Tracking-sheet live preview + SPOC/project-scoped temp
     expect(d.row_count).toBeGreaterThan(0);
   });
 
-  test('real headless UI: the Submit-to-Client modal shows a live tracking-sheet table (not just template buttons), and a "Manage Templates" link opens Ops Settings on the real Templates tab', async ({ page }) => {
+  test('real headless UI: the Submit-to-Client modal shows a live tracking-sheet table (not just template buttons), and an "Add/Edit Columns" link opens Ops Settings on the real Templates tab', async ({ page }) => {
+    // Link text changed 2026-09-03 (reported live: "option to add new...
+    // column") from generic "Manage Templates" to "+ Add / Edit Columns"
+    // — more directly answers "how do I add a column" without leaving
+    // this modal for an unrelated-sounding link; same real destination
+    // (/ops-settings?tab=templates), unchanged.
     await page.goto(`${BASE}/pipeline?job=${reqId}`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(1500);
     const card = page.locator(`text=${`QA S98 Candidate ${stamp}`}`).first();
@@ -13457,7 +13462,7 @@ test.describe.serial('S98 Tracking-sheet live preview + SPOC/project-scoped temp
       await expect(panel).toBeVisible({ timeout: 10000 });
       const table = panel.locator('table').first();
       await expect(table).toBeVisible({ timeout: 10000 });
-      const mgmtLink = panel.locator('a', { hasText: 'Manage Templates' });
+      const mgmtLink = panel.locator('a', { hasText: 'Add/Edit Columns' }).first();
       await expect(mgmtLink).toBeVisible();
       expect(await mgmtLink.getAttribute('href')).toContain('/ops-settings?tab=templates');
     }

@@ -21811,3 +21811,125 @@ the same 2-of-5-style gap was also not attempted in this pass (Hari's
 own record was fixed as a direct, verified side effect of testing the
 fix, not a separate bulk operation) — matching this project's own
 established caution against blind, unreviewed bulk data changes.
+
+## Submit-to-Client tracking sheet: readability fix, a real Enlarge toggle, and a genuine multi-candidate batch send, 2026-09-03
+Direct follow-up to the skill-extraction fix above — user reported the
+live tracking-sheet PREVIEW table itself was hard to read ("its not
+clearly visible") and asked for a way to enlarge it and to "add new row
+and column." Investigated the real cause of the readability issue before
+touching anything, and used AskUserQuestion to resolve 2 genuinely
+different readings of "add row/column" before building (a large, real
+scope difference either way — multi-candidate batch send vs. a bare
+column-add convenience link) rather than guessing.
+
+**Readability, root-caused directly**: the skill_summary auto-fill built
+in the prior fix (2026-09-03) genuinely IS multi-line
+("SAP FICO: 8 Yrs\nSAP COPA: 3 Yrs\n...") — but the editable table cell
+rendered it in a plain single-line `<input>`, which silently collapses
+every newline in an HTML text input, and the read-only (historical-row)
+rendering had no `white-space: pre-line` either, so a real multi-line
+value ran together into one unreadable string in BOTH states. Fixed
+(`pipeline/page.tsx`'s inline tracking-sheet table): the editable
+skill_summary cell now renders a real `<textarea rows={4}>`, matching
+the exact pattern already used elsewhere in this same file for this same
+field; every read-only cell now respects real newlines via
+`white-space: pre-line`; the skill_summary column got a real
+`min-width: 220px` so it isn't squeezed to near-nothing by the table's
+default auto-layout.
+
+**Enlarge**: the modal already had native CSS `resize: both` (a
+manual drag-handle on the corner, built 2026-09-02) — real, but an easy-
+to-miss affordance and not what "enlarge" naturally means to a user.
+Added a real one-click ⛶ Enlarge/Restore toggle next to the close button
+(`Maximize2`/`Minimize2` icons), swapping the panel's starting
+width/height between the existing default (640×620) and a near-
+fullscreen size (95vw × 92vh, the SAME real bound the resize handle
+already respects) — the two don't conflict; a user can still drag
+further from either state.
+
+**"Add column"** — user confirmed via AskUserQuestion the real
+column-editor already exists (Ops Settings > Tracking Sheet Templates,
+free-form add/rename/remove, built 2026-08-23/2026-09-02) and just
+needed to be more discoverable from here, not rebuilt inline. Both real
+links to it (next to the template picker, and right under the table
+caption) renamed from generic "Manage Templates →" to the more
+literal "+ Add/Edit Columns →" — same real destination
+(`/ops-settings?tab=templates`), unchanged.
+
+**"Add row" — confirmed via AskUserQuestion to mean a genuine
+multi-candidate batch send**: submit a 2nd (or 3rd, etc.) DIFFERENT
+real candidate to the same client for the same role in one action,
+each appearing as its own genuine new SL No row, instead of repeating
+the whole Submit-to-Client flow once per person. Built as a thin batch
+WRAPPER around the exact same, already-proven `_do_client_submission()`
+— never a second, parallel send engine — matching this project's own
+"one shared engine" discipline throughout its history:
+
+- New `POST /applications/{application_id}/submit-to-client/batch`
+  (`kae_submission.py`) accepts `additional_application_ids` alongside
+  every existing `SubmitToClientIn` field, calls `_do_client_submission()`
+  once per candidate SEQUENTIALLY (never concurrently — each call's own
+  `sl_no` computation reads the real, just-committed prior row, so
+  sequencing is what keeps SL Nos correctly consecutive across the whole
+  batch), and returns a real per-candidate result list. Every safeguard
+  the single-candidate path already has (HITL role gate, SPOC-visibility
+  scoping, hidden-column redaction, the atomic race-safe stage-bump,
+  notification dispatch) applies identically to every candidate in the
+  batch, for free — nothing was reimplemented.
+- Real safety guard: every additional candidate must genuinely belong to
+  the SAME requisition as the anchor (same client, same role) — a
+  mismatched one is skipped with a clear per-item error, never silently
+  included in a real client-facing send. Capped at 20 candidates per
+  batch. `manual_resume` is deliberately rejected for a batch (one
+  hand-typed summary can't correctly describe several different real
+  people) — the caller must pick a style that renders from each
+  candidate's own real profile. `field_values`/`columns_override`/
+  `save_as_default` apply only to the anchor (index 0) — a manual cell
+  edit or template-save side effect is a per-request/per-template
+  concern, not something that should silently repeat per candidate.
+- Frontend (`pipeline/page.tsx`): a new `AddAnotherCandidatePicker`
+  reuses the already-fetched `GET /requisitions/{id}/pipeline` shape
+  (the same board-keyed-by-stage dict the Kanban board itself already
+  renders — a real bug caught and fixed BEFORE shipping, not after: the
+  first version assumed a flat array/`{applications:[...]}` wrapper and
+  would have thrown trying to `.filter()` a plain object; fixed to
+  `Object.values(pipeline||{}).flat()`) to search and pick other real
+  candidates on the same requisition, shown as removable chips. `send()`
+  branches to the new batch endpoint only when 1+ additional candidates
+  are selected — the existing single-candidate call path is completely
+  unchanged for the common case.
+
+Verified for real end-to-end, not code review, at every layer: a full
+scripted scenario (a genuine throwaway client + SPOC + requisition + 3
+candidates, plus a 4th, deliberately UNRELATED candidate on a separate
+requisition) confirmed via direct API calls — `manual` resume_style
+correctly 400s for a batch; the mismatched-requisition candidate is
+correctly skipped with a real per-item error and `email_sent:false`,
+never silently sent; all 3 genuine candidates got `email_sent:true`,
+`stage_bumped_to_submitted:true`, and distinct real `submission_id`s.
+Direct DB confirmation: 3 real `candidate_submissions` rows with
+genuinely sequential `sl_no` 1/2/3, `status:'sent'` on all 3, timestamps
+~4s apart confirming true sequential (not concurrent) processing. Then a
+SEPARATE, full real headless-browser pass through the ACTUAL live UI
+(not just the API): opened a real candidate's drawer, moved it into
+Submit to Client, clicked Enlarge and confirmed the panel's real
+bounding box grew to 1520×920 (matching the 95vw/92vh target), opened
+the picker, searched and added a 2nd real candidate as a chip, confirmed
+the skill_summary cell is now a genuine `<TEXTAREA>` (not `<INPUT>`),
+clicked the real Send button, and confirmed via the SAME direct-DB
+method (not the click alone) that 2 more real submissions landed as SL
+No 4 and 5, both `status:'sent'`, both applications correctly bumped to
+`submitted` — a genuine, complete proof that the exact live UI a
+recruiter/KAE actually uses produces the correct real result, not just
+that the underlying API works in isolation. Zero console errors
+throughout. A regression sweep across every suite directly exercising
+`kae_submission.py` (S14/S17/S29/S54/S61/S65/S73/S98/S99/S100, 87 tests)
+— one real, expected failure found and fixed (S98's own pre-existing
+test still asserted the old "Manage Templates" link text, stale the
+moment that copy was deliberately changed as part of this work; updated
+to assert the new, real "Add/Edit Columns" text instead, same real
+destination) — re-ran fully clean: 87/87. Zero-token audit: `CONFIRMED
+CLEAN`. All throwaway test data (6 candidates, 2 requisitions, 1 client,
+including one leftover from an earlier failed test-setup attempt caught
+by a final direct-DB residue check rather than assumed clean) removed
+via the real APIs, confirmed zero residue.
