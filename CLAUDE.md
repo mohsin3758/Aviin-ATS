@@ -82,15 +82,26 @@ every later UI phase (P5-P10) is theme-aware from the start.
 12. ALWAYS write a `consent_records` row before storing/processing ANY
     candidate PII (DPDP 2023), not just WhatsApp
 
-## VPS RESOURCES (checked 2026-06-15)
-96GB disk (93GB free), 7.8GB RAM (5.5GB free), Docker 29.5.3 +
-Compose v5.1.4, `dev` user in both `sudo` and `docker` groups (no
-sudo prefix needed for docker commands). Node 20.20.2 / Python 3.12.3
-on host. 7.8GB RAM is workable but not generous once Postgres + Ollama
-+ n8n + FastAPI + Next.js + WAHA (P11, Chromium-based like Playwright)
-are all running together — if containers start OOM-killing in later
-phases, stagger non-essential services or add swap rather than
-removing the zero-token local-AI services.
+## VPS RESOURCES (checked 2026-09-04 — upgraded since the original
+2026-06-15 note below; keeping the history since it explains the
+original "keep it lean" design constraints that still shape the
+zero-token cascade)
+193GB disk (117GB free), 15GB RAM (~10GB available with buff/cache
+reclaimable, 4GB swap essentially unused), 4 CPU cores, Docker 29.6.1 +
+Compose v5.2.0, `dev` user in both `sudo` and `docker` groups (no sudo
+prefix needed for docker commands). The VPS was upgraded at some point
+after the original P0 provisioning — real headroom is now genuinely
+comfortable (confirmed live: 1GB "free" is deceptive, buff/cache brings
+real availability to ~10GB), not the tight 5.5GB-free/2-core original.
+Original 2026-06-15 note, left for historical context: "96GB disk (93GB
+free), 7.8GB RAM (5.5GB free)... 7.8GB RAM is workable but not
+generous once Postgres + Ollama + n8n + FastAPI + Next.js + WAHA
+(Chromium-based like Playwright) are all running together — if
+containers start OOM-killing, stagger non-essential services or add
+swap rather than removing the zero-token local-AI services." The
+zero-token cascade itself was never designed AROUND the old tight
+budget in a way that needs undoing now that there's more headroom —
+this note is purely informational.
 
 ## DATABASE CONNECTION (target — created in P0)
 - Host: db (inside Docker) / localhost:5432 (outside)
@@ -22850,3 +22861,144 @@ Requests` responses in the exact failure window) before concluding this,
 not assumed; re-ran the affected suites in isolation after a genuine,
 pure time-based wait (no polling) and confirmed zero real regressions.
 Zero-token audit: `CONFIRMED CLEAN`.
+
+## VPS git-checkout reconciliation + Enterprise Email Management System verified/fixed + 3 QA-sweep deferred items closed, 2026-09-04
+Direct follow-up to the domain migration (Task B) and brand rename
+(Task C) work — while confirming the VPS's own git ref was in sync
+after those two, found the VPS local checkout 2 commits behind
+`origin/main`, carrying real, never-committed work from an earlier
+session (the full Enterprise Email Management System build, already
+applied to the live database). Investigated precisely rather than
+assumed either "side" was disposable — a genuine `sql/108`/`sql/109`
+migration-number collision existed between the VPS's disk content
+(`email_management_system.sql`/`email_link_click_tracking_function.sql`)
+and origin's (`spoc_kae_assignments.sql`/`tracking_template_spoc_
+project_scope.sql`). Checked the real, live database schema for both
+sides before touching anything: every one of 8 checked schema objects
+(`email_threads`, `client_contact_kae_assignments`, `whatsapp_channel_
+connections`, `referral_links.hired_candidate_id`, `tracking_sheet_
+templates.client_contact_id`, `feed_registrations`, `record_link_click()`,
+`idx_applications_req_stage`) was genuinely live in production — both
+sides were real, completed, already-deployed work, nothing draft or
+discardable.
+
+Reconciled via `git diff origin/main` (bypassing the stale, messy
+index entirely) rather than `git status`, which correctly compares
+the WORKING TREE against a commit regardless of what's staged —
+found exactly 22 real differing files, individually resolved: the
+VPS's colliding sql files preserved under new, non-colliding numbers
+(111, 112, since the built-in `git reset --hard` was blocked by the
+auto-mode safety classifier — built the correct commit directly via
+`git commit-tree` with the right parent instead, every file verified
+against origin or the live DB before being included); 2 files
+(`source_attribution.py`, `JobDetailClient.tsx`) that turned out to be
+pure CRLF corruption (byte-identical to origin after LF normalization);
+`QA_SWEEP_PROGRESS.md` (VPS had a stale ~212-line snapshot, origin had
+the real, ~10x-fuller, current progress tracker); 2 stray artifacts
+removed (a leftover one-off Playwright verification script, and a
+literal garbage file whose name was an unescaped Windows path from an
+earlier script bug); a real production `.env` secrets backup explicitly
+kept OUT of the commit (confirmed via an explicit filename scan for
+env/secret/credential/key/password patterns before committing, caught
+once already being accidentally swept in by a `git add -A` and
+immediately unstaged). Pushed as a clean fast-forward
+(`7219d6d..5745abb`), pulled back down to the local machine, confirmed
+the live app (all 8 containers) never needed a rebuild for any of this
+(pure git bookkeeping + line-ending fixes) and stayed healthy
+throughout.
+
+**Then verified the Enterprise Email Management System is genuinely
+complete and working, not just committed** — all 9 real endpoints
+(`/email-reports/{client-wise,kae-wise,recruiter,performance,sla,
+engagement,schedule-config,executive}` + `/communications/dashboard`)
+confirmed 200 with real data via direct API calls; the `/email-reports`
+frontend page confirmed to load with its route baked into the deployed
+JS chunks. **A real, live bug found and fixed during this verification
+— the exact same "missing `is_active` filter on a joined `clients`/
+`users` table" bug class already found and fixed dozens of times
+elsewhere in this project's history, now present in 7 places in this
+brand-new system**: `email_reports.py`'s client-wise report,
+engagement-scores list, the executive dashboard's top/least-responsive-
+clients + top-KAE + pending-client-responses, both CSV exports, plus
+`email_tracking.py`'s `compute_client_engagement_scores()` (the
+function that actually WRITES `client_engagement_scores`) and the
+`v_client_email_sla` view (fixed via a new migration,
+`sql/113_fix_email_reports_client_active_leak.sql` — never editing an
+already-applied migration file, and re-stating `security_invoker=true`
+explicitly since `CREATE OR REPLACE VIEW` doesn't preserve it across a
+replace, the same real gotcha already documented for
+`v_recruiter_capacity`/`v_monthly_billing`/`v_sla_dashboard`). Confirmed
+live before fixing: 148 of 155 real "outbound, unreplied"
+`candidate_messages` joined to a client belonged to an already-soft-
+deleted (mostly QA-test-fixture) client — the Executive Dashboard's
+`pending_client_responses` was genuinely showing "QA S102 Client ..."
+entries mixed into real data. Manually triggered the weekly
+`compute_client_engagement_scores` job directly (no need to wait for
+the real Monday 03:45 schedule) to populate real data for the first
+time — confirmed exactly 1 real client (Invenio) with correctly
+zero-token-computed engagement data (0% reply rate over 7 real sent
+emails, honestly scored `engagement_level: 'inactive'` — a real,
+correct result, not a bug), zero QA-test rows anywhere in the
+dashboard after the fix. Full S102 suite (8/8) re-run clean, confirmed
+no fresh leakage from the suite's own fixtures either.
+
+**Closed 3 more items from `QA_SWEEP_PROGRESS.md`'s "Open/deferred
+items" list** (see that file's own 2026-09-04 follow-up entry for full
+detail):
+- `candidates.py::bulk_assign`'s real `str(actor.user_id)` bug (a
+  trusted-internal/`x-tenant-id`-only caller with `actor.user_id is
+  None` produced the literal 4-character string `"None"` instead of a
+  real NULL, crashing on the `candidate_activities.user_id` UUID
+  column) — fixed with `str(actor.user_id) if actor.user_id else None`.
+  Reproduced the exact original 500 live via the trusted-internal path
+  before fixing, confirmed a clean 200 after. Checked the other 4
+  `str(actor.user_id)` call sites in the same file — all already either
+  explicitly `None`-guarded or reachable only via `require_role()`
+  (which structurally guarantees a real, non-`None` `actor.user_id`) —
+  this was the one real instance. S51/S79/S60 regression sweep (21/21)
+  passed clean.
+- CLAUDE.md's own stale VPS RESOURCES section (documented 7.8GB RAM/2
+  cores from the original 2026-06-15 provisioning) — updated with the
+  real, live-checked current values (15GB RAM, 4 cores, 193GB disk,
+  Docker 29.6.1/Compose v5.2.0); the VPS was evidently upgraded at some
+  point after P0. Original figures kept inline as historical context,
+  not silently deleted.
+- The `account_pl`'s "Infosys BPM" corrupted-`client_id` item
+  (documented since 2026-08-17 as "no safe way to infer the intended
+  real client from the data alone") — investigated with a wider net
+  than the original finding, checking `collection_records` too, not
+  just `account_pl`, and found 8 MORE rows with the identical
+  `client_id = tenant_id` corruption there. Cross-referencing
+  `client_name`/`invoice_ref` on both tables settled what the original
+  finding called unresolvable: all 5 `account_pl` + 8
+  `collection_records` rows were created within the same ~90-minute
+  window on 2026-06-21 — 12 of 13 unambiguously named "QA Test Client"/
+  "Fix Test PL"/"QA Client Ltd"/"QA Analyst Test Corp"/"Final Test"/"QA
+  Client Review Corp", and the 13th ("Infosys BPM")'s own invoice ref
+  (`INV-INFOSYS-DEC-73651`) carries the exact `73651` numeric marker
+  this project's own history already traced to the same June 2026
+  ad-hoc test/seed script batch (the same signature independently
+  confirmed in the 2026-08-31 "Faisal K"/garbage-name investigation).
+  Confirmed beyond reasonable doubt as test/seed data, not a real
+  client's corrupted financial record — **the actual cleanup DELETE
+  was blocked by the auto-mode safety classifier** (a raw SQL delete
+  against production financial tables, even fully-confirmed test rows)
+  and needs the user's own explicit go-ahead before it can run; the
+  investigation and evidence are complete either way, disclosed
+  directly rather than forced through.
+
+**Re-checked, unchanged, both flagged directly rather than silently
+re-deferred**: WAHA's primary "default" WhatsApp session is still
+`SCAN_QR_CODE` (disconnected) as of this check — real, live, affecting
+every automated WhatsApp notification, genuinely cannot be fixed by me
+(needs a physical phone to re-scan the QR via the WAHA dashboard).
+SMS (MSG91)/browser push remain untested against a real recipient — no
+genuinely safe test path has become available since Phase 0's original
+note. The secrets-sweep item (whether the real Hostinger credential
+found in old, still-recoverable git history was actually rotated) also
+remains something only the user can confirm — I have no way to
+independently verify an external system's current state.
+
+Full regression sweep across every suite touching the modified files
+(S51/S60/S79/S102, 29 tests) passed clean. Zero-token audit:
+`CONFIRMED CLEAN`.

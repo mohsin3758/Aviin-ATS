@@ -249,7 +249,7 @@ async def compute_client_engagement_scores(conn, tenant_id: str, period_start, p
         """SELECT DISTINCT cm.client_id, cl.name AS client_name
            FROM candidate_messages cm JOIN clients cl ON cl.id = cm.client_id
            WHERE cm.tenant_id=$1 AND cm.client_id IS NOT NULL AND cm.channel='email'
-             AND cm.is_deleted IS NOT TRUE
+             AND cm.is_deleted IS NOT TRUE AND cl.is_active IS NOT FALSE
              AND cm.created_at::date BETWEEN $2 AND $3""",
         tenant_id, period_start, period_end,
     )

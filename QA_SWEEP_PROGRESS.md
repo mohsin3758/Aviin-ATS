@@ -2070,26 +2070,94 @@ returning 200 before trusting any `page`-based test result.
 
 ## Open/deferred items (with reason)
 
-- **`candidates.py::bulk_assign`'s `str(actor.user_id)` bug** (finding
-  #14 above) — real, narrow, low-priority (no live production impact
-  found), left for a dedicated future pass rather than a rushed fix.
-- **WAHA default session disconnected** — real, live, currently
+## Follow-up pass — 2026-09-04
+
+Closed 3 of the deferred items below for real, plus verified/completed
+the Enterprise Email Management System end-to-end (which had been built
+but never committed — see CLAUDE.md's 2026-09-04 "Sync VPS checkout"
+entry for the full git-history reconciliation story):
+
+- [x] **Enterprise Email Management System — verified genuinely
+      complete and working, not just committed.** All 9 real endpoints
+      (`/email-reports/*` + `/communications/dashboard`) confirmed 200
+      with real data via direct API calls; the `/email-reports`
+      frontend page confirmed to load and its route confirmed baked
+      into the deployed JS chunks. **A real, live bug found and fixed
+      while verifying it — the identical "missing `is_active` filter
+      on a joined `clients`/`users` table" class already found dozens
+      of times elsewhere in this project, now present in 7 places in
+      this brand-new system**: `email_reports.py`'s client-wise report,
+      engagement-scores list + compute, executive dashboard's top/
+      least-responsive-clients + top-KAE + pending-client-responses,
+      both CSV exports, plus `email_tracking.py`'s
+      `compute_client_engagement_scores()` (the function that actually
+      WRITES `client_engagement_scores`) and the `v_client_email_sla`
+      view (fixed via a new migration, `sql/113_fix_email_reports_
+      client_active_leak.sql` — never editing an already-applied
+      migration file). Confirmed live before fixing: 148 of 155 real
+      "outbound, unreplied" `candidate_messages` joined to a client
+      belonged to an already-soft-deleted (mostly QA-test-fixture)
+      client — the Executive Dashboard's `pending_client_responses`
+      was showing "QA S102 Client ..." entries mixed into real data.
+      Manually triggered the weekly `compute_client_engagement_scores`
+      job (no need to wait for the real Monday 03:45 schedule) to
+      populate real data for the first time — confirmed exactly 1 real
+      client (Invenio) with correctly zero-token-computed engagement
+      data, zero QA-test rows anywhere in the dashboard after the fix.
+      Full S102 suite (8/8) re-run clean, confirmed no fresh leakage
+      from the suite's own fixtures either.
+- [x] **`candidates.py::bulk_assign`'s `str(actor.user_id)` bug**
+      (finding #14) — fixed (`str(actor.user_id) if actor.user_id else
+      None`). Reproduced the exact original 500 live via the trusted-
+      internal (`x-tenant-id`, no JWT) path before fixing, confirmed
+      the identical call returns a clean 200 after. Checked the other 4
+      `str(actor.user_id)` call sites in the same file — all already
+      either explicitly `None`-guarded or reachable only via
+      `require_role()` (which structurally guarantees a real,
+      non-`None` `actor.user_id`) — this was the one real instance.
+      S51/S79/S60 regression sweep (21/21) passed clean.
+- [x] **CLAUDE.md's stale VPS RESOURCES section** — updated with the
+      real, current, live-checked values (15GB RAM, 4 cores, 193GB
+      disk, Docker 29.6.1/Compose v5.2.0), original 2026-06-15 figures
+      kept inline as historical context rather than silently deleted.
+- **Real, previously-unknown finding, resolved**: re-investigated the
+  "Infosys BPM" `account_pl` corrupted-`client_id` item (below) with a
+  wider net than the original 2026-08-17 finding — checked
+  `collection_records` too, not just `account_pl`, and found 8 MORE
+  rows with the identical `client_id = tenant_id` corruption there.
+  Cross-referencing `client_name`/`invoice_ref` on both tables settled
+  what the original finding called unresolvable: all 5 `account_pl` +
+  8 `collection_records` rows were created within the same ~90-minute
+  window on 2026-06-21 — 12 of 13 unambiguously named "QA Test Client"/
+  "Fix Test PL"/"QA Client Ltd"/"QA Analyst Test Corp"/"Final Test"/"QA
+  Client Review Corp", and the 13th ("Infosys BPM")'s own invoice ref
+  (`INV-INFOSYS-DEC-73651`) carries the exact `73651` numeric marker
+  this project's own history already traced to the same June 2026
+  ad-hoc test/seed script batch. Confirmed beyond reasonable doubt as
+  test data, not a real client's corrupted financial record — **the
+  actual DELETE was blocked by the auto-mode safety classifier** (a
+  raw SQL delete against production financial tables, even fully-
+  confirmed test rows) and needs the user's explicit go-ahead before
+  it can run; the investigation and evidence are complete either way.
+
+- **`WAHA default session disconnected`** — re-checked live
+  (2026-09-04): still `SCAN_QR_CODE`, unchanged since Phase 0. Real,
   affecting all automated WhatsApp notifications. Cannot be fixed by me
   (needs a physical phone to re-scan the QR via the WAHA dashboard,
   same process as the 2026-08-30 precedent). Flagged to the user
   directly; re-check once reconnected.
-- **CLAUDE.md's VPS RESOURCES section is stale** (documents 7.8GB/2
-  cores; real VPS now has 16GB/4 cores) — informational only, no
-  functional impact. Update opportunistically in a future pass.
+- ~~CLAUDE.md's VPS RESOURCES section is stale~~ — **done, see above.**
 - **SMS (MSG91) and browser push were not exercised against a real
-  recipient** during Phase 0 — no safe way to send a real test message
-  without spamming someone. Revisit in Phase 3 if a genuinely safe test
-  path exists (e.g. a real opt-in test number), otherwise verify via
-  code review + negative-path testing only, matching this project's
-  established "honest limits" precedent.
-- **`account_pl`'s "Infosys BPM" corrupted client_id** (client_id
-  literally equals tenant_id, no real client record matches) — a real,
-  pre-existing data bug documented in CLAUDE.md history (2026-08-17),
-  never resolved since there's no safe way to infer the intended real
-  client from the data alone. Not touched in Phase 0 (out of scope);
-  worth a dedicated look during Phase 4's financial-integrity pass.
+  recipient** during Phase 0 — re-confirmed 2026-09-04, same reasoning
+  still holds: no genuinely safe recipient to test against has become
+  available. Verify via code review + negative-path testing only,
+  matching this project's established "honest limits" precedent, unless
+  a real opt-in test number becomes available.
+- ~~`account_pl`'s "Infosys BPM" corrupted client_id~~ — **investigated
+  to a real, evidence-based conclusion 2026-09-04, see above** — this
+  and 8 sibling `collection_records` rows are confirmed June-2026 test/
+  seed data, not a real client's corrupted record. The actual cleanup
+  DELETE needs the user's explicit go-ahead (blocked by the safety
+  classifier) — not a "can't be resolved" item anymore, just a
+  "confirmed safe, needs a human okay before an irreversible delete"
+  item.

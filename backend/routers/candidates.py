@@ -692,7 +692,7 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
                 INSERT INTO candidate_activities
                   (tenant_id, candidate_id, user_id, activity_type, title, description)
                 VALUES ($1, $2, $3, 'status_change', 'Added to Pipeline', $4)
-            """, actor.tenant_id, cid, str(actor.user_id),
+            """, actor.tenant_id, cid, str(actor.user_id) if actor.user_id else None,
                  f"Added to pipeline: {req['title']}" + (f" (stage: {stage})" if stage != "sourced" else ""))
             created += 1
 

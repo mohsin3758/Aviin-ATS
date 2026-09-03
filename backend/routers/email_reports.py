@@ -80,7 +80,7 @@ async def client_wise_report(
                    ROUND(AVG(EXTRACT(EPOCH FROM (cm.replied_at - cm.created_at)) / 3600)
                          FILTER (WHERE cm.replied_at IS NOT NULL), 1) AS avg_response_hours
             FROM candidate_messages cm
-            JOIN clients cl ON cl.id = cm.client_id
+            JOIN clients cl ON cl.id = cm.client_id AND cl.is_active IS NOT FALSE
             LEFT JOIN users u ON u.id = cm.sent_by
             WHERE {where}
             GROUP BY cm.client_id, cl.name
@@ -221,7 +221,7 @@ async def list_engagement_scores(actor: Actor = Depends(require_permission("emai
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT ces.*, cl.name AS client_name FROM client_engagement_scores ces
-            JOIN clients cl ON cl.id = ces.client_id
+            JOIN clients cl ON cl.id = ces.client_id AND cl.is_active IS NOT FALSE
             WHERE ces.tenant_id=$1
             ORDER BY ces.period_end DESC, ces.engagement_score DESC
             LIMIT 200""", actor.tenant_id)
@@ -282,22 +282,22 @@ async def executive_dashboard(actor: Actor = Depends(require_role_or_trusted_int
             actor.tenant_id)
         top_responsive = await conn.fetch("""
             SELECT cl.name AS client_name, ces.engagement_score, ces.reply_rate
-            FROM client_engagement_scores ces JOIN clients cl ON cl.id = ces.client_id
+            FROM client_engagement_scores ces JOIN clients cl ON cl.id = ces.client_id AND cl.is_active IS NOT FALSE
             WHERE ces.tenant_id=$1 ORDER BY ces.reply_rate DESC NULLS LAST LIMIT 5""", actor.tenant_id)
         least_responsive = await conn.fetch("""
             SELECT cl.name AS client_name, ces.engagement_score, ces.reply_rate
-            FROM client_engagement_scores ces JOIN clients cl ON cl.id = ces.client_id
+            FROM client_engagement_scores ces JOIN clients cl ON cl.id = ces.client_id AND cl.is_active IS NOT FALSE
             WHERE ces.tenant_id=$1 ORDER BY ces.reply_rate ASC NULLS LAST LIMIT 5""", actor.tenant_id)
         top_kae = await conn.fetch("""
             SELECT u.full_name, COUNT(*) AS emails_sent
-            FROM candidate_messages cm JOIN users u ON u.id=cm.sent_by
+            FROM candidate_messages cm JOIN users u ON u.id=cm.sent_by AND u.is_active IS NOT FALSE
             WHERE cm.tenant_id=$1 AND cm.client_id IS NOT NULL AND cm.channel='email'
               AND cm.is_deleted IS NOT TRUE AND cm.created_at >= now() - INTERVAL '30 days'
             GROUP BY u.full_name ORDER BY emails_sent DESC LIMIT 5""", actor.tenant_id)
         pending_client_responses = await conn.fetch("""
             SELECT cl.name AS client_name, cm.subject, cm.created_at,
                    ROUND(EXTRACT(EPOCH FROM (now() - cm.created_at)) / 3600, 1) AS hours_pending
-            FROM candidate_messages cm JOIN clients cl ON cl.id=cm.client_id
+            FROM candidate_messages cm JOIN clients cl ON cl.id=cm.client_id AND cl.is_active IS NOT FALSE
             WHERE cm.tenant_id=$1 AND cm.direction='outbound' AND cm.replied_at IS NULL
               AND cm.channel='email' AND cm.is_deleted IS NOT TRUE
             ORDER BY cm.created_at ASC LIMIT 10""", actor.tenant_id)
@@ -379,7 +379,7 @@ async def export_report(
                 SELECT cl.name AS client_name, COUNT(*) AS emails_sent,
                        COUNT(*) FILTER (WHERE cm.email_open_count > 0) AS opened,
                        COUNT(*) FILTER (WHERE cm.replied_at IS NOT NULL) AS replied
-                FROM candidate_messages cm JOIN clients cl ON cl.id=cm.client_id
+                FROM candidate_messages cm JOIN clients cl ON cl.id=cm.client_id AND cl.is_active IS NOT FALSE
                 WHERE cm.tenant_id=$1 AND cm.channel='email' AND cm.client_id IS NOT NULL
                   AND cm.is_deleted IS NOT TRUE AND cm.created_at::date BETWEEN $2 AND $3
                 GROUP BY cl.name ORDER BY emails_sent DESC""", actor.tenant_id, d_from, d_to)
@@ -402,7 +402,7 @@ async def export_report(
             rows = await conn.fetch(
                 """SELECT cl.name AS client_name, ces.engagement_score, ces.engagement_level,
                           ces.open_rate, ces.reply_rate
-                   FROM client_engagement_scores ces JOIN clients cl ON cl.id=ces.client_id
+                   FROM client_engagement_scores ces JOIN clients cl ON cl.id=ces.client_id AND cl.is_active IS NOT FALSE
                    WHERE ces.tenant_id=$1 ORDER BY ces.engagement_score DESC""", actor.tenant_id)
             fields = ["client_name", "engagement_score", "engagement_level", "open_rate", "reply_rate"]
         else:  # recruiter
