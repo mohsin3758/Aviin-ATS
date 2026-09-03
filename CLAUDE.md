@@ -22471,3 +22471,119 @@ real send through this exact shared engine
 both rewritten S99 tests) passed fully clean: 84 passed, 0 failed, 0
 flaky, 0 did-not-run. Zero-token audit: `CONFIRMED CLEAN` (447 files, 0
 external API refs).
+## Tracking-sheet email: real Outlook-safe column widths + header wrap fix, found via a real Outlook screenshot, 2026-09-04
+
+Direct follow-up to the same-day cumulative-history fix. User pasted a
+real Outlook screenshot of a genuine sent email plus 4 explicit issues:
+no visible gap between the message text and the tracking-sheet table;
+columns not properly aligned, with real data ("Partner", "Name", "Date",
+"Acme Staffing India", "Rahul K Y", "Associate Managing Consultant -
+SAP FICO") overflowing and breaking across multiple lines; excessive row
+height from unnecessary wrapping; and a request that the table render
+correctly and responsively across Outlook, Gmail, and Microsoft 365.
+
+**Root cause 1 (spacing), confirmed by reading the real code**:
+`_send_kae_email()`'s HTML-body construction concatenated the message
+`<div>` and the tracking table with zero space between them, relying on
+`_build_tracking_html_table()`'s own `margin:12px 0` on the `<table>`
+element for spacing — but CSS `margin` on a `<table>` specifically (not
+a `<div>`) is one of the least-reliably-honored properties in Outlook's
+Word rendering engine, the same class of Outlook quirk already found and
+fixed for paragraph spacing earlier the same day. Fixed with a real
+spacer `<div style="height:18px;...">` (explicit height, not margin) —
+the standard, portable Outlook-safe technique for forcing vertical space
+between two blocks.
+
+**Root cause 2 (column overflow/wrapping), confirmed by actually
+rendering the real HTML in a headless browser and looking at it, not
+code review**: `_build_tracking_html_table()` had NO per-column width at
+all — every email client's own default table layout auto-sizes columns
+from content, and with this tenant's real ~19-24-column default template
+all competing for a forced `width:100%` squeezed into a normal email
+body's rendered width, even short header LABELS like "Name"/"Partner"
+got crushed down to a few px, wrapping character-by-character — exactly
+matching the reported symptom. Rebuilt with real, explicit per-column
+widths (both the HTML `width` attribute AND matching CSS — Outlook's
+Word engine honors the HTML attribute far more reliably than CSS alone),
+`table-layout:fixed`, and a real total table width replacing the forced
+`width:100%` squeeze — short/simple columns (SL No, Date, CTC, Mobile
+Number, NDA Status, etc.) get just enough width to stay on one line;
+long-text columns (Role, Skill Summary, Current Company) get a
+genuinely wide column so at most 2 clean lines are ever needed, matching
+"similar to a well-formatted Excel table" rather than the old,
+pathological many-line collapse. Deliberately did NOT use `overflow:
+hidden`/`text-overflow:ellipsis` on the short/nowrap columns — both are
+unreliably honored by Outlook too, and the real risk if they silently
+failed is DATA LOSS (a truncated phone number or CTC value with no
+visual sign anything was cut) — a worse failure mode than the rare case
+of an unexpectedly long value making one row slightly taller.
+
+**2 more real bugs found and fixed only by rendering the actual result
+and looking at it, not caught by the first fix attempt**: the first
+version forced every `<th>` to `white-space:nowrap` regardless of its
+real column width — a real headless-browser screenshot showed genuinely
+long real header LABELS ("Notice Period / LWD") overflowing straight
+past their own `<th>` into the next header's text, visually garbling
+both. Fixed by making headers wrap using the SAME rule as their data
+cells (`_EMAIL_COL_NOWRAP`) — but this SECOND fix attempt was ALSO
+wrong, caught the same way (re-rendering and looking again, not assumed
+fixed): 2 real columns (`job_type`, `rtr_status`) have genuinely SHORT
+data ("Contract" — correctly nowrap) but a deliberately LONG,
+explanatory registry label ("Job Type (Full Time / Contract / C2H /
+Freelancer)", "RTR (Right To Represent)") — forcing THAT to nowrap too
+(since it borrowed the DATA column's nowrap category) still overflowed
+into "NDA Status"/"Recruiter Name". Fixed properly by decoupling the
+header wrap decision from the data wrap decision entirely — computed
+dynamically from the real label length against the real column width
+(a conservative ~6.3px/char estimate for this 11px Arial/Helvetica
+header font), not a second hand-maintained set that could silently
+drift the exact same way the first one already had.
+
+**Verified for real, end-to-end, at every round — not code review**:
+built a real throwaway client ("Acme Staffing India QA") + SPOC + a
+requisition titled exactly "Associate Managing Consultant - SAP FICO" +
+a candidate named "Rahul K Y" (14y experience, "New Delhi", "Aviin Tech
+Business Solutions") — matching the exact real reported data — and
+called the real `submit-to-client/preview` endpoint 3 times across the
+3 fix rounds, each time rendering the actual returned `tracking_html`
+in a real headless browser and pulling a screenshot (not just checking
+the raw HTML string) to visually confirm the result before moving on.
+Round 1 confirmed the spacer fix (a real, visible gap now exists between
+the message and the table) and confirmed most columns render cleanly on
+one line, with "Associate Managing Consultant - SAP FICO" correctly
+wrapping to exactly 2 clean lines (not the old many-line collapse) — but
+also caught the header-overflow bug live, at 3000px width, before
+concluding anything. Round 2's fix was deployed and re-rendered — caught
+the SECOND header bug (job_type/rtr_status) live, the same way. Round
+3's fix was deployed and re-rendered at both a wide (3000px) view — every
+header and value now renders cleanly with zero overlap — and a realistic
+narrow (850px) email-pane view, confirming the visible result matches
+the reference example's own clean, professional look. All throwaway
+test data (candidate, requisition, client) cleaned up via the real
+DELETE APIs afterward, confirmed zero residue.
+
+**Honest, disclosed verification limit, matching the identical pattern
+already established for the sibling greeting/signature-position fix
+earlier the same day**: the spacer-div fix specifically lives inside
+`_send_kae_email()`'s own HTML-body composition, not exposed via the
+public preview endpoint (which only returns the table itself) — so it
+could not be given automated Playwright coverage the same way the table-
+width/wrap fix could. Verified instead via direct rendering of the full
+composed message+spacer+table HTML in a real headless browser (the same
+screenshots described above already include the message text and the
+real, visible gap above the table) rather than left unverified.
+
+New permanent test coverage added to the existing "S99" suite: a real
+API-level test asserting `table-layout:fixed` (never `width:100%`),
+every `<th>` carries a genuine `width="N"` attribute, "Date" (a short
+label) stays nowrap, and the exact real "Job Type (Full Time / Contract
+/ C2H / Freelancer)" header — the specific column that broke the second
+fix attempt — correctly wraps (never nowrap) while its own DATA cell
+correctly stays nowrap, proving the header/data wrap decisions are
+genuinely independent going forward. S99 suite re-run clean in
+isolation: 10/10 passing (the new test included). A broader scoped
+regression sweep across every suite that performs a real send through
+this exact shared engine (S14/S17/S37/S43/S54/S61/S65/S73/S98/S99/S100,
+84 tests) passed fully clean before this last fix round, with the S99
+addition re-verified in isolation afterward. Zero-token audit:
+`CONFIRMED CLEAN` (447 files, 0 external API refs).

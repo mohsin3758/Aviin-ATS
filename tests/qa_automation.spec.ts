@@ -13828,6 +13828,64 @@ test.describe.serial('S99 Submit-to-Client modal: real drag-resize (CSS resize:b
     const rowNames = JSON.stringify(body.rows);
     expect(rowNames).not.toContain('Cand2');
   });
+
+  test('real bug fix (2026-09-04, reported live via a real Outlook screenshot): every real tracking-sheet email column gets an explicit, Outlook-safe width, and every header wraps/nowraps correctly based on its OWN real label length, never overflowing into a neighbor', async ({ request }) => {
+    // Root-caused via 3 rounds of actually rendering the real HTML in a
+    // headless browser and looking at it, not code review — the first 2
+    // attempts each fixed one real, distinct bug the previous one missed:
+    // (1) no per-column width at all -> "Na"/"me" (Name's own header
+    // wrapping character-by-character); (2) reusing the DATA nowrap rule
+    // for HEADERS too -> a genuinely long real label ("Job Type (Full
+    // Time / Contract / C2H / Freelancer)", "RTR (Right To Represent)")
+    // on a short-DATA (so nowrap-for-data) column overflowed straight
+    // past its own <th> and garbled into the next header's text. This
+    // test asserts the final, working state: every <th>/<td> carries a
+    // real explicit width attribute, and a header's own wrap/nowrap is
+    // computed from its real label length vs its real column width, not
+    // borrowed from an unrelated data-shape decision.
+    const prev = await request.get(`${API}/applications/${appId}/submit-to-client/preview`, { headers: authA() });
+    expect(prev.ok(), await prev.text()).toBeTruthy();
+    const html = (await prev.json()).tracking_html as string;
+
+    // table-layout:fixed + an explicit total width — never a bare
+    // width:100% squeeze (the root cause of the original "Na"/"me" bug).
+    expect(html).toContain('table-layout:fixed');
+    expect(html).not.toMatch(/width:100%/);
+
+    // Every real <th> carries a genuine width="N" HTML attribute (the
+    // one Outlook's Word rendering engine honors reliably) — not just a
+    // CSS width, which Word can silently ignore.
+    const thWidths = [...html.matchAll(/<th width="(\d+)"/g)].map(m => Number(m[1]));
+    expect(thWidths.length).toBeGreaterThan(10);
+    expect(thWidths.every(w => w > 0)).toBe(true);
+
+    // "Date" (a genuinely short label on a real, narrow column) stays
+    // nowrap — the common, expected case, unaffected by either fix.
+    const dateThMatch = html.match(/<th[^>]*>Date<\/th>/);
+    expect(dateThMatch).toBeTruthy();
+    expect(dateThMatch![0]).toContain('white-space:nowrap');
+
+    // "Job Type (Full Time / Contract / C2H / Freelancer)" — the exact
+    // real column whose SHORT data ("Contract") made it a nowrap DATA
+    // column, but whose LONG label broke the first fix attempt. Its own
+    // <th> must wrap (never nowrap), and must never bleed past its own
+    // closing </th> tag into "NDA Status"/"Recruiter Name" the way the
+    // real reported screenshot showed.
+    const jobTypeThMatch = html.match(/<th[^>]*>Job Type \(Full Time \/ Contract \/ C2H \/ Freelancer\)<\/th>/);
+    expect(jobTypeThMatch).toBeTruthy();
+    expect(jobTypeThMatch![0]).toContain('white-space:normal');
+    expect(jobTypeThMatch![0]).not.toContain('white-space:nowrap');
+
+    // The real DATA cell for job_type (this candidate's actual value,
+    // e.g. "Not specified" or a real job type) still stays nowrap —
+    // confirming the fix only changed the HEADER decision, not the
+    // deliberate, unrelated data-wrap policy for this same column.
+    const jobTypeColIdx = [...html.matchAll(/<th width="\d+"[^>]*>([^<]*)<\/th>/g)]
+      .findIndex(m => m[1].startsWith('Job Type'));
+    expect(jobTypeColIdx).toBeGreaterThanOrEqual(0);
+    const tdMatches = [...html.matchAll(/<td width="\d+"[^>]*>([\s\S]*?)<\/td>/g)];
+    expect(tdMatches[jobTypeColIdx][0]).toContain('white-space:nowrap');
+  });
 });
 
 test.describe.serial('S100 Tracking-sheet template delete: real FK-block fix (ON DELETE SET NULL) + a real used_template_id audit-trail bug found along the way', () => {

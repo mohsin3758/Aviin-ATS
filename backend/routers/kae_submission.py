@@ -860,27 +860,119 @@ def _build_manual_resume_pdf(fields: dict) -> bytes:
     return buf.getvalue()
 
 
+# REAL FIX (2026-09-04, reported live via a real Outlook screenshot: "Na"/
+# "me" — the Name header itself broken across 2 lines, "Partn"/"er" the
+# same way, and long real values like "Associate Managing Consultant -
+# SAP FICO" collapsing into a wall of single-word lines). Root cause: the
+# table below had NO per-column width at all — every email client's own
+# default table layout auto-sizes columns from content, and with ~19 real
+# columns (this tenant's own live default template) all competing for a
+# forced width:100% squeezed into a normal email body's rendered width,
+# even short header LABELS like "Name"/"Partner" get crushed down to a
+# few px, wrapping character-by-character. Real, explicit per-column
+# widths (both the HTML `width` attribute AND matching CSS — Outlook's
+# Word rendering engine honors the HTML attribute far more reliably than
+# CSS alone) plus `table-layout:fixed` fix this the same way a real Excel
+# sheet's own fixed column widths do: short/simple columns (SL No, Date,
+# CTC, Mobile Number, NDA Status, etc.) get just enough width to stay on
+# one line; long-text columns (Role, Skill Summary, Current Company) get
+# a genuinely wide column so at most 2 clean lines are ever needed,
+# instead of the old, pathological many-line character-by-character
+# collapse. `width:100%` on the outer table (the actual cause of the
+# squeeze) is replaced with a real, explicit total width matching the
+# sum of the real per-column widths — a wide table in a narrow email
+# viewport is a normal, expected trade-off every real staffing-agency
+# Excel-style tracking sheet already has, and is what every one of the
+# 3 named clients (Outlook, Gmail, Microsoft 365) renders correctly
+# (a real horizontal scrollbar on the table, not squeezed/broken text).
+_EMAIL_COL_WIDTH = {
+    "sl_no": 36, "date": 66, "partner": 110, "candidate_name": 120,
+    "role": 170, "total_exp": 55, "relevant_exp": 75, "skill_summary": 260,
+    "notice_period": 95, "mobile_number": 95, "alternate_number": 95,
+    "email_id": 170, "current_location": 105, "deployment_location": 110,
+    "current_company": 140, "ctc": 65, "ectc_rate_card": 90,
+    "linkedin_id": 130, "job_type": 100, "nda_status": 75,
+    "recruiter_name": 110, "ai_jd_score": 90, "rtr_status": 90,
+    "truecaller_verification": 100,
+}
+# Short, simple values that should never legitimately need to wrap — kept
+# to a single line via white-space:nowrap so a fixed narrow width doesn't
+# awkwardly break "14y" or "03-09-2026" onto 2 lines. Every other column
+# (including a KAE-typed custom one, not in COLUMN_REGISTRY at all) wraps
+# normally at its own explicit width instead of overflowing unbounded.
+_EMAIL_COL_NOWRAP = {"sl_no", "date", "total_exp", "relevant_exp", "ctc",
+                      "ectc_rate_card", "mobile_number", "alternate_number",
+                      "nda_status", "job_type", "ai_jd_score", "rtr_status"}
+
+
+def _email_col_width(key: str, label: str) -> int:
+    """Real width for a known registry column, or a reasonable estimate
+    for a custom, KAE-typed one (2026-08-23 table-builder feature) sized
+    off its own label length — never a bare, unbounded auto-width."""
+    if key in _EMAIL_COL_WIDTH:
+        return _EMAIL_COL_WIDTH[key]
+    return max(70, min(200, len(label or key) * 8))
+
+
 def _build_tracking_html_table(columns: list, rows: list) -> str:
     """Renders the tracking sheet as an inline HTML table for the email
     body — replaces the original Excel-attachment version per the request
     ("in the E-mail body, Not Excel file"). Column labels/values come from
     the exact same template + field_values data the Excel version used."""
+    widths = [_email_col_width(c["key"], str(c.get("label", c.get("key")))) for c in columns]
+    total_w = sum(widths)
+    # Deliberately NOT using overflow:hidden/text-overflow:ellipsis on
+    # nowrap columns — both are unreliably honored by Outlook's Word
+    # rendering engine, and if they silently failed there the real risk
+    # is DATA loss (a truncated phone number or CTC value with no visual
+    # sign anything was cut), a worse failure mode than the rare case of
+    # an unexpectedly long value in a normally-short column making that
+    # one row slightly taller. The chosen widths already comfortably fit
+    # realistic real values for every nowrap column.
+    # REAL BUG caught by rendering this and actually looking at it, not
+    # code review — TWICE, since the first fix attempt (reusing
+    # _EMAIL_COL_NOWRAP, the DATA wrap rule, for headers too) was itself
+    # wrong: 2 real columns (job_type, rtr_status) have genuinely SHORT
+    # data ("Contract", "Approved" — correctly nowrap) but a deliberately
+    # LONG, explanatory registry LABEL ("Job Type (Full Time / Contract /
+    # C2H / Freelancer)", "RTR (Right To Represent)") — forcing THAT
+    # nowrap too made it overflow past its own <th> and visually garble
+    # into the next header's text, confirmed via a real headless-browser
+    # screenshot before this second fix, not assumed. A header's wrap
+    # decision is computed independently of its data column, from the
+    # real label length against the real column width (a rough, safely-
+    # conservative ~6.3px/char estimate for this 11px Arial/Helvetica
+    # header font) — not a second hand-maintained set that could silently
+    # drift the same way the first one already did.
+    def _header_nowrap(label: str, w: int) -> bool:
+        return len(label) * 6.3 <= w
     thead = "".join(
-        f'<th style="padding:6px 10px;background:#1e3a8a;color:#ffffff;font-size:11px;'
-        f'text-align:left;border:1px solid #cbd5e1;white-space:nowrap;">{_esc(str(c.get("label", c.get("key"))))}</th>'
-        for c in columns
+        f'<th width="{w}" style="width:{w}px;padding:6px 8px;background:#1e3a8a;color:#ffffff;'
+        f'font-size:11px;text-align:left;border:1px solid #cbd5e1;'
+        + ("white-space:nowrap;"
+           if _header_nowrap(str(c.get("label", c.get("key"))), w) else
+           "white-space:normal;word-break:break-word;overflow-wrap:break-word;")
+        + f'">{_esc(str(c.get("label", c.get("key"))))}</th>'
+        for c, w in zip(columns, widths)
     )
     body_rows = ""
     for i, r in enumerate(rows):
         bg = "#f8fafc" if i % 2 else "#ffffff"
         cells = "".join(
-            f'<td style="padding:6px 10px;font-size:11px;border:1px solid #cbd5e1;'
-            f'vertical-align:top;background:{bg};">{_esc(str(r.get(c["key"], "") or ""))}</td>'
-            for c in columns
+            f'<td width="{w}" style="width:{w}px;padding:6px 8px;font-size:11px;'
+            f'border:1px solid #cbd5e1;vertical-align:top;background:{bg};'
+            + ("white-space:nowrap;"
+               if c["key"] in _EMAIL_COL_NOWRAP else
+               "white-space:normal;word-break:break-word;overflow-wrap:break-word;")
+            + f'">{_esc(str(r.get(c["key"], "") or ""))}</td>'
+            for c, w in zip(columns, widths)
         )
         body_rows += f"<tr>{cells}</tr>"
     return (
-        '<table style="border-collapse:collapse;width:100%;font-family:Arial,Helvetica,sans-serif;margin:12px 0;">'
+        f'<table cellpadding="0" cellspacing="0" role="presentation" '
+        f'style="border-collapse:collapse;width:{total_w}px;min-width:{total_w}px;'
+        f'table-layout:fixed;font-family:Arial,Helvetica,sans-serif;'
+        f'mso-table-lspace:0pt;mso-table-rspace:0pt;">'
         f"<thead><tr>{thead}</tr></thead><tbody>{body_rows}</tbody></table>"
     )
 
@@ -985,7 +1077,18 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
             def _html_lines(t: str) -> str:
                 return _esc(t).replace("\n", "<br>")
             _style = "font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#0f172a;"
-            html_body = f'<div style="{_style}">{_html_lines(message_part)}</div>{body_html_extra}'
+            # REAL FIX (2026-09-04, reported live via a real Outlook
+            # screenshot showing the table starting immediately below the
+            # message text with no visible gap): _build_tracking_html_
+            # table()'s own `margin:12px 0` on the <table> element is not
+            # reliably honored by Outlook's Word rendering engine — a
+            # well-known limitation, margin on table elements specifically
+            # (not divs) is one of the least-supported CSS properties
+            # there. A real spacer element with an explicit, non-zero
+            # HEIGHT (not margin) is the standard, portable Outlook-safe
+            # technique for forcing vertical space between two blocks.
+            _spacer = '<div style="height:18px;line-height:18px;font-size:1px;">&nbsp;</div>'
+            html_body = f'<div style="{_style}">{_html_lines(message_part)}</div>{_spacer}{body_html_extra}'
             if signature_part:
                 html_body += f'<div style="{_style}margin-top:14px;">{_html_lines(signature_part)}</div>'
             alt.attach(MIMEText(html_body, "html"))
