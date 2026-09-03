@@ -22235,12 +22235,10 @@ or expired token"}` signature at the very first login step - confirmed
 via direct backend-log correlation (18 real 429 Too Many Requests
 responses in the exact failure window) as this session's own extensively
 documented per-IP login rate-limit artifact from very heavy cumulative
-test volume today, not a regression - the underlying core
-fix is independently confirmed correct regardless via the direct SQL
-proof above and S54's own clean isolated run; a formal re-run of these
-6 is still pending the real, required ~15-minute cooldown at the time
-of this entry, disclosed honestly rather than claimed complete before
-it actually happened. Zero-token audit: `CONFIRMED CLEAN`. All throwaway test data cleaned
+test volume today, not a regression - confirmed for real, not just
+assumed: once the genuine ~15-minute cooldown passed, all 6 suites
+(38 tests total) re-ran fully clean in the same invocation. Zero-token
+audit: `CONFIRMED CLEAN`. All throwaway test data cleaned
 up via real APIs, confirmed zero residue.
 
 ## Conversations: "N new" badge relabeled "N unread" — a real, unbounded all-time count was being badged as freshly-arrived mail, 2026-09-03
@@ -22258,7 +22256,10 @@ file's own established thousands-separator convention elsewhere) —
 accurate regardless of how large the real number is. Left the separate,
 correctly-scoped "N new email(s) arrived!" toast notification untouched
 — that one genuinely measures a real delta since the last poll, not a
-static backlog, so "new" is the right word there. Verified the fix is
-genuinely live by confirming the deployed JS bundle itself, not
-assumed — the session's own login rate limit was still active at the
-time, so a direct in-browser screenshot check is still pending.
+static backlog, so "new" is the right word there. Verified live twice, not
+assumed: first by confirming the deployed JS bundle itself while the
+session's own login rate limit was still active, then via a real
+headless-browser session once the ~15-minute cooldown genuinely
+cleared — the actual rendered badge reads "41 unread" (a real,
+different number from the screenshot, checked against the admin
+account, not Shahana's own).
