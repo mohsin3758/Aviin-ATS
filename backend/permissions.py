@@ -245,6 +245,22 @@ def require_permission(feature: str, action: str = "read"):
     return dependency
 
 
+async def is_role_or_full_permission(actor, *roles: str) -> bool:
+    """The plain, non-raising boolean core of require_role_or_full_permission
+    (below) — extracted (2026-09-04) so a route that needs to serve a
+    genuinely DIFFERENT, narrower response to a non-admin-equivalent caller
+    (rather than a hard 403) can reuse the exact same admin-equivalence
+    check, instead of every such route re-deriving its own copy. Opens its
+    own connection since callers may not always have one in scope."""
+    if actor.role in roles:
+        return True
+    if actor.role is None:
+        return False
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        permissions = await get_role_permissions(conn, actor.tenant_id, actor.role)
+    return check_permission(permissions, "*", "*") is True
+
+
 def require_role_or_full_permission(*roles: str):
     """Like require_role(*roles) — a hard, unconditional 403 unless the
     actor's JWT role is literally one of `roles` — but ALSO accepts any
@@ -270,13 +286,7 @@ def require_role_or_full_permission(*roles: str):
     a real human" requirement."""
 
     async def dependency(actor: Actor = Depends(get_actor)) -> Actor:
-        if actor.role in roles:
-            return actor
-        if actor.role is None:
-            raise HTTPException(status_code=403, detail=f"Requires role in {roles}")
-        async with db.tenant_conn(actor.tenant_id) as conn:
-            permissions = await get_role_permissions(conn, actor.tenant_id, actor.role)
-        if check_permission(permissions, "*", "*") is True:
+        if await is_role_or_full_permission(actor, *roles):
             return actor
         raise HTTPException(status_code=403, detail=f"Requires role in {roles}")
 

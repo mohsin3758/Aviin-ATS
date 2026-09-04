@@ -23184,3 +23184,80 @@ innerHeight}`, and the panel must fall fully within `[0, viewportHeight]`)
 rather than just "the form is submittable," which wouldn't have reliably
 caught this class of bug either. Full S49 suite (9/9, including the new
 test) passed clean. Zero-token audit: `CONFIRMED CLEAN`.
+
+## Real, live security gap fixed: any authenticated role could see every user's full PII, and reach the admin-only Users & Roles page unconditionally, 2026-09-04
+User reported (2 screenshots): Shahana Tahreen (a real KAE) could open
+the full "Users & Roles" admin page - a real 649-user list with employee
+IDs, phone numbers, and edit/deactivate/delete action buttons - via her
+own Topbar profile-dropdown "Account Settings" item, and asked to fix it
+so a user only sees features actually assigned to their role.
+
+Investigated properly, not guessed: `GET /users` (`list_users`) and
+`GET /users/{user_id}` (`get_user`) in `users.py` had ZERO role
+restriction at all - `Depends(get_actor)` only, while every WRITE
+endpoint in the same file already correctly required
+`require_role_or_full_permission("admin","manager")` (built earlier the
+same day for a separate, related fix). Any authenticated tenant user,
+any role, could fetch every real user's full PII. Root-caused the
+navigation path too: `Topbar.tsx`'s profile-dropdown "Account Settings"
+item hardcoded `router.push('/settings/users')` for every role
+unconditionally - a completely separate code path from the Sidebar's
+own already-correct, dynamic `hasFeatureAccess('users_roles')` gating
+(built 2026-08-31), bypassing it entirely. `settings/users/page.tsx`
+itself had no role guard of its own either - it relied entirely on
+upstream navigation hygiene, so a direct URL/bookmark/browser-back visit
+would have worked regardless of the Topbar fix alone.
+
+**The naive backend fix (a hard admin/manager gate on `GET /users`,
+matching every write endpoint) was tried and reverted** - that same
+plain list endpoint turned out to be the real, load-bearing "list
+active users for a picker dropdown" call used by 16+ real pages across
+every role (the Assigned Recruiter/Interviewer pickers, the New
+Follow-Up form's own Assigned User field fixed earlier the same day,
+etc.) - locking the whole endpoint down would have broken every one of
+them for anyone but admin/manager. Fixed properly instead: the endpoint
+stays reachable by anyone (unchanged for the picker-dropdown case), but
+a non-admin-equivalent caller now gets back only the minimal fields
+those pickers actually render (`id/full_name/role/role_name/is_active`)
+- confirmed by checking every real frontend caller's own `.map()` usage
+before committing to this field set. `GET /users/{user_id}` and
+`GET /users/stats/summary` (no legitimate non-admin frontend caller for
+either, confirmed via grep) were hard-gated the same way the write
+endpoints already are. New `is_role_or_full_permission()` in
+`permissions.py` - a plain, non-raising boolean extracted from
+`require_role_or_full_permission()`'s own dependency (2026-09-04,
+earlier the same day) - lets `list_users` branch on the SAME real
+admin-equivalence check without a second, drifting copy of that logic.
+
+Frontend: `Topbar.tsx`'s "Account Settings" item now only renders for a
+role that genuinely has `users_roles` read access - mirrors
+`Sidebar.tsx`'s own established check verbatim (same `GET /roles` call,
+same real-permission semantics), not a second, drifting copy. A real
+defensive third layer added on `settings/users/page.tsx` itself - an
+"Access Restricted" message for anyone who reaches the URL directly
+regardless of navigation path, matching this project's own established
+defense-in-depth precedent elsewhere (e.g. `requisitions/page.tsx`'s
+`canCreateReq` gating).
+
+Verified for real end-to-end, not code review, at every layer: a
+genuine throwaway KAE (never touching Shahana's own real credentials -
+this project's established "never guess/reset a real user's password"
+discipline) confirmed via direct API calls that `GET /users` now
+returns only the 5 safe fields (no email/phone/employee_id/department/
+last_login_at) while still being non-empty and usable, `GET /users/
+{id}` and `/stats/summary` both cleanly 403, and admin's own identical
+calls are completely unaffected (full field set, 200 everywhere). A
+real headless-browser pass confirmed the live UI: the KAE's own
+dropdown menu genuinely has no "Account Settings" item (screenshot-
+confirmed - the gap between "Open Mailbox" and "Help & Support" is
+simply gone), a direct navigation to `/settings/users` shows a clean
+"Access Restricted" message with zero trace of the real user table or
+Invite User button (screenshot-confirmed), and the SAME KAE's real
+New Follow-Up "Assigned User" picker still correctly lists real
+recruiter names - proving the narrowed response genuinely didn't break
+the legitimate use case it exists to preserve. Admin's own page and
+menu confirmed completely unaffected. New permanent "S104" suite (5
+tests) added to `qa_automation.spec.ts`, passed clean on the first run.
+A scoped regression sweep (S31/S33/S49/S51/S81, 30 tests) passed clean
+- zero regressions in any of the picker-dependent or Users & Roles
+write-flow suites. Zero-token audit: `CONFIRMED CLEAN`.

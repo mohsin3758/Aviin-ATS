@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 import db
 from deps import Actor, get_actor
-from permissions import FEATURES, FEATURE_GROUPS, ACTIONS, require_role_or_full_permission
+from permissions import FEATURES, FEATURE_GROUPS, ACTIONS, require_role_or_full_permission, is_role_or_full_permission
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -54,12 +54,39 @@ async def list_users(
     is_active: Optional[bool] = None,
     actor: Actor = Depends(get_actor)
 ):
+    """Real, live security gap fixed (2026-09-04): this had zero role
+    restriction at all - any authenticated tenant user, any role, could
+    fetch every real user's full PII (email, phone, employee_id,
+    last_login_at, department, ...). Reported live via a real KAE reaching
+    the full Users & Roles admin page and its real 659-user list through
+    the Topbar's "Account Settings" menu item (itself also fixed the same
+    day - it linked to this admin-only page unconditionally, for every
+    role).
+
+    The naive fix (a hard require_role_or_full_permission gate, like
+    every WRITE endpoint in this file already has) was tried and reverted
+    - this endpoint is ALSO the real, load-bearing "list active users for
+    a picker dropdown" call used by 16+ real pages across every role
+    (Assigned Recruiter/Interviewer pickers, the Follow-Up form's
+    Assigned User field, etc.) - locking the whole endpoint down would
+    have broken all of them for anyone but admin/manager.
+
+    Real fix instead: stays reachable by anyone (unchanged for the
+    picker-dropdown case), but a non-admin-equivalent caller only gets
+    back the minimal fields those pickers actually render
+    (id/full_name/role/role_name/is_active) - the same real PII (email,
+    phone, employee_id, last_login_at, department, designation,
+    location, joining_date, reporting_to) only an admin/manager sees on
+    the real Users & Roles page is no longer exposed to every role."""
+    is_admin = await is_role_or_full_permission(actor, "admin", "manager")
+    cols = ("v.id, v.email, v.full_name, v.role, v.role_name, v.role_level, "
+            "v.department, v.designation, v.phone, v.employee_id, "
+            "v.is_active, v.location, v.joining_date, v.last_login_at, "
+            "v.capacity_weekly, v.reporting_to_name, u.reporting_to") if is_admin \
+        else "v.id, v.full_name, v.role, v.role_name, v.is_active"
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
-            SELECT v.id, v.email, v.full_name, v.role, v.role_name, v.role_level,
-                   v.department, v.designation, v.phone, v.employee_id,
-                   v.is_active, v.location, v.joining_date, v.last_login_at,
-                   v.capacity_weekly, v.reporting_to_name, u.reporting_to
+        rows = await conn.fetch(f"""
+            SELECT {cols}
             FROM v_users_with_roles v
             JOIN users u ON u.id = v.id
             WHERE v.tenant_id = $1
@@ -209,7 +236,7 @@ async def create_user(body: UserCreate, actor: Actor = Depends(require_role_or_f
     return dict(row)
 
 @router.get("/{user_id}")
-async def get_user(user_id: str, actor: Actor = Depends(get_actor)):
+async def get_user(user_id: str, actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT v.*, u.reporting_to FROM v_users_with_roles v
@@ -504,7 +531,7 @@ async def purge_user(user_id: str, force: bool = False, actor: Actor = Depends(r
 
 
 @router.get("/stats/summary")
-async def user_stats(actor: Actor = Depends(get_actor)):
+async def user_stats(actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             SELECT

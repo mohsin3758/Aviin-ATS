@@ -57,9 +57,33 @@ export default function UsersPage() {
   // doesn't exist during server render), same pattern used elsewhere in
   // this app (device-monitoring, recruiter-ops).
   const [myUserId, setMyUserId] = useState('');
-  useEffect(() => { setMyUserId(getTokenPayload()?.sub || ''); }, []);
+  // Real, live security gap fixed (2026-09-04): this page had no role
+  // guard of its own at all — it relied entirely on the Sidebar/Topbar
+  // not linking here for a non-admin role, and a direct URL/bookmark/
+  // browser-back visit bypassed that completely. Reported live: a real
+  // KAE (Shahana Tahreen) reached this exact page's full real user list
+  // through the Topbar's own "Account Settings" menu item (also fixed
+  // the same day). Deferred read (SSR-safe), and `!mounted` starts
+  // permissive to avoid flashing "Access Restricted" at a legitimate
+  // admin during the one-tick loading window — matches the exact
+  // real-permission semantics already established in Sidebar.tsx/
+  // Topbar.tsx for this same check (admin/super_admin always true;
+  // otherwise the real role_definitions row for this role, via the
+  // `roles` fetch already happening below for the role dropdown — no
+  // second API call needed).
+  const [myRole, setMyRole] = useState('');
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { const t = getTokenPayload(); setMyUserId(t?.sub || ''); setMyRole(t?.role || ''); setMounted(true); }, []);
   const { data: users, loading, refetch } = useFetch<any[]>('/users');
   const { data: roles } = useFetch<any[]>('/roles');
+  const canManage = !mounted || ['admin','super_admin'].includes(myRole) || (() => {
+    const mine = (roles||[]).find((r:any) => r.role_code === myRole);
+    const perms = mine?.permissions || {};
+    const wildcard = perms['*'];
+    const acts = perms['users_roles'];
+    return Boolean((wildcard && (wildcard.includes('*') || wildcard.includes('read'))) ||
+      (acts && (acts.includes('*') || acts.includes('read'))));
+  })();
 
   const inactiveCount = (users||[]).filter(u=>u.is_active===false).length;
   const filtered = (users||[]).filter(u =>
@@ -229,6 +253,18 @@ export default function UsersPage() {
 
   const inputStyle = { width:'100%', border:'1px solid #e2e8f0', borderRadius:'8px', padding:'9px 12px', fontSize:'13px', outline:'none', color:'#1e293b', background:'white', boxSizing:'border-box' as const };
   const depts = [...new Set((users||[]).map(u=>u.department).filter(Boolean))];
+
+  if (!canManage) {
+    return (
+      <div className="anim-fade-up space-y-6">
+        <div style={{ padding:'60px 20px', textAlign:'center', color:'#64748b' }}>
+          <Shield size={40} style={{ margin:'0 auto 12px', opacity:0.4 }} />
+          <h2 style={{ fontSize:'16px', fontWeight:700, color:'#1e293b', marginBottom:'6px' }}>Access Restricted</h2>
+          <p style={{ fontSize:'13px' }}>Managing users and roles is limited to admin/manager accounts.<br/>Contact your admin if you believe you should have access.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="anim-fade-up space-y-6">

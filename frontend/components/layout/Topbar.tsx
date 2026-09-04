@@ -4,7 +4,7 @@ import { Search, Bell, Plus, ChevronDown, Settings, LogOut,
          User, HelpCircle, Briefcase, Users, Building2, Keyboard, Mail, PenSquare, Menu } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { clearToken, getToken, getTokenPayload } from '@/lib/auth';
-import { useFetch } from '@/lib/useFetch';
+import { useFetch, apiFetch } from '@/lib/useFetch';
 import Link from 'next/link';
 
 export function Topbar({ onOpenMobileMenu }: { onOpenMobileMenu?: () => void } = {}) {
@@ -21,6 +21,36 @@ export function Topbar({ onOpenMobileMenu }: { onOpenMobileMenu?: () => void } =
   const displayName = _tok?.full_name || 'Admin';
   const displayRole = (_tok?.role || 'admin').replace(/_/g,' ').replace(/\w/g, (c:string) => c.toUpperCase());
   const initials = displayName.split(' ').map((n:string) => n[0]).join('').slice(0,2).toUpperCase();
+
+  // Real, live security gap fixed (2026-09-04): "Account Settings" always
+  // routed here — to /settings/users, the tenant-wide Users & Roles admin
+  // page — for EVERY role, regardless of whether the Sidebar's own
+  // dynamic hasFeatureAccess('users_roles') gate would ever have shown
+  // that page's link at all. Reported live: a real KAE (Shahana Tahreen)
+  // reached the full page, its real user list, and its edit/deactivate/
+  // delete action buttons through this exact menu item. Mirrors
+  // Sidebar.tsx's own established check verbatim (same GET /roles call,
+  // same real-permission semantics) rather than a second, drifting copy
+  // of that logic — admin/super_admin always true; every other role
+  // fetches its own real role_definitions row once and checks for
+  // 'users_roles' read access, same as the Sidebar link itself.
+  const userRole = _tok?.role || 'admin';
+  const [canManageUsers, setCanManageUsers] = useState(true);
+  useEffect(() => {
+    if (!mounted) return;
+    if (['admin','super_admin'].includes(userRole)) { setCanManageUsers(true); return; }
+    let cancelled = false;
+    apiFetch('/roles').then((rows: any[]) => {
+      if (cancelled) return;
+      const mine = (rows || []).find((r: any) => r.role_code === userRole);
+      const perms = mine?.permissions || {};
+      const wildcard = perms['*'];
+      const acts = perms['users_roles'];
+      setCanManageUsers(Boolean((wildcard && (wildcard.includes('*') || wildcard.includes('read'))) ||
+        (acts && (acts.includes('*') || acts.includes('read')))));
+    }).catch(() => { if (!cancelled) setCanManageUsers(false); });
+    return () => { cancelled = true; };
+  }, [mounted, userRole]);
 
   const logout = async () => {
     try {
@@ -168,7 +198,12 @@ export function Topbar({ onOpenMobileMenu }: { onOpenMobileMenu?: () => void } =
                   { icon:<User size={14}/>,       label:'My Profile',     action:()=>{} },
                   { icon:<Mail size={14}/>,       label:'My Email Accounts', action:()=>router.push('/settings/mail-accounts') },
                   { icon:<PenSquare size={14}/>,  label:'Open Mailbox',      action:()=>router.push('/conversations') },
-                  { icon:<Settings size={14}/>,    label:'Account Settings',action:()=>router.push('/settings/users') },
+                  // Real fix (2026-09-04): only rendered for a role that
+                  // genuinely has admin-equivalent access to Users & Roles
+                  // (see canManageUsers above) — previously routed every
+                  // role here unconditionally, the real cause of a KAE
+                  // reaching the full tenant-wide user-management page.
+                  ...(canManageUsers ? [{ icon:<Settings size={14}/>, label:'Account Settings', action:()=>router.push('/settings/users') }] : []),
                   { icon:<HelpCircle size={14}/>,  label:'Help & Support', action:()=>{} },
                 ].map(({ icon, label, action }) => (
                   <button key={label} onClick={()=>{ setShowProfile(false); action(); }}

@@ -14661,3 +14661,93 @@ test.describe.serial('S103 Real signature auto-appended to Submit-to-KAE/Submit-
     expect(errors).toHaveLength(0);
   });
 });
+
+test.describe.serial('S104 Users & Roles: real, live security gap fixed — GET /users returned full PII to any role, and Account Settings routed every role to the admin-only page', () => {
+  const stamp = Date.now();
+  let adminTok: string;
+  let kaeTok: string;
+  let kaeId: string;
+
+  test('setup: real admin token + a real throwaway KAE user, logged in as themselves', async ({ request }) => {
+    const loginRes = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme' },
+    });
+    adminTok = (await loginRes.json()).access_token;
+    const created = await (await request.post(`${API}/users`, {
+      headers: { Authorization: `Bearer ${adminTok}` },
+      data: { full_name: `QA S104 KAE ${stamp}`, email: `qa.s104.kae.${stamp}@test.com`, password: 'TestPass123!', role: 'kae' },
+    })).json();
+    kaeId = created.id;
+    const kaeLogin = await request.post(`${API}/auth/login`, {
+      data: { email: `qa.s104.kae.${stamp}@test.com`, password: 'TestPass123!' },
+    });
+    kaeTok = (await kaeLogin.json()).access_token;
+  });
+
+  test('BUG FIX: GET /users returns only minimal fields (id/full_name/role/role_name/is_active) to a non-admin-equivalent role — real PII (email/phone/employee_id/department/last_login_at) is no longer exposed, while the response stays non-empty and usable for a real picker dropdown', async ({ request }) => {
+    const res = await request.get(`${API}/users?is_active=true`, { headers: { Authorization: `Bearer ${kaeTok}` } });
+    expect(res.ok()).toBeTruthy();
+    const rows = await res.json();
+    expect(Array.isArray(rows)).toBeTruthy();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(r).toHaveProperty('id');
+      expect(r).toHaveProperty('full_name');
+      expect(r).toHaveProperty('is_active');
+      expect(r).not.toHaveProperty('email');
+      expect(r).not.toHaveProperty('phone');
+      expect(r).not.toHaveProperty('employee_id');
+      expect(r).not.toHaveProperty('department');
+      expect(r).not.toHaveProperty('last_login_at');
+    }
+  });
+
+  test('BUG FIX: admin still gets the real, full field set from the identical endpoint — no regression', async ({ request }) => {
+    const res = await request.get(`${API}/users?is_active=true&role=kae`, { headers: { Authorization: `Bearer ${adminTok}` } });
+    const rows = await res.json();
+    const mine = rows.find((r: any) => r.id === kaeId);
+    expect(mine).toBeTruthy();
+    expect(mine.email).toBe(`qa.s104.kae.${stamp}@test.com`);
+    expect(mine).toHaveProperty('phone');
+    expect(mine).toHaveProperty('employee_id');
+  });
+
+  test('BUG FIX: GET /users/{id} and GET /users/stats/summary now cleanly 403 a non-admin caller (previously wide open)', async ({ request }) => {
+    const single = await request.get(`${API}/users/${kaeId}`, { headers: { Authorization: `Bearer ${kaeTok}` } });
+    expect(single.status()).toBe(403);
+    const stats = await request.get(`${API}/users/stats/summary`, { headers: { Authorization: `Bearer ${kaeTok}` } });
+    expect(stats.status()).toBe(403);
+    // Admin unaffected.
+    const adminSingle = await request.get(`${API}/users/${kaeId}`, { headers: { Authorization: `Bearer ${adminTok}` } });
+    expect(adminSingle.ok()).toBeTruthy();
+  });
+
+  test('real headless UI: a non-admin-equivalent role sees no "Account Settings" item in the Topbar profile menu, and a direct navigation to /settings/users shows "Access Restricted" (not the real user table) — admin is unaffected either way', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.goto('/login');
+    await page.fill('input[type="email"]', `qa.s104.kae.${stamp}@test.com`);
+    await page.fill('input[type="password"]', 'TestPass123!');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await page.locator('header').getByText(`QA S104 KAE ${stamp}`, { exact: false }).first().click();
+    await page.waitForTimeout(500);
+    const menuText = await page.locator('body').innerText();
+    expect(menuText).not.toContain('Account Settings');
+
+    await page.goto('/settings/users');
+    await page.waitForTimeout(1500);
+    const pageText = await page.locator('body').innerText();
+    expect(pageText).toContain('Access Restricted');
+    expect(pageText).not.toContain('Invite User');
+    expect(errors).toHaveLength(0);
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (kaeId) {
+      await request.patch(`${API}/users/${kaeId}/deactivate`, { headers: { Authorization: `Bearer ${adminTok}` } }).catch(() => {});
+      await request.delete(`${API}/users/${kaeId}/purge`, { headers: { Authorization: `Bearer ${adminTok}` } }).catch(() => {});
+    }
+  });
+});
