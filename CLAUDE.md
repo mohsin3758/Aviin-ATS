@@ -23649,3 +23649,74 @@ move creates a `recruiter_tasks`/`notifications`/`email_threads` row, a
 referral test creates a `referral_links` row) — this pass's real value
 was doing that systematic FK-aware widening across the whole schema
 rather than repeating the same narrower table list a second time.
+
+## Real VPS resource audit: 3 orphaned WAHA sessions found and closed (real ~1.7GB memory + 24GB disk reclaimed), 2026-09-04
+User pasted a live Hostinger VPS overview panel (CPU 7%, Memory 32%,
+Disk 78GB/200GB, plus Incoming/Outgoing traffic and Bandwidth) and asked
+why, and to check and fix it. Investigated every metric directly on the
+VPS rather than guessed — 2 genuine, real, actionable findings, both
+fixed; the traffic/bandwidth numbers were confirmed healthy and needed
+no action.
+
+**Real finding #1 — 3 completely orphaned WAHA WhatsApp-session Chromium
+instances, running 24/7, doing zero useful work.** `docker stats`
+showed `aviin_waha` as by far the single largest consumer (3.36GB
+memory, 11% CPU) — investigated why, not assumed normal. A host-level
+process listing revealed 5 separate full Chromium browser trees (main
+process + renderer + GPU process + 2 utility processes + crashpad
+handlers each) running inside that one container, one per WAHA session.
+Called WAHA's own real session-list API and found **all 5 sessions were
+`SCAN_QR_CODE` — completely disconnected, none ever linked to a real
+phone**. Cross-referenced the 3 personal-session ones
+(`u_ce1160b8...`/`u_0a6d15ec...`/`u_efe87bbb...`) against the real
+`user_whatsapp_accounts` table (the individual-WhatsApp-numbers feature
+built 2026-08-26/27) and found **zero matching real user records at
+all** — these 3 sessions were never represented in the app's own data
+model, had empty webhook configs, and were pure leftover artifacts from
+earlier verification work on that feature, never properly stopped.
+Confirmed the other 2 sessions (`default`, `aviin`) are genuinely real —
+both webhook-wired to the actual backend and referenced nowhere as test
+data (a repo-wide grep for a literal `'aviin'` session name found zero
+matches in application code, confirming it was a real, deliberate,
+human-configured second company number, not test residue) — left
+completely untouched, matching the already-documented, disclosed
+"needs a physical QR re-scan" state for `default`.
+
+Stopped and deleted all 3 orphaned sessions via WAHA's own real
+`POST .../stop` + `DELETE .../{session}` API. Verified for real, not
+assumed: `aviin_waha`'s own reported memory dropped from 3.36GB (21.5%)
+to 1.65GB (10.58%) and CPU from 11.02% to 3.31% within seconds of the
+cleanup — a genuine, immediate, measured improvement, not a guess.
+
+**Real finding #2 — 25.89GB of pure Docker build cache, 100%
+reclaimable, the same recurring pattern already found and fixed once
+before on this exact VPS (2026-08-30).** `docker system df` showed 9
+real images (23GB, all needed — the actual running application code),
+22.6GB of real volumes (dominated by `aviin_resume_uploads` at ~20GB —
+genuine candidate resume files, correctly untouched), and 25.89GB of
+build cache — leftover intermediate layers from the many `docker
+compose up -d --build` cycles this project's own history runs
+constantly, with zero relationship to any currently-running container.
+Reclaimed via `docker builder prune -af` (`docker image prune -f`
+separately confirmed 0B — no dangling images beyond the build cache).
+Disk usage dropped from 79GB/200GB (41%) to 55GB/200GB (29%) —
+confirmed via a direct `df -h` before and after, not assumed from the
+prune command's own claimed total alone.
+
+**Confirmed genuinely fine, not "solved" because nothing needed
+solving**: CPU (7%, load average 0.27-1.03 on 4 real cores — well
+within normal), incoming/outgoing traffic (23.4MB/12.2MB — ordinary,
+recent API/user traffic, not a spike), and bandwidth (0.006TB of a
+16TB allocation — effectively nothing). Reported this honestly rather
+than inventing a fix for numbers that were already healthy.
+
+Verified for real, not just via the two before/after resource snapshots
+above: all 8 real AVIIN ATS containers confirmed `Up`/`healthy` via
+`docker compose ps` after both fixes, `/health` returned `{"ok":true}`,
+and the live frontend `/dashboard` returned a real `200` — the cleanup
+had zero impact on the running application, exactly as expected (an
+orphaned browser session and a build-time-only cache both have zero
+bearing on a currently-running container's own operation). The
+unrelated `payrollpro-app-1` container (a separate project sharing this
+VPS, confirmed via this project's own established history) was left
+completely untouched throughout.
