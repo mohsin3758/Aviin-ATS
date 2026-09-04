@@ -23720,3 +23720,40 @@ bearing on a currently-running container's own operation). The
 unrelated `payrollpro-app-1` container (a separate project sharing this
 VPS, confirmed via this project's own established history) was left
 completely untouched throughout.
+
+## Reminders & Follow-Ups: 19 more stray tasks found and closed — root cause was join-based, not the task's own title, 2026-09-04
+Direct follow-up to the same-day comprehensive QA sweep — user pointed
+at the live `/reminders` page still showing test residue. Investigated
+before assuming the earlier sweep had missed something wholesale: the
+earlier pass's `recruiter_tasks` check queried the task's OWN `title`
+column (`ILIKE '%QA %'`) — genuinely `0` remaining, confirmed live — but
+the actual 19 stray rows had completely normal-looking task titles
+("JD Review & Approval," "Screening Call," "Follow up: Ravinandan"-style
+names) with the QA/test signal living entirely in the JOINED
+`requisitions.title` instead (2 already-inactive, June-2026-dated stray
+requisitions — "QA Req 1782055168"/"1782055263" — plus 2 more from
+S48/S60 test suites), invisible to a query that only checked the task's
+own title.
+
+One entry ("Follow up: Ashwin Ashwini C") looked concerning at first —
+"Ashwini" is a real, active recruiter on this tenant — investigated
+carefully before touching it: confirmed `candidate_id IS NULL` on all 4
+of the S60-suite-linked rows, meaning "Ashwini C" was purely synthetic
+test-generated text in the task's free-text title, never a reference to
+the real staff member; the real Ashwini's own account/activity was
+completely unaffected. Deleted all 19 via the real `DELETE
+/recruiter-tasks/{id}` API after confirming this.
+
+Widened the check to every join path a task can have (requisition,
+candidate, client) rather than just the one that surfaced this batch —
+confirmed genuinely `0` across all three afterward. Verified against the
+real, live production page via a real headless-browser pass, not just
+the API: the Dashboard tab's "My Reminders"/"Team Reminders" views and
+the "Follow-Ups" tab were all screenshot-confirmed showing only real
+content — real critical-escalation alerts (Venkatesh.C, a real SAP FICO
+requisition), and, on the Follow-Ups tab, real AI-suggested candidate
+follow-ups (Ravinandan, Sumanta Jana, Rakshith K S, etc.) with zero
+"QA "-pattern text anywhere on the page (checked programmatically via
+the actual rendered page text, not assumed from a passing test alone).
+The tenant-wide "Team Reminders" 118-overdue count was independently
+confirmed to be real candidate activity, not test noise.
