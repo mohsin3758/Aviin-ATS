@@ -14751,3 +14751,40 @@ test.describe.serial('S104 Users & Roles: real, live security gap fixed — GET 
     }
   });
 });
+
+test.describe('S105 Real, systemic fix: .anim-fade-up no longer creates a fixed-position containing block on ANY page (root-cause CSS fix, not a per-modal portal)', () => {
+  test('BUG FIX: the .anim-fade-up page wrapper genuinely reports transform:none (not the identity matrix) after its entrance animation settles, on multiple real, independent pages', async ({ page }) => {
+    for (const url of ['/companies', '/interviews', '/shift-scheduling', '/reminders']) {
+      await page.goto(url);
+      await page.waitForTimeout(1200);
+      const info = await page.evaluate(() => {
+        const wrapper = document.querySelector('.anim-fade-up');
+        if (!wrapper) return null;
+        return { transform: getComputedStyle(wrapper).transform };
+      });
+      expect(info, `${url} should have a real .anim-fade-up wrapper`).toBeTruthy();
+      expect(info!.transform, `${url}'s .anim-fade-up wrapper must report literal 'none', not an identity matrix (that's what was silently creating a containing block)`).toBe('none');
+    }
+  });
+
+  test('BUG FIX: a genuinely untouched bespoke modal (interviews/page.tsx\'s "Schedule Interview" — never portaled, never individually edited for this fix) is now fully viewport-relative — proves the fix is real and systemic, not specific to the one reported form', async ({ page }) => {
+    await page.goto('/interviews');
+    await page.waitForTimeout(1200);
+    await page.locator('button:has-text("Schedule Interview")').first().click();
+    await page.waitForTimeout(400);
+    const box = await page.evaluate(() => {
+      const overlay = Array.from(document.querySelectorAll('div')).find(
+        el => getComputedStyle(el).position === 'fixed' && el.textContent?.includes('Schedule Interview')
+      );
+      if (!overlay) return null;
+      const r = overlay.getBoundingClientRect();
+      return { top: r.top, height: r.height, viewportHeight: window.innerHeight };
+    });
+    expect(box).toBeTruthy();
+    expect(box!.top).toBe(0);
+    expect(box!.height).toBe(box!.viewportHeight);
+    // Close cleanly, no real data mutated.
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.locator('button:has-text("Cancel")').first().click().catch(() => {});
+  });
+});

@@ -427,9 +427,40 @@ h3 { font-size: 15px; font-weight: 600; color: var(--gray-700); }
 .filter-pill.active { background: var(--primary-bg); border-color: var(--primary); color: var(--primary); font-weight: 600; }
 
 /* ── ANIMATIONS ─────────────────────────────────────────── */
-@keyframes fadeUp   { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+/* Real, live, systemic bug fixed (2026-09-04): any bespoke, non-portaled
+   `position:fixed, inset:0` modal nested anywhere inside a page wrapped
+   in `.anim-fade-up` (52 real pages use it) had its overlay silently
+   contained within that PAGE WRAPPER's own full scroll height instead
+   of the true browser viewport - reported live once (the New Follow-Up
+   form's top rendering off-screen) and confirmed to affect 25 total
+   files using this bespoke modal pattern.
+
+   First attempt - changing the animation's resting keyframe from
+   `transform:translateY(0)` to `transform:none` - was tried and proven
+   NOT to work via a real, isolated, controlled test: an element with an
+   ACTIVE OR COMPLETED CSS animation involving `transform` continues to
+   be treated by the browser as establishing a containing block for
+   fixed/absolute descendants for the ELEMENT'S ENTIRE LIFETIME,
+   regardless of what the animation's own final keyframe value is - even
+   `to { transform:none }` inside a CSS *animation* still leaves
+   `getComputedStyle().transform` reporting `matrix(1,0,0,1,0,0)`, not
+   the literal `none`, and a fixed-position child stays genuinely
+   contained. Confirmed this is specifically about the `transform`
+   PROPERTY being animated at all - real fix, verified the same way:
+   animate `margin-top`/`margin-left` (a plain layout property, never
+   `transform`/`filter`/`perspective`/`will-change`) to get the
+   IDENTICAL visual "slide in while fading" motion without ever touching
+   `transform` - confirmed via the same isolated test that this genuinely
+   reports `transform:none` and leaves a fixed-position child correctly
+   viewport-relative. `scaleIn` (a genuine scale/grow effect, no clean
+   non-transform equivalent) is deliberately left using `transform:scale`
+   - real usage is limited to Topbar.tsx's own small, self-contained
+   profile dropdown, never a page-level wrapper that could host a nested
+   modal, so the same risk doesn't apply there the way it did to
+   fadeUp/slideIn. */
+@keyframes fadeUp   { from { opacity:0; margin-top:12px; } to { opacity:1; margin-top:0; } }
 @keyframes fadeIn   { from { opacity:0; } to { opacity:1; } }
-@keyframes slideIn  { from { transform:translateX(-16px); opacity:0; } to { transform:translateX(0); opacity:1; } }
+@keyframes slideIn  { from { margin-left:-16px; opacity:0; } to { margin-left:0; opacity:1; } }
 @keyframes scaleIn  { from { transform:scale(0.95); opacity:0; } to { transform:scale(1); opacity:1; } }
 @keyframes shimmer  { from { background-position: -200% 0; } to { background-position: 200% 0; } }
 

@@ -23261,3 +23261,85 @@ tests) added to `qa_automation.spec.ts`, passed clean on the first run.
 A scoped regression sweep (S31/S33/S49/S51/S81, 30 tests) passed clean
 - zero regressions in any of the picker-dependent or Users & Roles
 write-flow suites. Zero-token audit: `CONFIRMED CLEAN`.
+
+## Real, systemic fix: the 25-file position:fixed containing-block bug closed at its true root (one CSS change, zero per-file portals), 2026-09-04
+Direct follow-up to the same-day New Follow-Up modal fix, which
+explicitly disclosed - not fixed - that 25 files across this codebase
+share the same bespoke, non-portaled `position:fixed, inset:0` modal
+pattern, each carrying the identical latent "top gets clipped" risk
+whenever its own host page's real content grows tall enough. User asked
+to fix it for real this time.
+
+**First attempt, tried and empirically disproven before shipping - not
+guessed at.** The obvious-looking central fix - change `@keyframes
+fadeUp`'s resting `to` state from `transform:translateY(0)` to
+`transform:none` (both are visually identical, zero displacement, and
+per the CSS spec only the literal `none` is exempted from creating a
+containing block for a `position:fixed` descendant) - was applied,
+deployed, and re-verified against the exact same live reproduction used
+for the earlier fix. **It didn't work.** Root-caused via a real,
+isolated, controlled 2-div HTML test (completely independent of this
+app, no confounding variables): a STATIC `transform:none` CSS rule
+correctly reports `none` and lets a fixed child render viewport-
+relative - but the SAME `transform:none` as a CSS *animation's* resting
+keyframe still reports `matrix(1,0,0,1,0,0)` (not the literal `none`)
+and STILL creates a containing block, for the element's entire
+lifetime, in this browser. This is a real, empirically-confirmed
+browser behavior: an element that has EVER been the subject of a CSS
+animation touching `transform` continues to be treated as
+"transformed" for containing-block purposes, regardless of what value
+that animation's own final keyframe declares.
+
+**Real, working fix, verified the identical way before trusting it**:
+animate `margin-top`/`margin-left` instead of `transform:translateY`/
+`translateX` - a plain layout property, never one of the 4 CSS
+properties (`transform`/`filter`/`perspective`/`will-change`) that can
+ever create a fixed-position containing block. The same isolated 2-div
+test confirmed this genuinely reports `transform:none` and leaves a
+fixed child correctly viewport-relative. Produces the IDENTICAL visual
+"slide up/in while fading" motion as the original `transform`-based
+animation - `margin-top:12px→0`/`margin-left:-16px→0` are visually
+indistinguishable from their `translateY`/`translateX` equivalents at
+these small pixel values. `@keyframes scaleIn` (a genuine scale/grow
+effect with no clean non-transform equivalent) was deliberately left
+using `transform:scale()` - its only real usage is `Topbar.tsx`'s own
+small, self-contained profile dropdown, never a page-level wrapper that
+could host a nested bespoke modal, so the same risk doesn't apply
+there. `@keyframes slideIn` fixed the same way for correctness even
+though it currently has zero real usages anywhere in the app (confirmed
+via grep) - closes the class entirely for any future use.
+
+Fixed in exactly ONE place (`globals.css`'s 3 keyframe definitions) -
+zero changes needed to any of the 25 individual files, since every one
+of them inherits the fix automatically the moment its own page's
+`.anim-fade-up`/`.anim-slide-in` wrapper stops creating a containing
+block.
+
+Verified for real end-to-end, not code review, at every step: re-ran
+the exact same real-app probe (a raw `position:fixed` div injected
+directly into the live `.anim-fade-up` wrapper on the Reminders page,
+already proven broken before this fix - `probeTop:254.5, probeHeight:
+349.5` in a 900px viewport) and confirmed it now measures `probeTop:0,
+probeHeight:900` - genuinely, exactly viewport-relative. Repeated the
+identical probe on 3 more real, completely different, untouched pages
+(`/companies`, `/interviews`, `/shift-scheduling`) - all 3 independently
+confirmed `transform:"none"` and `probeTop:0, probeHeight:900`, proving
+this is a genuinely systemic fix, not specific to one page. The
+decisive, real, user-facing proof: clicked the actual "Schedule
+Interview" button on `interviews/page.tsx` - a completely untouched
+file, never portaled, never individually edited for this fix at all -
+and confirmed via both a direct DOM measurement (`top:0, height:900`)
+and a pulled screenshot that its bespoke modal now renders fully and
+correctly on screen, header through both buttons, with zero code
+changes to that file. A scoped regression sweep (S1/S3/S22/S49/S51/S69/
+S81, 36 real tests spanning health checks, page-load checks, and 3
+different UI-flow suites) passed clean - zero visual/functional
+regression from switching the entrance animations off `transform`.
+
+New permanent "S105" suite (2 tests) added to `qa_automation.spec.ts` -
+one directly asserting the real mechanism (`.anim-fade-up`'s computed
+`transform` is the literal string `"none"` on 4 real, independent
+pages, not an identity matrix), one repeating the real "Schedule
+Interview" proof as a permanent regression guard against this exact bug
+class ever silently reappearing. Both passed clean on the first run.
+Zero-token audit: `CONFIRMED CLEAN`.
