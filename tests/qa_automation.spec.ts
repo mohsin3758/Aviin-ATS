@@ -14910,3 +14910,28 @@ test.describe('S106 Company Profile: real, live gap fixed — tenants.name (show
     expect(errors).toHaveLength(0);
   });
 });
+
+test.describe('S107 Careers hero heading: real company-name word-wrap fix (2026-09-04)', () => {
+  // Reported live: the plain browser word-wrap on the real 6-word tenant
+  // name ("Aviin Technology Business Solutions Pvt Ltd") broke after
+  // "Pvt", leaving a lonely "Ltd" alone on line 2 — legible but visually
+  // wrong. Fixed with heroNameLines() (careers/page.tsx): a name with 5+
+  // words puts the first 2 (the brand) on line one and the rest (the
+  // legal suffix) on line two; a shorter name (e.g. the sibling real
+  // tenant's 3-word "Acme Staffing India") gets no forced break at all.
+  test('real headless UI: the live careers page hero renders the real tenant name split exactly "Aviin Technology" / "Business Solutions Pvt Ltd"', async ({ page }) => {
+    await page.goto('/careers');
+    await expect(page.locator('h1')).toBeVisible({ timeout: 10000 });
+    await page.waitForTimeout(500);
+
+    const h1Text = await page.locator('h1').innerText();
+    const lines = h1Text.split('\n').filter(Boolean);
+    expect(lines).toEqual(['Aviin Technology', 'Business Solutions Pvt Ltd']);
+
+    // Confirm it's a real, structural 2-line break (2 <span> children),
+    // not just a coincidental soft-wrap that could re-break differently
+    // at a different viewport width.
+    const spanCount = await page.locator('h1 span').count();
+    expect(spanCount).toBe(2);
+  });
+});

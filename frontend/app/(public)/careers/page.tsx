@@ -43,6 +43,23 @@ function useTenantBranding() {
   return name || 'Careers';
 }
 
+// Real, reported bug (2026-09-04): the plain browser word-wrap on a long
+// company name (e.g. "Aviin Technology Business Solutions Pvt Ltd") broke
+// after "Pvt", leaving a lonely "Ltd" on its own line — legible but
+// visually wrong. This only ever applies to the large hero heading; the
+// underlying companyName string used elsewhere (JSON-LD, share text,
+// consent text) is never altered. Short names (<=4 words, e.g. the other
+// real tenant's "Acme Staffing India") are unaffected — they already read
+// cleanly on one line and get no forced break at all. For a longer name,
+// puts the first 2 words (the brand) on line one and the rest (the legal
+// suffix) on line two — a defensible general split, not hardcoded to one
+// specific string, so a future company-name change stays sensible too.
+function heroNameLines(name: string): string[] {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 5) return [name];
+  return [words.slice(0, 2).join(' '), words.slice(2).join(' ')];
+}
+
 function TalentCommunitySignup({ filters }: { filters: { search: string; location: string; employmentType: string; workMode: string } }) {
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
@@ -405,7 +422,9 @@ export default function PublicJobsPage() {
       <div style={{background:'linear-gradient(135deg,#1e40af,#7c3aed)',padding:'48px 24px 32px',textAlign:'center'}}>
         <div style={{maxWidth:'600px',margin:'0 auto'}}>
           <h1 style={{fontSize:'28px',fontWeight:'800',color:'white',margin:'0 0 8px'}}>
-            {companyName}
+            {heroNameLines(companyName).map((line, i, arr) => (
+              <span key={i}>{line}{i < arr.length - 1 && <br/>}</span>
+            ))}
           </h1>
           <p style={{fontSize:'15px',color:'rgba(255,255,255,0.8)',margin:'0 0 28px'}}>
             {total} open position{total===1?'':'s'} · Join a team that delivers

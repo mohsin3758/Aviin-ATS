@@ -23405,3 +23405,44 @@ every suite touching the same 4 files (S31/S33/S51/S81/S104, 26 tests)
 passed clean — zero regressions from the new `is_role_or_full_
 permission()` extraction or the new `tenant_router`. Zero-token audit:
 `CONFIRMED CLEAN` (458 files, 0 external API refs).
+
+## Careers hero heading: real word-wrap fix for a long company name, 2026-09-04
+Direct follow-up to the same-day Company Profile rename — user pasted a
+live screenshot of the careers page hero showing the real, now-live
+company name wrapping awkwardly: "Aviin Technology Business Solutions
+Pvt" on line one, a lonely "Ltd" alone on line two — legible but
+visually wrong, and asked for it to break as "Aviin Technology" /
+"Business Solutions Pvt Ltd" instead.
+
+Fixed with a small, general `heroNameLines()` helper
+(`careers/page.tsx`), applied ONLY to the large hero `<h1>` render -
+the underlying `companyName` string used everywhere else on the page
+(JSON-LD, ShareButtons text, the apply-consent text) is completely
+untouched, so nothing downstream of the plain string was affected.
+Deliberately not hardcoded to this one specific name: a name with 5+
+words puts the first 2 (the brand) on line one and the rest (the legal
+suffix) on line two; a name with 4 or fewer words - including the
+sibling real tenant's own "Acme Staffing India" (3 words) - gets no
+forced break at all and renders exactly as before. This is a real,
+principled general rule (brand vs. legal-suffix split), not a one-off
+string match, so a future rename via the same-day Company Profile
+feature stays sensible without needing another fix.
+
+Verified for real, not code review: the pure split function tested
+directly against the exact real name ("Aviin Technology" / "Business
+Solutions Pvt Ltd" - matching the request exactly) and against both
+real tenant names on this system, confirming neither is force-broken
+unnecessarily. Deployed via the established local tsc/build -> scp ->
+sha256 hash-verify -> `docker compose up -d --build frontend` ->
+health-check cycle. A real headless-browser pass against the live
+production careers page confirmed the actual rendered `<h1>` text is
+exactly `["Aviin Technology", "Business Solutions Pvt Ltd"]" via 2
+real, structural `<span>` line elements (not a coincidental soft-wrap
+that could re-break differently at another viewport width) - and a
+pulled screenshot visually confirmed the same, both lines centered and
+clean. New permanent "S107" suite (1 test) added to
+`qa_automation.spec.ts`, passed clean. Scoped regression sweep across
+every suite touching the careers page (S90/S95/S107, 19 tests) passed
+clean - zero regressions in the sitemap/JSON-LD/branding/filter/
+click-tracking features built the same file houses. Zero-token audit:
+`CONFIRMED CLEAN` (457 files, 0 external API refs).
