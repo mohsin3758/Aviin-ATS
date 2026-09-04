@@ -447,8 +447,21 @@ async def inbox(limit: int = Query(50, le=500), offset: int = Query(0), channel:
                 actor: Actor = Depends(get_actor)):
     is_admin = actor.role in _INBOX_ADMIN_ROLES
     async with db.tenant_conn(actor.tenant_id) as conn:
-        # ---- Outbound ATS messages ----
-        w = "WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE"
+        # ---- Inbound ATS-tracked messages (e.g. real inbound WhatsApp) ----
+        # Real bug fix (2026-09-04): this block had NO direction filter at
+        # all - it pulled every candidate_messages row regardless of
+        # direction, so every real outbound email a recruiter/KAE ever sent
+        # (channel='email', direction='outbound' - logged since well before
+        # the 2026-09-03 Email Management build, confirmed live: 697 such
+        # rows going back to 2026-07-01) showed up mixed into the Inbox tab
+        # right alongside genuinely received mail. /sent already correctly
+        # filters direction='outbound' - this is the missing mirror-image
+        # filter. Inbound email itself never lives in candidate_messages at
+        # all (it's synced into imap_messages, already correctly included
+        # below via the separate imap_rows block, folder='INBOX') - the only
+        # real rows this filter now keeps are genuine inbound WhatsApp
+        # messages, which correctly belong in Inbox.
+        w = "WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE AND cm.direction='inbound'"
         p = [actor.tenant_id]
         if channel and channel not in ('imap', 'inbound'):
             p.append(channel); w += f" AND cm.channel=${len(p)}"
@@ -548,12 +561,15 @@ async def get_thread(cand_id: str, actor: Actor = Depends(get_actor)):
 @router.get("/inbox-count")
 async def inbox_count(actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Same real fix as /inbox above (2026-09-04): only inbound
+        # candidate_messages count toward the Inbox badge - an outbound
+        # send must never inflate the "received mail" count.
         if actor.role in _INBOX_ADMIN_ROLES:
-            ats_cnt = await conn.fetchval("SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND is_deleted IS NOT TRUE", actor.tenant_id)
+            ats_cnt = await conn.fetchval("SELECT COUNT(*) FROM candidate_messages WHERE tenant_id=$1 AND is_deleted IS NOT TRUE AND direction='inbound'", actor.tenant_id)
         else:
             ats_cnt = await conn.fetchval(
                 f"""SELECT COUNT(*) FROM candidate_messages cm
-                    WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE AND {_own_ats_message_filter(2)}""",
+                    WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE AND cm.direction='inbound' AND {_own_ats_message_filter(2)}""",
                 actor.tenant_id, actor.user_id)
         imap_cnt = await conn.fetchval("""SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 AND im.is_deleted IS NOT TRUE AND im.folder = 'INBOX'""", actor.tenant_id, actor.user_id)
         by_folder = await conn.fetch("""SELECT im.folder, COUNT(*) as cnt FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 GROUP BY im.folder ORDER BY cnt DESC""", actor.tenant_id, actor.user_id)
@@ -1094,12 +1110,18 @@ async def stats(actor: Actor = Depends(get_actor)):
     ats_scope = "" if is_admin else f"AND {_own_ats_message_filter(2)}"
     ats_params = [actor.tenant_id] if is_admin else [actor.tenant_id, actor.user_id]
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Same real fix as /inbox and /inbox-count (2026-09-04): inbox_cnt
+        # and unread_cnt_ats both had no direction filter, so real outbound
+        # sends (697 real outbound-email rows, 33 of them is_read=FALSE)
+        # were silently counted into "Inbox"/"unread" - a candidate reading
+        # a message WE sent isn't a "read/unread" state on OUR side at all,
+        # and is tracked separately via email_open_count when it matters.
         inbox_cnt = await conn.fetchval(
-            f"SELECT COUNT(DISTINCT COALESCE(cm.candidate_id::text,cm.to_email)) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE {ats_scope}",
+            f"SELECT COUNT(DISTINCT COALESCE(cm.candidate_id::text,cm.to_email)) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_deleted IS NOT TRUE AND cm.direction='inbound' {ats_scope}",
             *ats_params)
         imap_unread_cnt = await conn.fetchval("SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id WHERE im.tenant_id=$1 AND ua.user_id=$2 AND im.is_read IS NOT TRUE AND im.is_deleted IS NOT TRUE AND im.folder = 'INBOX'", actor.tenant_id, actor.user_id)
         unread_cnt_ats = await conn.fetchval(
-            f"SELECT COUNT(*) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_read IS NOT TRUE AND cm.is_deleted IS NOT TRUE {ats_scope}",
+            f"SELECT COUNT(*) FROM candidate_messages cm WHERE cm.tenant_id=$1 AND cm.is_read IS NOT TRUE AND cm.is_deleted IS NOT TRUE AND cm.direction='inbound' {ats_scope}",
             *ats_params)
         unread_cnt = (unread_cnt_ats or 0) + (imap_unread_cnt or 0)
         sent_cnt_ats = await conn.fetchval(
@@ -1156,9 +1178,11 @@ async def mailbox_dashboard(team_view: bool = Query(False), actor: Actor = Depen
                WHERE im.tenant_id=$1 AND ($2 OR ua.user_id=$3) AND im.folder='INBOX'
                  AND im.is_deleted IS NOT TRUE AND im.received_at::date=$4""",
             actor.tenant_id, scope_team, actor.user_id, today)
+        # Same fix as /stats above (2026-09-04) - an outbound send has no
+        # real "unread by us" meaning; only genuine inbound messages count.
         unread_ats = await conn.fetchval(
             f"""SELECT COUNT(*) FROM candidate_messages cm
-                WHERE cm.tenant_id=$1 AND cm.is_read IS NOT TRUE AND cm.is_deleted IS NOT TRUE {own_cond}""",
+                WHERE cm.tenant_id=$1 AND cm.is_read IS NOT TRUE AND cm.is_deleted IS NOT TRUE AND cm.direction='inbound' {own_cond}""",
             *own_params)
         unread_imap = await conn.fetchval(
             """SELECT COUNT(*) FROM imap_messages im JOIN user_email_accounts ua ON ua.id=im.account_id

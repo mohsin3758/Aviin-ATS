@@ -23002,3 +23002,125 @@ independently verify an external system's current state.
 Full regression sweep across every suite touching the modified files
 (S51/S60/S79/S102, 29 tests) passed clean. Zero-token audit:
 `CONFIRMED CLEAN`.
+
+## Real, live gap fixed: a full-permission role (e.g. 'ceo') was still blocked by hardcoded admin/manager checks in Users & Roles, 2026-09-04
+User reported (2 screenshots) not being able to delete or clean up users
+from the tenant's own primary "Admin" login - a real "Requires role in
+('admin', 'manager')" error blocking the exact account this tenant's
+CEO actually signs in with (`admin@aviintech.com`, `role='ceo'`), plus
+a Users & Roles page showing 768 real inactive users needing cleanup.
+
+Investigated live before guessing at a fix, not assumed: confirmed
+`role_definitions` already seeds `'ceo'` with the identical full-
+wildcard permissions as `'admin'` (`{"*": ["*"]}` on both, verified via
+direct DB query) - the permission SYSTEM already treats them as
+equivalent - but every one of the 11 `require_role("admin","manager")`
+-style gates in `users.py` only ever checked the literal JWT role
+string, never consulted that real permission catalog at all. A
+genuinely full-access account was silently blocked from every real
+user-management action (create/update/password-change/deactivate/
+activate/delete/purge/enforcement-settings/permission-log).
+
+Fixed with a new `require_role_or_full_permission(*roles)`
+(`permissions.py`) - a hard, unconditional check like `require_role()`
+(anonymous/no-role callers still always fail, matching `require_role()`'s
+own established behavior for exactly this case), but which ALSO accepts
+any role whose live `role_definitions` row genuinely grants a real
+`{"*": ["*"]}` wildcard, checked against the DB via the same
+`get_role_permissions()`/`check_permission()` helpers this project's
+soft-launch permission system already uses elsewhere - not a new,
+separate authorization concept. Circular-import-safe: lives in
+`permissions.py` (which already imports from `deps.py`), not `deps.py`
+itself. Applied to all 11 real call sites in `users.py`.
+
+Verified for real end-to-end, not code review: created a genuine
+throwaway `role='ceo'` user, logged in as THEM directly (not touching
+the real `admin@aviintech.com` account's own credentials - the same
+established "never guess/reset a real user's password" discipline
+already documented multiple times in this file), and confirmed they can
+now `DELETE` another real (throwaway) user - a genuine `200`, where this
+was a `403` before the fix, the exact real scenario reported. Confirmed
+the negative case still holds too: a separate throwaway plain
+`role='recruiter'` account is still correctly `403`'d on the identical
+`DELETE` call - the fix widens exactly who counts as admin-equivalent
+among real, permission-backed roles, it doesn't loosen anything else.
+Full regression sweep (S31/S33/S51/S81, 21 tests) passed clean. Zero-
+token audit: `CONFIRMED CLEAN`. All 3 throwaway test accounts purged via
+the real API, confirmed zero residue.
+
+**Second half of the report, closed the same session, no code change
+needed**: with the CEO-role fix live, ran the real, already-established
+bulk-purge pattern from this project's own 2026-08-22 precedent against
+the 776 real inactive users on the tenant - excluded the 6 confirmed-
+real historical people by exact email (Meer Mohsin Ali Khan, Neha
+Joshi, Rahul Verma, Sanya Kapoor, `mohsin3786`, `Sneha Joshi
+(Recruiter)` - all already correctly, deliberately inactive from
+earlier, unrelated reasons documented previously in this file, left
+untouched), spot-checked a real random sample of the remaining 770 to
+confirm every one was a genuine QA-test-suite fixture (S43/S74/S36/S64/
+S51/S19b/S31/S73/S93 patterns, all real, permanent test-suite names
+documented throughout this project's own history) before running the
+loop, then purged via the real `DELETE /users/{id}/purge` API, relying
+on its own established FK-violation safety net rather than hand-
+verifying each one individually: **129 genuinely, permanently removed;
+641 correctly, automatically kept** (real activity now on record across
+this project's many features by 2026-09 - a lower purge ratio than
+2026-08-22's, consistent with 2 more weeks of accumulated real test-
+suite activity across dozens of new features since then), 0 unexpected
+failures. Confirmed app health and a real authenticated API call both
+still clean afterward.
+
+## Real bug fixed: sent emails were mixing into the Inbox tab, not staying in their own Sent folder, 2026-09-04
+User reported (screenshot): "why received and sent are in the same
+inbox folder, its should work like received mail should go to Inbox
+and Sent email should go to Sent Items Folder" - the Conversations
+page's Inbox tab showing real sent-tagged messages alongside genuinely
+received ones.
+
+Root-caused precisely via direct code reading, then confirmed against
+real production data before touching anything: `GET /communications/
+inbox`'s "Outbound ATS messages" block (`communications.py`) had **no
+`direction` filter at all** - it pulled every `candidate_messages` row
+regardless of direction and merged them into the same list as the
+genuinely inbound IMAP rows. `/sent` already correctly filters
+`direction='outbound'`; `/inbox` never got the mirror-image filter.
+Confirmed live via a direct DB query this wasn't a brand-new regression
+from the 2026-09-03 Enterprise Email Management build specifically -
+697 real `direction='outbound', channel='email'` rows already existed
+in `candidate_messages` going back to 2026-07-01 - the bug is
+long-standing, just newly and clearly visible now that outbound email
+volume through this table has grown.
+
+Fixed by adding `AND cm.direction='inbound'` to `/inbox`'s outbound-
+block WHERE clause (real inbound email itself never lives in
+`candidate_messages` at all - it's synced into `imap_messages`, already
+correctly included via the separate, untouched `imap_rows` block,
+`folder='INBOX'` - so the only rows this filter now keeps are genuine
+inbound WhatsApp messages, which correctly belong in Inbox). Found and
+fixed the SAME missing-direction-filter bug in 3 more places while
+checking every sibling counter, not just the one reported: `/inbox-
+count`'s `ats_cnt` (both admin and non-admin branches), `/stats`'s
+`inbox_cnt` and `unread_cnt_ats`, and `/dashboard`'s `unread_ats` -
+confirmed live via direct DB query that 33 real outbound-email rows
+with `is_read=FALSE` were silently inflating the tenant's "unread"
+badge count before this fix (an outbound send has no real "unread by
+us" meaning; the recipient's read state is separately tracked via
+`email_opened_at`/`email_open_count`, not `is_read`). Deliberately left
+`/thread/{cand_id}` untouched - a full conversation thread legitimately
+needs to show both directions together, that's a genuinely different,
+correct use case from a folder listing.
+
+Verified for real end-to-end, not code review: a direct API call to the
+live `/inbox` endpoint confirmed the response now contains **zero**
+`direction='outbound'` rows (was mixing in real sent emails before); a
+real headless-browser pass on the live production Conversations page
+confirmed zero "You (...)" outbound-sender labels anywhere in the
+rendered Inbox tab, and a pulled screenshot visually confirmed every
+visible row (Ashutosh Kumar, E2E WA Test, Uzair Shaikh) is genuinely
+tagged "received," with Sent now correctly showing its own separate
+count in its own tab. Full regression sweep across every suite touching
+this file (S11/S52/S66/S67/S70/S75/S102, 43 tests) passed clean - 42
+passed, 1 self-healed on Playwright's own retry (a pre-existing timing
+sensitivity in an unrelated background-WhatsApp-delivery assertion that
+queries `/thread/{cand_id}`, a code path this fix never touched -
+confirmed not a regression). Zero-token audit: `CONFIRMED CLEAN`.
