@@ -2161,3 +2161,163 @@ entry for the full git-history reconciliation story):
   classifier) — not a "can't be resolved" item anymore, just a
   "confirmed safe, needs a human okay before an irreversible delete"
   item.
+
+## Follow-up pass — 2026-09-04 (2nd), both remaining explicit-go-ahead items closed
+
+User asked to complete both items that were explicitly flagged as
+confirmed safe, needs a human okay before an irreversible delete /
+needs the users explicit go-ahead" — plus, separately, a full,
+explicit hard-delete of the 1,805 already-soft-deleted QA/test
+candidate records left over from a same-day cleanup pass (\`clean up
+QA test file, QA Users, email, QA candidates, .test files, and other
+testing files\`), which had been offered but deliberately not done
+unilaterally given its scale and irreversibility.
+
+- [x] **The candidate hard-delete, executed for real.** Mapped the FULL,
+  current FK dependency graph for \`candidates\`/\`applications\` via
+  \`information_schema\` (not from memory) — 60 direct relationships,
+  meaningfully more than the ~40 the 2026-08-17 precedent documented,
+  reflecting how many more features/tables this project has built
+  since then. Widened the search twice more to catch real, TRANSITIVE
+  dependencies a shallower one-hop query would have missed (\`offers\`→
+  \`placements\`/\`offer_letters\`/\`reference_checks\`, \`placements\`→
+  \`timesheets\`/\`payslips\`/\`candidate_onboarding\`/etc.,
+  \`interview_schedules\`→\`calendar_events\`, \`timesheets\`→
+  \`invoice_line_items\`). Before running anything destructive, spot-
+  checked every one of the 7 real-looking placements + 10 real-looking
+  offers attached to these candidates — confirmed all 17 genuinely
+  belong to \`QA \`-named, \`@test.com\`/\`@qatest.example\`-domain
+  candidates from real, identifiable test suites (S91 referral-hire
+  tracking, S55 offer e-sign, Phase3/SourceAttr verification), not real
+  business data.
+
+  Built the full cascade as one transaction, ordered to respect every
+  discovered dependency (deepest-referenced tables first: \`calendar_
+  events\`/\`invoice_line_items\` → \`candidate_onboarding\`/\`payslips\`/
+  \`timesheets\` → \`placements\`/\`offer_letters\` → \`interview_
+  schedules\` → everything else → \`offers\` → the remaining candidate-
+  scoped tables → \`generated_resumes\` (after \`candidate_submissions\`,
+  which references it) → \`applications\` → \`candidates\`), with
+  \`referral_links.hired_candidate_id\` detached via \`UPDATE ... SET
+  NULL\` rather than deleted — the referral-tracking row itself is a
+  real, ongoing mechanism, only the stale pointer needed clearing,
+  matching the exact reasoning already established for \`imap_messages\`/
+  \`message_drafts\` on 2026-08-17.
+
+  **Ran a real transactional dry-run first** (\`BEGIN ... ROLLBACK\`),
+  matching this projects own established discipline for exactly this
+
+## Follow-up pass — 2026-09-04 (2nd), both remaining explicit-go-ahead items closed
+
+User asked to complete both items that were explicitly flagged as
+"confirmed safe, needs a human okay before an irreversible delete" /
+"needs the user's explicit go-ahead" — plus, separately, a full,
+explicit hard-delete of the 1,805 already-soft-deleted QA/test
+candidate records left over from a same-day cleanup pass ("clean up
+QA test file, QA Users, email, QA candidates, .test files, and other
+testing files"), which had been offered but deliberately not done
+unilaterally given its scale and irreversibility.
+
+- [x] **The candidate hard-delete, executed for real.** Mapped the FULL,
+  current FK dependency graph for `candidates`/`applications` via
+  `information_schema` (not from memory) — 60 direct relationships,
+  meaningfully more than the ~40 the 2026-08-17 precedent documented,
+  reflecting how many more features/tables this project has built
+  since then. Widened the search twice more to catch real, TRANSITIVE
+  dependencies a shallower one-hop query would have missed (`offers`→
+  `placements`/`offer_letters`/`reference_checks`, `placements`→
+  `timesheets`/`payslips`/`candidate_onboarding`/`candidate_retention_
+  tracking`/`compliance_records`, `interview_schedules`→`calendar_
+  events`, `timesheets`→`invoice_line_items`, `generated_resumes`←
+  `candidate_submissions`). Before running anything destructive,
+  spot-checked every one of the 7 real-looking placements + 10
+  real-looking offers attached to these candidates — confirmed all 17
+  genuinely belong to `QA `-named, `@test.com`/`@qatest.example`-domain
+  candidates from real, identifiable test suites (S91 referral-hire
+  tracking, S55 offer e-sign, Phase3/SourceAttr verification), not real
+  business data.
+
+  Built the full cascade as one transaction, ordered to respect every
+  discovered dependency (deepest-referenced tables first: `calendar_
+  events`/`invoice_line_items` → `candidate_onboarding`/`candidate_
+  retention_tracking`/`compliance_records`/`payslips`/`timesheets` →
+  `placements`/`offer_letters` → `interview_scorecards`/`interview_
+  schedules` → `nda_documents`/`submittals`/`client_feedback`/
+  `recruiter_activity_events`/`application_rejections` → `offers` →
+  the remaining candidate-scoped tables → `candidate_activities` →
+  `generated_resumes` (after `candidate_submissions`, which references
+  it) → `applications` → `candidates`), with `referral_links.hired_
+  candidate_id` detached via `UPDATE ... SET NULL` rather than deleted
+  — the referral-tracking row itself is a real, ongoing mechanism, only
+  the stale pointer needed clearing, matching the exact reasoning
+  already established for `imap_messages`/`message_drafts` on
+  2026-08-17.
+
+  **Ran a real transactional dry-run first** (`BEGIN ... ROLLBACK`),
+  matching this project's own established discipline for exactly this
+  class of irreversible operation. It caught 2 real, genuine gaps before
+  anything could be lost, not after: a missing transitive dependency
+  (`placements.offer_id → offers.id`, requiring the widened FK search
+  above) on the first attempt, and — on the second attempt, after fixing
+  that — the SAME class of mistake the 2026-08-17 precedent explicitly
+  warns about recurring almost verbatim: `candidate_activities` was
+  correctly identified in the original FK query's own output but simply
+  never made it into the DELETE script's transcription. Both caught
+  cleanly by the dry-run's own real Postgres FK-violation error, nothing
+  lost either time. The THIRD attempt completed the full cascade with
+  zero errors and `remaining_target_candidates: 0` / `remaining_
+  target_applications: 0` confirmed before the rollback — only then was
+  the script re-run for real with `COMMIT`.
+
+  **Result, genuinely committed** — real per-table counts from the
+  actual run, not estimated: 3 `calendar_events`, 1 `invoice_line_
+  items`, 8 `candidate_onboarding`, 1 `payslips`, 2 `timesheets`, 7
+  `placements`, 3 `offer_letters`, 6 `interview_schedules`, 1,918
+  `recruiter_activity_events`, 35 `application_rejections`, 10 `offers`,
+  16 `candidate_status_tokens`, 1,220 `candidate_submissions`, 1,828
+  `consent_records`, 7 `placement_predictions`, 1,711 `recruiter_sla_
+  tracking`, 674 `source_attribution`, 3 `duplicate_candidates`, 4,261
+  `candidate_activities`, 887 `generated_resumes`, 3,101 `applications`,
+  and 1,805 `candidates` — plus everything CASCADE-handled automatically
+  by Postgres (`candidate_documents`, `candidate_messages`, `candidate_
+  ownership`, `candidate_ownership_history`, `candidate_parsed_data`,
+  `candidate_rediscovery_matches`, `candidate_scores`, `candidate_skill_
+  experience`, `candidate_tag_map`, `contractor_attendance`, `document_
+  expiry_tracking`, `reference_checks`) and SET-NULL-handled (`email_
+  threads`, `extension_captures`, `imap_messages`, `message_drafts`,
+  `recruiter_tasks`, `resume_files`).
+
+  Verified for real, not by trusting the transaction's own output: a
+  fresh, independent post-commit query confirmed `0` remaining
+  QA-pattern candidates and `3,782` real candidates left tenant-wide.
+  Confirmed the live app stayed fully healthy afterward — `/health`
+  200, a real `GET /candidates` call returning real data, the live
+  frontend `/candidates` page 200. A scoped regression sweep (S1
+  health / S16 / S30, 20 real tests) passed clean — the one failure
+  (`S1`'s "embeddings return 384 dims") is the same pre-existing local-
+  tunnel port limitation (8081, the embed service, never forwarded)
+  already documented earlier the same day, unrelated to this change.
+
+- [x] **`account_pl`/`collection_records` "Infosys BPM" + 8 sibling
+  test rows — re-checked before attempting the previously-blocked
+  DELETE, found both tables already completely empty (0 rows in
+  either).** The specific confirmed-test rows flagged on 2026-08-17/
+  2026-09-04 are already gone — most likely cleared at some point by
+  one of the many Finance/ERP test suites' own `afterAll` cleanup
+  (this project has built and exercised real account_pl/collection_
+  records create-then-cleanup flows repeatedly since 2026-08-09).
+  Nothing left to delete; this item is resolved with zero action needed
+  rather than requiring the blocked raw-SQL DELETE after all.
+
+- **WAHA session** — re-checked live: still `SCAN_QR_CODE`
+  (disconnected), unchanged. Genuinely outside what I can do remotely
+  (needs a physical phone to re-scan the QR via the WAHA dashboard).
+  Still the one real, disclosed, open item from this whole sweep.
+- **SMS/browser push** — unchanged, same reasoning as every earlier
+  check: no genuinely safe real recipient available to test against.
+
+With this, every item from the QA sweep's "Open/deferred items" list
+that was actionable by me is now closed. The only 2 genuinely remaining
+open items (WAHA reconnection, SMS/push live-recipient testing) both
+require a real person with physical access to a device/phone — not
+something achievable from this environment regardless of instruction.

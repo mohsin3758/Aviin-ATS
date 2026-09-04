@@ -23446,3 +23446,71 @@ every suite touching the careers page (S90/S95/S107, 19 tests) passed
 clean - zero regressions in the sitemap/JSON-LD/branding/filter/
 click-tracking features built the same file houses. Zero-token audit:
 `CONFIRMED CLEAN` (457 files, 0 external API refs).
+
+## QA/test data cleanup, part 2: 1,805 candidates permanently hard-deleted, Infosys BPM cleanup found already resolved, 2026-09-04
+Direct follow-up to the same-day "clean up QA test file, QA Users, email,
+QA candidates, .test files, and other testing files" pass — user asked
+to complete the deep, irreversible candidate hard-delete that had been
+offered but deliberately not done unilaterally, plus finish the other
+real pending item (the confirmed-safe "Infosys BPM"/collection_records
+test rows blocked on an explicit go-ahead since 2026-08-17/2026-09-04).
+
+**Candidate hard-delete, executed for real** — mapped the complete,
+current FK dependency graph for `candidates`/`applications` via
+`information_schema` (not from memory): 60 direct relationships, up
+from the ~40 the 2026-08-17 precedent documented, reflecting how much
+this project has grown since. Widened the search twice more to catch
+genuine transitive dependencies a one-hop query would miss (`offers`→
+`placements`/`offer_letters`, `placements`→`timesheets`/`payslips`/
+`candidate_onboarding`/etc., `interview_schedules`→`calendar_events`,
+`timesheets`→`invoice_line_items`). Before running anything destructive,
+spot-checked all 7 real-looking `placements` + 10 real-looking `offers`
+attached to these candidates — confirmed every one genuinely belongs to
+a `QA `-named, `@test.com`/`@qatest.example`-domain candidate from a
+real, identifiable test suite (S91 referral-hire tracking, S55 offer
+e-sign, Phase3/SourceAttr verification), not real business data.
+
+Ran a real transactional dry-run first (`BEGIN...ROLLBACK`), matching
+this project's established discipline for exactly this class of
+operation — it caught 2 real gaps before anything could be lost, not
+after: a missing transitive dependency (`placements.offer_id→offers.
+id`) on the first attempt, then — on the second — the exact same class
+of mistake the 2026-08-17 precedent explicitly warns about recurring
+almost verbatim: `candidate_activities` was correctly identified in the
+original FK query's own output but never made it into the DELETE
+script's transcription. Both caught cleanly by Postgres's own FK-
+violation error, nothing lost either time. The third attempt completed
+the full cascade with zero errors and both `remaining_target_
+candidates`/`remaining_target_applications` confirmed at `0` before the
+rollback — only then was it re-run for real with `COMMIT`.
+
+**Genuinely committed**: 1,805 candidates + 3,101 applications + real,
+counted rows across every dependent table (1,918 `recruiter_activity_
+events`, 1,828 `consent_records`, 1,711 `recruiter_sla_tracking`, 1,220
+`candidate_submissions`, 887 `generated_resumes`, 674 `source_
+attribution`, 4,261 `candidate_activities`, and 20+ smaller tables
+including the spot-checked placements/offers) — plus everything
+CASCADE/SET-NULL-handled automatically by Postgres. Verified for real,
+not by trusting the transaction's own output: a fresh, independent
+post-commit query confirmed `0` remaining QA-pattern candidates and
+`3,782` real candidates left tenant-wide. Confirmed the live app stayed
+fully healthy afterward (`/health` 200, a real `GET /candidates` call,
+the live frontend page 200). A scoped regression sweep (S1 health/S16/
+S30, 20 tests) passed clean — the one failure (`S1`'s embeddings-dims
+check) is the same pre-existing local-tunnel port limitation already
+documented earlier the same day, unrelated to this change.
+
+**"Infosys BPM" + 8 sibling `collection_records` test rows** — re-
+checked before attempting the previously-blocked DELETE, found both
+`account_pl` and `collection_records` already completely empty (0 rows
+in either) — most likely cleared at some point by one of the many
+Finance/ERP test suites' own `afterAll` cleanup. Nothing left to
+delete; resolved with zero action needed.
+
+**Genuinely still open, disclosed rather than glossed over**: WAHA's
+default WhatsApp session remains disconnected (`SCAN_QR_CODE`) —
+re-checked live, unchanged, needs a physical phone to re-scan the QR.
+SMS (MSG91)/browser push remain untested against a real recipient —
+no safe one has become available. Neither is achievable from this
+environment regardless of instruction. Full detail in
+`QA_SWEEP_PROGRESS.md`.
