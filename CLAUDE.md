@@ -23589,3 +23589,63 @@ legitimate reasons over this project's long history), not test residue —
 bulk-deleting that population without individual evidence would risk
 destroying real historical audit-trail data, the same caution this
 project has applied repeatedly elsewhere.
+
+## Comprehensive QA/test data re-sweep, S1-through-S107: found and closed 8 more categories missed by the earlier passes, 2026-09-04
+Direct follow-up, same day — user asked to check again, systematically,
+"from S1 to S110" for QA/test residue across every kind of data
+(candidates, users, resumes, emails, pipeline, "and other related test
+files"), not just the categories already checked. Ran a genuinely wide
+survey (16+ tables) rather than repeating the same narrower checks —
+found 8 real categories the two earlier same-day passes had missed
+entirely, all confirmed real test-suite residue (S30/S37/S51/S52/S73/
+S74/S91/S97/S102/KAE-submission/Tier2 patterns), none false positives.
+
+**Cleaned up via real APIs** (matching this project's established
+"prefer the real endpoint over raw SQL" discipline wherever one exists):
+454 `recruiter_tasks` (real `DELETE /recruiter-tasks/{id}`, discovered
+via reading the route file directly rather than guessed) and 10 more
+`candidate_messages` (real `DELETE /communications/messages/{id}`) that
+had accumulated since the earlier passes' snapshot.
+
+**Cleaned up via direct SQL, checked and dry-run first** — none of these
+6 remaining tables have a delete/bulk-delete endpoint at all, matching
+established precedent for exactly this situation elsewhere in this
+project. Mapped every table's real FK dependents via `information_
+schema` before touching anything (all either `CASCADE`/`SET NULL` or
+genuinely zero dependents — confirmed, not assumed) and ran a real
+transactional dry-run (`BEGIN...ROLLBACK`) before committing for real:
+1,370 `client_owners` rows (100% confirmed tied to already-inactive
+test clients from the earlier same-day cleanup — stale ownership
+assignments the earlier pass's client soft-delete never touched), 500
+`client_contacts` (same root cause — `client_contact_kae_assignments`,
+21 rows, CASCADEd away automatically), 355 `notifications`, 30
+`email_threads`, 6 `referral_links`, 3 `recruiter_job_links`, 3
+`recruiter_personal_links`.
+
+**A final, comprehensive re-verification confirmed genuinely `0` across
+all 14 categories checked** (candidates/users/clients/requisitions/
+resume_files/candidate_messages/client_owners/recruiter_tasks/
+notifications/referral_links/client_contacts/email_threads/recruiter_
+job_links/recruiter_personal_links), plus a wider spot-check across 9
+more tables (interview_schedules, offers, monitored_devices,
+staff_shifts, feed_registrations, candidate_rediscovery_matches,
+user_whatsapp_accounts, device_monitoring_consent) that all came back
+genuinely clean already. Confirmed the live app stayed fully healthy
+throughout (`/health` 200; `/candidates`, `/resume-inbox?source=
+manual_add`, `/companies`, `/recruiter-ops` all 200; a real `GET
+/candidates` API call 200). A scoped regression sweep (S1 health/S49/
+S54/S97, 32 real tests) passed clean — the one failure (`S1`'s
+embeddings-dims check) is the same pre-existing local-tunnel port
+limitation (8081, never forwarded) documented repeatedly earlier the
+same day, unrelated to this cleanup.
+
+**Root cause of why 8 categories were missed by the earlier same-day
+passes, disclosed rather than glossed over**: those passes correctly
+checked the tables most directly visible in the reported screenshots
+(candidates, users, resume_files, candidate_messages, clients) but
+didn't widen to every table a test suite's own side effects can reach
+(a submission creates a `client_owners`/`client_contacts` row, a stage
+move creates a `recruiter_tasks`/`notifications`/`email_threads` row, a
+referral test creates a `referral_links` row) — this pass's real value
+was doing that systematic FK-aware widening across the whole schema
+rather than repeating the same narrower table list a second time.
