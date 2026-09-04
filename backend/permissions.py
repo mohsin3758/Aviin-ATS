@@ -245,6 +245,44 @@ def require_permission(feature: str, action: str = "read"):
     return dependency
 
 
+def require_role_or_full_permission(*roles: str):
+    """Like require_role(*roles) — a hard, unconditional 403 unless the
+    actor's JWT role is literally one of `roles` — but ALSO accepts any
+    role whose real role_definitions.permissions grants a genuine full
+    wildcard ({"*": ["*"]}), checked live against the DB.
+
+    Closes a real, live gap found 2026-09-04: role_definitions already
+    seeds several senior/executive roles (e.g. 'ceo') with the exact
+    same {"*": ["*"]} full-access permissions as 'admin' - but every
+    hard-coded require_role("admin", "manager")-style gate in this
+    codebase only ever checked the literal role string, so a real
+    account with genuinely full wildcard permissions (confirmed live:
+    this tenant's own primary "Admin" login, role='ceo', permissions
+    {"*":["*"]} - identical to 'admin''s own row) was silently blocked
+    from admin-only actions like user delete/purge despite the
+    permission system itself already saying they should have full
+    access.
+
+    Anonymous (x-tenant-id only, role=None) callers still always fail,
+    matching require_role()'s own established behavior for exactly this
+    case - this dependency only widens WHO counts as admin-equivalent
+    among real, named, authenticated roles, never loosens the "must be
+    a real human" requirement."""
+
+    async def dependency(actor: Actor = Depends(get_actor)) -> Actor:
+        if actor.role in roles:
+            return actor
+        if actor.role is None:
+            raise HTTPException(status_code=403, detail=f"Requires role in {roles}")
+        async with db.tenant_conn(actor.tenant_id) as conn:
+            permissions = await get_role_permissions(conn, actor.tenant_id, actor.role)
+        if check_permission(permissions, "*", "*") is True:
+            return actor
+        raise HTTPException(status_code=403, detail=f"Requires role in {roles}")
+
+    return dependency
+
+
 async def has_permission_soft(conn, actor, feature: str, action: str = "read", route: Optional[str] = None) -> bool:
     """Same allow/deny OUTCOME require_permission()'s dependency would
     produce, but as a plain bool a handler can branch on instead of a

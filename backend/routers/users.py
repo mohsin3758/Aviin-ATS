@@ -6,8 +6,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 import db
-from deps import Actor, get_actor, require_role
-from permissions import FEATURES, FEATURE_GROUPS, ACTIONS
+from deps import Actor, get_actor
+from permissions import FEATURES, FEATURE_GROUPS, ACTIONS, require_role_or_full_permission
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -99,7 +99,7 @@ async def update_me(body: dict, actor: Actor = Depends(get_actor)):
 
 
 @router.post("")
-async def create_user(body: UserCreate, actor: Actor = Depends(require_role("admin", "manager"))):
+async def create_user(body: UserCreate, actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     # Defensive: reporting_to is a UUID FK — an empty string (a "no
     # selection" default some caller forgot to convert to null, same bug
     # class documented repeatedly elsewhere in this project) crashes
@@ -222,7 +222,7 @@ async def get_user(user_id: str, actor: Actor = Depends(get_actor)):
 
 
 @router.put("/{user_id}")
-async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(require_role("admin", "manager"))):
+async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     # Same empty-string-to-UUID/date cast defensive fix as create_user.
     if body.reporting_to == "":
         body.reporting_to = None
@@ -262,7 +262,7 @@ async def update_user(user_id: str, body: UserUpdate, actor: Actor = Depends(req
 
 
 @router.patch("/{user_id}/password")
-async def change_password(user_id: str, body: PasswordChange, actor: Actor = Depends(require_role("admin", "manager"))):
+async def change_password(user_id: str, body: PasswordChange, actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     if len(body.new_password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -276,7 +276,7 @@ async def change_password(user_id: str, body: PasswordChange, actor: Actor = Dep
 
 
 @router.patch("/{user_id}/deactivate")
-async def deactivate_user(user_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
+async def deactivate_user(user_id: str, actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     if user_id == actor.user_id:
         raise HTTPException(400, "Cannot deactivate yourself")
     async with db.tenant_conn(actor.tenant_id) as conn:
@@ -290,7 +290,7 @@ async def deactivate_user(user_id: str, actor: Actor = Depends(require_role("adm
 
 
 @router.patch("/{user_id}/activate")
-async def activate_user(user_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
+async def activate_user(user_id: str, actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow("""
             UPDATE users SET is_active=true WHERE id=$1 AND tenant_id=$2
@@ -302,7 +302,7 @@ async def activate_user(user_id: str, actor: Actor = Depends(require_role("admin
 
 
 @router.delete("/{user_id}")
-async def delete_user(user_id: str, actor: Actor = Depends(require_role("admin", "manager"))):
+async def delete_user(user_id: str, actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
     """Soft-delete (is_active=false) — same real DELETE-verb-backed-by-
     soft-delete convention already established for clients.py (a genuine
     hard DELETE on a user would throw FK violations against every real
@@ -415,7 +415,7 @@ _FORCE_DELETE_ROWS = [
 
 
 @router.delete("/{user_id}/purge")
-async def purge_user(user_id: str, force: bool = False, actor: Actor = Depends(require_role("admin"))):
+async def purge_user(user_id: str, force: bool = False, actor: Actor = Depends(require_role_or_full_permission("admin"))):
     """Real gap fix (2026-08-22): soft-delete (above) has no effect on a
     user who's already inactive — an admin re-clicking Delete on an
     already-`is_active:false` row (e.g. leftover QA/test fixtures) gets a
@@ -661,7 +661,7 @@ async def get_enforcement(actor: Actor=Depends(get_actor)):
 
 
 @roles_router.put("/enforcement", tags=["permissions"])
-async def set_enforcement(body: EnforcementUpdate, actor: Actor=Depends(require_role("admin", "super_admin"))):
+async def set_enforcement(body: EnforcementUpdate, actor: Actor=Depends(require_role_or_full_permission("admin", "super_admin"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
         await conn.execute(
             "UPDATE tenants SET permission_enforcement_enabled=$1 WHERE id=$2", body.enabled, actor.tenant_id)
@@ -669,7 +669,7 @@ async def set_enforcement(body: EnforcementUpdate, actor: Actor=Depends(require_
 
 
 @roles_router.get("/permission-log", tags=["permissions"])
-async def permission_log(days: int = 14, actor: Actor=Depends(require_role("admin", "super_admin"))):
+async def permission_log(days: int = 14, actor: Actor=Depends(require_role_or_full_permission("admin", "super_admin"))):
     """Aggregated, not raw rows — an admin reviewing before flipping
     enforcement on needs "recruiter tried 'read' on 'companies' 47 times
     this week", not 47 individual timestamps."""
@@ -709,7 +709,7 @@ async def update_role(role_id: str, body: dict, actor: Actor=Depends(get_actor))
 
 @roles_router.put("/{role_id}/permissions", tags=["permissions"])
 async def update_role_permissions(role_id: str, body: PermissionsUpdate,
-                                    actor: Actor=Depends(require_role("admin", "super_admin"))):
+                                    actor: Actor=Depends(require_role_or_full_permission("admin", "super_admin"))):
     """Permissions-only edit, deliberately allowed on system roles (all 27
     seeded staffing roles have is_system=true) — the general PUT above
     protects rename/delete of foundational roles, but blocking permission
@@ -730,7 +730,7 @@ class VisibilityUpdate(BaseModel):
 
 @roles_router.put("/{role_id}/visibility", tags=["permissions"])
 async def update_role_visibility(role_id: str, body: VisibilityUpdate,
-                                   actor: Actor=Depends(require_role("admin", "super_admin"))):
+                                   actor: Actor=Depends(require_role_or_full_permission("admin", "super_admin"))):
     """Recommendation 2 (recruiter-assignment gap analysis): per-role
     'all jobs' vs 'assigned jobs only' scope, read by requisitions.py's
     GET /requisitions (which also backs the Pipeline board's job picker
