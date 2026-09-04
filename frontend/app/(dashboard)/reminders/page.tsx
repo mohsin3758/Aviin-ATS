@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
 import {
@@ -111,7 +112,20 @@ function FollowUpForm({ onClose, onSaved }: { onClose: () => void; onSaved: () =
     }
   };
 
-  return (
+  // Real bug fix (2026-09-04): reported live as "top side is hide" - this
+  // modal rendered inline in the page tree (no portal), and every
+  // dashboard page wraps its content in a `.anim-fade-up` div carrying a
+  // real `transform` (even at its resting/identity value, that's still a
+  // non-`none` transform) - per the CSS spec, any ancestor transform
+  // creates a NEW containing block for `position:fixed` descendants, so
+  // this "fixed, inset:0" overlay was being sized/centered against that
+  // page wrapper's own full scroll height (confirmed live: 36,485px on
+  // this real page) instead of the true viewport, landing the centered
+  // panel far below the visible screen. Fixed by portaling straight to
+  // document.body, matching the already-correct, established pattern
+  // components/ui/Modal.tsx already uses for exactly this reason.
+  if (typeof document === 'undefined') return null;
+  return createPortal(
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
       <div style={{ width: 520, maxWidth: '92vw', maxHeight: '88vh', overflowY: 'auto', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
@@ -195,7 +209,8 @@ function FollowUpForm({ onClose, onSaved }: { onClose: () => void; onSaved: () =
           <button onClick={save} disabled={saving} style={{ ...btn, opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Create Follow-Up'}</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

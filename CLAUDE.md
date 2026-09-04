@@ -23124,3 +23124,63 @@ passed, 1 self-healed on Playwright's own retry (a pre-existing timing
 sensitivity in an unrelated background-WhatsApp-delivery assertion that
 queries `/thread/{cand_id}`, a code path this fix never touched -
 confirmed not a regression). Zero-token audit: `CONFIRMED CLEAN`.
+
+## Real bug fixed: New Follow-Up modal's top was rendering off-screen — a CSS containing-block bug, plus a real, disclosed, systemic finding, 2026-09-04
+User reported (screenshot, then a direct clarification): "New followup
+form top is hide" - the top of the New Follow-Up modal (title bar, close
+button, Title field, Description label) genuinely not visible or
+reachable, no matter how far the panel's own internal scroll was tried.
+
+Reproduced live, not guessed from the screenshot alone: a real headless-
+browser check found the modal's own "fixed" overlay measuring
+`height: 36,485px` and its centered panel sitting at `y: 18,158px` - both
+wildly larger than the real 900px viewport. Root-caused precisely by
+walking the DOM ancestor chain: every dashboard page wraps its content in
+a `.anim-fade-up` entrance-animation div (a real, established convention
+used across 52 pages) carrying a genuine CSS `transform`
+(`matrix(1,0,0,1,0,0)` - the animation's resting/identity value, but
+still a non-`none` transform). Per the CSS spec, ANY non-`none` transform
+on an ancestor creates a NEW containing block for a `position:fixed`
+descendant - `FollowUpForm`'s modal was rendered inline in the page tree
+(unlike the shared `Modal.tsx` component, which correctly `createPortal`s
+straight to `document.body` for exactly this reason), so its "fixed,
+inset:0" overlay was being sized/centered against that page wrapper's own
+full, genuinely-tall scroll height (36,485px on this real page, with its
+real long list of overdue follow-ups) instead of the true browser
+viewport - centering a panel within a box that size lands it far below
+the visible screen, with no scrollbar able to reach the clipped top since
+it's the OUTER container's own box, not the panel's internal overflow,
+that's the problem.
+
+Fixed by portaling `FollowUpForm`'s modal straight to `document.body` via
+`createPortal`, matching `Modal.tsx`'s already-correct, established
+pattern exactly - no change to the `.anim-fade-up` animation itself
+(altering a convention used on 52 pages for one form's bug would be a far
+bigger, riskier, unrelated change).
+
+**A real, disclosed, systemic finding, not silently expanded into or
+silently hidden**: swept the codebase for the same bespoke,
+non-portaled `position:'fixed', inset:0` modal pattern - found it in
+25 files total. Every one of them shares the identical latent risk
+whenever its own host page's real content grows tall enough (the
+severity is content-dependent, not guaranteed to manifest on every
+page every time) - not fixed in this pass, since the user reported one
+specific form and fixing all 25 unilaterally would be a materially
+larger, unverified change. Flagged here for a future, deliberate
+decision on whether to fix them individually or address the pattern at
+its root.
+
+Verified for real end-to-end, not code review: re-ran the exact same
+reproduction script after deploying - the overlay now measures exactly
+`top:0, height:900` (the true viewport), and the panel's own bounding
+box (`y:111.75`) sits comfortably within it. A pulled screenshot of the
+live page visually confirmed the full modal - header, Title, Description,
+Candidate search, Follow-Up Reason, the Priority/Assigned/Due-Date/
+Reminder/Client/Job grid, Recurrence, and both buttons - all fully
+visible and correctly centered. New permanent regression test added to
+the existing "S49" suite, asserting the precise mechanism (the overlay's
+own `getBoundingClientRect()` must equal `{top:0, height:window.
+innerHeight}`, and the panel must fall fully within `[0, viewportHeight]`)
+rather than just "the form is submittable," which wouldn't have reliably
+caught this class of bug either. Full S49 suite (9/9, including the new
+test) passed clean. Zero-token audit: `CONFIRMED CLEAN`.

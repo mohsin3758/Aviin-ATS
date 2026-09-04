@@ -6341,6 +6341,39 @@ test.describe.serial('S49 Reminder & Follow-Up Management System', () => {
     expect(errors).toHaveLength(0);
   });
 
+  test('BUG FIX (2026-09-04): the New Follow-Up modal is now portaled to document.body, so its position:fixed overlay is genuinely viewport-relative regardless of the page\'s real content height — reported live as "top side is hide," root-caused to every page wrapping its content in a real .anim-fade-up transform, which (per the CSS spec) creates a NEW containing block for any non-portaled position:fixed descendant, sizing/centering the modal against the page\'s full scroll height instead of the true viewport', async ({ page }) => {
+    await page.goto('/reminders');
+    await expect(page.getByRole('heading', { name: 'Reminders & Follow-Ups' })).toBeVisible({ timeout: 10000 });
+    await page.locator('.anim-fade-up button', { hasText: 'Follow-Ups' }).first().click();
+    await page.waitForTimeout(400);
+    await page.locator('button:has-text("New Follow-Up")').first().click();
+    await page.waitForTimeout(300);
+    // The exact real check that caught the bug live: the overlay's own
+    // fixed-position box must equal the true viewport (top:0, height ==
+    // window.innerHeight), not the page's own, potentially far taller,
+    // scrollHeight.
+    const overlayBox = await page.evaluate(() => {
+      const overlay = Array.from(document.querySelectorAll('div')).find(
+        el => getComputedStyle(el).position === 'fixed' && el.textContent?.includes('New Follow-Up')
+      );
+      if (!overlay) return null;
+      const r = overlay.getBoundingClientRect();
+      return { top: r.top, height: r.height, viewportHeight: window.innerHeight };
+    });
+    expect(overlayBox).toBeTruthy();
+    expect(overlayBox!.top).toBe(0);
+    expect(overlayBox!.height).toBe(overlayBox!.viewportHeight);
+    // And the panel itself must be fully within [0, viewportHeight] — the
+    // concrete, user-visible guarantee that its top (title/close button/
+    // Title field) is never pushed off-screen.
+    const panelBox = await page.locator('div:has-text("+ New Follow-Up")').filter({ has: page.locator('input') }).first().boundingBox();
+    expect(panelBox).toBeTruthy();
+    expect(panelBox!.y).toBeGreaterThanOrEqual(0);
+    expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(overlayBox!.viewportHeight + 1);
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.locator('button:has-text("Cancel")').first().click().catch(() => {});
+  });
+
   test.afterAll(async ({ request }) => {
     if (taskId) await request.delete(`${API}/recruiter-tasks/${taskId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
     if (docId) await request.delete(`${API}/document-expiry/${docId}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
