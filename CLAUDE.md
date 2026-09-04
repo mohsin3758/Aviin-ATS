@@ -23514,3 +23514,78 @@ SMS (MSG91)/browser push remain untested against a real recipient —
 no safe one has become available. Neither is achievable from this
 environment regardless of instruction. Full detail in
 `QA_SWEEP_PROGRESS.md`.
+
+## Resume Inbox test residue found and closed: root cause was resume_files, not candidates, 2026-09-04
+Direct follow-up to the same-day mass QA-cleanup pass — user pasted a live
+screenshot of `/resume-inbox?source=manual_add` still showing dozens of
+"QA S58 UI Test..."/"S92 Education Test Candidat..."/"S101 Setup
+Placeholder..." rows, some with a real linked name/skills, some showing
+"—" for name, and asked why, given the earlier candidate-level cleanup.
+
+Root-caused before touching anything, not guessed: Resume Inbox renders
+directly from `resume_files.parsed_data`/`file_name`, independent of
+whether the linked `candidate_id` still exists or is active — confirmed
+live that `candidates_active_qa_now: 0` and `resume_files_linked_to_
+active_QA_candidate: 0` at the exact moment the screenshot was taken, yet
+the rows still rendered with real-looking names. Two distinct causes: (1)
+`intake_queue()`'s own default filter (`rf.candidate_id IS NULL OR c.
+is_active IS NOT FALSE`) deliberately always shows a candidate-less
+resume — correct behavior for a genuinely unlinked real resume awaiting
+review, but it also meant every `resume_files` row whose linked candidate
+had been permanently hard-deleted in the earlier pass (via the real `SET
+NULL` cascade on `resume_files.candidate_id`) stayed fully visible,
+showing "—" for name; (2) a steady trickle of brand-new test-suite runs
+(S58/S71/S92/S101 — several run by me, today, verifying earlier fixes)
+had created fresh `resume_files` rows since the earlier sweep's one-time
+snapshot, which the earlier pass could never have caught.
+
+`resume_files` has no delete endpoint (only `/approve`/`/reject`, which
+just relabel `parse_status` — confirmed via reading `intake_queue()`'s
+own query that a `'rejected'` row is NOT excluded from the default view,
+so rejecting these wouldn't have actually hidden them). Checked its real
+FK dependents (`candidate_parsed_data` SET NULL, `generated_resumes.
+source_resume_file_id` NO ACTION — confirmed zero of the target rows were
+referenced there) before deleting directly.
+
+Surveyed the real scope precisely rather than a blind bulk delete: of 93
+`resume_files` rows under `job_board='manual_add'`, 91 matched a clear
+test-suite fingerprint (`qa_s58*.txt`, `s92_*.txt`, `s101_*.txt`, "S71
+Report Weird.pdf" linked to "S71 Download Candidate ..."/"S101 Setup
+Placeholder ..."/"Manual CR Test" candidates) — the other 2 ("MAK"'s real
+Charan SAP-FICO resume, "MOHSIN KHAN"'s real V Pavan resume) were
+correctly identified as genuine and excluded. Widened the same pattern
+check across the WHOLE table (not just manual_add) and found exactly one
+more coincidental match — "Pratik Sinkar," a real, dated 2026-07-05 email-
+intake candidate whose resume filename happens to start with "QA_" (a
+real Quality-Assurance-role context, not test residue) — the exact
+well-documented false-positive class this project watches for
+repeatedly; correctly left untouched.
+
+Ran a real transactional dry-run first (`BEGIN...ROLLBACK`) confirming
+exactly 91 rows would be removed and exactly the 2 real ones would
+survive, then committed for real. Independently re-verified via a fresh
+query (2 real rows remaining) and via the actual live API endpoint
+(`GET /resume-intake/queue?source=manual_add` — the real param name is
+`source`, not `job_board`, confirmed by reading the endpoint's own
+signature) returning exactly those same 2 real candidates. Also caught
+and cleaned up the small amount of fresh residue that had accumulated
+from suites run during this same conversation's own verification work:
+1 more active test candidate ("UI Test Candidate," soft-deleted via the
+real API) and 3 more test-domain `candidate_messages` (deleted via the
+real API). A final, broad re-check across every category (active QA
+candidates, stray manual_add resume_files, test-domain messages, active
+test users, active test clients) confirmed genuinely, completely clean
+— `0` everywhere. Confirmed the live app stayed healthy throughout
+(`/health` 200, the live `/resume-inbox?source=manual_add` page 200).
+
+**Honest scope note, disclosed rather than silently implied complete**:
+the much larger `resume_files` population outside `manual_add` (~4,677
+rows under `job_board='direct'`, the real email-intake pipeline) was
+deliberately NOT bulk-swept — a broad regex check across the whole table
+found only the one coincidental "Pratik Sinkar" false-positive, strongly
+suggesting the rest is genuine production intake history (real resumes
+whose candidate was later soft-deleted/merged for entirely unrelated,
+legitimate reasons over this project's long history), not test residue —
+bulk-deleting that population without individual evidence would risk
+destroying real historical audit-trail data, the same caution this
+project has applied repeatedly elsewhere.
