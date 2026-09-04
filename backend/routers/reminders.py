@@ -36,27 +36,40 @@ async def reminder_dashboard(team_view: bool = False, actor: Actor = Depends(get
         task_cond = "" if scope_team else "AND rt.recruiter_id = $2"
         params = [actor.tenant_id] if scope_team else [actor.tenant_id, actor.user_id]
 
+        # REAL FEATURE ADD (2026-09-04): "click a follow-up, see all
+        # related details" - reported live off both the My/Team Reminders
+        # toggle. Every task row already carries its own denormalized
+        # candidate_name/req_title (captured at creation time), but WHO
+        # it's assigned to and WHO created it were never returned by any
+        # endpoint at all - genuinely missing detail, not just unused.
+        # Added here (real joins, not a second fetch) so the frontend's
+        # detail view can open instantly from data already in hand.
+        _task_select = """rt.*, cl.name AS client_name,
+                       ru.full_name AS recruiter_name, cu.full_name AS created_by_name"""
+        _task_joins = """LEFT JOIN clients cl ON cl.id = rt.client_id
+                LEFT JOIN users ru ON ru.id = rt.recruiter_id
+                LEFT JOIN users cu ON cu.id = rt.created_by"""
         due_today = await conn.fetch(
-            f"""SELECT rt.*, cl.name AS client_name FROM recruiter_tasks rt
-                LEFT JOIN clients cl ON cl.id = rt.client_id
+            f"""SELECT {_task_select} FROM recruiter_tasks rt
+                {_task_joins}
                 WHERE rt.tenant_id=$1 {task_cond} AND rt.status IN ('pending','in_progress')
                   AND rt.due_at::date = CURRENT_DATE
                 ORDER BY rt.due_at""", *params)
         due_this_week = await conn.fetch(
-            f"""SELECT rt.*, cl.name AS client_name FROM recruiter_tasks rt
-                LEFT JOIN clients cl ON cl.id = rt.client_id
+            f"""SELECT {_task_select} FROM recruiter_tasks rt
+                {_task_joins}
                 WHERE rt.tenant_id=$1 {task_cond} AND rt.status IN ('pending','in_progress')
                   AND rt.due_at > CURRENT_DATE AND rt.due_at <= CURRENT_DATE + INTERVAL '7 days'
                 ORDER BY rt.due_at""", *params)
         overdue = await conn.fetch(
-            f"""SELECT rt.*, cl.name AS client_name FROM recruiter_tasks rt
-                LEFT JOIN clients cl ON cl.id = rt.client_id
+            f"""SELECT {_task_select} FROM recruiter_tasks rt
+                {_task_joins}
                 WHERE rt.tenant_id=$1 {task_cond} AND rt.status IN ('pending','in_progress')
                   AND rt.due_at < now()
                 ORDER BY rt.due_at""", *params)
         critical = await conn.fetch(
-            f"""SELECT rt.*, cl.name AS client_name FROM recruiter_tasks rt
-                LEFT JOIN clients cl ON cl.id = rt.client_id
+            f"""SELECT {_task_select} FROM recruiter_tasks rt
+                {_task_joins}
                 WHERE rt.tenant_id=$1 {task_cond} AND rt.status IN ('pending','in_progress')
                   AND rt.priority = 'critical'
                 ORDER BY rt.due_at NULLS LAST""", *params)

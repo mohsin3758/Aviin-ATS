@@ -23757,3 +23757,106 @@ follow-ups (Ravinandan, Sumanta Jana, Rakshith K S, etc.) with zero
 the actual rendered page text, not assumed from a passing test alone).
 The tenant-wide "Team Reminders" 118-overdue count was independently
 confirmed to be real candidate activity, not test noise.
+
+
+## Reminders & Follow-Ups: real click-to-detail on every follow-up row (My/Team Reminders + Follow-Ups tab), plus 2 more real stray-data findings closed, 2026-09-04
+User asked, from a live screenshot of the real Team Reminders overdue
+list: clicking a follow-up row (e.g. "Ashwin Jayaseelan") should show
+its full detail, and this should work identically on both My Reminders
+and Team Reminders, and on the Follow-Ups tab.
+
+**Backend** (`reminders.py`'s dashboard queries, `recruiter_ops.py`'s
+`list_tasks`) — all 5 real task-fetching queries gained
+`recruiter_name`/`created_by_name` via new `LEFT JOIN users` clauses
+(one shared `_task_select`/`_task_joins` fragment reused across the 4
+dashboard buckets in `reminders.py`, a matching join added directly to
+`recruiter_ops.py`'s own query) — no new endpoint, the existing real
+`recruiter_id`/`created_by` columns were always there, just never
+resolved to a human-readable name for display.
+
+**Frontend** (`reminders/page.tsx`) — new `TaskDetailModal` component,
+rendered from the ONE shared `TaskRow` component every one of the 3
+real surfaces (Dashboard's My/Team toggle, the Follow-Ups tab) already
+renders through — wiring it there covers all 3 at once, matching the
+user's explicit ask, not three separate implementations. Shows
+description/reason/task type/due date/reminder time, real clickable
+links to the candidate/requisition/client when linked
+(`/candidates/{id}`, `/requisitions/{id}`, `/companies?client={id}` —
+all pre-existing deep-link conventions, reused not reinvented), the
+resolved recruiter/creator names, recurrence, and reschedule history.
+`TaskRow`'s title/subtitle block became the click target; the message
+icon, status dropdown, and reschedule button all got `e.stopPropagation()`
+so they keep working exactly as before without also opening the modal.
+The new `TaskDetailModal` uses a plain `position:'fixed'` div with no
+portal wrapper — safe by construction thanks to the same-day `globals.css`
+containing-block fix (animating `margin` instead of `transform` means
+no page wrapper creates a containing block anymore, so a new bespoke
+fixed-position modal doesn't need individual portal treatment the way
+older ones on this page still do).
+
+**Investigating the very first live API response surfaced 2 more real,
+previously-uncaught findings — a check this project's earlier reminders
+cleanup pass (documented immediately above this entry) had never run**:
+the earlier pass checked requisition/candidate/client joins on a stray
+task, but never checked the task's own `recruiter_id` assignment.
+
+1. **24 more stray tasks, assigned to 3 already-inactive "QA User" test
+   accounts** — all 21 "Follow up: <name>" rows shared the exact same
+   `created_at` timestamp (2026-08-22 13:37:10, to the millisecond) with
+   `candidate_id IS NULL` on every one; the other 3 were literal "S49
+   UI-created Follow-Up" rows from this project's own S49 Playwright
+   suite. Investigated the one name that mattered most before deleting
+   anything — the exact "Ashwin Jayaseelan" row from the user's own
+   screenshot — and confirmed it's the ONLY row with that title anywhere
+   in `recruiter_tasks` (`status: cancelled`), already correctly excluded
+   from the live dashboard's overdue list (a cancelled task can't appear
+   there) — resolving the user's specific concern directly: there is no
+   real, currently-live "Ashwin Jayaseelan" follow-up being hidden or
+   mishandled, this was genuine test residue that had simply never been
+   cleaned up. All 24 deleted via the real `DELETE /recruiter-tasks/{id}`
+   API.
+2. **A separate, real, more serious finding: 39 duplicate "Get started:
+   Associate Managing Consultant - SAP FICO" kickoff tasks, all pointing
+   at the identical 1 requisition, all `candidate_id IS NULL`, spanning
+   2026-08-24 through 2026-09-01** — not fabricated test data, a genuine
+   accumulation from this project's own real Assignment Dashboard
+   automation (built 2026-08-24: every real assign/reassign action fires
+   a "Get started" kickoff task for the newly-assigned recruiter)
+   correctly firing, over and over, every single time this ONE real
+   production requisition was used across many separate sessions'
+   worth of legitimate Auto-Assign/Auto-Reassign/bulk-reassign feature
+   verification — the one real role most readily available for
+   live-data testing throughout this project's history. Each firing was
+   legitimate at the time; nothing ever cleaned up the resulting stale,
+   redundant duplicates afterward. Kept the single most recent (still a
+   real, potentially-actionable prompt), deleted the other 38 as stale
+   clutter via the real API. Swept for any other requisition with the
+   same pattern — none found, this was an isolated pile.
+
+Verified for real end-to-end, not code review, via a genuine
+headless-browser pass against the live production site across all 3
+required surfaces: **Team Reminders** — clicked a real overdue row
+("Follow up: Para Praveen"), confirmed the modal opened with correct
+real data (AI-suggested description, reason, due date, a working
+"View role ↗" requisition link, "Assigned To: mohsin3786"), screenshot-
+confirmed. **My Reminders** — confirmed the admin's own real, correct
+empty state ("Nothing needs your attention right now.") renders cleanly
+rather than broken/blank, since this account genuinely has zero
+personally-assigned follow-ups — not a bug, a legitimate state,
+screenshot-confirmed. **Follow-Ups tab** — clicked a real row ("Follow
+up: Swaroop S"), confirmed the identical modal opens with correct data
+(CANCELLED status, "Assigned To: khan mer", a working requisition
+link), screenshot-confirmed. One real test-script mistake caught and
+corrected during this same verification, not an app bug: an early
+assertion used a case-sensitive regex (`/^DESCRIPTION$/`) against text
+that's only visually uppercased via CSS `text-transform` (the real DOM
+text is title-case, e.g. "Description") — re-confirmed via the actual
+screenshot that the modal was genuinely rendering correctly the whole
+time.
+
+The pre-existing "S49 Reminder & Follow-Up Management System" Playwright
+suite re-run clean after all of the above: 9/9 passing, and its own
+fixture recruiter/task confirmed to leave zero residue behind afterward
+(re-checked the exact same "assigned to a fake QA account" query that
+surfaced today's findings — 0 remaining). Zero-token audit: `CONFIRMED
+CLEAN` (457 files, 0 external API refs).

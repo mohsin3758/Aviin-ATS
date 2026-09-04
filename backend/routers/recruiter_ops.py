@@ -193,11 +193,18 @@ async def list_tasks(recruiter_id: Optional[str] = None, status: Optional[str] =
         conditions.append("rt.status IN ('pending','in_progress') AND rt.due_at < now()")
 
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Real feature add (2026-09-04, same shape as reminders.py's own
+        # dashboard endpoint) - recruiter_name/created_by_name were never
+        # returned by any task endpoint at all, needed for a real
+        # click-through detail view on the Follow-Ups tab.
         rows = await conn.fetch(
             f"""SELECT rt.*, cl.name AS client_name,
+                       ru.full_name AS recruiter_name, cu.full_name AS created_by_name,
                        (rt.status IN ('pending','in_progress') AND rt.due_at < now()) AS is_overdue
                 FROM recruiter_tasks rt
                 LEFT JOIN clients cl ON cl.id = rt.client_id
+                LEFT JOIN users ru ON ru.id = rt.recruiter_id
+                LEFT JOIN users cu ON cu.id = rt.created_by
                 WHERE {' AND '.join(conditions)}
                 ORDER BY (rt.status = 'completed'), rt.due_at NULLS LAST""",
             *params,

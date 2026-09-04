@@ -246,8 +246,67 @@ function RescheduleModal({ task, onClose, onSaved }: { task: any; onClose: () =>
   );
 }
 
+// REAL FEATURE ADD (2026-09-04): "clicking a follow-up should show all
+// details and related details, for both My Reminders and Team Reminders"
+// - reported live off a screenshot of the Team Reminders overdue list.
+// TaskRow is the ONE shared row component every one of those 3 surfaces
+// (Dashboard tab's My/Team toggle, and the Follow-Ups tab) already
+// renders through, so wiring the click here covers all of them at once
+// - no per-surface duplication needed. Built entirely from data already
+// present on `t` (every recruiter_tasks column, plus the recruiter_name/
+// created_by_name this same fix adds on the backend) - opens instantly,
+// no extra fetch.
+function TaskDetailModal({ t, onClose }: { t: any; onClose: () => void }) {
+  const row = (lbl: string, val: React.ReactNode) => val ? (
+    <div style={{ display: 'flex', gap: 8, padding: '6px 0', borderBottom: '1px solid #F8FAFC', fontSize: 12.5 }}>
+      <div style={{ width: 120, flexShrink: 0, color: '#94A3B8', fontWeight: 700, fontSize: 10.5, textTransform: 'uppercase', paddingTop: 1 }}>{lbl}</div>
+      <div style={{ flex: 1, color: '#1E293B' }}>{val}</div>
+    </div>
+  ) : null;
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1150, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={onClose}>
+      <div style={{ width: 480, maxHeight: '85vh', overflowY: 'auto', background: '#fff', borderRadius: 14, padding: 22 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, marginBottom: 4 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>
+            {t.ai_suggested && <span title="AI-suggested" style={{ marginRight: 6 }}>✨</span>}
+            {t.title}
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', flexShrink: 0 }}><X size={16} /></button>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+          <PriorityBadge p={t.priority} />
+          <span style={{ fontSize: 10.5, fontWeight: 700, color: t.is_overdue ? '#DC2626' : '#64748B', textTransform: 'uppercase' }}>{t.status?.replace('_', ' ')}</span>
+          {t.is_overdue && <span style={{ fontSize: 10.5, fontWeight: 800, color: '#DC2626' }}>· OVERDUE</span>}
+        </div>
+
+        {row('Description', t.description)}
+        {row('Reason', t.follow_up_reason)}
+        {row('Notes', t.notes)}
+        {row('Task Type', t.task_type)}
+        {row('Due', fmtDT(t.due_at))}
+        {row('Reminder At', t.reminder_at && fmtDT(t.reminder_at))}
+        {row('Candidate', t.candidate_id ? <a href={`/candidates/${t.candidate_id}`} target="_blank" rel="noreferrer" style={{ color: '#2563EB', fontWeight: 600 }}>{t.candidate_name || 'View profile'} ↗</a> : t.candidate_name)}
+        {row('Requisition', t.requisition_id ? <a href={`/requisitions/${t.requisition_id}`} target="_blank" rel="noreferrer" style={{ color: '#2563EB', fontWeight: 600 }}>{t.req_title || 'View role'} ↗</a> : t.req_title)}
+        {row('Client', t.client_id ? <a href={`/companies?client=${t.client_id}`} target="_blank" rel="noreferrer" style={{ color: '#2563EB', fontWeight: 600 }}>{t.client_name} ↗</a> : t.client_name)}
+        {row('Assigned To', t.recruiter_name)}
+        {row('Created By', t.created_by_name && <>{t.created_by_name}{t.created_at ? ` · ${fmtDT(t.created_at)}` : ''}</>)}
+        {row('Recurrence', t.recurrence_rule)}
+        {row('Reschedule History', t.reschedule_count > 0 && <>Rescheduled ×{t.reschedule_count}{t.rescheduled_from ? ` · originally due ${fmtDT(t.rescheduled_from)}` : ''}</>)}
+
+        {t.candidate_id && (
+          <a href={`/conversations?compose_candidate=${t.candidate_id}&compose_subject=${encodeURIComponent('Follow-up: ' + t.title)}`}
+            style={{ marginTop: 14, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 700, color: '#2563EB', textDecoration: 'none' }}>
+            <MessageCircle size={13} /> Send a message about this follow-up
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TaskRow({ t, onChanged }: { t: any; onChanged: () => void }) {
   const [rescheduling, setRescheduling] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const setStatus = async (status: string) => {
     await apiFetch(`/recruiter-tasks/${t.id}?status=${status}`, { method: 'PATCH' });
     onChanged();
@@ -255,7 +314,7 @@ function TaskRow({ t, onChanged }: { t: any; onChanged: () => void }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 4px', borderBottom: '1px solid #F1F5F9', fontSize: 12 }}>
       {t.ai_suggested && <span title="AI-suggested" style={{ fontSize: 13 }}>✨</span>}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => setDetailOpen(true)} title="View full details">
         <div style={{ fontWeight: 600, color: t.status === 'completed' ? '#94A3B8' : '#1E293B', textDecoration: t.status === 'completed' ? 'line-through' : 'none' }}>{t.title}</div>
         <div style={{ fontSize: 10.5, color: '#94A3B8' }}>
           {t.candidate_name ? `${t.candidate_name} · ` : ''}{t.client_name ? `${t.client_name} · ` : ''}{t.req_title ? `${t.req_title} · ` : ''}Due {fmtDT(t.due_at)}
@@ -283,19 +342,21 @@ function TaskRow({ t, onChanged }: { t: any; onChanged: () => void }) {
           second, parallel messaging surface. */}
       {t.candidate_id && (
         <a href={`/conversations?compose_candidate=${t.candidate_id}&compose_subject=${encodeURIComponent('Follow-up: ' + t.title)}`}
+          onClick={e => e.stopPropagation()}
           title="Send a message about this follow-up" style={{ background: 'none', border: '1px solid #E2E8F0', borderRadius: 6, padding: 5, cursor: 'pointer', color: '#2563EB', display: 'flex' }}>
           <MessageCircle size={12} />
         </a>
       )}
-      <select value={t.status} onChange={e => setStatus(e.target.value)} style={{ fontSize: 11, padding: '4px 6px', borderRadius: 6, border: '1px solid #E2E8F0' }}>
+      <select value={t.status} onChange={e => setStatus(e.target.value)} onClick={e => e.stopPropagation()} style={{ fontSize: 11, padding: '4px 6px', borderRadius: 6, border: '1px solid #E2E8F0' }}>
         <option value="pending">Pending</option><option value="in_progress">In Progress</option>
         <option value="completed">Completed</option><option value="rescheduled">Rescheduled</option>
         <option value="cancelled">Cancelled</option>
       </select>
-      <button onClick={() => setRescheduling(true)} title="Reschedule" style={{ background: 'none', border: '1px solid #E2E8F0', borderRadius: 6, padding: 5, cursor: 'pointer', color: '#64748B' }}>
+      <button onClick={e => { e.stopPropagation(); setRescheduling(true); }} title="Reschedule" style={{ background: 'none', border: '1px solid #E2E8F0', borderRadius: 6, padding: 5, cursor: 'pointer', color: '#64748B' }}>
         <RotateCcw size={12} />
       </button>
       {rescheduling && <RescheduleModal task={t} onClose={() => setRescheduling(false)} onSaved={() => { setRescheduling(false); onChanged(); }} />}
+      {detailOpen && <TaskDetailModal t={t} onClose={() => setDetailOpen(false)} />}
     </div>
   );
 }
