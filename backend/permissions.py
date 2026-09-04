@@ -135,6 +135,7 @@ FEATURE_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
         ("users_roles", "Users & Roles"),
         ("permissions_settings", "Permissions"),
         ("pipeline_stages", "Pipeline Stages"),
+        ("company_profile", "Company Profile"),
         ("company_email_smtp", "Company Email (SMTP)"),
         ("email_signatures", "Email Signatures"),
         ("security_2fa", "Security / 2FA"),

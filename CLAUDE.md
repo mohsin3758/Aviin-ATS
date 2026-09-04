@@ -23343,3 +23343,65 @@ pages, not an identity matrix), one repeating the real "Schedule
 Interview" proof as a permanent regression guard against this exact bug
 class ever silently reappearing. Both passed clean on the first run.
 Zero-token audit: `CONFIRMED CLEAN`.
+
+## Company Profile: real admin-panel capability to edit the tenant's company display name, 2026-09-04
+Direct follow-up to the same-day security-gap fix — user pasted a live
+screenshot of the public careers page showing "Acme Staffing India" (the
+original seed/demo tenant name) and asked how to change it to "Aviin
+Technology Business Solutions Pvt Ltd," and whether an admin-panel
+option exists to do it. Investigated first, not guessed: grepped the
+whole backend for any write path touching `tenants.name` — found none
+at all, only the pre-existing `permission_enforcement_enabled` toggle
+and a read-only `GET /public/tenant-info` (built 2026-09-02, already
+correctly wired to the real careers page). `tenants.name` had been a
+real, live-consumed value (careers page, e-signed offer/NDA letters,
+tracking-sheet emails) since P0 with genuinely no way to change it short
+of raw SQL — a real, confirmed gap, not assumed.
+
+Built `GET`/`PUT /tenants/me` (`backend/routers/users.py`, a third
+`APIRouter` in this file alongside the existing `router`/`roles_router`,
+matching this file's own established multi-router convention) —
+`PUT` gated with `require_role_or_full_permission("admin","manager")`
+(the same real, dependency-based admin-equivalence check built earlier
+the same day for the Users & Roles security fix), trims/validates a
+non-blank, ≤255-char name, and returns the real updated row. `GET`
+stays open to any authenticated role — every user legitimately reads
+their own tenant's name, only the write is privileged. Extracted a new
+`is_role_or_full_permission()` helper in `permissions.py` (the plain,
+non-raising boolean core of the existing `require_role_or_full_
+permission()` dependency) so a route needing to serve a genuinely
+different response to a non-admin-equivalent caller — as this page's
+own frontend guard does — doesn't need to re-derive the same check.
+Added `("company_profile","Company Profile")` to the Settings feature
+group's real taxonomy.
+
+New `frontend/app/(dashboard)/settings/company/page.tsx` — a real
+editable-name form (matching `profile/page.tsx`'s own established style
+constants/toast pattern), the same SSR-safe deferred-role-read
+`!mounted`-starts-permissive `canManage` guard already established on
+`settings/users/page.tsx` for the identical class of problem the same
+day, a live "Currently live on your public careers page as X" panel,
+and Save disabled when unchanged/loading/saving. New Sidebar entry
+(`Company Profile`, `Building2` icon, `feature:'company_profile'`) in
+the SETTINGS group.
+
+Verified for real end-to-end, not code review, at every layer: a
+direct `PUT /tenants/me` call confirmed a real update persists and is
+immediately reflected on the live, public `GET /public/tenant-info`
+endpoint the careers page itself reads — used to perform the actual,
+requested rename to "Aviin Technology Business Solutions Pvt Ltd" for
+real. A real headless-browser pass confirmed the Sidebar link renders,
+the page loads with the real current name pre-filled, editing and
+saving genuinely round-trips through the live UI with a real success
+toast, and — restoring the intended value through the same real UI, not
+just the API — confirmed zero console errors throughout. New permanent
+"S106" suite (5 tests) added to `qa_automation.spec.ts`: the real GET/
+PUT round-trip (restoring the live tenant's name immediately after,
+since this is a single, real production tenant, not throwaway data), a
+blank-name 400 with the record confirmed untouched, a real throwaway
+recruiter correctly reading but cleanly 403ing on write, and the full
+real UI click-through — 5/5 passing. A scoped regression sweep across
+every suite touching the same 4 files (S31/S33/S51/S81/S104, 26 tests)
+passed clean — zero regressions from the new `is_role_or_full_
+permission()` extraction or the new `tenant_router`. Zero-token audit:
+`CONFIRMED CLEAN` (458 files, 0 external API refs).

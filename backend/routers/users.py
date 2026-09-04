@@ -772,3 +772,48 @@ async def update_role_visibility(role_id: str, body: VisibilityUpdate,
         if not row:
             raise HTTPException(404, "Role not found")
     return _role_dict(row)
+
+
+# ── Company Profile (2026-09-04) ────────────────────────────────────────
+# Real, live gap fixed: tenants.name (the real display name shown on the
+# public careers page, e-signed offer/NDA letters' company header, etc. -
+# already wired to real, live consumers via GET /public/tenant-info,
+# built 2026-09-02) had NO write path anywhere in the app - not a single
+# endpoint, not a single settings page. Reported live: the user's own
+# careers page showed the seed/demo tenant name "Acme Staffing India,"
+# with no way to change it to the real company name from the admin
+# panel at all. tenant_router is a third small router in this same file
+# (alongside the existing router/roles_router), matching this codebase's
+# own established multi-router-per-file convention.
+tenant_router = APIRouter(prefix="/tenants", tags=["tenants"])
+
+
+class TenantUpdate(BaseModel):
+    name: str
+
+
+@tenant_router.get("/me")
+async def get_my_tenant(actor: Actor = Depends(get_actor)):
+    """Read-only, any authenticated user - harmless org-level display
+    info, same bar as GET /roles (also unrestricted)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT id, name, slug, created_at FROM tenants WHERE id=$1", actor.tenant_id)
+    if not row:
+        raise HTTPException(404, "Tenant not found")
+    return dict(row)
+
+
+@tenant_router.put("/me")
+async def update_my_tenant(body: TenantUpdate,
+                            actor: Actor = Depends(require_role_or_full_permission("admin", "manager"))):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Company name cannot be blank")
+    if len(name) > 255:
+        raise HTTPException(400, "Company name is too long (max 255 characters)")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE tenants SET name=$1 WHERE id=$2 RETURNING id, name, slug, created_at",
+            name, actor.tenant_id)
+    return dict(row)

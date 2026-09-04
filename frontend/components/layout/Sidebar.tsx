@@ -122,6 +122,7 @@ const NAV_GROUPS = [
   { id:'settings', label:'SETTINGS', defaultOpen:false, items:[
     { icon:UserCog,         href:'/settings/users',       label:'Users & Roles', feature:'users_roles' },
     { icon:KeyRound,        href:'/settings/permissions', label:'Permissions', roles:['admin','super_admin'] },
+    { icon:Building2,       href:'/settings/company',     label:'Company Profile', feature:'company_profile' },
     { icon:KanbanSquare,    href:'/settings/pipeline',    label:'Pipeline Stages', feature:'pipeline_stages' },
     { icon:Mail,            href:'/settings/email',           label:'Company Email (SMTP)', feature:'company_email_smtp' },
     { icon:MessageSquare,   href:'/settings/signatures',       label:'Email Signatures', feature:'email_signatures' },

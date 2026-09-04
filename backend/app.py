@@ -258,6 +258,7 @@ app.include_router(pipeline_stages.router)
 from routers import whatsapp_settings
 app.include_router(whatsapp_settings.router)
 app.include_router(users.roles_router)
+app.include_router(users.tenant_router)
 app.include_router(p23_p27.skills_router)
 app.include_router(p23_p27.bulk_router)
 app.include_router(p23_p27.email_router)

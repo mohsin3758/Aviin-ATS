@@ -14788,3 +14788,125 @@ test.describe('S105 Real, systemic fix: .anim-fade-up no longer creates a fixed-
     await page.locator('button:has-text("Cancel")').first().click().catch(() => {});
   });
 });
+
+test.describe('S106 Company Profile: real, live gap fixed — tenants.name (shown on the public careers page) had no write path in the admin panel at all', () => {
+  let adminTok = '';
+  let originalName = '';
+
+  test.beforeAll(async ({ request }) => {
+    const login = await request.post(`${API}/auth/login`, {
+      data: { email: 'admin@example.com', password: 'changeme' },
+    });
+    adminTok = (await login.json()).access_token;
+    const me = await request.get(`${API}/tenants/me`, { headers: { Authorization: `Bearer ${adminTok}` } });
+    originalName = (await me.json()).name;
+  });
+
+  test('GET /tenants/me returns the real, live tenant name', async ({ request }) => {
+    const res = await request.get(`${API}/tenants/me`, { headers: { Authorization: `Bearer ${adminTok}` } });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body).toHaveProperty('id');
+    expect(body).toHaveProperty('name');
+    expect(body.name.length).toBeGreaterThan(0);
+  });
+
+  test('PUT /tenants/me genuinely updates the name — real round-trip, then restored', async ({ request }) => {
+    const testName = `QA S106 Verify ${Date.now()}`;
+    const put = await request.put(`${API}/tenants/me`, {
+      headers: { Authorization: `Bearer ${adminTok}` },
+      data: { name: testName },
+    });
+    expect(put.ok()).toBeTruthy();
+    expect((await put.json()).name).toBe(testName);
+
+    const confirm = await request.get(`${API}/tenants/me`, { headers: { Authorization: `Bearer ${adminTok}` } });
+    expect((await confirm.json()).name).toBe(testName);
+
+    // Restore the real value immediately — this is a live, single production tenant.
+    const restore = await request.put(`${API}/tenants/me`, {
+      headers: { Authorization: `Bearer ${adminTok}` },
+      data: { name: originalName },
+    });
+    expect((await restore.json()).name).toBe(originalName);
+  });
+
+  test('PUT /tenants/me rejects a blank name (400, real record untouched)', async ({ request }) => {
+    const res = await request.put(`${API}/tenants/me`, {
+      headers: { Authorization: `Bearer ${adminTok}` },
+      data: { name: '   ' },
+    });
+    expect(res.status()).toBe(400);
+    const confirm = await request.get(`${API}/tenants/me`, { headers: { Authorization: `Bearer ${adminTok}` } });
+    expect((await confirm.json()).name).toBe(originalName);
+  });
+
+  test('a non-admin-equivalent caller is cleanly blocked from writing the tenant name (read-only elsewhere in this app is fine — write is not)', async ({ request }) => {
+    // Reuse a real, already-connected non-admin login pattern: create a
+    // throwaway recruiter, confirm they can read (GET) but not write (PUT).
+    const stamp = Date.now();
+    const created = await request.post(`${API}/users`, {
+      headers: { Authorization: `Bearer ${adminTok}` },
+      data: {
+        email: `qa.s106.recruiter.${stamp}@test.com`, full_name: `QA S106 Recruiter ${stamp}`,
+        role: 'recruiter', password: 'TestPass123!',
+      },
+    });
+    const userId = (await created.json()).id;
+    const login = await request.post(`${API}/auth/login`, {
+      data: { email: `qa.s106.recruiter.${stamp}@test.com`, password: 'TestPass123!' },
+    });
+    const tok = (await login.json()).access_token;
+
+    const readAttempt = await request.get(`${API}/tenants/me`, { headers: { Authorization: `Bearer ${tok}` } });
+    expect(readAttempt.ok()).toBeTruthy(); // GET is intentionally open — every role reads their own tenant.
+
+    const writeAttempt = await request.put(`${API}/tenants/me`, {
+      headers: { Authorization: `Bearer ${tok}` },
+      data: { name: 'Should Never Be Applied' },
+    });
+    expect(writeAttempt.status()).toBe(403);
+    const confirm = await request.get(`${API}/tenants/me`, { headers: { Authorization: `Bearer ${adminTok}` } });
+    expect((await confirm.json()).name).toBe(originalName); // untouched by the blocked write
+
+    await request.patch(`${API}/users/${userId}/deactivate`, { headers: { Authorization: `Bearer ${adminTok}` } }).catch(() => {});
+    await request.delete(`${API}/users/${userId}/purge`, { headers: { Authorization: `Bearer ${adminTok}` } }).catch(() => {});
+  });
+
+  test('real headless UI: the Company Profile page renders the real name, edit + save round-trips through the real UI, and the Sidebar shows the link', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'admin@example.com');
+    await page.fill('input[type="password"]', 'changeme');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/dashboard', { timeout: 20000 });
+
+    await expect(page.locator('a[href="/settings/company"]')).toBeVisible({ timeout: 5000 });
+
+    await page.goto('/settings/company');
+    await expect(page.locator('h1:has-text("Company Profile")')).toBeVisible({ timeout: 10000 });
+    await page.waitForTimeout(800);
+
+    const input = page.locator('input[placeholder*="Aviin Technology"]');
+    const val = await input.inputValue();
+    expect(val).toBe(originalName);
+    await expect(page.locator('text=Currently live on your public careers page as')).toBeVisible();
+
+    const testName = `QA S106 UI Verify ${Date.now()}`;
+    await input.fill(testName);
+    await page.waitForTimeout(200);
+    await expect(page.locator('button:has-text("Save Changes")')).toBeEnabled();
+    await page.locator('button:has-text("Save Changes")').click();
+    await page.waitForTimeout(1500);
+    await expect(page.locator('text=Company name updated')).toBeVisible();
+
+    // Restore the real value through the same real UI, not just the API.
+    await input.fill(originalName);
+    await page.waitForTimeout(200);
+    await page.locator('button:has-text("Save Changes")').click();
+    await page.waitForTimeout(1500);
+
+    expect(errors).toHaveLength(0);
+  });
+});
