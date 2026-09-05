@@ -330,9 +330,22 @@ export default function RequisitionPipelinePage() {
                     {req.employment_type.replace('_', ' ')}
                   </span>
                 )}
-                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: req.status === 'open' ? 'rgba(34,197,94,0.25)' : 'rgba(148,163,184,0.25)', color: req.status === 'open' ? '#86EFAC' : '#CBD5E1', border: '1px solid rgba(34,197,94,0.35)' }}>
-                  ● {(req.status || 'open').toUpperCase()}
-                </span>
+                {/* Real bug fix (2026-09-05): this badge used to derive purely
+                    from req.status, which a soft-delete never touches — a
+                    removed requisition could still literally read status:
+                    'open' and render as a normal, live, green "OPEN" badge
+                    with zero indication it had been closed. is_active is
+                    this codebase's own real "is this deleted" signal
+                    everywhere else; check it first. */}
+                {req.is_active === false ? (
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: 'rgba(220,38,38,0.25)', color: '#FCA5A5', border: '1px solid rgba(220,38,38,0.4)' }}>
+                    ● REMOVED
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: req.status === 'open' ? 'rgba(34,197,94,0.25)' : 'rgba(148,163,184,0.25)', color: req.status === 'open' ? '#86EFAC' : '#CBD5E1', border: '1px solid rgba(34,197,94,0.35)' }}>
+                    ● {(req.status || 'open').toUpperCase()}
+                  </span>
+                )}
                 {req.priority === 'high' && (
                   <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: 'rgba(239,68,68,0.25)', color: '#FCA5A5', border: '1px solid rgba(239,68,68,0.35)' }}>
                     🔴 Urgent
@@ -383,6 +396,15 @@ export default function RequisitionPipelinePage() {
           </div>
         </div>
       </div>
+
+      {req.is_active === false && (
+        <div style={{ background: '#FEF2F2', borderBottom: '1px solid #FECACA', padding: '9px 20px', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <AlertTriangle size={14} color="#DC2626" />
+          <span style={{ fontSize: 12.5, color: '#991B1B', fontWeight: 600 }}>
+            This requisition has been closed / removed by an admin — it is kept here for historical record only. Adding new candidates to it is disabled.
+          </span>
+        </div>
+      )}
 
       {/* ── TOOLBAR ───────────────────────────────────────────────────────── */}
       {activeTab === 'candidates' && (

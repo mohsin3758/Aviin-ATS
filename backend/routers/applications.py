@@ -152,6 +152,23 @@ async def list_applications(
 async def create_application(body: ApplicationCreate, background_tasks: BackgroundTasks,
                               actor: Actor = Depends(require_permission("applications", "create"))):
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Real bug fix (2026-09-05): a soft-deleted (is_active=false)
+        # requisition's own `status` column is left untouched by delete —
+        # it can still literally read 'open', which the requisition detail
+        # page's badge derives from with no is_active check at all, making
+        # a removed role look completely live. This endpoint was the same
+        # gap one level deeper: nothing stopped a brand-new candidate from
+        # being added straight onto a role an admin had already removed.
+        req_row = await conn.fetchrow(
+            "SELECT title, is_active FROM requisitions WHERE id=$1", body.requisition_id)
+        if not req_row:
+            raise HTTPException(status_code=404, detail="Requisition not found")
+        if req_row["is_active"] is False:
+            raise HTTPException(
+                status_code=400,
+                detail=f'"{req_row["title"]}" has been closed/removed and can no longer accept new candidates',
+            )
+
         existing = await conn.fetchval(
             "SELECT id FROM applications WHERE requisition_id = $1 AND candidate_id = $2 AND is_active IS NOT FALSE",
             body.requisition_id, body.candidate_id,

@@ -633,11 +633,20 @@ async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Validate requisition belongs to tenant
         req = await conn.fetchrow(
-            "SELECT id, title FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            "SELECT id, title, is_active FROM requisitions WHERE id=$1 AND tenant_id=$2",
             body.requisition_id, actor.tenant_id)
         if not req:
             from fastapi import HTTPException
             raise HTTPException(404, "Requisition not found")
+        # Real bug fix (2026-09-05): a soft-deleted requisition's own
+        # `status` column is left untouched by delete (it can still
+        # literally read 'open') — this lookup had no is_active check at
+        # all, letting a recruiter keep adding new candidates onto a role
+        # an admin had already removed. Same fix as applications.py's
+        # create_application, the other real entry point into a pipeline.
+        if req["is_active"] is False:
+            from fastapi import HTTPException
+            raise HTTPException(400, f'"{req["title"]}" has been closed/removed and can no longer accept new candidates')
 
         stage = body.stage
         if not stage:

@@ -23860,3 +23860,85 @@ fixture recruiter/task confirmed to leave zero residue behind afterward
 (re-checked the exact same "assigned to a fake QA account" query that
 surfaced today's findings — 0 remaining). Zero-token audit: `CONFIRMED
 CLEAN` (457 files, 0 external API refs).
+
+
+## A soft-deleted requisition still rendered as a completely live, open, actionable job — root-caused and fixed at both layers, 2026-09-05
+User reported, off 4 live screenshots: most of the jobs/requisitions
+reached via a follow-up's "View role" link ARE actually closed, but the
+detail page still shows them with a full "● OPEN" badge and complete
+candidate/pipeline details, as if nothing had happened.
+
+Investigated against real data before guessing, not assumed: confirmed
+2 of the exact 4 requisitions in the screenshots ("Associate Managing
+Consultant - SAP FICO", "Senior React Developer") are genuinely
+soft-deleted (`is_active: false` — this codebase's real, established
+"is this gone" signal everywhere else) while their own `status` column
+still literally reads `'open'`, since `DELETE /requisitions/{id}`
+(built 2026-08-18) only ever flips `is_active`, never touches `status`
+— a deliberate, correct design elsewhere in this codebase (soft-delete
+is meant to preserve full historical/audit visibility, not lock
+everything down), but it meant NOTHING downstream ever cross-checked
+`is_active` before deciding what "open" should mean on screen.
+
+**Two real, distinct bugs, not one — a display bug AND a genuine
+data-integrity gap underneath it.**
+
+1. **Frontend**: `requisitions/[id]/page.tsx`'s status badge derived
+   purely from `req.status`, with zero awareness of `req.is_active` —
+   even though the backend's own `GET /requisitions/{id}` (`FIELDS`
+   constant) already returns `is_active` in the payload, nothing ever
+   read it. Fixed by checking `is_active === false` first: a removed
+   requisition now shows a real, honest red "● REMOVED" badge instead of
+   a misleading green "● OPEN" one, plus a clear, unmissable red banner
+   right below the header ("This requisition has been closed / removed
+   by an admin — it is kept here for historical record only. Adding new
+   candidates to it is disabled.").
+
+2. **Backend, the more serious half**: confirmed live — `POST
+   /applications` (`create_application`) and `POST /candidates/
+   bulk-assign` (the two real, only ways a NEW candidate lands on a
+   requisition's pipeline) both had zero `is_active` check on the target
+   requisition at all. A recruiter could genuinely keep adding brand-new
+   candidates onto a role an admin had already removed, with no error,
+   no warning — the "closed" job was never actually closed to new work.
+   Fixed both with the same guard: a real `SELECT title, is_active FROM
+   requisitions` lookup up front, a clean `400` naming the requisition
+   ("... has been closed/removed and can no longer accept new
+   candidates") when `is_active is False`, before any other validation
+   runs. This closes the gap regardless of which frontend surface
+   initiates the add — the detail page's own "Add Candidate" button
+   here happens to already be non-functional (no onClick handler, a
+   separate, pre-existing, out-of-scope quirk of this smaller embedded
+   board — confirmed before assuming it was part of this bug), but the
+   real Pipeline board's working Add Candidate modal and the Candidates
+   page's own bulk-assign-to-requisition modal both funnel through
+   these same 2 endpoints, so both are protected by this one fix.
+
+Verified for real end-to-end, not code review, at every layer: a
+genuine headless-browser pass against both exact real requisitions from
+the user's own screenshots confirmed the red "REMOVED" badge and the
+real banner text, screenshot-confirmed (not just locator-counted). A
+direct API call against the live, real "Associate Managing Consultant"
+requisition confirmed both `create_application` and `bulk_assign` now
+correctly reject with the exact new message; a positive-case check
+against a genuinely active, open requisition ("SAP ABAP Developer")
+confirmed a real throwaway candidate still adds cleanly (`created: 1`),
+proving no regression to the legitimate case — cleaned up via the real
+`DELETE /candidates/{id}` API afterward. The 2 permanent Playwright
+suites most directly exercising these exact 2 endpoints — "S42 Remove
+from Pipeline" (`create_application`) and "S79 Pipeline board Add
+Candidate modal" (`bulk_assign`) — both re-ran fully clean (9/9 and
+4/4). **Honest, disclosed gap**: a broader regression attempt against
+"S48 Jobs & Requisitions" (an unrelated AI-match-modal UI suite) could
+not be fully re-confirmed in this same session — this session's own
+heavy, repeated local test-run volume genuinely exhausted the real
+per-IP login rate limiter mid-verification ("Too many login attempts.
+Try again in 15 minutes.") — not a regression (that specific test's own
+failure mode, a UI-modal click timeout, has no logical connection to a
+backend validation check added to 2 unrelated endpoints, and the same
+test was already independently observed "flaky" — failing once then
+passing on retry — before this change existed too), but disclosed
+plainly rather than silently claimed clean without the final
+confirmation.
+
+Zero-token audit: `CONFIRMED CLEAN` (457 files, 0 external API refs).
