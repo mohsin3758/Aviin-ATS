@@ -59,6 +59,7 @@ FEATURE_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
         ("duplicates", "Duplicate Candidates"),
         ("recruiter_ops", "Recruiter Ops"),
         ("assignment_dashboard", "Assignment Dashboard"),
+        ("sender_tracking", "Recruiter / Sender Tracking"),
         ("reminders", "Reminders & Follow-Ups"),
         ("device_monitoring", "Device Monitoring"),
         ("field_attendance", "Field Attendance"),

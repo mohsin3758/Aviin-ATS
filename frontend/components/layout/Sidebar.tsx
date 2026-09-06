@@ -17,7 +17,7 @@ import {
   ChevronDown, ChevronLeft, ChevronRight,
   FileSignature, Send, GitMerge, ExternalLink, Activity, Workflow,
   Users2, CalendarDays, Smile, Video, FileBarChart, UserPlus, Sliders,
-  Laptop, KeyRound, MapPin, CalendarClock, HeartPulse, Bell,
+  Laptop, KeyRound, MapPin, CalendarClock, HeartPulse, Bell, UserCheck,
 } from 'lucide-react';
 
 // REAL BUG FIX (2026-08-31): reported live off Settings > Permissions
@@ -48,6 +48,7 @@ const NAV_GROUPS = [
     { icon:GitMerge,        href:'/duplicates',   label:'Duplicate Candidates', feature:'duplicates' },
     { icon:Users2,          href:'/recruiter-ops', label:'Recruiter Ops', feature:'recruiter_ops' },
     { icon:ClipboardList,   href:'/assignments',   label:'Assignment Dashboard', feature:'assignment_dashboard' },
+    { icon:UserCheck,       href:'/recruiter-tracking', label:'Recruiter / Sender Tracking', feature:'sender_tracking' },
     { icon:Laptop,          href:'/device-monitoring', label:'Device Monitoring', feature:'device_monitoring' },
     { icon:MapPin,          href:'/field-attendance', label:'Field Attendance', feature:'field_attendance' },
     { icon:CalendarClock,   href:'/shift-scheduling', label:'Shift Scheduling', feature:'shift_scheduling' },

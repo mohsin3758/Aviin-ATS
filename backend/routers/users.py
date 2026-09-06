@@ -179,6 +179,15 @@ async def create_user(body: UserCreate, actor: Actor = Depends(require_role_or_f
             body.full_name, body.role, body.department, body.designation,
             body.phone, body.employee_id, body.reporting_to,
             body.joining_date, body.location, body.capacity_weekly or 40)
+        # Spec Scenario 2's closing requirement: "Once [the ATS user
+        # account is] created, automatically map all previous submissions
+        # to that recruiter." A brand-new user's email might already be a
+        # real Temporary Sender Record (an internal @company-domain
+        # sender who forwarded candidates before ever getting an ATS
+        # login) — link every prior ownership claim/history row to this
+        # real user_id now, retroactively (2026-09-07).
+        from services.candidate_ownership import auto_map_unregistered_sender
+        await auto_map_unregistered_sender(conn, actor.tenant_id, str(row["id"]), body.email)
         # Read email settings INSIDE the connection block (before conn closes)
         _cfg = await conn.fetchrow(
             "SELECT smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,smtp_from_name,smtp_tls FROM email_settings WHERE tenant_id=$1 AND is_active=TRUE",

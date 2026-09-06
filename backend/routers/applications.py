@@ -185,7 +185,13 @@ async def create_application(body: ApplicationCreate, background_tasks: Backgrou
         default_recruiter_id = actor.user_id
         if not body.assigned_recruiter_id:
             owner = await ownership.get_ownership(conn, actor.tenant_id, body.candidate_id)
-            if owner and owner["status"] == "active" and owner["ownership_expires_at"] > datetime.now(timezone.utc):
+            # owner["recruiter_id"] can be None (a Temporary Sender Record
+            # — an unregistered internal sender, 2026-09-07) — that's a
+            # real sourcing credit, not a real user to hand the actual
+            # pipeline work to, so keep the actor-based default in that
+            # case rather than defaulting assigned_recruiter_id to NULL.
+            if (owner and owner["status"] == "active" and owner["recruiter_id"]
+                    and owner["ownership_expires_at"] > datetime.now(timezone.utc)):
                 default_recruiter_id = owner["recruiter_id"]
 
         # Per-role submission cap. NULL limit (the default) = unlimited, no

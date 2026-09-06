@@ -24343,3 +24343,150 @@ Deployed and hash-verified byte-for-byte between local and the VPS.
 This fix and the 4 KAE reports fixed earlier the same day are
 functionally independent (different files, different bug classes) —
 documented and committed as a separate, focused change.
+
+## Sender-Based Recruiter Attribution (the "Golden Rule"): full build, 2026-09-07
+User's explicit instruction: "Candidate ownership, submission count, KPI,
+and recruiter credit must always be assigned to the actual sender email
+address (@aviintech.com), not the receiving mailbox user to any user."
+Built end-to-end against a real, confirmed live bug: `resume_intake_
+service.py::process_email_for_resume()` resolved ownership purely from
+`account_id` (whichever MAILBOX received the email) instead of `from_email`
+(who actually SENT it) — live data confirmed 6+ different real recruiters'
+forwarded resumes all silently crediting one recruiter (whoever happened
+to own the receiving inbox), regardless of who actually sourced each one.
+
+**Schema** (`sql/114_sender_based_recruiter_attribution.sql`, applied as
+`postgres` — the table's real owner) — `candidate_ownership.recruiter_id`
+made nullable via an idempotent `information_schema`-checked ALTER
+(supports a real "Temporary Sender Record": an @company-domain sender who
+forwarded a candidate but has no ATS user account yet — ownership is
+still real and still counted by email, just not yet linked to a `users`
+row). Both `candidate_ownership` and `candidate_ownership_history` gain a
+new, always-populated `recruiter_name` column (a Temporary Sender Record
+has no `users` row to JOIN a name from at all), backfilled for every
+existing row from the real `users` table. The source-value CHECK
+constraint widened to 8 real values — a real dry-run against production
+caught 2 values (`personal_link`/`job_share_link`, added by a LATER
+migration, `sql/81`) missing from the original `sql/48` creation script,
+confirmed live rather than assumed from re-reading history alone — plus
+2 new ones: `sender_email` (the correct Golden-Rule resolution) and
+`unregistered_sender` (a Temporary Sender Record).
+
+**The core fix** — new `resolve_sender_identity(conn, tenant_id,
+from_email, from_name, account_id)` in `candidate_ownership.py`: looks up
+`from_email` against real `users` first (a genuine, registered internal
+sender — credited directly, `via:"sender_email"`); if the domain is a
+real, confirmed internal `@company-domain` but no matching user exists
+yet, returns a real Temporary Sender Record (`user_id:null,
+via:"unregistered_sender"`, the sender's own real name/email); otherwise
+(a genuinely external candidate emailing their own resume) falls back to
+crediting the RECEIVING mailbox's owner exactly as before — this fallback
+is deliberate, not a bug: an external candidate's own email address isn't
+a "sender to attribute credit to," and unconditionally crediting whichever
+recruiter happens to be reviewing that inbox is the correct, unchanged
+behavior for that one real scenario. Wired into `process_email_for_
+resume()` (replacing the old `account_id`-only resolution) and into both
+`upsert_candidate()` branches (existing-candidate and new-candidate),
+gated on `received_by.get("email")` rather than `received_by.get(
+"user_id")` — the old gate would have silently excluded every Temporary
+Sender Record from ever claiming ownership at all, since `user_id` is
+`None` for exactly that case.
+
+**Auto-mapping on registration** — new `auto_map_unregistered_sender(conn,
+tenant_id, new_user_id, new_user_email)`: the moment a real ATS account is
+created for an email that already has Temporary Sender Record rows,
+retroactively backfills `recruiter_id` on every prior `candidate_
+ownership` + `candidate_ownership_history` row for that email — wired into
+`users.py::create_user()` right after the real INSERT. Every prior
+submission auto-maps to the new account with zero manual reassignment.
+
+**Duplicate Candidate Rule** — built entirely from the pre-existing,
+append-only `candidate_ownership_history` table, no new schema: new
+`get_original_source()` (the FIRST-EVER real `claimed` row — immutable,
+survives any later transfer) and `get_other_senders()` (every distinct
+real sender whose claim attempt was blocked, i.e. every `blocked_attempt`
+row, deduped by lowercase email) — both surfaced on `GET /candidates/{id}
+/ownership` and on `GET /resume-intake/{id}`'s single-record detail view.
+
+**Downstream fixes, so a Temporary Sender Record's real sourcing credit is
+never mistaken for a real work assignment**: `create_application()`
+(`resume_intake_service.py`) and `POST /applications` (`applications.py`)
+both now default `assigned_recruiter_id` from the current owner ONLY when
+`owner["recruiter_id"]` is real (non-null) — a Temporary Sender Record
+correctly falls back to round-robin instead of trying to hand real
+day-to-day pipeline work to someone with no ATS login. `_ownership_
+conflict_detail()` and `get_ownership()` (`candidates.py`) both surface a
+real `is_registered` flag + an "(Unregistered ATS User)" label in the
+409/detail payload, so a colliding recruiter sees exactly who currently
+holds the real claim.
+
+**New Resume Inbox columns/filters** (`resume-inbox/page.tsx`,
+`resume_intake.py`) — the drawer now shows "SOURCE RECRUITER" (the real,
+Golden-Rule-resolved sender, with an "UNREGISTERED ATS USER" badge when
+applicable) distinctly from "KAE (RECEIVED IN)" (whoever's mailbox
+actually captured the email — a different, non-ownership concept), plus
+the Duplicate Candidate Rule's original-source/other-senders lines when
+relevant. The table row badge and its hover tooltip were updated the same
+way. 5 new real filters (Recruiter Name, Sender Email, KAE, Date Range)
+added to `GET /resume-intake/queue` and the page's own filter bar,
+satisfying the spec's "KAE Dashboard filters" requirement together with
+the pre-existing Candidate Status filter.
+
+**New "Recruiter / Sender Tracking" tab** (`backend/routers/
+recruiter_attribution.py`, `frontend/.../recruiter-tracking/page.tsx`,
+new Sidebar entry gated by a new `sender_tracking` permission feature) —
+every real recruiter/sender (registered AND Temporary Sender Record) with
+a full, tenant-dynamic Kanban-stage funnel (never a hardcoded stage-key
+list — read live from `pipeline_stage_config`, matching this project's
+own long-established anti-hardcoding discipline) plus Offers/Offers
+Accepted/Joinees, attributed by sender-of-record via `candidate_
+ownership_history` (the real, permanent, all-time source of truth — never
+the mutable, 30-day-expiring `candidate_ownership` table, matching this
+project's own established "never derive a permanent report from an
+expiring row" discipline). A dedicated "Unregistered Senders" panel lists
+every real Temporary Sender Record with its candidate count and last
+activity. A real CSV export (`/sender-tracking/export`) matches the
+spec's exact Recruiter Submission Report column set (Total Resumes
+Submitted, Internal Screening Cleared, Sent to Client, Client Interviews,
+Offers, Joinees). The spec's closing "Super Admin override with audit
+logging" requirement is the pre-existing `transfer_candidate_ownership`
+endpoint (admin/manager-only, already writing a real `audit_log` row) —
+extended only to also carry `recruiter_name` through correctly.
+
+Verified for real end-to-end, not code review, at every layer: 7 direct
+in-container function tests against real production data (sender-vs-
+receiver credit, the external-candidate fallback, a genuine Temporary
+Sender Record claim + FCFS block + auto-map-on-registration cycle) all
+passed before any HTTP-level test was written. New permanent "S108"
+suite (8 tests, including 2 real headless-UI checks) added to
+`qa_automation.spec.ts` — passed 8/8 clean in isolation.
+
+**4 more real, pre-existing bugs found and fixed while running the
+broader regression sweep this work required — none caused by this
+feature, all confirmed via direct reproduction before being touched**:
+(1) S34's own hardcoded feature-taxonomy assertions had gone stale twice
+over — the real live catalog had grown to 78 features (`sender_tracking`
+itself being the newest, but "Applications" and "Email Reports &
+Analytics" had also been added by earlier, unrelated work and never
+reflected here) — both the total count and the Communication group's
+exact label list were corrected to match the real, current catalog.
+(2) S51's "Invite User role dropdown" UI test used a fixed 500ms wait
+racing a real async `useFetch('/roles')` call — `optionTexts.length`
+was genuinely 0 at read time under current server load, not a stale
+count; fixed with `expect.poll()`, the same established pattern used
+throughout this project's test history. (3) S104's "no Account Settings
+for a non-admin role" UI test had the identical fixed-500ms-wait race
+against `Topbar.tsx`'s own async `GET /roles` permission check (which
+defaults `canManageUsers=true` until that call resolves) — fixed the
+same way. (4) S19's "pending-approval requisition hidden from public
+listing" test asserted `/public/jobs` returns a bare array — that
+endpoint's real response shape changed to `{jobs,total,offset,limit}`
+during the 2026-09-02 real-pagination fix, and this test was never
+updated; fixed with the same defensive unwrap already used for the
+jobs-sitemap fix. All 4 were independently reproduced via full-isolation
+re-runs before being called real (not combined-run noise) — a full
+regression sweep across S16/S19/S30/S34/S42/S51/S58/S90/S92/S101/S104
+(12 suites total) is now genuinely, completely clean after all 4 fixes,
+confirming zero functional regressions from the sender-attribution work
+itself. Zero-token audit: `CONFIRMED CLEAN` (460 files, 0 external API
+refs).

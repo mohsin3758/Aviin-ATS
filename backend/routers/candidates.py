@@ -793,15 +793,18 @@ async def _ownership_conflict_detail(conn, tenant_id: str, existing_row) -> dict
     }
     owner = await ownership.get_ownership(conn, tenant_id, str(existing_row["id"]))
     if owner and owner["status"] == "active":
+        is_temp = owner.get("recruiter_id") is None
+        label = f"{owner['recruiter_name']} (Unregistered ATS User)" if is_temp else owner['recruiter_name']
         detail["detail"] = (
-            f"Candidate Already Owned — currently owned by {owner['recruiter_name']} "
+            f"Candidate Already Owned — currently owned by {label} "
             f"until {owner['ownership_expires_at']}. You cannot claim or process this "
             f"candidate during the active ownership period."
         )
         detail["owner"] = {
-            "recruiter_id": str(owner["recruiter_id"]),
+            "recruiter_id": str(owner["recruiter_id"]) if owner.get("recruiter_id") else None,
             "recruiter_name": owner["recruiter_name"],
             "recruiter_email": owner["recruiter_email"],
+            "is_registered": not is_temp,
             "expires_at": owner["ownership_expires_at"].isoformat(),
         }
     return detail
@@ -1474,15 +1477,26 @@ class OwnershipTransferBody(BaseModel):
 async def get_candidate_ownership(candidate_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         owner = await ownership.get_ownership(conn, actor.tenant_id, candidate_id)
+        # Duplicate Candidate Rule: show the ORIGINAL source recruiter
+        # (immutable, first-ever claim) distinctly from the CURRENT owner
+        # above, plus every other real sender who also tried to submit
+        # this candidate while it was already owned (2026-09-07).
+        original_source = await ownership.get_original_source(conn, actor.tenant_id, candidate_id)
+        other_senders = await ownership.get_other_senders(conn, actor.tenant_id, candidate_id)
         history = await conn.fetch(
-            """SELECT h.*, u.full_name AS recruiter_name
+            """SELECT h.*, COALESCE(u.full_name, h.recruiter_name) AS recruiter_name
                FROM candidate_ownership_history h
                LEFT JOIN users u ON u.id = h.recruiter_id
                WHERE h.tenant_id=$1 AND h.candidate_id=$2
                ORDER BY h.created_at DESC""",
             actor.tenant_id, candidate_id,
         )
-    return {"owner": owner, "history": [dict(h) for h in history]}
+    return {
+        "owner": owner,
+        "original_source": original_source,
+        "other_senders": other_senders,
+        "history": [dict(h) for h in history],
+    }
 
 
 @router.post("/{candidate_id}/ownership/claim")
@@ -1497,6 +1511,7 @@ async def claim_candidate_ownership(candidate_id: str, actor: Actor = Depends(re
             raise HTTPException(404, "Candidate not found")
         result = await ownership.claim_ownership(
             conn, actor.tenant_id, candidate_id, str(actor.user_id), actor.email, "manual_assign",
+            recruiter_name=actor.full_name,
         )
     return result
 
@@ -1505,19 +1520,21 @@ async def claim_candidate_ownership(candidate_id: str, actor: Actor = Depends(re
 async def transfer_candidate_ownership(candidate_id: str, new_recruiter_id: str, body: OwnershipTransferBody,
                                         actor: Actor = Depends(require_role("admin", "manager"))):
     """Explicit admin/manager override — always allowed regardless of an
-    active lock (rule 10/11's "authorized ownership transfer")."""
+    active lock (rule 10/11's "authorized ownership transfer"; matches the
+    spec's Golden-Rule caveat: "unless manually changed by Super Admin
+    with audit logging" — the write_audit call below is that log)."""
     async with db.tenant_conn(actor.tenant_id) as conn:
         cand = await conn.fetchrow("SELECT id FROM candidates WHERE id=$1 AND tenant_id=$2", candidate_id, actor.tenant_id)
         if not cand:
             raise HTTPException(404, "Candidate not found")
         new_recruiter = await conn.fetchrow(
-            "SELECT id, email FROM users WHERE id=$1 AND tenant_id=$2 AND role='recruiter' AND is_active",
+            "SELECT id, email, full_name FROM users WHERE id=$1 AND tenant_id=$2 AND role='recruiter' AND is_active",
             new_recruiter_id, actor.tenant_id)
         if not new_recruiter:
             raise HTTPException(404, "Recruiter not found")
         result = await ownership.transfer_ownership(
             conn, actor.tenant_id, candidate_id, new_recruiter_id, new_recruiter["email"],
-            str(actor.user_id), body.reason,
+            str(actor.user_id), body.reason, new_recruiter_name=new_recruiter["full_name"],
         )
         await events.write_audit(
             conn, actor.tenant_id, actor.user_id, "candidate.ownership_transferred",

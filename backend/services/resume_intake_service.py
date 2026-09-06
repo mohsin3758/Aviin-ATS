@@ -464,12 +464,17 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
                            job_board: str, label: str,
                            from_email: str, file_path: str, resume_text: str,
                            received_by: dict | None = None) -> str:
-    """received_by: {"user_id", "email"} of the recruiter whose registered
-    personal mailbox this resume arrived in (2026-08-11, individual
-    recruiter ownership) — None when there's no known per-recruiter
-    mailbox for this message (e.g. backlog reprocessing with no account
-    context), in which case no ownership claim is made and the candidate
-    falls into the unassigned/review queue rather than guessing."""
+    """received_by: {"user_id", "email", "name"} identifying who gets
+    ownership/submission credit — since 2026-09-07 (Golden Rule) this is
+    the resolved SENDER identity from candidate_ownership.
+    resolve_sender_identity(), not necessarily the receiving mailbox.
+    "user_id" may be None — a Temporary Sender Record (a real internal
+    sender with no ATS user account yet, spec Scenario 2); "email"/"name"
+    are still real and still get credited by email, just not yet linked
+    to a users row. received_by itself is None only when there's no
+    known sender AND no receiving-mailbox fallback at all (e.g. backlog
+    reprocessing with no account context) — the candidate then falls into
+    the unassigned/review queue rather than guessing."""
     cand_email = (parsed.get('email') or '').lower().strip().lstrip('-.+@')
     # Reject: content-id emails (image001.png@...), too-short domains, no real TLD
     if cand_email:
@@ -595,10 +600,12 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
         # the caller, unconditionally, right after this returns — only the
         # candidate's own fields are protected, per the user's explicit
         # "block entirely, don't silently merge" decision).
-        if received_by and received_by.get("user_id") and received_by.get("email"):
+        if received_by and received_by.get("email"):
             from services import candidate_ownership as _ownership
             claim = await _ownership.claim_ownership(
-                conn, tenant_id, str(existing_id), received_by["user_id"], received_by["email"], "personal_mailbox",
+                conn, tenant_id, str(existing_id), received_by.get("user_id"), received_by["email"],
+                received_by.get("via") or "personal_mailbox",
+                recruiter_name=received_by.get("name"),
             )
             if not claim["claimed"]:
                 return str(existing_id)
@@ -647,15 +654,26 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
     # resulting candidate for 30 days — only on genuine creation, never on
     # the existing_id UPDATE branch above (an update never transfers
     # ownership per the business rule).
-    if received_by and received_by.get("user_id") and received_by.get("email"):
+    if received_by and received_by.get("email"):
         from services import candidate_ownership as _ownership
         await _ownership.claim_ownership(
-            conn, tenant_id, str(new_id), str(received_by["user_id"]), received_by["email"], "personal_mailbox",
+            conn, tenant_id, str(new_id), received_by.get("user_id"), received_by["email"],
+            received_by.get("via") or "personal_mailbox",
+            recruiter_name=received_by.get("name"),
         )
-        from services import activity_events as _activity_events
-        await _activity_events.log_recruiter_activity(
-            conn, tenant_id, str(received_by["user_id"]), _activity_events.SOURCED, candidate_id=str(new_id),
-        )
+        # Activity-event KPI feed requires a real, registered recruiter_id
+        # (NOT NULL FK) — a Temporary Sender Record (unregistered sender,
+        # user_id=None) is still fully credited via candidate_ownership
+        # above; this specific KPI-activity table just can't carry an
+        # unregistered identity, so it's skipped until the sender is
+        # created as a real user (auto_map_unregistered_sender backfills
+        # candidate_ownership itself, but not activity events already
+        # skipped at the time — a real, accepted, disclosed trade-off).
+        if received_by.get("user_id"):
+            from services import activity_events as _activity_events
+            await _activity_events.log_recruiter_activity(
+                conn, tenant_id, str(received_by["user_id"]), _activity_events.SOURCED, candidate_id=str(new_id),
+            )
     from services import source_attribution as _source_attribution
     await _source_attribution.record_source_attribution(conn, tenant_id, str(new_id), job_board)
     return str(new_id)
@@ -791,7 +809,14 @@ async def create_application(conn, tenant_id: str, candidate_id: str, requisitio
         # ever applies as the fallback for candidates nobody currently owns.
         from services import candidate_ownership as _ownership
         owner = await _ownership.get_ownership(conn, tenant_id, candidate_id)
-        if owner and owner["status"] == "active" and owner["ownership_expires_at"] > datetime.now(timezone.utc):
+        # A Temporary Sender Record (owner["recruiter_id"] is None — an
+        # unregistered sender, 2026-09-07) has SOURCING credit but no real
+        # user account to hand the day-to-day pipeline WORK to yet —
+        # falls back to round-robin for the work assignment only; the
+        # sourcing credit itself stays correctly with the unregistered
+        # sender via candidate_ownership, untouched here.
+        if (owner and owner["status"] == "active" and owner["recruiter_id"]
+                and owner["ownership_expires_at"] > datetime.now(timezone.utc)):
             recruiter_id = owner["recruiter_id"]
         else:
             recruiter_id = await _pick_round_robin_recruiter(conn, tenant_id)
@@ -1128,20 +1153,31 @@ async def process_email_for_resume(
 
     # Only create candidate if confidence is sufficient
     if routing_decision != 'low_confidence':
-        # Individual recruiter ownership (2026-08-11): account_id already
-        # tells us exactly which recruiter's own registered mailbox this
-        # resume arrived in (user_email_accounts.user_id) — that identity
-        # used to be discarded entirely; now resolved once and threaded
-        # into upsert_candidate() so the receiving recruiter claims the
-        # candidate on genuine creation. None when there's no per-recruiter
-        # mailbox context (e.g. some backlog-reprocessing calls) — falls
-        # into the unassigned queue rather than guessing.
+        # GOLDEN RULE, sender-based attribution (2026-09-07): ownership and
+        # submission credit go to the actual SENDER of this email, never
+        # the mailbox that merely received it — real, live data confirmed
+        # the previous account_id-based resolution below credited whoever
+        # owned the RECEIVING mailbox regardless of which of several real,
+        # distinct internal senders actually forwarded the resume (e.g.
+        # 6 different @company.com senders all silently crediting one
+        # recruiter, purely because their forwards all landed in her
+        # inbox). resolve_sender_identity() only overrides to the receiving
+        # mailbox when the sender is genuinely external (a candidate
+        # applying directly, where "sender" and "candidate" are the same
+        # person and there's no internal recruiter to credit instead) —
+        # see its own docstring for the full two-scenario rule.
+        from services.candidate_ownership import resolve_sender_identity
+        sender = await resolve_sender_identity(conn, tenant_id, from_email, from_name, account_id)
         received_by = None
-        if account_id:
-            acc = await conn.fetchrow(
-                "SELECT user_id, email FROM user_email_accounts WHERE id=$1", account_id)
-            if acc:
-                received_by = {"user_id": str(acc["user_id"]), "email": acc["email"]}
+        if sender:
+            # candidate_ownership.source CHECK constraint doesn't know the
+            # internal "receiving_mailbox" fallback label — that scenario
+            # is semantically the pre-existing 'personal_mailbox' meaning
+            # (an external candidate's own resume landing in a recruiter's
+            # inbox), just resolved through the same function now.
+            src = 'personal_mailbox' if sender["via"] == 'receiving_mailbox' else sender["via"]
+            received_by = {"user_id": sender["user_id"], "email": sender["email"],
+                           "name": sender["name"], "via": src}
         candidate_id = await upsert_candidate(conn, tenant_id, parsed, job_board, label,
                                               from_email, file_path, resume_text,
                                               received_by=received_by)

@@ -122,6 +122,17 @@ async def intake_queue(
     source: str = Query(None),
     req_id: str = Query(None),
     owned: str = Query(None),  # 'mine' — 2026-08-30, matching candidates.py's owned=mine
+    # New Resume Inbox filters (2026-09-07 sender-attribution spec): match
+    # on the Golden-Rule-resolved Source Recruiter (name or email), the
+    # raw Sender Email, the receiving KAE (name or email), and a real
+    # received-date range — "KAE should instantly know which recruiter
+    # submitted this profile... without opening the resume or tracking
+    # sheet" is exactly what these expose as real columns + filters.
+    recruiter: str = Query(None),
+    sender_email: str = Query(None),
+    kae: str = Query(None),
+    date_from: str = Query(None),
+    date_to: str = Query(None),
     limit: int = Query(100, le=500),
     offset: int = Query(0),
     actor: Actor = Depends(get_actor)
@@ -160,6 +171,26 @@ async def intake_queue(
                 f"AND co2.status='active' AND co2.ownership_expires_at > now() AND co2.recruiter_id=${p}))"
             )
             params.append(actor.user_id); p += 1
+        if recruiter:
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM candidate_ownership co3 WHERE co3.tenant_id=$1 AND co3.candidate_id=rf.candidate_id "
+                f"AND (co3.recruiter_name ILIKE ${p} OR co3.recruiter_email ILIKE ${p}))")
+            params.append(f"%{recruiter}%"); p += 1
+        if sender_email:
+            conditions.append(f'rf.source_email ILIKE ${p}')
+            params.append(f"%{sender_email}%"); p += 1
+        if kae:
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM imap_messages im3 JOIN user_email_accounts ua3 ON ua3.id=im3.account_id "
+                f"JOIN users u3 ON u3.id=ua3.user_id WHERE im3.id=rf.imap_msg_id "
+                f"AND (u3.full_name ILIKE ${p} OR u3.email ILIKE ${p}))")
+            params.append(f"%{kae}%"); p += 1
+        if date_from:
+            conditions.append(f'rf.created_at >= ${p}::date')
+            params.append(date_from); p += 1
+        if date_to:
+            conditions.append(f"rf.created_at < (${p}::date + interval '1 day')")
+            params.append(date_to); p += 1
         where = ' AND '.join(conditions)
 
         rows = await conn.fetch(f"""
@@ -176,7 +207,13 @@ async def intake_queue(
                    mr.title as matched_jd_title,
                    pl.stage as pipeline_stage, pl.pipeline_job,
                    sc.readiness_index AS live_match_score,
+                   recv_u.full_name AS kae_name, recv_u.email AS kae_email,
+                   -- Kept for backward compat with any existing caller —
+                   -- received_by_name now means the same thing as kae_name.
                    recv_u.full_name AS received_by_name,
+                   own.recruiter_name AS source_recruiter_name,
+                   own.recruiter_email AS source_recruiter_email,
+                   (own.recruiter_id IS NOT NULL) AS source_recruiter_registered,
                    own.recruiter_name AS owner_recruiter_name
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
@@ -198,9 +235,15 @@ async def intake_queue(
                 ORDER BY cs.scored_at DESC LIMIT 1
             ) sc ON c.id IS NOT NULL
             LEFT JOIN LATERAL (
-                SELECT u.full_name AS recruiter_name
+                -- Golden Rule (2026-09-07): the real, sender-resolved
+                -- current owner — LEFT JOIN + COALESCE so a Temporary
+                -- Sender Record (recruiter_id IS NULL, an unregistered
+                -- internal sender) still shows a real name, matching
+                -- candidate_ownership.py's own get_ownership() exactly.
+                SELECT co.recruiter_id, co.recruiter_email,
+                       COALESCE(u.full_name, co.recruiter_name) AS recruiter_name
                 FROM candidate_ownership co
-                JOIN users u ON u.id = co.recruiter_id
+                LEFT JOIN users u ON u.id = co.recruiter_id
                 WHERE co.tenant_id=$1 AND co.candidate_id=c.id
             ) own ON c.id IS NOT NULL
             WHERE {where}
@@ -242,10 +285,19 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
                    c.location, c.current_employer, c.current_designation,
                    r.title as requisition_title,
                    pl.stage as pipeline_stage, pl.pipeline_job,
-                   sc.readiness_index AS live_match_score
+                   sc.readiness_index AS live_match_score,
+                   im.received_at AS email_received_at,
+                   recv_u.full_name AS kae_name, recv_u.email AS kae_email,
+                   own.recruiter_id AS source_recruiter_id,
+                   own.recruiter_name AS source_recruiter_name,
+                   own.recruiter_email AS source_recruiter_email,
+                   (own.recruiter_id IS NOT NULL) AS source_recruiter_registered
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
             LEFT JOIN requisitions r ON r.id=rf.requisition_id
+            LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
+            LEFT JOIN user_email_accounts recv_ua ON recv_ua.id = im.account_id
+            LEFT JOIN users recv_u ON recv_u.id = recv_ua.user_id
             LEFT JOIN LATERAL (
                 SELECT a.stage, ar.title AS pipeline_job
                 FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
@@ -258,6 +310,13 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
                   AND (c.matched_requisition_id IS NULL OR cs.requisition_id=c.matched_requisition_id)
                 ORDER BY cs.scored_at DESC LIMIT 1
             ) sc ON c.id IS NOT NULL
+            LEFT JOIN LATERAL (
+                SELECT co.recruiter_id, co.recruiter_email,
+                       COALESCE(u.full_name, co.recruiter_name) AS recruiter_name
+                FROM candidate_ownership co
+                LEFT JOIN users u ON u.id = co.recruiter_id
+                WHERE co.tenant_id=$2 AND co.candidate_id=c.id
+            ) own ON c.id IS NOT NULL
             WHERE rf.id=$1 AND rf.tenant_id=$2""",
             resume_file_id, actor.tenant_id)
     if not row:
@@ -266,6 +325,17 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
     if isinstance(d.get('parsed_data'), str):
         try: d['parsed_data'] = json.loads(d['parsed_data'])
         except Exception: d['parsed_data'] = {}
+    # Duplicate Candidate Rule: original source recruiter (immutable) +
+    # any other real senders who also tried to submit this same candidate
+    # while it was already owned (2026-09-07) — only meaningful once a
+    # candidate record actually exists.
+    d['original_source'] = None
+    d['other_senders'] = []
+    if d.get('candidate_id'):
+        from services import candidate_ownership as _ownership
+        async with db.tenant_conn(actor.tenant_id) as conn2:
+            d['original_source'] = await _ownership.get_original_source(conn2, actor.tenant_id, str(d['candidate_id']))
+            d['other_senders'] = await _ownership.get_other_senders(conn2, actor.tenant_id, str(d['candidate_id']))
     return d
 
 

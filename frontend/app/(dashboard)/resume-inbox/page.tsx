@@ -62,6 +62,24 @@ interface ResumeItem {
   // when genuinely unknown (e.g. a public job-board apply with no
   // recruiter involved at all).
   received_by_name?: string; owner_recruiter_name?: string;
+  // Sender-based recruiter attribution (2026-09-07 spec — the Golden
+  // Rule: ownership/credit goes to the actual SENDER email, never the
+  // mailbox that merely received it). source_recruiter_* is the real,
+  // fixed attribution (matches candidate_ownership.py's resolve_sender_
+  // identity()); kae_name/kae_email is who RECEIVED the email (renamed
+  // from the old ambiguous received_by_name, which used to be shown as
+  // if it were ownership — it never was, it's just who's reviewing).
+  source_recruiter_name?: string; source_recruiter_email?: string;
+  source_recruiter_registered?: boolean;
+  kae_name?: string; kae_email?: string;
+  // Duplicate Candidate Rule (single-record detail only, via GET
+  // /resume-intake/{id}): the ORIGINAL source recruiter (immutable,
+  // first-ever claim) shown distinctly from the current owner above when
+  // a later resubmission/transfer has since changed who currently owns
+  // it, plus every other real sender who also tried to submit this same
+  // candidate while someone else already owned it.
+  original_source?: { recruiter_id: string | null; recruiter_name: string; recruiter_email: string } | null;
+  other_senders?: { recruiter_id: string | null; recruiter_name: string; recruiter_email: string; last_attempt_at: string }[];
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -399,14 +417,48 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
           <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#059669', fontSize: 12, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}><Download size={12} /> Download</button></div></div>}
 
         {item.email_subject && <div style={{ marginBottom: 16 }}><div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>ORIGINAL EMAIL</div><div style={{ fontSize: 13, color: '#374151', fontStyle: 'italic' }}>{item.email_subject}</div><div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>From: {item.source_email} · {fdt(item.email_received_at || item.created_at)}</div></div>}
-        {(item.received_by_name || item.owner_recruiter_name) && (
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>RECRUITER</div>
-            <div style={{ fontSize: 13, color: '#374151' }}>
-              👤 {item.received_by_name || item.owner_recruiter_name}
-              {item.received_by_name && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · received in their mailbox</span>}
-              {!item.received_by_name && item.owner_recruiter_name && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · current owner</span>}
-            </div>
+        {/* Sender-based attribution (2026-09-07 Golden Rule): Source
+            Recruiter is who actually SENT this email (ownership/KPI
+            credit) — never confused with KAE, who's just the person
+            reviewing it in their own inbox. Both shown distinctly,
+            matching the spec's real column requirements. */}
+        {(item.source_recruiter_name || item.kae_name) && (
+          <div style={{ marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {item.source_recruiter_name && (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>SOURCE RECRUITER</div>
+                <div style={{ fontSize: 13, color: '#374151' }}>
+                  👤 {item.source_recruiter_name}
+                  {item.source_recruiter_email && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · {item.source_recruiter_email}</span>}
+                  {item.source_recruiter_registered === false && (
+                    <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#b45309', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 6, padding: '1px 6px' }}>UNREGISTERED ATS USER</span>
+                  )}
+                </div>
+              </div>
+            )}
+            {item.kae_name && (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>KAE (RECEIVED IN)</div>
+                <div style={{ fontSize: 13, color: '#374151' }}>
+                  📥 {item.kae_name}{item.kae_email && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · {item.kae_email}</span>}
+                </div>
+              </div>
+            )}
+            {/* Duplicate Candidate Rule: show the original source
+                distinctly once it differs from the current owner above
+                (a later resubmission/transfer moved ownership on), plus
+                any other real senders who also tried to submit this same
+                candidate while it was already owned. */}
+            {item.original_source && item.original_source.recruiter_email?.toLowerCase() !== item.source_recruiter_email?.toLowerCase() && (
+              <div style={{ fontSize: 12, color: '#64748b' }}>
+                🕐 Original source: <b>{item.original_source.recruiter_name}</b> ({item.original_source.recruiter_email})
+              </div>
+            )}
+            {!!item.other_senders?.length && (
+              <div style={{ fontSize: 12, color: '#64748b' }}>
+                Also submitted by: {item.other_senders.map(s => s.recruiter_name).join(', ')}
+              </div>
+            )}
           </div>
         )}
 
@@ -598,6 +650,21 @@ function ResumeInboxPageInner() {
   // resume box, not everyone's" — reported live, matching the same
   // owned=mine scope just built for the Candidates page.
   const [ownedFilter, setOwnedFilter] = useState('');
+  // KAE Dashboard Enhancement filters (2026-09-07 spec): Recruiter Name,
+  // Sender Email, KAE, Date Range — "KAE should instantly know which
+  // recruiter submitted this profile... without opening the resume or
+  // tracking sheet."
+  const [recruiterFilter, setRecruiterFilter] = useState('');
+  const [senderEmailFilter, setSenderEmailFilter] = useState('');
+  const [kaeFilter, setKaeFilter] = useState('');
+  const [dateFromFilter, setDateFromFilter] = useState('');
+  const [dateToFilter, setDateToFilter] = useState('');
+  const extraFilterQs =
+    (recruiterFilter ? `&recruiter=${encodeURIComponent(recruiterFilter)}` : '') +
+    (senderEmailFilter ? `&sender_email=${encodeURIComponent(senderEmailFilter)}` : '') +
+    (kaeFilter ? `&kae=${encodeURIComponent(kaeFilter)}` : '') +
+    (dateFromFilter ? `&date_from=${dateFromFilter}` : '') +
+    (dateToFilter ? `&date_to=${dateToFilter}` : '');
 
   // Sync jobFilter with ?req= URL param
   useEffect(() => { const r = _sp?.get('req') || ''; if (r !== jobFilter) setJobFilter(r); }, [_sp]);
@@ -670,7 +737,7 @@ function ResumeInboxPageInner() {
   // just the first page; loadMore() below fetches subsequent pages by
   // offset and appends, which has no upper bound.
   const PAGE_SIZE = 100;
-  const queueUrl = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}${ownedFilter ? `&owned=${ownedFilter}` : ''}&limit=${PAGE_SIZE}&offset=0`;
+  const queueUrl = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}${ownedFilter ? `&owned=${ownedFilter}` : ''}${extraFilterQs}&limit=${PAGE_SIZE}&offset=0`;
   const { data: queueData, refetch: reloadQueue, loading: isLoading } = useFetch<any>(queueUrl);
   const [accumItems, setAccumItems] = useState<ResumeItem[]>([]);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -679,7 +746,7 @@ function ResumeInboxPageInner() {
   const loadMore = async () => {
     setLoadingMore(true);
     try {
-      const url = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}${ownedFilter ? `&owned=${ownedFilter}` : ''}&limit=${PAGE_SIZE}&offset=${accumItems.length}`;
+      const url = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}${ownedFilter ? `&owned=${ownedFilter}` : ''}${extraFilterQs}&limit=${PAGE_SIZE}&offset=${accumItems.length}`;
       const more = await apiFetch(url);
       setAccumItems(prev => [...prev, ...((more?.items || []) as ResumeItem[])]);
       setAutoLoadFails(0);
@@ -888,6 +955,31 @@ function ResumeInboxPageInner() {
         </div>
       </div>
 
+      {/* KAE Dashboard Enhancement filters (2026-09-07 spec): Recruiter
+          Name, Sender Email, KAE, Date Range — a second filter row so a
+          KAE/manager can find exactly who submitted a profile without
+          opening the resume or tracking sheet. */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <input data-testid="resume-inbox-filter-recruiter" value={recruiterFilter} onChange={e => setRecruiterFilter(e.target.value)}
+          placeholder="Filter by Recruiter…" style={{ padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, width: 160 }} />
+        <input data-testid="resume-inbox-filter-sender-email" value={senderEmailFilter} onChange={e => setSenderEmailFilter(e.target.value)}
+          placeholder="Filter by Sender Email…" style={{ padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, width: 180 }} />
+        <input data-testid="resume-inbox-filter-kae" value={kaeFilter} onChange={e => setKaeFilter(e.target.value)}
+          placeholder="Filter by KAE…" style={{ padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, width: 140 }} />
+        <input data-testid="resume-inbox-filter-date-from" type="date" value={dateFromFilter} onChange={e => setDateFromFilter(e.target.value)}
+          title="Received from" style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12 }} />
+        <span style={{ color: '#94a3b8', fontSize: 12 }}>to</span>
+        <input data-testid="resume-inbox-filter-date-to" type="date" value={dateToFilter} onChange={e => setDateToFilter(e.target.value)}
+          title="Received to" style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12 }} />
+        {(recruiterFilter || senderEmailFilter || kaeFilter || dateFromFilter || dateToFilter) && (
+          <button data-testid="resume-inbox-filters-clear" onClick={() => { setRecruiterFilter(''); setSenderEmailFilter(''); setKaeFilter(''); setDateFromFilter(''); setDateToFilter(''); }}
+            style={{ fontSize: 11, color: '#dc2626', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>✕ Clear filters</button>
+        )}
+        <a href="/recruiter-tracking" style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: '#1e40af', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+          📊 Recruiter / Sender Tracking →
+        </a>
+      </div>
+
       {/* Bulk actions bar */}
       {selectedIds.size > 0 && (
         <div style={{ background: '#1e40af', color: '#fff', padding: '10px 16px', borderRadius: 10, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -1034,10 +1126,21 @@ function ResumeInboxPageInner() {
                       </td>
                       <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}>
                         <SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} />
-                        {(r.received_by_name || r.owner_recruiter_name) && (
-                          <div title={r.received_by_name ? `Received in ${r.received_by_name}'s mailbox` : `Owned by ${r.owner_recruiter_name}`}
+                        {(r.source_recruiter_name || r.received_by_name || r.owner_recruiter_name) && (
+                          <div title={r.source_recruiter_name ? `Source Recruiter: ${r.source_recruiter_name}${r.source_recruiter_registered === false ? ' (Unregistered ATS User)' : ''}` : `Received by ${r.kae_name || r.received_by_name}`}
                             style={{ fontSize: 10, color: '#64748b', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
-                            👤 {r.received_by_name || r.owner_recruiter_name}
+                            👤 {r.source_recruiter_name || r.received_by_name || r.owner_recruiter_name}
+                            {r.source_recruiter_registered === false && <span style={{ color: '#b45309' }}> *</span>}
+                          </div>
+                        )}
+                        {/* KAE (who received it) — distinct from Source
+                            Recruiter above, shown only when different, to
+                            avoid a redundant repeated name in the common
+                            direct-application case where sender==KAE. */}
+                        {r.kae_name && r.kae_name !== r.source_recruiter_name && (
+                          <div title={`KAE (received in): ${r.kae_name}`}
+                            style={{ fontSize: 10, color: '#94a3b8', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
+                            📥 {r.kae_name}
                           </div>
                         )}
                       </td>
