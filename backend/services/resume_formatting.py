@@ -12,6 +12,7 @@ import io
 import os
 import re
 from typing import Optional
+from urllib.parse import quote
 from xml.sax.saxutils import escape as _esc
 
 
@@ -137,6 +138,31 @@ def build_resume_filename(display_name: str, position: Optional[str], total_exp_
     exp = f"{round(total_exp_mo / 12)}Yrs" if total_exp_mo else ""
     parts = [p for p in (name, pos, exp) if p]
     return "_".join(parts) + f".{ext}"
+
+
+def content_disposition_header(filename: str, disposition: str = "attachment") -> str:
+    """Real bug fix (2026-09-06): confirmed live — "Chandra_Associate
+    Managing Consultant – SAP FICO.pdf" (a genuine Unicode EN DASH, not a
+    plain ASCII hyphen — a perfectly valid, legitimate filesystem/display
+    character, which is exactly why build_resume_filename() above
+    correctly keeps it) crashed a raw
+    f'attachment; filename="{fn}"' Content-Disposition header with an
+    unhandled UnicodeEncodeError -> "Download failed: 500" — HTTP headers
+    are transmitted as Latin-1, and a character like U+2013 simply can't
+    be Latin-1-encoded at all, no matter how valid it is as a filename.
+    Any real candidate/company name with an accent, dash, or other non-
+    Latin-1 character hits this identically. The shared fix: try Latin-1
+    first (the overwhelmingly common case, byte-identical output); if
+    that fails, provide a safe plain-ASCII fallback filename= for older
+    clients PLUS the real, correct filename*=UTF-8'' extended parameter
+    (RFC 6266/5987) so a modern browser still shows and saves the file
+    under its genuine, accented name."""
+    try:
+        filename.encode("latin-1")
+        return f'{disposition}; filename="{filename}"'
+    except UnicodeEncodeError:
+        ascii_fallback = filename.encode("ascii", "replace").decode("ascii").replace('"', "'")
+        return f"{disposition}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
 DEFAULT_CONFIG = {

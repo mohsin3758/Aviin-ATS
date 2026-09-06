@@ -298,8 +298,22 @@ async def download_resume_file(resume_file_id: str, actor: Actor = Depends(get_a
     # Strip any control character (C0 range) before it ever reaches a
     # header, for every filename, not just this one already-broken row.
     fn = ''.join(ch for ch in fn if ord(ch) >= 32)
-    return FileResponse(str(abs_path), media_type=mime, filename=fn,
-        headers={'Content-Disposition': 'attachment; filename="' + fn + '"'})
+    # Real bug fix (2026-09-06): a filename containing a genuinely valid,
+    # printable-but-non-Latin-1 character (confirmed live — "Chandra_
+    # Associate Managing Consultant – SAP FICO.pdf", a Unicode EN DASH
+    # U+2013, not a plain ASCII hyphen) crashed with "Download failed:
+    # 500" — HTTP headers are transmitted as latin-1, and U+2013 can't be
+    # latin-1-encoded at all, so the explicit
+    # headers={'Content-Disposition': ...} override below raised a raw,
+    # unhandled UnicodeEncodeError the instant uvicorn tried to send it.
+    # The fix is simply to STOP overriding it: Starlette's own
+    # FileResponse(filename=...) already builds a correct
+    # Content-Disposition header on its own — RFC 5987's
+    # filename*=utf-8''<percent-encoded> whenever the name needs it,
+    # falling back to a plain filename="..." otherwise — the manual
+    # override here was silently bypassing that correct, already-built-in
+    # logic for every single download, not just this one filename.
+    return FileResponse(str(abs_path), media_type=mime, filename=fn)
 
 @router.post('/{resume_file_id}/reparse')
 async def reparse_resume(resume_file_id: str, actor: Actor = Depends(get_actor)):

@@ -8,16 +8,23 @@ submittals, client_feedback, recruiter_leave, sla_tier_config) rather
 than introducing a parallel "assignment summary" table that could drift
 from the real source of truth.
 
-Scope explicitly EXCLUDES co-recruiter/secondary-assignee support — that
-needs relaxing assignments_one_active_per_requisition (added 2026-08-10
-to fix a real self-amplifying data-corruption bug) and was flagged in
-research as needing its own separate decision, not folded in here.
+Originally scoped to EXCLUDE co-recruiter/secondary-assignee support —
+that needed relaxing assignments_one_active_per_requisition (added
+2026-08-10 to fix a real self-amplifying data-corruption bug) and was
+flagged as needing its own separate decision. That relaxation shipped
+2026-08-31 (sql/98: the unique constraint is now scoped to (requisition_
+id, recruiter_id), not just requisition_id, so 2+ different recruiters
+can each hold a real, distinct active assignment on one role) — this
+file's own bulk-assign action (2026-09-06) is the first place that
+capability is actually exposed as a real UI action, not just a raw API
+possibility.
 """
 
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 import asyncpg
+from decimal import Decimal
 
 import db
 import events
@@ -26,6 +33,8 @@ from permissions import require_permission
 from pydantic import BaseModel
 from typing import Optional
 from routers.ops_gaps import is_auto_assign_enabled
+from routers.assignments import _recruiter_match_detail
+from services import assignment_notify
 
 router = APIRouter(prefix="/assignment-dashboard", tags=["assignment-dashboard"])
 
@@ -34,7 +43,9 @@ router = APIRouter(prefix="/assignment-dashboard", tags=["assignment-dashboard"]
 # POST /assignments and POST /requisitions/{id}/assign). Everyone else
 # is hard-scoped to their own — no query param can override this, same
 # enforcement shape as job_visibility_scope elsewhere in this codebase.
-_BROAD_VISIBILITY_ROLES = ("admin", "super_admin", "manager", "kae")
+# 'kam' added 2026-09-06 — same account-ownership tier as 'kae'
+# throughout the rest of this codebase, missed here specifically.
+_BROAD_VISIBILITY_ROLES = ("admin", "super_admin", "manager", "kae", "kam")
 
 # Industry benchmark thresholds (research pass, 2026-08-24): 15-20 open
 # reqs/recruiter is the commonly cited "healthy" range, 20-30+ is the
@@ -400,6 +411,82 @@ async def bulk_reassign(body: BulkReassignBody, actor: Actor = Depends(require_r
                 })
             except asyncpg.exceptions.RaiseError as exc:
                 errors.append({"assignment_id": assignment_id, "error": str(exc)})
+    return {"succeeded": len(results), "failed": len(errors), "results": results, "errors": errors}
+
+
+class BulkAssignBody(BaseModel):
+    requisition_ids: list[str]
+    recruiter_ids: list[str]
+    reason: Optional[str] = None
+
+
+@router.post("/bulk-assign")
+async def bulk_assign(body: BulkAssignBody, actor: Actor = Depends(require_role("admin", "manager", "kae", "kam"))):
+    """Real, reported gap (2026-09-06): "assign a job role to one or
+    multiple recruiters... many-to-many, without restrictions" — a
+    genuinely DIFFERENT action from Bulk Reassign above. Reassign
+    TRANSFERS an existing active assignment (removes the old recruiter) —
+    that's the HARD RULE #10 HITL-gated action, deliberately staying
+    admin/manager-only. This creates NEW assignments alongside whatever
+    already exists (co-recruiter support, shipped as a raw DB capability
+    2026-08-31 via the same partial-unique-index relaxation
+    do_reassign() itself relies on) — never removes anyone, so it's the
+    same permitted, non-HITL action as the existing single POST
+    /assignments, just batched across requisition x recruiter pairs.
+    Reuses that same endpoint's real match-detail/notify logic (imported
+    from routers.assignments), not a second, drifting assignment engine.
+    One bad pair is skipped and reported, never aborts the rest of the
+    batch — same discipline as Bulk Reassign above."""
+    results, errors = [], []
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        for req_id in body.requisition_ids:
+            for rec_id in body.recruiter_ids:
+                try:
+                    existing = await conn.fetchval(
+                        "SELECT id FROM assignments WHERE requisition_id=$1 AND recruiter_id=$2 AND status='active'",
+                        req_id, rec_id,
+                    )
+                    if existing:
+                        errors.append({"requisition_id": req_id, "recruiter_id": rec_id, "error": "already actively assigned"})
+                        continue
+
+                    detail = await _recruiter_match_detail(conn, req_id, rec_id)
+                    match_score = detail["match_score"] if detail else None
+
+                    row = await conn.fetchrow(
+                        """INSERT INTO assignments (tenant_id, requisition_id, recruiter_id, match_score)
+                           VALUES ($1, $2, $3, $4) RETURNING id""",
+                        actor.tenant_id, req_id, rec_id, match_score,
+                    )
+                    recruiter_name = await conn.fetchval("SELECT full_name FROM users WHERE id=$1", rec_id)
+
+                    explanation = {"reason": "manually_assigned", "assigned_by": actor.user_id, "bulk": True}
+                    if detail:
+                        # match_score/performance_score come back as
+                        # Postgres numeric -> asyncpg Decimal, which
+                        # json.dumps() can't serialize on its own — same
+                        # cast already needed by the single-assign endpoint.
+                        for k in ("match_score", "skill_match_count", "available_capacity", "active_assignments",
+                                  "capacity_weekly", "on_leave", "location_match", "has_prior_client_relationship",
+                                  "tenure_months", "performance_score", "workload_label"):
+                            v = detail[k]
+                            explanation[k] = float(v) if isinstance(v, Decimal) else v
+
+                    await events.write_assignment_event(
+                        conn, actor.tenant_id, "assigned",
+                        assignment_id=str(row["id"]), reason=body.reason or "Bulk assignment",
+                        actor_user_id=actor.user_id, metadata=explanation,
+                    )
+                    await assignment_notify.notify_and_task_on_assign(
+                        conn, actor.tenant_id, requisition_id=req_id,
+                        recruiter_id=rec_id, assigned_by_user_id=actor.user_id,
+                    )
+                    results.append({
+                        "requisition_id": req_id, "recruiter_id": rec_id,
+                        "recruiter_name": recruiter_name, "assignment_id": str(row["id"]),
+                    })
+                except Exception as exc:
+                    errors.append({"requisition_id": req_id, "recruiter_id": rec_id, "error": str(exc)})
     return {"succeeded": len(results), "failed": len(errors), "results": results, "errors": errors}
 
 

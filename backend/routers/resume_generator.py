@@ -24,6 +24,7 @@ from services.resume_formatting import (
     render_resume_pdf, render_resume_docx, mask_name, DEFAULT_CONFIG,
     _resolve_body_text, _company_line, _client_line, VISUAL_THEMES, _VALID_THEMES,
     LOGO_POSITION_OPTIONS, _VALID_LOGO_POSITIONS, build_resume_filename,
+    content_disposition_header,
 )
 
 router = APIRouter(prefix="/resume-generator", tags=["resume-generator"])
@@ -529,5 +530,10 @@ async def download_generated(generated_id: str, actor: Actor = Depends(get_actor
     if not filename:
         safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", row["display_name"] or "resume")
         filename = f"{safe_name}_{row['template_name'].replace(' ', '_')}.{ext}"
+    # Real bug fix (2026-09-06): a real candidate name with a non-Latin-1
+    # character (accent, en/em-dash, etc.) crashed this with an unhandled
+    # UnicodeEncodeError -> "Download failed: 500" — see content_
+    # disposition_header()'s own docstring for the exact mechanism
+    # (confirmed live on a different, sibling resume-download endpoint).
     return Response(content=data, media_type=media_type,
-                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+                     headers={"Content-Disposition": content_disposition_header(filename)})

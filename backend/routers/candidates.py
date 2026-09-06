@@ -1020,8 +1020,15 @@ async def download_candidate_document(doc_id: str, actor: Actor = Depends(get_ac
         raise HTTPException(404, "File missing from disk")
     mime = row["mime_type"] or "application/octet-stream"
     fn = row["file_name"] or abs_path.name
-    return FileResponse(str(abs_path), media_type=mime, filename=fn,
-        headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+    # Real bug fix (2026-09-06, same class found live on
+    # resume_intake.py's resume download): a real, uploaded document
+    # filename containing any character outside Latin-1 (an accented
+    # name, an en/em-dash, etc.) crashed this with an unhandled
+    # UnicodeEncodeError -> "Download failed: 500", because the explicit
+    # headers={} override below bypassed Starlette's own FileResponse
+    # logic, which already builds a correct RFC 5987 Content-Disposition
+    # header on its own whenever the filename needs it.
+    return FileResponse(str(abs_path), media_type=mime, filename=fn)
 
 
 @router.get("/{candidate_id}/documents")
@@ -1301,7 +1308,7 @@ async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get
     near-duplicate PDF builder."""
     from fastapi.responses import StreamingResponse
     import io as _io
-    from services.resume_formatting import render_resume_pdf, build_resume_filename
+    from services.resume_formatting import render_resume_pdf, build_resume_filename, content_disposition_header
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
@@ -1315,9 +1322,13 @@ async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get
         "company_mode": "original", "project_mode": "include",
     })
     filename = build_resume_filename(row["full_name"], row["current_designation"], row["total_exp_mo"], "pdf")
+    # Real bug fix (2026-09-06): a real candidate name/designation with a
+    # non-Latin-1 character (accent, en/em-dash, etc.) crashed this same
+    # way as the resume-intake download did — see content_disposition_
+    # header()'s own docstring for the exact mechanism.
     return StreamingResponse(
         _io.BytesIO(pdf_bytes), media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        headers={"Content-Disposition": content_disposition_header(filename)})
 
 
 @router.patch("/{candidate_id}")

@@ -208,14 +208,44 @@ def compute_skill_similarity(
     strictly more correct than the substring check it replaces, never
     loosens an existing match.
 
+    Fourth real gap fix (2026-09-06): a genuine, previously-undiscovered
+    false-positive class found while investigating a live report of "AI
+    Skills Matching... shows candidates matched for almost every skill" -
+    the word-boundary check above is a pure grammatical check (is this a
+    standalone word), with zero semantic awareness, so a resume literally
+    stating "No ABAP development experience" still counted as a real
+    match on "ABAP" - proven directly against a real synthetic resume
+    before this fix (100% similarity on a required skill the candidate
+    explicitly said they lack). _in_text() now checks EVERY occurrence
+    of the term (not just the first) and only counts it as a genuine
+    match if at least one occurrence has no negation cue word in its
+    immediately preceding text - a real match elsewhere in the resume
+    still counts even if one mention happens to be negated, matching this
+    function's own established "never loosens an existing match, only
+    ever removes a false one" discipline from the word-boundary fix
+    above.
+
     Returns (skill_similarity_0_to_1, matched_skills, missing_skills)."""
     cand_lower = {s.lower() for s in (candidate_skills or []) if s}
     text_lower = (resume_text or "").lower()
 
+    _NEGATION_CUES = {
+        "no", "not", "without", "never", "lack", "lacking", "lacks",
+        "none", "excluding", "except", "nor", "neither", "unfamiliar",
+    }
+
     def _in_text(term: str) -> bool:
         if not text_lower:
             return False
-        return bool(re.search(r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])', text_lower))
+        pattern = r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])'
+        found_any = False
+        for m in re.finditer(pattern, text_lower):
+            found_any = True
+            preceding = text_lower[max(0, m.start() - 40):m.start()]
+            preceding_words = re.findall(r'[a-z]+', preceding)[-5:]
+            if not any(w in _NEGATION_CUES for w in preceding_words):
+                return True
+        return False if found_any else False
 
     req_list = [s for s in (required_skills or []) if s]
     matched = [s for s in req_list if s.lower() in cand_lower or _in_text(s.lower())]

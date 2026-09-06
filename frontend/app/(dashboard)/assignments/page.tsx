@@ -197,17 +197,120 @@ function BulkReassignModal({ ids, onDone, onClose }: { ids: string[]; onDone: ()
   );
 }
 
+function BulkAssignModal({ requisitionIds, onDone, onClose }: { requisitionIds: string[]; onDone: () => void; onClose: () => void }) {
+  // Real, reported gap (2026-09-06): adds one or more NEW recruiters to
+  // the selected requisition(s) without touching anyone already
+  // assigned — the many-to-many "co-recruiter" action, distinct from
+  // Bulk Reassign above (which transfers/removes an existing recruiter
+  // and is deliberately admin/manager-only, HARD RULE #10). This one is
+  // permitted for KAE/KAM too, matching POST /assignments.
+  const { data: users } = useFetch<any[]>('/users?is_active=true&role=recruiter');
+  const { data: capacity } = useFetch<any[]>('/analytics/recruiter-capacity');
+  const capMap = Object.fromEntries((capacity || []).map((c: any) => [c.recruiter_id, c]));
+  const [recruiterIds, setRecruiterIds] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+
+  const toggleRecruiter = (id: string) => setRecruiterIds(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const r = await apiFetch('/assignment-dashboard/bulk-assign', {
+        method: 'POST',
+        body: JSON.stringify({ requisition_ids: requisitionIds, recruiter_ids: Array.from(recruiterIds) }),
+      });
+      setResult(r);
+      onDone();
+    } catch (e: any) {
+      setResult({ error: e.message || 'Failed' });
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div style={{ background: '#fff', borderRadius: 14, padding: 20, width: 460 }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 4 }}>Bulk Assign</div>
+        <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>
+          Add one or more recruiters to {requisitionIds.length} selected requisition(s) — anyone already assigned stays untouched.
+        </p>
+        <label style={label}>RECRUITERS TO ADD — select one or more</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14, maxHeight: 280, overflowY: 'auto' }} data-testid="bulk-assign-recruiter-picker">
+          {(users || []).map((u: any) => {
+            const c = capMap[u.id];
+            const wl = RECRUITER_WORKLOAD_BADGE[c?.workload_label] || RECRUITER_WORKLOAD_BADGE.Medium;
+            const isSelected = recruiterIds.has(u.id);
+            return (
+              <div key={u.id} data-testid={`bulk-assign-recruiter-option-${u.id}`}
+                onClick={() => toggleRecruiter(u.id)}
+                title={c ? `${c.available_capacity}/${c.capacity_weekly ?? c.max_active_reqs} slots free · ${c.active_assignments ?? 0} active assignment(s)${c.on_leave ? ' · on leave' : ''}` : 'No capacity data yet'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                  border: `1px solid ${isSelected ? '#93C5FD' : '#E2E8F0'}`,
+                  background: isSelected ? '#EFF6FF' : '#fff',
+                }}>
+                {isSelected ? <CheckSquare size={14} style={{ color: '#2563EB', flexShrink: 0 }} /> : <Square size={14} style={{ color: '#94A3B8', flexShrink: 0 }} />}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{u.full_name}</div>
+                  {c && (
+                    <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 2 }}>
+                      {c.available_capacity}/{c.max_active_reqs} req slots free · {c.active_assignments} active
+                      {c.on_leave ? ' · on leave' : ''}
+                    </div>
+                  )}
+                </div>
+                {c?.on_leave && (
+                  <span title="On leave right now" style={{ color: '#D97706', flexShrink: 0 }}><Moon size={13} /></span>
+                )}
+                {c && (
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 6, color: wl.color, background: wl.bg, flexShrink: 0 }}>
+                    {c.workload_label} load
+                  </span>
+                )}
+              </div>
+            );
+          })}
+          {!(users || []).length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No active recruiters found.</div>}
+        </div>
+        {result && !result.error && (
+          <div style={{ fontSize: 12, color: '#16A34A', background: '#F0FDF4', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+            {result.succeeded} assignment(s) created, {result.failed} skipped (already assigned or an error).
+          </div>
+        )}
+        {result?.error && <div style={{ fontSize: 12, color: '#DC2626', marginBottom: 10 }}>{result.error}</div>}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={submit} disabled={busy || recruiterIds.size === 0} style={btn}>{busy ? 'Assigning…' : 'Confirm Bulk Assign'}</button>
+          <button onClick={onClose} style={btnGhost}>{result ? 'Close' : 'Cancel'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AssignmentDashboardPage() {
   const [role, setRole] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setRole(getTokenPayload()?.role || ''); setMounted(true); }, []);
-  const isManager = mounted && ['admin', 'super_admin', 'manager', 'kae'].includes(role || '');
+  // 'kam' added 2026-09-06 — same broad-visibility tier as 'kae' on this
+  // page (matches the backend's own _BROAD_VISIBILITY_ROLES).
+  const isManager = mounted && ['admin', 'super_admin', 'manager', 'kae', 'kam'].includes(role || '');
+  // Bulk REASSIGN transfers/removes an existing recruiter — the real
+  // HARD RULE #10 HITL-gated action, deliberately admin/manager-only.
+  // Bulk ASSIGN (below) only ever adds, never removes, so it's shown to
+  // every isManager role — the same permission split as the single
+  // POST /assignments (kae/kam allowed) vs POST /reassign (not).
+  const canReassign = mounted && ['admin', 'super_admin', 'manager'].includes(role || '');
 
   const [groupBy, setGroupBy] = useState<'recruiter' | 'client' | 'desk'>('recruiter');
   const [filters, setFilters] = useState({ client_id: '', department: '', recruiter_id: '', priority: '', status: 'active', method: '' });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [historyReqId, setHistoryReqId] = useState<string | null>(null);
   const [showBulk, setShowBulk] = useState(false);
+  const [showBulkAssign, setShowBulkAssign] = useState(false);
 
   const { data: clients } = useFetch<any>('/clients');
   const clientList = clients?.items || clients || [];
@@ -376,7 +479,10 @@ export default function AssignmentDashboardPage() {
         {isManager && selected.size > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, padding: '8px 12px', marginBottom: 10 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: '#1E40AF' }}>{selected.size} selected</span>
-            <button onClick={() => setShowBulk(true)} style={{ ...btn, padding: '5px 12px' }}><RotateCcw size={12} /> Bulk Reassign</button>
+            <button onClick={() => setShowBulkAssign(true)} data-testid="btn-bulk-assign" style={{ ...btn, padding: '5px 12px' }}><Users size={12} /> Bulk Assign</button>
+            {canReassign && (
+              <button onClick={() => setShowBulk(true)} data-testid="btn-bulk-reassign" style={{ ...btnGhost, padding: '5px 12px' }}><RotateCcw size={12} /> Bulk Reassign</button>
+            )}
             <button onClick={() => setSelected(new Set())} style={{ ...btnGhost, padding: '5px 12px' }}>Clear</button>
           </div>
         )}
@@ -463,6 +569,12 @@ export default function AssignmentDashboardPage() {
       {historyReqId && <HistoryModal requisitionId={historyReqId} onClose={() => setHistoryReqId(null)} />}
       {showBulk && (
         <BulkReassignModal ids={Array.from(selected)} onClose={() => setShowBulk(false)}
+          onDone={() => { setSelected(new Set()); refetchList(); }} />
+      )}
+      {showBulkAssign && (
+        <BulkAssignModal
+          requisitionIds={Array.from(new Set(rows.filter((r: any) => selected.has(r.id)).map((r: any) => r.requisition_id)))}
+          onClose={() => setShowBulkAssign(false)}
           onDone={() => { setSelected(new Set()); refetchList(); }} />
       )}
     </div>

@@ -71,7 +71,7 @@ async def list_assignments(requisition_id: str | None = None, actor: Actor = Dep
 
 @router.post("")
 async def create_assignment(
-    body: AssignmentCreate, actor: Actor = Depends(require_role("admin", "manager", "kae"))
+    body: AssignmentCreate, actor: Actor = Depends(require_role("admin", "manager", "kae", "kam"))
 ):
     """Recommendation 4 (recruiter-assignment gap analysis): initial manual
     assign had no role gate at all — any authenticated user (including a
@@ -83,6 +83,11 @@ async def create_assignment(
 
     2026-08-24: widened to also allow role='kae' (manual assignment is
     now reachable from KAE, Manager, or Admin accounts, per request), and
+
+    2026-09-06: widened again to also allow role='kam' — KAM is the same
+    account-ownership tier as KAE throughout the rest of this codebase
+    (client_owners, kae_submission.py's review queue, etc.) and had been
+    missed here specifically, a real, reported gap.
     the response now carries the same real availability/priority/workload
     breakdown Auto-Assign already surfaces — reusing match_recruiters(),
     not a second scoring path — so the manual picker's tooltip can show

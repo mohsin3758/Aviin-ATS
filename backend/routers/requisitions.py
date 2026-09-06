@@ -410,11 +410,13 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
                       a.stage, a.fit_score, a.app_notes, a.app_tags,
                       a.rejected_reason, a.assigned_recruiter_id, a.board_rank,
                       a.created_at, a.updated_at,
+                      ru.full_name AS recruiter_name, ru.email AS recruiter_email,
                       (SELECT COUNT(*) FROM interview_scorecards s
                        WHERE s.application_id = a.id AND s.tenant_id = a.tenant_id
                       )::int AS scorecard_count
                FROM applications a
                JOIN candidates c ON c.id = a.candidate_id
+               LEFT JOIN users ru ON ru.id = a.assigned_recruiter_id
                LEFT JOIN LATERAL (
                    SELECT id, file_name FROM resume_files rf
                    WHERE rf.candidate_id = c.id AND rf.tenant_id = a.tenant_id

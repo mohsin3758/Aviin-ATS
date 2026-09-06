@@ -7151,6 +7151,57 @@ test.describe.serial('S53 JD Match Scoring Accuracy + Inline Profile Preview', (
     }
   });
 
+  test('negation awareness: a resume explicitly stating it LACKS a skill does not count as a match', async ({ request }) => {
+    // Regression guard for a real, live-reported bug (2026-09-06):
+    // compute_skill_similarity's resume-text fallback used a pure
+    // word-boundary check with zero semantic awareness - a resume
+    // literally stating "No ABAP development experience" still counted
+    // as a genuine match on "ABAP" as a required skill, since the word
+    // itself is a real, standalone word regardless of the negation right
+    // in front of it. Fixed by checking every occurrence of the term and
+    // only counting it a real match if at least one occurrence has no
+    // negation cue word (no/not/without/never/lack/etc.) in its
+    // immediately preceding text - a genuine match elsewhere in the
+    // resume still counts even if one mention happens to be negated.
+    const negatedRes = await request.post(`${API}/candidates`, {
+      headers: auth(),
+      data: {
+        full_name: `QA S53 Negation Negated ${Date.now()}`,
+        skills: [],
+        resume_text: 'Experienced Java developer. No ABAP development experience. Worked on backend systems for 6 years.',
+      },
+    });
+    const negated = await negatedRes.json();
+    const realRes = await request.post(`${API}/candidates`, {
+      headers: auth(),
+      data: {
+        full_name: `QA S53 Negation Real ${Date.now()}`,
+        skills: [],
+        resume_text: '5 years of SAP ABAP development experience building custom reports and interfaces.',
+      },
+    });
+    const real = await realRes.json();
+    try {
+      const res = await request.post(`${API}/candidates/rank`, {
+        headers: auth(),
+        data: { jd_text: 'ABAP', limit: 5000 },
+      });
+      const body = await res.json();
+      const mineNegated = body.ranked.find((r: any) => r.id === negated.id);
+      const mineReal = body.ranked.find((r: any) => r.id === real.id);
+      // The negated mention must NOT count as a real match.
+      expect(mineNegated.matched_skills).toEqual([]);
+      expect(mineNegated.missing_skills).toEqual(['ABAP']);
+      // A genuine, non-negated mention must still match correctly -
+      // this fix must never loosen an existing, real match.
+      expect(mineReal.matched_skills).toEqual(['ABAP']);
+      expect(mineReal.missing_skills).toEqual([]);
+    } finally {
+      await request.delete(`${API}/candidates/${negated.id}`, { headers: auth() }).catch(() => {});
+      await request.delete(`${API}/candidates/${real.id}`, { headers: auth() }).catch(() => {});
+    }
+  });
+
   test('real headless UI: View Profile opens an inline preview (zero navigation), Back to list restores the ranked results', async ({ page }) => {
     await page.goto('/candidates');
     await page.getByRole('button', { name: 'JD Match' }).click();

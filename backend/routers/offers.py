@@ -18,6 +18,7 @@ from schemas import OfferCreate, OfferRespond
 from routers.p30_p35 import fire_webhook
 from services import activity_events
 from services import source_attribution
+from services.resume_formatting import content_disposition_header
 
 router = APIRouter(prefix="/offers", tags=["offers"])
 
@@ -531,10 +532,14 @@ async def download_offer_letter_pdf(offer_id: str, actor: Actor = Depends(get_ac
     company_name = company_row['name'] if company_row else 'Aviin Technology Business Solutions Pvt Ltd'
     pdf_bytes = _build_offer_pdf(dict(offer), dict(candidate), company_name)
     fname = f"offer_{offer_id[:8]}_{str(candidate['full_name']).replace(' ','_')}.pdf"
+    # Real bug fix (2026-09-06): a real candidate name with a non-Latin-1
+    # character (accent, en/em-dash, etc.) crashes a raw Content-
+    # Disposition header with an unhandled UnicodeEncodeError — confirmed
+    # live on a sibling resume-download endpoint, same fix applied here.
     return StreamingResponse(
         BytesIO(pdf_bytes),
         media_type='application/pdf',
-        headers={'Content-Disposition': f'attachment; filename="{fname}"'}
+        headers={'Content-Disposition': content_disposition_header(fname)}
     )
 
 

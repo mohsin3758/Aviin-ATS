@@ -14,7 +14,7 @@ import {
   KanbanSquare, Mail, Phone, IndianRupee, FileText, RefreshCw, Calendar,
   FileSignature, Upload, ShieldCheck, Copy, CheckSquare, Printer,
   Columns3, GripVertical, Trash2, Building2, Eye, EyeOff, ArrowLeft, Lock, Bell,
-  Maximize2, Minimize2,
+  Maximize2, Minimize2, User,
 } from 'lucide-react';
 
 // ── Stage config (fallback — overridden by /settings/pipeline-stages once loaded) ──
@@ -145,6 +145,10 @@ function PipelineInner() {
   const [selected, setSelected] = useState<any | null>(null);
   const [drawerTab, setDrawerTab] = useState('profile');
   const [candSearch, setCandSearch] = useState('');
+  // Real gap (2026-09-06, explicit ask): "KAE/KAM should be able to
+  // filter, search, and track candidates by recruiter" — the board had
+  // no way to narrow down to one recruiter's own submissions at all.
+  const [recruiterFilter, setRecruiterFilter] = useState('');
   const [activeStage, setActiveStage] = useState('all');
   const [addCandidateOpen, setAddCandidateOpen] = useState(false);
   const [booleanOpen, setBooleanOpen] = useState(false);
@@ -370,14 +374,32 @@ function PipelineInner() {
   }, [rawBoard, selected, showToast, refreshStats, refreshBoard]);
 
   const filteredApps = useCallback((apps: any[]) => {
-    if (!candSearch.trim()) return apps;
-    const q = candSearch.toLowerCase();
-    return apps.filter(a =>
-      a.candidate_name?.toLowerCase().includes(q) ||
-      a.current_designation?.toLowerCase().includes(q) ||
-      a.skills?.some((s: string) => s.toLowerCase().includes(q))
-    );
-  }, [candSearch]);
+    let out = apps;
+    if (candSearch.trim()) {
+      const q = candSearch.toLowerCase();
+      out = out.filter(a =>
+        a.candidate_name?.toLowerCase().includes(q) ||
+        a.current_designation?.toLowerCase().includes(q) ||
+        a.skills?.some((s: string) => s.toLowerCase().includes(q))
+      );
+    }
+    if (recruiterFilter) {
+      out = recruiterFilter === '__unassigned__'
+        ? out.filter(a => !a.assigned_recruiter_id)
+        : out.filter(a => a.assigned_recruiter_id === recruiterFilter);
+    }
+    return out;
+  }, [candSearch, recruiterFilter]);
+
+  // Real, distinct recruiters currently visible on THIS board — derived
+  // from the data already loaded, not a second API call.
+  const boardRecruiters = useMemo(() => {
+    const seen = new Map<string, string>();
+    Object.values(board).forEach(apps => (apps || []).forEach((a: any) => {
+      if (a.assigned_recruiter_id && a.recruiter_name) seen.set(a.assigned_recruiter_id, a.recruiter_name);
+    }));
+    return Array.from(seen.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [board]);
 
   // Within-column drag reorder — full-column resnapshot (matches the
   // backend's own approach) rather than midpoint-rank math, since a
@@ -432,12 +454,17 @@ function PipelineInner() {
   }
 
   function exportBoardCsv() {
-    const cols = ['Candidate', 'Stage', 'Score', 'Designation', 'Employer', 'Location', 'Experience', 'Notice Period (days)', 'Expected CTC', 'Email', 'Phone', 'Days in Stage'];
+    // Recruiter column added (2026-09-06, explicit ask): "recruiter
+    // ownership information should also be available in reports,
+    // analytics, and export files for performance tracking and auditing
+    // purposes" — recruiter_name now comes through from the backend's
+    // own pipeline query (LEFT JOIN users on assigned_recruiter_id).
+    const cols = ['Candidate', 'Stage', 'Recruiter', 'Score', 'Designation', 'Employer', 'Location', 'Experience', 'Notice Period (days)', 'Expected CTC', 'Email', 'Phone', 'Days in Stage'];
     const rows: string[][] = [];
     for (const stage of STAGES) {
       for (const app of (board[stage.key] || [])) {
         rows.push([
-          app.candidate_name || '', stage.label, app.fit_score != null ? String(Math.round(app.fit_score)) : '',
+          app.candidate_name || '', stage.label, app.recruiter_name || 'Unassigned', app.fit_score != null ? String(Math.round(app.fit_score)) : '',
           app.current_designation || '', app.current_employer || '', app.location || '',
           app.total_exp_mo ? gx(app.total_exp_mo) : '', app.notice_period_days != null ? String(app.notice_period_days) : '',
           app.expected_ctc != null ? String(app.expected_ctc) : '', app.email || '', app.phone || '',
@@ -463,6 +490,7 @@ function PipelineInner() {
       if (apps.length === 0) return '';
       const body = apps.map((a: any) => `<tr>
         <td>${a.candidate_name || ''}</td>
+        <td>${a.recruiter_name || 'Unassigned'}</td>
         <td>${[a.current_designation, a.current_employer].filter(Boolean).join(' @ ')}</td>
         <td>${a.fit_score != null ? Math.round(a.fit_score) + '%' : '—'}</td>
         <td>${a.total_exp_mo ? gx(a.total_exp_mo) : '—'}</td>
@@ -470,7 +498,7 @@ function PipelineInner() {
         <td>${daysSince(a.updated_at)}d</td>
       </tr>`).join('');
       return `<h3 style="color:${stage.color}">${stage.label} (${apps.length})</h3>
-        <table><thead><tr><th>Candidate</th><th>Role @ Employer</th><th>Score</th><th>Experience</th><th>Location</th><th>Days in Stage</th></tr></thead>
+        <table><thead><tr><th>Candidate</th><th>Recruiter</th><th>Role @ Employer</th><th>Score</th><th>Experience</th><th>Location</th><th>Days in Stage</th></tr></thead>
         <tbody>${body}</tbody></table>`;
     }).join('');
     win.document.write(`<!doctype html><html><head><title>${selectedJob?.title || 'Pipeline'} — Pipeline Board</title>
@@ -649,6 +677,12 @@ function PipelineInner() {
               style={{ border: 'none', background: 'none', outline: 'none', fontSize: 12, color: '#374151', width: '100%' }} />
             {candSearch && <button onClick={() => setCandSearch('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', padding: 0 }}><X size={12} /></button>}
           </div>
+          <select value={recruiterFilter} onChange={e => setRecruiterFilter(e.target.value)} data-testid="pipeline-recruiter-filter"
+            style={{ padding: '6px 10px', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, background: '#fff', color: recruiterFilter ? '#1E293B' : '#64748B' }}>
+            <option value="">All Recruiters</option>
+            <option value="__unassigned__">Unassigned</option>
+            {boardRecruiters.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
           <button onClick={refreshBoard} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 12, fontWeight: 600, color: '#64748B', cursor: 'pointer' }}>
             <RotateCcw size={13} /> Refresh
           </button>
@@ -984,6 +1018,15 @@ function KanbanCard({ app, stageColor, onClick, onNotesClick, onQuickReject, onQ
           <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.candidate_name}</div>
           <div style={{ fontSize: 10, color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {[app.current_designation, app.current_employer].filter(Boolean).join(' @ ')}
+          </div>
+          {/* Real gap (2026-09-06, explicit ask): "KAE/KAM cannot identify
+              which recruiter submitted or owns a particular candidate
+              profile" — recruiter_name now comes from the backend's own
+              pipeline query (LEFT JOIN users on assigned_recruiter_id),
+              shown on every card in every stage, not just one. */}
+          <div title={app.recruiter_email ? `${app.recruiter_name} · ${app.recruiter_email}` : app.recruiter_name}
+            style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9.5, fontWeight: 600, color: app.recruiter_name ? '#7C3AED' : '#CBD5E1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
+            <User size={9} style={{ flexShrink: 0 }} /> {app.recruiter_name || 'Unassigned'}
           </div>
         </div>
         {/* View Profile (2026-09-01, explicit ask, moved same day to the

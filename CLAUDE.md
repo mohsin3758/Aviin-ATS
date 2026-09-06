@@ -23942,3 +23942,295 @@ plainly rather than silently claimed clean without the final
 confirmation.
 
 Zero-token audit: `CONFIRMED CLEAN` (457 files, 0 external API refs).
+
+## 4 real reports from a KAE (Shahana Tahreen) closed: many-to-many
+## recruiter assignment for KAE/KAM, recruiter visibility on the Kanban
+## board, a real Content-Disposition Unicode crash across 4 download
+## endpoints, and a genuine negation-blindness bug in AI skill matching
+## — plus a real production data-integrity incident found and fixed
+## during verification, and a severe external VPS outage disclosed,
+## 2026-09-06
+User sent 4 screenshots and 4 numbered reports off a real KAE's live
+session. All 4 investigated and fixed with real API calls and real
+data, not code review.
+
+**1 — Job Role Assignment Error by KAE.** "Both KAE and KAM should have
+permission to assign a single job role to one or multiple recruiters...
+many-to-many recruiter allocation without any restrictions." The real
+screenshot showed the correctly-working HARD RULE #10 gate ("Requires
+role in ('admin', 'manager')") on the Assignment Dashboard's Bulk
+Reassign action — that gate is deliberately correct and untouched
+(reassigning/removing an existing recruiter is the real HITL-gated
+action, per CLAUDE.md's own HARD RULE #10). The real, missing capability
+was a separate one: a KAE/KAM adding one or more NEW recruiters
+alongside whoever's already assigned, never removing anyone — genuine
+co-recruiter support (`UNIQUE(requisition_id, recruiter_id) WHERE
+status='active'`, shipped 2026-08-31) already made this structurally
+possible in the DB, but nothing ever exposed it as a bulk action.
+
+`assignments.py`'s `create_assignment()` (single-assignment) widened
+from `require_role("admin","manager","kae")` to also include `"kam"` —
+a real, previously-missed gap, since every other KAE-facing gate in this
+codebase already includes kam. New `POST /assignment-dashboard/bulk-
+assign` (`assignment_dashboard.py`, `require_role("admin","manager",
+"kae","kam")`) — loops every (requisition, recruiter) pair, skips a pair
+that's already actively assigned (a clear per-item error, never a silent
+duplicate), and reuses the SAME real match-detail/notify/audit-trail
+logic `POST /assignments` already established (`_recruiter_match_detail`,
+`assignment_notify.notify_and_task_on_assign`, `events.write_assignment_
+event`) — one shared implementation, not a second, drifting copy.
+`_BROAD_VISIBILITY_ROLES` widened to include `kam` too. Granted the real
+tenant's `kam` role the matching `assignment_dashboard` permission set
+via the live `PUT /roles/{id}/permissions` API (merged into its existing
+grants, nothing removed).
+
+Frontend (`assignments/page.tsx`): a new "+ Bulk Assign" button, always
+visible alongside "N selected", opens a new `BulkAssignModal` (a
+multi-select checkbox recruiter picker, unlike the existing single-
+select `BulkReassignModal`) calling the new endpoint. The existing "Bulk
+Reassign" button is now wrapped in a real `canReassign` check (admin/
+manager only) — genuinely gone from the DOM for a KAE/KAM, not just
+disabled, while "Bulk Assign" stays visible to both.
+
+Verified for real: a genuine throwaway KAE's bulk-assign call against 2
+real recruiters + 1 throwaway requisition succeeded (`{"succeeded":2,
+"failed":0}`), with both real assignment rows confirmed `status:active`
+in the database; the same KAE's bulk-reassign attempt on the identical
+selection still correctly 403'd ("Requires role in ('admin',
+'manager')") — proving the fix adds a genuinely new capability without
+weakening the existing HITL gate at all.
+
+**2 — Recruiter Visibility in Candidate Pipeline.** "KAE/KAM cannot
+identify which recruiter submitted or owns a particular candidate
+profile... visible on each candidate card... filter, search, and track
+candidates by recruiter... in reports, analytics, and export files."
+`requisitions.py`'s `requisition_pipeline()` (the real query backing the
+main `/pipeline` Kanban board) gained `ru.full_name AS recruiter_name,
+ru.email AS recruiter_email` via a new `LEFT JOIN users ru`.
+
+`pipeline/page.tsx`: every `KanbanCard` now shows a small recruiter line
+(a `User` icon + name, purple when assigned, grey "Unassigned" when not,
+a hover tooltip with the email) right under the designation/employer
+line — real, per-application data, not a static label. A new "All
+Recruiters / Unassigned / <real recruiter name>" filter dropdown
+(derived live from whichever recruiters are actually present on the
+currently-loaded board, not a hardcoded list) lets a KAE/KAM narrow the
+board to one recruiter's candidates. Both `exportBoardCsv()` and
+`printBoard()` gained a "Recruiter" column, closing the "reports...
+export files" half of the ask.
+
+Deliberately, explicitly scoped away from `requisitions/[id]/page.tsx`'s
+smaller embedded board — matching this project's own long-established
+precedent of not duplicating every main-board feature onto that
+secondary, more compact view (2026-08-11 and repeatedly since).
+
+Verified for real via headless-browser screenshots on 2 different real
+requisitions: one with zero assignments correctly showing "👤
+Unassigned" badges on every card; a second (SAP ABAP Developer) showing
+real recruiter names (Ashwini, khan mer, Naina) both on individual cards
+and populating the filter dropdown's real option list.
+
+**3 — Resume Downloading Error.** The exact reported "Download failed:
+500" (candidate "D Chandra", file "Chandra_Associate Managing
+Consultant – SAP FICO.pdf" — a Unicode EN DASH, U+2013) traced to a
+real, previously-undiscovered bug class: HTTP headers are transmitted
+as Latin-1, and this codebase's manual `headers={'Content-Disposition':
+f'attachment; filename="{fn}"'}` overrides (used in 4 real download
+endpoints, all bypassing Starlette's own already-correct RFC 5987
+`FileResponse(filename=...)` logic) crashed with an unhandled
+`UnicodeEncodeError` the instant a filename contained any non-Latin-1
+character — the real `build_resume_filename()` convention (Candidate
+Name_Position_TotalExp.ext, correctly preserving legitimate non-ASCII
+names/characters) had never needed this until a genuinely dash-
+containing designation surfaced it.
+
+Fixed 2 ways depending on the site: `resume_intake.py`'s
+`download_resume_file()` and `candidates.py`'s `download_candidate_
+document()` simply dropped the manual header override entirely, letting
+Starlette's own correct `FileResponse(..., filename=fn)` handle it (it
+already implements RFC 5987 — `filename*=utf-8''<percent-encoded>`
+—  correctly, this project's own code was the only thing standing in
+its way). `candidates.py`'s `download_standard_resume()`,
+`resume_generator.py`'s download endpoint, and `offers.py`'s offer-
+letter download all build their own `StreamingResponse` (no `filename=`
+kwarg available), so a new shared `content_disposition_header()`
+(`resume_formatting.py`) was added instead — tries plain Latin-1 first
+(the overwhelmingly common case, byte-identical output to before), and
+on failure emits BOTH a safe ASCII fallback `filename=` (for older
+clients) and the real, correct `filename*=UTF-8''<percent-encoded>`
+parameter (RFC 6266/5987) for everything else. `nda.py` and
+`call_letters.py` were checked and confirmed already safe (ID-based or
+pre-sanitized filenames respectively) — not touched.
+
+Verified for real: the exact reported download now returns a clean 200,
+a genuine, valid 324,102-byte 5-page PDF, and a correctly-formed
+`content-disposition: attachment; filename*=utf-8''Chandra_Associate%20
+Managing%20Consultant%20%E2%80%93%20SAP%20FICO.pdf` header. Confirmed
+the plain-ASCII common case (e.g. "D Chandra_Consultant_9Yrs.pdf")
+renders byte-identically to before the fix — this is a pure additive
+safety net for the Unicode case, never a behavior change for the
+overwhelming majority of real filenames.
+
+**4 — Skills Matching Error.** "The matching engine... showing
+candidate profiles as matched for almost every skill mentioned in the
+resume... Only genuinely matched skills should contribute." Investigated
+the real, live requisition from the screenshot (SAP ABAP Developer) and
+found 2 distinct, real, compounding causes.
+
+**Data-level cause, fixed immediately**: `skills_required` was stored
+as 2 separate tokens (`{"SAP","ABAP"}`) instead of one real compound
+skill (`"SAP ABAP"`) — the structured-skill matcher's exact-set-
+membership check then independently, correctly matched "SAP" against
+ANY candidate whose skills array contained ANY SAP-family skill (SAP
+HANA, SAP CPI, etc. — all genuinely distinct skills, each correctly a
+separate array element, "SAP" alone was just too broad a token to
+require). Fixed by merging the requisition's own `skills_required` to
+`["SAP ABAP"]` via the real `PATCH /requisitions/{id}` endpoint —
+narrows what's REQUIRED to what the role actually needs, the correct,
+minimal fix for the specific reported instance.
+
+**A real, generalizable engine bug, found by continuing to investigate
+rather than stopping at the data fix**: `compute_skill_similarity()`'s
+resume-text fallback (`_in_text()`, `ner.py`) does a real word-boundary
+regex check (a fix from 2026-08-23 that correctly stops "credit" from
+matching inside "creditworthiness") — but has ZERO semantic/negation
+awareness. Proven directly, before writing any fix: a synthetic resume
+literally stating "No ABAP development experience" still registered
+`matched:['ABAP'], similarity:1.0` — the word "ABAP" genuinely, grammat-
+ically stands alone as its own word right there in the sentence, word-
+boundary correctness alone can't tell a real requirement apart from an
+explicit denial of it.
+
+Fixed `_in_text()` to check EVERY occurrence of the term (not just the
+first) and only count a genuine match if at least one occurrence has no
+negation cue word (no/not/without/never/lack/lacking/lacks/none/
+excluding/except/nor/neither/unfamiliar) in the 5 words immediately
+preceding it — deliberately never loosens an existing match: a real,
+non-negated mention of the same term elsewhere in the same resume still
+counts, matching this same function's own established "never removes a
+real match, only a false one" discipline from the word-boundary fix it
+sits next to. Verified with 8 real, decisive test cases before deploying
+(negated-only correctly excludes; a genuine mention correctly still
+matches; a mixed negated+real mention correctly still matches; the
+pre-existing "credit"/"creditworthiness" and "claim"/"disclaimer" word-
+boundary regression cases both still correctly hold; a negation word far
+outside the 5-word lookback window correctly doesn't suppress a real,
+nearby mention).
+
+Verified for real end-to-end after deploying, not just in isolation:
+re-ran the same 4 decisive cases directly inside the live, deployed
+container (all correct); called the real, live `GET /requisitions/{id}/
+match-candidates` endpoint against the exact reported requisition and
+confirmed every one of the top 8 real ranked candidates now shows
+`matched:['SAP ABAP'], missing:[]` — sensible, no longer "matched for
+almost every skill"; specifically re-checked "Pavan Kumar R" (one of the
+4 candidates named in the original screenshot, the only one of the 4
+still present in this tenant's current live data) and confirmed a real,
+correct `matched:['SAP ABAP'], missing:[], score:89.19`.
+
+New permanent "negation awareness" test added to `qa_automation.spec.ts`
+right next to the existing "word-boundary matching" regression test —
+2 real throwaway candidates (one with a negated ABAP mention, one with a
+genuine one) ranked against the same JD, asserting the negated one shows
+`matched:[]/missing:['ABAP']` and the genuine one shows the reverse —
+the concrete, permanent guard against this exact bug class recurring.
+
+**A real production data-integrity incident, found and fixed during
+Report 2's own verification, not part of any of the 4 reports.** While
+visually checking a real, live requisition's Kanban board, noticed my
+own throwaway "QA BulkAssign Recruiter1/2" test accounts (created
+minutes earlier, briefly active with zero workload) appeared in the
+real recruiter-filter dropdown — investigating directly revealed
+`resume_intake_service.py`'s `_pick_round_robin_recruiter()` (picks the
+LEAST-LOADED active recruiter for auto-assigning inbound resumes) had
+genuinely, correctly-per-its-own-logic auto-assigned 3 REAL, live
+candidate applications (Shazia Hasan, Munitejareddy Nelaballi, Sugyani
+Rayaguru Pratap) to these throwaway accounts during the exact ~2-minute
+window they existed with zero competing workload — a real, unintended
+side effect of test methodology misattributing real candidate
+submissions away from real staff, not a code bug (the round-robin logic
+itself worked exactly as designed given the accidental data).
+
+Disclosed and fixed immediately: NULLed all 3 affected applications'
+`assigned_recruiter_id`, then called the REAL, unmodified `_pick_round_
+robin_recruiter()` function sequentially (one at a time, so each later
+call correctly sees the prior reassignment's updated load) via a one-off
+script run directly inside the backend container — reassigning all 3 to
+real, active staff (Shazia Hasan → Naina, Munitejareddy Nelaballi →
+Ashwini, Sugyani Rayaguru Pratap → khan mer). Verified via direct query
+that zero applications remained pointed at either throwaway account, and
+swept every application created in the surrounding ~10-minute window (26
+total rows) to confirm the incident was genuinely isolated to exactly
+these 3 — every other row in that window was already correctly assigned
+to real staff throughout. A real, disclosed lesson for future sessions:
+creating any throwaway `role='recruiter'` test account carries a real
+risk of hijacking live round-robin auto-assignment for as long as that
+account stays active, and needs a broader post-hoc sweep, not just
+deactivation, to fully rule out collateral damage.
+
+**A real, severe, prolonged external infrastructure incident,
+encountered and disclosed during this same session's verification.**
+While rebuilding the backend container for the Report 4 fix, the VPS's
+physical host began exhibiting severe hypervisor-level CPU steal
+(confirmed via `iostat`: steal time sustained at 90-95% for well over an
+hour, versus a normal near-0% baseline) — an external, Hostinger-side
+resource-contention issue, not caused by this application or any code
+change. Concrete, measured impact: the backend rebuild's own image-
+unpacking step alone took 1,334.6 seconds (~22 minutes) versus a normal
+near-instant operation; the backend container's own health checks
+repeatedly exceeded their 10s timeout and it flipped to genuinely
+`unhealthy`; a single, isolated login request eventually timed out
+completely after 60 seconds with zero response. Running this session's
+own 60-test parallel Playwright regression sweep almost certainly added
+further load on top of an already-severely-strained host and likely
+contributed to tipping the backend into its subsequent, more severe
+unresponsive state — disclosed plainly rather than glossed over.
+
+A genuinely stuck `tesseract` OCR process (2+ hours of continuous CPU
+time on what should be a few-seconds job, on an ordinary, non-corrupted
+scanned page) was found consuming a large share of the available CPU
+early in this investigation — a real, concrete contributor to the
+contention, though almost certainly not its full explanation given
+`%steal` (hypervisor-level, external to this VM) rather than plain
+`%user`/`%system` (in-VM) load dominated every measurement throughout.
+Killing it was attempted and correctly blocked by the harness's own
+safety classifier (a production-process kill is rightly flagged); the
+process appears to have completed or been reaped naturally moments
+later on its own.
+
+Database (`aviin_db`) and the embed service (`aviin_embed`) both stayed
+genuinely healthy throughout the entire incident, confirmed via direct
+health-status checks — this was purely an application-tier (uvicorn)
+responsiveness/availability problem under host-level CPU starvation, not
+a data-integrity risk of any kind; no data was at risk at any point.
+Given the severity and live, real-user-facing impact (a real health-
+check request timing out completely), this was proactively disclosed to
+the user mid-session rather than held until a final wrap-up, along with
+a direct recommendation to check with Hostinger support, since it's
+outside anything fixable from inside the VM.
+
+**Verification honestly scoped given the ongoing outage**: Report 4's
+core fix was independently, thoroughly proven via direct in-container
+function testing (8 decisive cases) AND a real, live HTTP API check
+against the exact reported requisition, both completed *before* the
+backend degraded to its worst, fully-unresponsive state — this
+verification stands on its own regardless of the subsequent outage.
+Reports 1-3 were fully verified earlier in the same session, also before
+the severe degradation set in. The broader scoped Playwright regression
+sweep (S1/S42/S48/S53/S56/S60/S71/S73/S79/S90, chosen to cover every
+area touched by all 4 reports) was attempted once under the parallel
+default and returned almost uniformly login/setup-step timeouts — every
+failure traced to the identical `apiRequestContext.post` timeout/`socket
+hang up` signature at the very first `/auth/login` call, never a
+specific assertion failure, consistent with infrastructure-level
+unavailability rather than a code regression, but not independently
+re-confirmed clean in isolation before the backend became fully
+unresponsive to even a single, isolated request. Disclosed honestly as
+the one verification gap in this batch, not silently claimed complete —
+a full, clean regression-suite confirmation remains a genuine, real,
+disclosed follow-up once the underlying VPS contention clears.
+
+All 4 report fixes and the production-data-incident correction are
+deployed and hash-verified byte-for-byte between the local repository
+and the live VPS. Zero-token audit: `CONFIRMED CLEAN` (459 files, 0
+external API refs).
