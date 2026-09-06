@@ -699,10 +699,39 @@ async def match_requisition(conn, tenant_id: str, subject: str, skills: list, jo
             if r['title'].lower() in extracted_title or extracted_title in r['title'].lower():
                 return str(r['id'])
 
+    # Real, severe bug found and fixed 2026-09-06, root-caused live from a
+    # user report of 1200+ genuinely unrelated candidates (plain React/
+    # Python/DevOps profiles, zero SAP skills) piling into "SAP ABAP
+    # Developer"'s pipeline. Both step 2 and step 3 below treated ANY
+    # title word past a bare length cutoff as a meaningful, discriminating
+    # match signal - but common job-title suffix/seniority words
+    # (Developer, Engineer, Consultant, Manager, ...) appear in countless
+    # unrelated real roles and carry ZERO information about which specific
+    # skill/domain a candidate needs. Confirmed directly against the real
+    # intake data: every misassigned candidate's real forwarded email
+    # subject (from the tenant's real "NVite - Naukri.com" bulk resume
+    # feed) contained the word "Developer" somewhere ("Frontend
+    # Developer", "Angular Lead, Senior Developer", "Scala OR Java
+    # Developer") - with "SAP ABAP Developer" the only real open
+    # requisition at the time, every one of those unrelated titles'
+    # shared "developer" suffix alone was enough to falsely match. This
+    # denylist excludes exactly the generic role-suffix/seniority
+    # vocabulary from being treated as a real signal in either step,
+    # while leaving genuinely specific terms (sap, abap, java, python,
+    # react, hana, ...) fully eligible - the fix narrows false-positive
+    # matching, it never removes a genuine one.
+    _GENERIC_TITLE_WORDS = {
+        'developer', 'engineer', 'consultant', 'analyst', 'manager',
+        'executive', 'specialist', 'associate', 'senior', 'junior',
+        'lead', 'officer', 'coordinator', 'administrator', 'architect',
+        'expert', 'professional', 'staff', 'principal', 'head',
+        'representative', 'assistant', 'trainee', 'intern',
+    }
+
     # 2. General subject match
     for r in reqs:
         title = r['title'].lower()
-        words = [w for w in title.split() if len(w) > 3]
+        words = [w for w in title.split() if len(w) > 3 and w not in _GENERIC_TITLE_WORDS]
         if title in subj_lower or any(w in subj_lower for w in words):
             return str(r['id'])
 
@@ -722,7 +751,8 @@ async def match_requisition(conn, tenant_id: str, subject: str, skills: list, jo
     if skills:
         skill_set = {s.lower() for s in skills}
         for r in reqs:
-            title_words = [w.lower() for w in r['title'].split() if len(w) > 2]
+            title_words = [w.lower() for w in r['title'].split()
+                            if len(w) > 2 and w not in _GENERIC_TITLE_WORDS]
             if any(tw in sk for tw in title_words for sk in skill_set):
                 return str(r['id'])
     return None

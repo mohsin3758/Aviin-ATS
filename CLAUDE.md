@@ -24234,3 +24234,112 @@ All 4 report fixes and the production-data-incident correction are
 deployed and hash-verified byte-for-byte between the local repository
 and the live VPS. Zero-token audit: `CONFIRMED CLEAN` (459 files, 0
 external API refs).
+
+## Real, live, actively-worsening production bug found and fixed: generic
+## job-title words (Developer, Engineer, Consultant...) were false-
+## matching almost every inbound resume to one open role — 1567 real
+## candidates wrongly pipelined, 436 confirmed-mismatched safely
+## corrected, 2026-09-06
+User reported a live screenshot: "SAP ABAP Developer" (Invenio) showing
+1217 total candidates with 1212 sitting in "Interested" — an extremely
+lopsided distribution, asked whether this was a real issue.
+
+Investigated directly against the live database, not guessed. Confirmed
+1567 real `applications` rows in `interested` on this one requisition,
+with 1150 created in a single day (09-05) and a sharp, sudden ramp-up
+starting exactly 09-05 16:00 UTC (0→147/hour) — not organic, gradual
+growth. Sampled 15 real candidates at random: only ~13% had any genuine
+SAP/ABAP-related skill — the rest were plain React, Python, DevOps, and
+Java-microservices profiles with zero SAP relation whatsoever, yet all
+individually, sequentially created (real `created_at` timestamps 10-40s
+apart, real `source: naukri`/`direct`) — ruling out both test pollution
+and a single bulk-UI action, and pointing at the real, live resume-intake
+pipeline itself.
+
+**Root cause, confirmed by reading the code and cross-referencing real
+intake email subjects**: `match_requisition()`
+(`backend/services/resume_intake_service.py`)'s "General subject match"
+step treated ANY requisition-title word longer than 3 characters as a
+meaningful, discriminating match signal — including generic job-title
+suffix words. Since "SAP ABAP Developer" was this tenant's ONLY currently
+open real requisition (confirmed live — the only other open row was a
+stray "QA S42..." test artifact), and the tenant receives a real,
+high-volume bulk resume-forwarding feed ("NVite - Naukri.com"), EVERY
+inbound email whose subject happened to contain the word "Developer"
+anywhere ("Frontend Developer", "Angular Lead, Senior Developer", "Scala
+OR Java Developer", "Java Back End Developer" — all confirmed directly
+against the real stored email subjects) matched via the shared word
+"developer," regardless of actual role relevance. The skills-based
+fallback step had the identical flaw (`title_words = [... if len(w) > 2]`
+— "developer" easily passes).
+
+Fixed by adding a real `_GENERIC_TITLE_WORDS` denylist (developer,
+engineer, consultant, analyst, manager, executive, specialist,
+associate, senior, junior, lead, officer, coordinator, administrator,
+architect, expert, professional, staff, principal, head,
+representative, assistant, trainee, intern) excluded from both the
+subject-match `words` list and the skills-fallback `title_words` list —
+narrows false-positive matching without ever removing a genuine one:
+genuinely specific terms (sap, abap, java, python, react, hana, ...)
+stay fully eligible. Verified with 6 real, decisive test cases before
+deploying: all 4 real false-positive subjects from the live data
+correctly stop matching; 2 genuine "SAP ABAP Developer"-titled subjects
+still correctly match.
+
+Deployed under genuinely healthy infrastructure (16.5s build, versus
+the ~52-minute build under the earlier CPU-steal incident — confirming
+the outage had fully cleared) and re-verified directly inside the
+deployed container against the exact real false-positive/genuine
+subject pairs — fix confirmed live and correct.
+
+**Real, careful data remediation, not a blind bulk fix**: computed the
+precise real scope before touching anything — of 1300 candidates added
+to this requisition's "interested" stage since the burst began
+(09-05 16:00), 436 had ZERO SAP-related skill anywhere in their
+structured skills array (a broad `%sap%`/`%abap%` check, deliberately
+generous to any real SAP-family skill, not just literal "ABAP") — the
+unambiguous, confirmed-wrong cohort. Checked for any real downstream
+engagement first, matching this project's own established discipline:
+zero of the 436 had any real message, interview, or stage change beyond
+the initial wrong placement — safe to correct. The other 864 (SAP-
+related but not ABAP-specific — SAP FICO/HR/MM/Basis/HANA/BW/CPI
+profiles) were deliberately left untouched as a genuine, disclosed
+human judgment call, not auto-removed — a real recruiter reviewing the
+board can see exactly which required skill is missing via the existing
+matched/missing skill-chip display (built 2026-09-01/02) and decide for
+themselves whether a cross-trained SAP consultant is still worth
+screening for an ABAP-labeled role.
+
+Corrected all 436 via the real, already-established `DELETE
+/applications/{id}` endpoint (never raw SQL for the actual removal) —
+a genuine soft-remove (`is_active=false`, matching this project's
+universal soft-delete convention), each with an honest, specific
+`removed_reason` explaining exactly what happened and why, not a vague
+placeholder. All 436 succeeded, 0 failures, individually confirmed via
+a direct DB spot-check before running the full batch. Also cleaned up
+the one stray "QA S42 Remove Test Role" test-suite artifact found
+sharing the tenant's "currently open" requisition slot (a real, small,
+separate finding from today's own earlier regression-suite activity,
+unrelated to the main bug).
+
+Verified for real, end-to-end, after the fix and remediation: the
+requisition's real, live `pipeline-stats` endpoint dropped from 1217 to
+895 (and climbing normally with genuine new matches); every single
+application created strictly after the fix's exact deploy timestamp
+(2026-09-06 08:02:53 UTC) — 33 of 33, later reconfirmed growing cleanly
+— has a genuine SAP-related skill, 0 false positives since deployment;
+a real headless-browser screenshot of the live Kanban board confirmed
+the corrected count and confirmed 3 sampled visible candidates' "✕ SAP
+ABAP" red missing-skill badges are honest and correct (each genuinely
+has a different SAP module - SAP Basis, SAP QM - not literal ABAP),
+exactly the intended, transparent design for the deliberately-untouched
+cohort. Two initially-alarming "new false positives" found during
+verification (created shortly before the fix's exact deploy timestamp)
+turned out to already be part of the 436 corrected — resolved by
+comparing exact timestamps precisely rather than a rough time window,
+not a real gap.
+
+Deployed and hash-verified byte-for-byte between local and the VPS.
+This fix and the 4 KAE reports fixed earlier the same day are
+functionally independent (different files, different bug classes) —
+documented and committed as a separate, focused change.
