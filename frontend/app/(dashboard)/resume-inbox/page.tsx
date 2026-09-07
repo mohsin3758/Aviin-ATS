@@ -1126,17 +1126,40 @@ function ResumeInboxPageInner() {
                       </td>
                       <td style={{ padding: '10px 8px' }} onClick={() => setSelected(r)}>
                         <SourceBadge source={r.job_board || 'direct'} label={r.job_board_label || 'Direct'} />
-                        {(r.source_recruiter_name || r.received_by_name || r.owner_recruiter_name) && (
-                          <div title={r.source_recruiter_name ? `Source Recruiter: ${r.source_recruiter_name}${r.source_recruiter_registered === false ? ' (Unregistered ATS User)' : ''}` : `Received by ${r.kae_name || r.received_by_name}`}
+                        {/* Real bug fix (2026-09-07): this used to fall back
+                            to received_by_name/owner_recruiter_name (WHO
+                            RECEIVED the email) under the same "👤 source
+                            recruiter" icon whenever there was no real
+                            ownership row — and, since source_recruiter_
+                            registered defaults to false whenever ownership
+                            is absent (not just for a genuine Temporary
+                            Sender Record), the asterisk rendered too,
+                            regardless of whether it was actually the
+                            fallback path. The net effect: any external
+                            candidate's resume (no real sender to credit)
+                            silently displayed whoever's mailbox happened to
+                            receive it, mislabeled with a "*" as if they were
+                            an unregistered internal sender — this is exactly
+                            what made "Ashwini*"/etc. appear on dozens of
+                            unrelated real candidates who were never actually
+                            owned by her at all. Fixed to match the detail
+                            drawer's own, already-correct convention: this
+                            line ONLY ever shows the real source_recruiter_
+                            name, and the asterisk only ever appears alongside
+                            it — never as a mislabeled substitute. */}
+                        {r.source_recruiter_name && (
+                          <div title={`Source Recruiter: ${r.source_recruiter_name}${r.source_recruiter_registered === false ? ' (Unregistered ATS User)' : ''}`}
                             style={{ fontSize: 10, color: '#64748b', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
-                            👤 {r.source_recruiter_name || r.received_by_name || r.owner_recruiter_name}
+                            👤 {r.source_recruiter_name}
                             {r.source_recruiter_registered === false && <span style={{ color: '#b45309' }}> *</span>}
                           </div>
                         )}
                         {/* KAE (who received it) — distinct from Source
                             Recruiter above, shown only when different, to
                             avoid a redundant repeated name in the common
-                            direct-application case where sender==KAE. */}
+                            direct-application case where sender==KAE. Always
+                            shown independently now, never conflated with the
+                            source-recruiter line above. */}
                         {r.kae_name && r.kae_name !== r.source_recruiter_name && (
                           <div title={`KAE (received in): ${r.kae_name}`}
                             style={{ fontSize: 10, color: '#94a3b8', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>

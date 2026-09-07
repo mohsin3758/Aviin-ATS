@@ -102,9 +102,17 @@ async def resolve_sender_identity(conn, tenant_id: str, from_email: str,
     # readable fallback derived from the local-part (matches the existing
     # convention already used elsewhere in this codebase for this exact
     # shape of fallback).
+    #
+    # Real bug fix (2026-09-07): a raw SMTP client that never sets a real
+    # display name commonly repeats the address itself as From:'s name
+    # part (confirmed live — 1,311 of ~2,856 backfilled rows had exactly
+    # this shape) — "not empty" alone isn't enough to trust from_name as a
+    # real human name; if it just IS the email address (with or without
+    # the @domain part), treat it the same as genuinely empty.
     display_name = (from_name or '').strip()
-    if not display_name:
-        display_name = from_email.split('@')[0].replace('.', ' ').replace('-', ' ').replace('_', ' ').title()
+    local_part = from_email.split('@')[0]
+    if not display_name or display_name.lower() in (from_email.lower(), local_part.lower()):
+        display_name = local_part.replace('.', ' ').replace('-', ' ').replace('_', ' ').title()
     return {"user_id": None, "email": from_email, "name": display_name[:200],
             "registered": False, "via": "unregistered_sender"}
 

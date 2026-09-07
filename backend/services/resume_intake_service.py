@@ -1368,7 +1368,7 @@ async def _process_pending_batch_locked(tenant_id: str, limit: int, ollama_url: 
     async with db.tenant_conn(tenant_id) as conn:
         rows = await conn.fetch("""
             SELECT im.id, im.imap_uid, im.folder, im.from_email, im.from_name,
-                   im.subject, im.attachments, im.tenant_id,
+                   im.subject, im.attachments, im.tenant_id, im.account_id,
                    ua.imap_host, ua.imap_port, ua.imap_user, ua.imap_password,
                    ua.email as smtp_email, ua.display_name,
                    ua.smtp_host, ua.smtp_port, ua.smtp_user, ua.smtp_password, ua.smtp_tls
@@ -1458,7 +1458,19 @@ async def _process_pending_batch_locked(tenant_id: str, limit: int, ollama_url: 
                     conn=conn,
                     msg_id=str(row['id']),
                     tenant_id=str(row['tenant_id']),
-                    account_id=None,
+                    # Real bug fix (2026-09-07): this was hardcoded None even
+                    # though the query above already JOINs user_email_accounts
+                    # via im.account_id — resolve_sender_identity()'s external-
+                    # sender fallback (credit whoever's mailbox received it)
+                    # silently returned no owner at all for every resume this
+                    # scheduled-every-1-minute backlog processor ever handled,
+                    # since account_id is what that fallback needs to resolve
+                    # the receiving recruiter. Internal-domain senders were
+                    # unaffected (that branch never needed account_id), but a
+                    # real external candidate's resume, processed via this
+                    # path, has never granted "who received this" ownership
+                    # credit to anyone.
+                    account_id=str(row['account_id']) if row['account_id'] else None,
                     imap_uid=row['imap_uid'],
                     folder=row['folder'],
                     from_email=row['from_email'] or '',
