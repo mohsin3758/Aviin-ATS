@@ -536,6 +536,21 @@ def _idle_folder(acc, folder, label):
 
     print(f'[IMAP {label}] IDLE listener starting for {email_addr} on {folder}')
 
+    # Real bug fix (2026-09-07): this loop used to sleep a flat 10s on ANY
+    # error, including a genuine AUTHENTICATIONFAILED - meaning a single bad
+    # credential (or a transient mail-server hiccup) triggers permanent,
+    # unthrottled reconnect attempts every 10s, forever, with 4 accounts x
+    # 2 folders each hammering the mail server in parallel. Confirmed live:
+    # 1182 AUTHENTICATIONFAILED errors across all 4 real monitored mailboxes
+    # in 24h, all 4 failing simultaneously - a pattern consistent with this
+    # retry storm itself triggering the mail provider's own anti-abuse IP
+    # throttling on top of whatever the original cause was. Real exponential
+    # backoff (10s -> 20s -> 40s ... capped at 10min), reset the moment a
+    # connection genuinely succeeds again, so a real transient blip still
+    # recovers quickly while a persistent failure backs off instead of
+    # hammering the server indefinitely.
+    consecutive_failures = 0
+
     while _running:
         M = None
         try:
@@ -562,6 +577,7 @@ def _idle_folder(acc, folder, label):
                 return
 
             print(f'[IMAP {label}] IDLE active on {folder}')
+            consecutive_failures = 0
 
             while _running:
                 _run_sync_folder(acc, folder)
@@ -632,7 +648,7 @@ def _idle_folder(acc, folder, label):
                     _run_sync_folder(acc, folder)
 
         except Exception as ex:
-            print(f'[IMAP {label}] Error: {ex}')
+            print(f'[IMAP {label}] Error for {email_addr}: {ex}')
             if M:
                 try:
                     M.logout()
@@ -643,8 +659,10 @@ def _idle_folder(acc, folder, label):
             except Exception:
                 pass
             if _running:
-                print(f'[IMAP {label}] Reconnecting in 10s...')
-                time.sleep(10)
+                backoff = min(10 * (2 ** consecutive_failures), 600)
+                consecutive_failures += 1
+                print(f'[IMAP {label}] Reconnecting for {email_addr} in {backoff}s... (consecutive failures: {consecutive_failures})')
+                time.sleep(backoff)
 
     print(f'[IMAP {label}] Stopped for {email_addr}')
 
