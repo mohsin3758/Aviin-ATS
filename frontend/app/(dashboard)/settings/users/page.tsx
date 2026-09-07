@@ -5,7 +5,14 @@ import { Modal, FormField, FormRow, FormActions } from '@/components/ui/Modal';
 import { getTokenPayload } from '@/lib/auth';
 import { Plus, Search, Shield, UserCheck, UserX, Edit, Trash2, Key } from 'lucide-react';
 
-const DEPT_LIST = ['Delivery','Account Management','Sales','Finance','HR','Technology','Leadership','Operations','IT'];
+// Real, canonical department list lives server-side (backend/routers/users.py
+// DEPARTMENTS) — GET /roles/departments, built 2026-08-16, previously had zero
+// caller anywhere while this page kept its own hand-maintained, independently-
+// hardcoded copy (in sync only by coincidence, a silent-drift risk this
+// project has already found and fixed for other duplicated lists elsewhere).
+// Kept as a hardcoded fallback only for the brief window before the real
+// fetch resolves, never as the source of truth.
+const DEPT_LIST_FALLBACK = ['Delivery','Account Management','Sales','Finance','HR','Technology','Leadership','Operations','IT'];
 const EMPTY_USER = { email:'', full_name:'', role:'recruiter', department:'Delivery', designation:'', phone:'', employee_id:'', location:'', capacity_weekly:40, password:'Welcome@2026', reporting_to:'' };
 
 const ROLE_COLOR:Record<string,string> = {
@@ -76,6 +83,8 @@ export default function UsersPage() {
   useEffect(() => { const t = getTokenPayload(); setMyUserId(t?.sub || ''); setMyRole(t?.role || ''); setMounted(true); }, []);
   const { data: users, loading, refetch } = useFetch<any[]>('/users');
   const { data: roles } = useFetch<any[]>('/roles');
+  const { data: deptData } = useFetch<{departments:string[]}>('/roles/departments');
+  const DEPT_LIST = deptData?.departments?.length ? deptData.departments : DEPT_LIST_FALLBACK;
   const canManage = !mounted || ['admin','super_admin'].includes(myRole) || (() => {
     const mine = (roles||[]).find((r:any) => r.role_code === myRole);
     const perms = mine?.permissions || {};

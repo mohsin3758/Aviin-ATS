@@ -67,6 +67,15 @@ export default function ReportsPage() {
   const { data: recruiter } = useFetch<any[]>(`/reports/recruiter-performance?month=${m}&year=${y}`);
   const { data: pv } = useFetch<any[]>('/reports/pipeline-velocity');
   const { data: clients } = useFetch<any[]>('/reports/client-revenue');
+  // Both real, previously zero-frontend-caller endpoints (QA sweep finding #6,
+  // 2026-09-07) — the backend logic already existed and worked, just had
+  // nowhere to render. Fetched unconditionally (cheap, tenant-scoped reads)
+  // rather than gated behind their own tab click, so the Summary widget below
+  // shows real data on first load, not an empty flash-then-populate.
+  const { data: billing } = useFetch<any[]>('/reports/monthly-billing');
+  const { data: activeReqs } = useFetch<any[]>('/pipeline/active-requisitions');
+  const billingRows: any[] = Array.isArray(billing) ? billing : [];
+  const activeReqRows: any[] = Array.isArray(activeReqs) ? activeReqs : [];
 
   const recs: any[] = Array.isArray(recruiter) ? recruiter : [];
   const pvRows: any[] = Array.isArray(pv) ? pv.filter((r: any) => STAGE_ORDER.includes(r.stage)) : [];
@@ -77,6 +86,7 @@ export default function ReportsPage() {
     {key:'recruiter', label:'Recruiter Leaderboard'},
     {key:'pipeline', label:'Pipeline Velocity'},
     {key:'clients', label:'Client Revenue'},
+    {key:'billing', label:'Monthly Billing'},
   ];
 
   return (
@@ -261,6 +271,40 @@ export default function ReportsPage() {
               <div style={{textAlign:'center',padding:'30px',color:'#94a3b8',fontSize:'13px'}}>No recruiter data for this period</div>
             )}
           </div>
+
+          {/* Most Active Requisitions — GET /pipeline/active-requisitions,
+              real backend logic (application-count leaderboard), zero
+              frontend caller before 2026-09-07. */}
+          <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px',gridColumn:'1/-1'}}>
+            <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px',display:'flex',alignItems:'center',gap:'8px'}}>
+              <Briefcase size={15} style={{color:'#0891b2'}}/> Most Active Requisitions
+            </h3>
+            {activeReqRows.length > 0 ? (
+              <div style={{overflowX:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse'}}>
+                  <thead>
+                    <tr style={{background:'#f8fafc'}}>
+                      {['Requisition','Location','Status','Applications'].map(h =>
+                        <th key={h} style={{padding:'8px 12px',textAlign:'left',fontSize:'11px',fontWeight:'700',
+                          color:'#94a3b8',textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activeReqRows.slice(0,8).map((r:any) => (
+                      <tr key={r.id} style={{borderBottom:'1px solid #f1f5f9'}}>
+                        <td style={{padding:'10px 12px',fontSize:'13px',fontWeight:'600',color:'#0f172a'}}>{r.title}</td>
+                        <td style={{padding:'10px 12px',fontSize:'13px',color:'#64748b'}}>{r.location || '—'}</td>
+                        <td style={{padding:'10px 12px',fontSize:'13px',color:'#64748b',textTransform:'capitalize'}}>{r.status}</td>
+                        <td style={{padding:'10px 12px',fontSize:'13px',color:'#0891b2',fontWeight:'700'}}>{r.app_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{textAlign:'center',padding:'30px',color:'#94a3b8',fontSize:'13px'}}>No requisitions with applications yet</div>
+            )}
+          </div>
         </div>
       )}
 
@@ -376,6 +420,43 @@ export default function ReportsPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Monthly Billing tab — GET /reports/monthly-billing, reads the real,
+          populated v_monthly_billing view, zero frontend caller before
+          2026-09-07. */}
+      {tab === 'billing' && (
+        <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+          <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',padding:'20px'}}>
+            <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'16px'}}>Estimated Revenue by Month</h3>
+            <BarChart rows={[...billingRows].reverse()} keyX="month" keyY="estimated_revenue" color="#16a34a"/>
+          </div>
+          <div style={{background:'white',border:'1px solid #e2e8f0',borderRadius:'12px',overflow:'hidden'}}>
+            <table style={{width:'100%',borderCollapse:'collapse'}}>
+              <thead>
+                <tr style={{background:'#f8fafc',borderBottom:'2px solid #e2e8f0'}}>
+                  {['Month','Year','Placements','Roles Filled','Candidates Placed','Estimated Revenue'].map(h =>
+                    <th key={h} style={{padding:'12px 14px',textAlign:'left',fontSize:'11px',fontWeight:'700',
+                      color:'#64748b',textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {billingRows.length === 0 ? (
+                  <tr><td colSpan={6} style={{padding:'40px',textAlign:'center',color:'#94a3b8',fontSize:'13px'}}>No billing data yet</td></tr>
+                ) : billingRows.map((r:any,i:number) => (
+                  <tr key={i} style={{borderBottom:'1px solid #f1f5f9'}}>
+                    <td style={{padding:'12px 14px',fontSize:'13px',fontWeight:'600',color:'#0f172a'}}>{MONTHS[r.month] || r.month}</td>
+                    <td style={{padding:'12px 14px',fontSize:'13px',color:'#64748b'}}>{r.year}</td>
+                    <td style={{padding:'12px 14px',fontSize:'14px',fontWeight:'700',color:'#374151'}}>{r.placements}</td>
+                    <td style={{padding:'12px 14px',fontSize:'13px',color:'#64748b'}}>{r.roles_filled}</td>
+                    <td style={{padding:'12px 14px',fontSize:'13px',color:'#64748b'}}>{r.candidates_placed}</td>
+                    <td style={{padding:'12px 14px',fontSize:'13px',color:'#16a34a',fontWeight:'700'}}>{fmt(r.estimated_revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

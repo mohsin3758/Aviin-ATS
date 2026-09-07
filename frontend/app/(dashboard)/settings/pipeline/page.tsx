@@ -305,12 +305,44 @@ function AutomationRulesSection({ stages }: { stages: StageRow[] }) {
     finally { setBusyId(null); }
   }
 
+  // POST /pipeline/auto-move — the same real rule-evaluation logic the
+  // nightly scheduler already runs automatically, exposed as a genuine
+  // "run it right now" trigger (distinct code from scheduler.py's own
+  // cron function, confirmed via grep). Had zero frontend caller before
+  // 2026-09-07 despite being real, safe, and already role-gated by the
+  // page it lives on.
+  const [running, setRunning] = useState(false);
+  const [runResult, setRunResult] = useState<string>('');
+  async function runRulesNow() {
+    setRunning(true); setRunResult('');
+    try {
+      const res = await apiFetch('/pipeline/auto-move', { method: 'POST' });
+      setRunResult(res?.detail ? res.detail : `Moved ${res?.moved ?? 0} candidate(s).`);
+    } catch (e: any) { setRunResult(e?.message || 'Failed to run rules'); }
+    finally { setRunning(false); }
+  }
+
   return (
     <div style={{ marginTop: 32 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-        <Zap size={16} style={{ color: '#7c3aed' }} />
-        <h2 style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', margin: 0 }}>Pipeline Automation Rules</h2>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Zap size={16} style={{ color: '#7c3aed' }} />
+          <h2 style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', margin: 0 }}>Pipeline Automation Rules</h2>
+        </div>
+        <button onClick={runRulesNow} disabled={running || (rules || []).length === 0}
+          data-testid="run-rules-now-btn"
+          title="Evaluate every enabled rule against the current pipeline right now, instead of waiting for tonight's scheduled run"
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderRadius: 8, border: 'none',
+            background: running || (rules || []).length === 0 ? '#e2e8f0' : '#7c3aed', color: running || (rules || []).length === 0 ? '#94a3b8' : 'white',
+            cursor: running || (rules || []).length === 0 ? 'not-allowed' : 'pointer', fontSize: 12, fontWeight: 700 }}>
+          <Zap size={13} /> {running ? 'Running…' : 'Run Rules Now'}
+        </button>
       </div>
+      {runResult && (
+        <div style={{ fontSize: 12, color: '#16a34a', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '8px 12px', marginBottom: 8 }}>
+          {runResult}
+        </div>
+      )}
       <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 12px' }}>
         Auto-move candidates between stages when conditions match — evaluated nightly (zero-token, no AI involved). E.g. "Sourced → Screened when AI Match Score ≥ 70".
       </p>

@@ -102,6 +102,30 @@ async function downloadStandardResume(candidateId: string, fullName: string) {
   } catch (e) { alert('Download error: ' + String(e)); }
 }
 
+// GET /pdf/candidate-profile/{id} (backend/routers/final_features.py) — a
+// real, working, self-contained name/contact/experience/readiness-score/
+// recent-applications snapshot PDF, genuinely distinct from Standard Resume
+// (which renders the parsed RESUME content, not the ATS profile record
+// around it) — had zero frontend caller anywhere until now.
+async function downloadCandidateProfilePdf(candidateId: string, fullName: string) {
+  const token = localStorage.getItem('airecruit_token');
+  const apiBase = process.env.NEXT_PUBLIC_API_URL ?? '/api';
+  try {
+    const resp = await fetch(`${apiBase}/pdf/candidate-profile/${candidateId}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!resp.ok) { alert('Download failed: ' + resp.status); return; }
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m  = cd.match(/filename="([^"]+)"/);
+    const a2   = document.createElement('a');
+    a2.href = url; a2.download = m ? m[1] : `Profile_Snapshot_${(fullName || 'candidate').replace(/[^A-Za-z0-9_-]+/g, '_')}.pdf`;
+    document.body.appendChild(a2); a2.click(); document.body.removeChild(a2);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { alert('Download error: ' + String(e)); }
+}
+
 // ── Edit Modal ────────────────────────────────────────────────────────────────
 function EditModal({ cand, onClose, onSaved }: { cand: any; onClose: ()=>void; onSaved: (updated: any)=>void }) {
   const [form, setForm] = useState({
@@ -1730,6 +1754,13 @@ export default function CandidateProfilePage() {
                 style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
                   border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#0f766e',whiteSpace:'nowrap'}}>
                 <Download size={13}/> Standard Resume (PDF)
+              </button>
+              <button onClick={() => downloadCandidateProfilePdf(candidate.id, candidate.full_name)}
+                title="A one-page ATS profile snapshot — name, contact, experience, AI readiness score, and recent applications — distinct from the resume content itself"
+                data-testid="download-profile-snapshot-btn"
+                style={{display:'flex',alignItems:'center',gap:'6px',padding:'8px 14px',borderRadius:'8px',
+                  border:'1px solid #e2e8f0',background:'white',cursor:'pointer',fontSize:'13px',fontWeight:'600',color:'#374151',whiteSpace:'nowrap'}}>
+                <Download size={13}/> Profile Snapshot (PDF)
               </button>
               <button onClick={() => setResumeGenOpen(true)}
                 title="Generate a privacy-controlled, company-replaced, or project-focused resume version — the original is never modified"

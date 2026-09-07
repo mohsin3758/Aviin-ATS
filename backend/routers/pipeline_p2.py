@@ -865,58 +865,19 @@ async def get_copilot(actor: Actor = Depends(get_actor)):
 # page and GET /candidates/{id}'s own ai_scores, so nothing user-facing
 # is lost.
 
-# ── Post-move Rule Check (Round 3 — auto-trigger after manual move) ───────────
-@metrics_router.post("/check-rules/{application_id}")
-async def check_rules_for_application(application_id: str, bg: BackgroundTasks, actor: Actor = Depends(get_actor)):
-    """After a manual move: check if any rules apply to the new stage and auto-move if matched."""
-    moved = []
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        # Get current state of this application
-        app = await conn.fetchrow("""
-            SELECT a.id, a.stage, a.candidate_id, a.fit_score,
-                   c.total_exp_mo, c.ai_match_score, c.expected_ctc,
-                   c.notice_period_days, c.full_name, c.email, c.phone,
-                   cs.readiness_index
-            FROM applications a JOIN candidates c ON c.id=a.candidate_id
-            LEFT JOIN LATERAL (
-                SELECT readiness_index FROM candidate_scores cs
-                WHERE cs.candidate_id=c.id AND cs.tenant_id=a.tenant_id
-                  AND cs.requisition_id=a.requisition_id
-                ORDER BY cs.scored_at DESC LIMIT 1
-            ) cs ON true
-            WHERE a.id=$1 AND a.tenant_id=$2
-        """, application_id, actor.tenant_id)
-
-        if not app:
-            return {"moved": 0, "stage": None}
-
-        # Find rules where stage_from = current stage
-        rules = await conn.fetch("""
-            SELECT id, name, stage_from, stage_to, conditions FROM stage_rules
-            WHERE enabled=TRUE AND stage_from=$1 AND tenant_id=$2
-        """, app["stage"], actor.tenant_id)
-
-        for rule in rules:
-            if not await is_valid_stage(conn, actor.tenant_id, rule["stage_to"]):
-                continue  # rule targets a since-deleted stage — skip, don't write it
-            conds = rule["conditions"] if isinstance(rule["conditions"], list) else json.loads(rule["conditions"] or "[]")
-            if all(_eval(app.get(co.get("field")), co.get("op",">"), co.get("value",0)) for co in conds):
-                # Rule matches — auto-move
-                await conn.execute("UPDATE applications SET stage=$1, updated_at=NOW() WHERE id=$2", rule["stage_to"], app["id"])
-                await conn.execute("""
-                    INSERT INTO pipeline_movements (id,tenant_id,candidate_id,application_id,stage_from,stage_to,reason,triggered_by)
-                    VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'post_move_rule',$6)
-                """, actor.tenant_id, app["candidate_id"], app["id"], app["stage"], rule["stage_to"], f"rule:{rule['name']}")
-                payload = {
-                    "candidate_name": app["full_name"], "email": app["email"], "phone": app["phone"],
-                    "stage_from": app["stage"], "stage_to": rule["stage_to"],
-                    "rule_name": rule["name"], "timestamp": datetime.utcnow().isoformat()
-                }
-                bg.add_task(notify_n8n, payload)
-                moved.append({"candidate": app["full_name"], "from": app["stage"], "to": rule["stage_to"], "rule": rule["name"]})
-                break  # One rule at a time
-
-    return {"moved": len(moved), "details": moved, "current_stage": app["stage"] if app else None}
+# ── Post-move Rule Check — retired 2026-09-07 ─────────────────────────────────
+# POST /pipeline/check-rules/{application_id}'s own docstring claimed "After a
+# manual move: check if any rules apply" — but confirmed via a whole-backend
+# grep it was never actually called from update_stage() or anywhere else, in
+# this codebase's history or today: the described behavior never happened,
+# and zero frontend caller existed either. Worse than a plain orphan — a
+# reader trusting the docstring would believe manual moves trigger automation
+# they never do. The real, working equivalent (POST /pipeline/auto-move, plus
+# the nightly scheduler.py::run_pipeline_auto_move() cron) already covers this
+# same rule-evaluation logic against every stage, on a schedule, matching the
+# "evaluated nightly" copy already shown on Settings > Pipeline Automation
+# Rules — so nothing user-facing is lost by retiring this specific, unused,
+# misleadingly-documented endpoint.
 
 
 # ── Active Requisitions sorted by application count ───────────────────────────

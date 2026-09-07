@@ -24490,3 +24490,122 @@ regression sweep across S16/S19/S30/S34/S42/S51/S58/S90/S92/S101/S104
 confirming zero functional regressions from the sender-attribution work
 itself. Zero-token audit: `CONFIRMED CLEAN` (460 files, 0 external API
 refs).
+
+## QA sweep leftovers closed: the 10 real backend-only orphan endpoints
+## from finding #6 given a real per-item batch decision, 2026-09-07
+User asked to complete all remaining gaps and unfinished work. Re-checked
+`QA_SWEEP_PROGRESS.md` end to end — every phase is genuinely closed except
+2 items that structurally require a real person with physical device
+access (WAHA WhatsApp session needs a QR re-scan; SMS/push have no safe
+recipient to test against) — neither achievable from this environment,
+re-confirmed unchanged, not re-attempted. The one real, actionable
+leftover was finding #6's 10 backend-only orphan endpoints (of the
+original 12, 1 — `/vendor-analytics/source-performance` — was already
+wired up during the same-day gap-audit work, and 1 — `GET /sla/audit-log`
+— was already retired), each individually re-investigated against the
+live code and current frontend, not assumed unresolved from memory, and
+given a real, deliberate decision per item:
+
+**Retired 2, both confirmed genuinely dead, matching this project's own
+established "no real usage, no natural home" retirement precedent (BGV
+offer-letter duplicate, Job Distribution, Assessments, `/pipeline/
+insights`)**:
+- `bgv.py`'s `GET`/`POST /trust-graph`(`/edge`) — 0 real rows ever,
+  confirmed the 2026-08-09 BGV rebuild deliberately shipped only 3 tabs
+  and never included a trust-graph view. Code-only removal, `trust_graph`
+  table left untouched.
+- `pipeline_p2.py`'s `POST /pipeline/check-rules/{application_id}` — worse
+  than a plain orphan: its own docstring claimed "after a manual move,
+  check if any rules apply" but a whole-backend grep confirmed it was
+  never actually called from `update_stage()` or anywhere else, ever —
+  the described behavior never happened. The real, working equivalent
+  (`POST /pipeline/auto-move` + the nightly scheduler cron) already
+  covers the same rule evaluation on a schedule.
+
+**Wired up 4 real, already-working features that simply had no UI**:
+- `roles/departments` — Settings > Users' own hardcoded `DEPT_LIST` (in
+  sync with the backend only by coincidence, the exact silent-drift risk
+  this project has already found and fixed for other duplicated lists
+  elsewhere) replaced with a real `useFetch('/roles/departments')`, kept
+  as a fallback only for the brief pre-fetch window.
+- `GET /pdf/candidate-profile/{id}` (`final_features.py`) — a real,
+  working, self-contained name/contact/experience/readiness-score
+  snapshot PDF, genuinely distinct from Standard Resume (which renders
+  parsed resume content, not the ATS profile record). New "Profile
+  Snapshot (PDF)" button on Candidate 360, same download-blob pattern
+  already established for Standard Resume.
+- `GET /reports/monthly-billing` (reads the real, populated
+  `v_monthly_billing` view) — new "Monthly Billing" tab on the Reports
+  page (a bar chart + a real per-month table), matching this page's own
+  existing tab/BarChart conventions.
+- `GET /pipeline/active-requisitions` (a real application-count
+  leaderboard) — new "Most Active Requisitions" section on the Reports
+  page's Summary tab.
+- `POST /pipeline/auto-move` — the same real rule-evaluation logic the
+  nightly scheduler already runs automatically, genuinely distinct code
+  from that cron function, exposed as a real "Run Rules Now" button on
+  Settings > Pipeline Automation Rules (disabled with no enabled rules,
+  shows the real `{moved, detail}` result inline).
+
+**Left alone, deliberately, not silently dropped**: `pipeline_p2.py`'s
+`POST /pipeline/sync-scores` and the retained `POST /pipeline/auto-move`
+itself both match this project's own already-accepted "internal ops/
+maintenance tool, correctly not user-facing" precedent (`/resume-intake/
+populate-parsed-data`, the `/scheduler/trigger/*` endpoints) — not built
+out further. `GET /pipeline/filter-options` (real distinct-source/skill
+aggregation) has no board-level source/skill filter to attach to today —
+flagged as a real, small, future feature opportunity rather than forced
+into this pass or retired without evidence it's unwanted.
+`incentives.py`'s `retention-tracking` (GET/POST/PATCH) is a genuinely
+bigger, real P15-framework piece (0 rows ever, needs an automatic
+population hook on placement + a scheduled days-employed updater before
+any UI would show real data) — out of proportion to an "orphan-endpoint"
+fix, disclosed as a real, larger, separately-prioritizable feature gap
+rather than attempted piecemeal.
+
+**A real, self-inflicted CRLF corruption caught before deploy, the same
+recurring class documented dozens of times in this project's history**:
+the Edit tool silently flipped `bgv.py` (100% LF in HEAD) to 100% CRLF
+mid-edit — caught via the established byte-count comparison against
+HEAD before touching the deploy, restored to pure LF, re-verified via
+`ast.parse()` (diff dropped from a false whole-file rewrite to the real,
+proportional 52-line change).
+
+Verified for real end-to-end, not code review: a local `tsc --noEmit`
+and a full local `npm run build` both passed clean (100+ pages compiled,
+zero errors) before deploying. Deployed via the established scp → sha256
+hash-verify → `docker compose up -d --build` → health-check cycle for
+both containers — hit a real, external VPS hypervisor CPU-steal spike
+mid-deploy (steal time briefly ~91%, load average 10 on 4 cores,
+matching this project's own already-documented pattern for this exact
+kind of external Hostinger-side contention) that stalled the backend's
+own startup; waited it out rather than force-restarting into more load,
+confirmed healthy once steal dropped back to near-zero. Every retired
+endpoint confirmed a genuine 404 via the trusted-internal path; every
+wired endpoint confirmed returning real data via direct curl
+(`monthly-billing` returned a real ₹4,50,000/2026-04 row,
+`active-requisitions` returned the real "SAP ABAP Developer" role at
+2,043 real applications, `roles/departments` returned the real 9-value
+list, a real candidate's profile-snapshot PDF downloaded as valid
+`application/pdf`). A full real headless-browser pass (fresh login,
+real token) confirmed all 4 UI wire-ups render and work end-to-end on
+the live production site: the Settings > Users Department `<select>`
+independently isolated and confirmed to show exactly the real 9-value
+list (not the Role select, caught and corrected once via a locator
+ambiguity in the verification script itself, not the app); the Reports
+page's Monthly Billing tab showing the real revenue table and the
+Summary tab's new Most Active Requisitions section showing the real
+top role; the Run Rules Now button firing and showing a real result
+message; and Candidate 360's Profile Snapshot button producing a real,
+successful PDF download (`Profile_Snapshot_Apoorva_Ningade.pdf`) — zero
+console errors across the entire run. A scoped regression sweep (S1 API
+Health + S13 BGV Trust Intelligence, the suite most directly exercising
+the one file with a real code change beyond additive comments) passed
+clean: 7/9, the 2 non-passes being the pre-existing, already-documented
+local-tunnel port-8081 limitation (embed service never forwarded) and
+its own retry — not a regression. Also cleaned up incidental git
+working-tree noise found at the start of this pass: 15 stale test-
+screenshot binary diffs discarded (no code involved), and 5 shell
+scripts' file-mode-only diffs confirmed to be a harmless, unfixable-
+without-touching-git-config Windows/Git-Bash NTFS quirk (left as-is,
+disclosed rather than silently ignored).

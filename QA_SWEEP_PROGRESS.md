@@ -1849,12 +1849,30 @@ over, and each has a clear reason it wasn't unilaterally acted on.
      endpoint) — a real "two copies of the same list, silent-drift
      risk" pattern already documented and fixed for other lists
      elsewhere in this project, just not yet actually drifted here.
-   None of these 12 are fixed yet — cataloged for a batch decision
-   (build real UI vs. retire, per item) rather than assumed unilaterally,
-   matching this project's own established precedent for exactly this
-   judgment call (e.g. BGV API, Job Distribution, Assessments — all
-   retired rather than UI'd, on a case-by-case basis, in this project's
-   history).
+   None of these 12 were fixed at the time this finding was written —
+   cataloged for a batch decision (build real UI vs. retire, per item)
+   rather than assumed unilaterally, matching this project's own
+   established precedent for exactly this judgment call (e.g. BGV API,
+   Job Distribution, Assessments — all retired rather than UI'd, on a
+   case-by-case basis, in this project's history).
+
+   **Batch decision made and executed 2026-09-07** (1 of the 12 —
+   vendor_analytics source-performance — had already been separately
+   wired up during the same-day gap-audit work; 1 — GET /sla/audit-log —
+   had already been retired per finding #8; this closes the remaining
+   10): retired `bgv.py`'s trust-graph pair and `pipeline_p2.py`'s
+   `check-rules/{id}` (both confirmed genuinely dead, no real usage, no
+   UI plan); wired up 4 real, working features that just had no UI
+   (`roles/departments` → Settings > Users' department dropdown,
+   candidate-profile PDF → a new Candidate 360 button, monthly-billing →
+   a new Reports tab, active-requisitions → a new Reports Summary
+   section); deliberately left `sync-scores`/`auto-move` as legitimate
+   ops tooling (matching the `populate-parsed-data`/`scheduler/trigger/*`
+   precedent) and `filter-options`/`retention-tracking` as real, disclosed,
+   out-of-proportion-for-this-pass items rather than force-built or
+   silently dropped. Full detail, including real end-to-end verification
+   (backend curl checks, a real headless-browser pass, a scoped
+   regression sweep), in CLAUDE.md's own dated 2026-09-07 entry.
 7. **4 confirmed FALSE POSITIVES from the automated first pass** (real,
    working, genuinely wired features that the static-string-matching
    script couldn't see) — recorded so a future re-run of the same

@@ -163,46 +163,18 @@ async def trust_score(candidate_id: str, actor: Actor = Depends(get_actor)):
     return d
 
 
-# ─── Trust Graph ──────────────────────────────────────────────────────────────
-
-class TrustEdgeCreate(BaseModel):
-    source_type: str
-    source_id: str
-    target_type: str
-    target_id: str
-    edge_type: str
-    weight: float = 1.0
-    metadata: dict = {}
-
-
-@router.get("/trust-graph")
-async def list_trust_edges(actor: Actor = Depends(get_actor)):
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch(
-            """SELECT id, source_type, source_id, target_type, target_id,
-                      edge_type, weight, metadata, created_at
-               FROM trust_graph
-               ORDER BY created_at DESC
-               LIMIT 100""",
-        )
-    return [dict(r) for r in rows]
-
-
-@router.post("/trust-graph/edge")
-async def add_trust_edge(body: TrustEdgeCreate, actor: Actor = Depends(require_permission("bgv_checks", "create"))):
-    async with db.tenant_conn(actor.tenant_id) as conn:
-        row = await conn.fetchrow(
-            """INSERT INTO trust_graph
-               (tenant_id, source_type, source_id, target_type, target_id,
-                edge_type, weight, metadata)
-               VALUES ($1,$2,$3::uuid,$4,$5::uuid,$6,$7,$8)
-               RETURNING id, edge_type, weight, created_at""",
-            actor.tenant_id,
-            body.source_type, body.source_id,
-            body.target_type, body.target_id,
-            body.edge_type, body.weight, body.metadata or {},
-        )
-    return dict(row)
+# ─── Trust Graph — retired 2026-09-07 ──────────────────────────────────────────
+# GET/POST /bgv/trust-graph(/edge) had zero real rows, ever (confirmed via a
+# direct count) and zero frontend callers anywhere (confirmed via a whole-
+# frontend grep) — the 2026-08-09 BGV rebuild deliberately shipped only 3 tabs
+# (Overview/Checks/India Verify) and never included a trust-graph view. Given
+# no real usage and no concrete UI plan to preserve, retired outright rather
+# than built out, matching this project's own established "genuinely unused,
+# no natural home" retirement pattern (BGV offer-letter duplicate, Job
+# Distribution, Assessments, the pipeline/insights AI endpoint). The
+# `trust_graph` table itself is left untouched — this is a code-only removal,
+# not a schema change, and reversible if a real relationship-graph feature is
+# ever prioritized.
 
 
 # Offer-letter generation used to live here as a second, non-overlapping-
