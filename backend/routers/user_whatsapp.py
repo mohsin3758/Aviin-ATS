@@ -172,9 +172,47 @@ async def start_my_session(actor: Actor = Depends(get_actor)):
             "Ask an admin to free up a slot (Ops Settings > WhatsApp Sessions) or raise the limit.",
         )
 
+    # Real bug fix (2026-09-07): this used to create the session with
+    # config.webhooks=[] - meaning a personal number never had inbound
+    # routing configured at all, ever, since this feature was built.
+    # whatsapp_bot.py's webhook handler already knows how to resolve
+    # WAHA's own `session` field back to the receiving personal account
+    # (built 2026-08-27) - it just never received an event to resolve,
+    # because nothing here ever told WAHA where to send them.
+    #
+    # Two real, compounding bugs found live while deploying the first
+    # attempt at this fix, not assumed: (1) `aviin_backend` (the
+    # container name, with an underscore) resolves fine via Docker's own
+    # DNS but FAILS WAHA's own strict URL validator - confirmed live,
+    # `POST /api/sessions` with that hostname returns a genuine 400
+    # "config.webhooks.0.url must be a URL address" (underscores aren't
+    # valid hostname characters per RFC 1123, and WAHA's validator is
+    # stricter than Docker's own lenient resolver). The plain service
+    # alias `backend` (no underscore) is the one CLAUDE.md's own history
+    # already documented as set-by-hand on the shared "default"/"aviin"
+    # sessions for exactly this reason - reused here instead of guessing.
+    # (2) `POST /api/sessions` on a session that ALREADY EXISTS (e.g.
+    # this exact recovery case - a real, previously-connected personal
+    # session that failed and is being restarted) doesn't update its
+    # config at all - it returns a genuine 422 "Session already exists.
+    # Use PUT to update it." Both failures were previously silently
+    # discarded (the POST's own response was never checked), so this
+    # fix genuinely never took effect for the one recovery case that
+    # actually needed it. Fixed by trying POST (the real first-ever-
+    # connect case) and falling back to PUT on any non-2xx response
+    # (the recovery/reconnect case) - verified both paths live before
+    # trusting this.
+    backend_url = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8080")
+    webhook_url = f"{backend_url}/whatsapp-bot/webhook"
+    webhook_cfg = {"config": {"webhooks": [
+        {"url": webhook_url, "events": ["message", "session.status"]}
+    ]}}
     async with httpx.AsyncClient(timeout=15) as client:
-        await client.post(f"{WAHA_BASE}/api/sessions", headers=_waha_headers(),
-                          json={"name": session_name, "config": {"webhooks": []}})
+        create_res = await client.post(f"{WAHA_BASE}/api/sessions", headers=_waha_headers(),
+                          json={"name": session_name, **webhook_cfg})
+        if create_res.status_code >= 300:
+            await client.put(f"{WAHA_BASE}/api/sessions/{session_name}", headers=_waha_headers(),
+                             json=webhook_cfg)
         await client.post(f"{WAHA_BASE}/api/sessions/{session_name}/start", headers=_waha_headers())
 
     async with db.tenant_conn(actor.tenant_id) as conn:

@@ -638,13 +638,34 @@ async def waha_start(actor: Actor = Depends(require_role("admin", "manager"))):
     """Start WAHA session."""
     try:
         import httpx
-        BACKEND_URL = os.getenv("BACKEND_INTERNAL_URL", "http://aviin_backend:8080")
+        # Real bug fix (2026-09-07): `aviin_backend` (the container name,
+        # with an underscore) resolves fine via Docker's own lenient DNS
+        # but FAILS WAHA's own strict URL validator (confirmed live -
+        # POST /api/sessions with that hostname returns a genuine 400
+        # "config.webhooks.0.url must be a URL address"; underscores
+        # aren't valid hostname characters per RFC 1123). This is very
+        # likely why this session's webhook has only ever worked because
+        # it was set by hand outside this code (CLAUDE.md's own 2026-08-08
+        # entry already flagged that as unconfirmed) - this endpoint's own
+        # POST call has probably always silently failed the same way.
+        # Fixed to `backend` (the plain service alias, no underscore,
+        # confirmed live-resolvable to the same real IP). Also: POST
+        # /api/sessions on an ALREADY-EXISTING session (the normal case
+        # for a reconnect) doesn't update its config at all - it returns
+        # a genuine 422 "Session already exists. Use PUT to update it.",
+        # previously discarded since the response was never checked.
+        # Falls back to PUT on any non-2xx create response.
+        BACKEND_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8080")
         webhook_url = f"{BACKEND_URL}/whatsapp-bot/webhook"
+        webhook_cfg = {"config": {"webhooks": [{"url": webhook_url, "events": ["message", "session.status"]}]}}
         async with httpx.AsyncClient(timeout=10.0) as cli:
             # Ensure session exists with correct webhook
-            await cli.post(f"{WAHA_BASE}/api/sessions",
+            create_res = await cli.post(f"{WAHA_BASE}/api/sessions",
                           headers={"X-Api-Key": WAHA_KEY},
-                          json={"name": "default", "config": {"webhooks": [{"url": webhook_url, "events": ["message", "session.status"]}]}})
+                          json={"name": "default", **webhook_cfg})
+            if create_res.status_code >= 300:
+                await cli.put(f"{WAHA_BASE}/api/sessions/default",
+                              headers={"X-Api-Key": WAHA_KEY}, json=webhook_cfg)
             # Start session
             r = await cli.post(f"{WAHA_BASE}/api/sessions/default/start",
                                headers={"X-Api-Key": WAHA_KEY})
