@@ -29,6 +29,12 @@ interface ResumeItem {
   id: string; job_board: string; job_board_label: string; source_email: string;
   file_name: string; file_path: string; mime_type: string; file_size: number;
   parse_status: string; created_at: string; parsed_data: ParsedData;
+  // Real gap fix (2026-09-08): these were real, captured DB columns
+  // (resume_files.error_msg/parse_confidence) that nothing anywhere ever
+  // showed a reviewer — a "needs review"/"low confidence"/"rejected" item
+  // gave zero indication of WHY, even when the system had already
+  // recorded a real reason. Now surfaced in the detail drawer.
+  error_msg?: string; parse_confidence?: number;
   candidate_id?: string; full_name?: string; email?: string; phone?: string;
   skills?: string[]; total_exp_mo?: number; location?: string;
   current_employer?: string; current_designation?: string; source_label?: string;
@@ -310,6 +316,26 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
             </a>
           )}
         </div>
+
+        {/* Real gap fix (2026-09-08): error_msg/parse_confidence are real,
+            captured columns (resume_files) that were never shown anywhere
+            — a needs_review/low_confidence/rejected item gave zero
+            indication of WHY, even when the system already knew. */}
+        {(item.error_msg || item.parse_confidence != null) && (
+          <div style={{ background: item.error_msg ? '#fef2f2' : '#f8fafc', border: `1px solid ${item.error_msg ? '#fecaca' : '#e2e8f0'}`, borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
+            {item.error_msg && (
+              <>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#b91c1c', marginBottom: 4 }}>⚠ WHY THIS NEEDS ATTENTION</div>
+                <div style={{ fontSize: 12, color: '#7f1d1d' }}>{item.error_msg}</div>
+              </>
+            )}
+            {item.parse_confidence != null && (
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: item.error_msg ? 6 : 0 }}>
+                Parse confidence: <b style={{ color: '#374151' }}>{(item.parse_confidence * 100).toFixed(0)}%</b>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* JD Match Card — shown when we have a match score */}
         {matchScore != null && (
@@ -918,7 +944,14 @@ function ResumeInboxPageInner() {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
         <KpiCard label="Resumes Today" value={today.total_today} color="#1e40af" Icon={Inbox} />
         <KpiCard label="Candidates Created" value={today.candidates_today} color="#059669" Icon={User} />
-        <KpiCard label="Review Needed" value={statusFilter === 'done' ? items.length : undefined} color="#f59e0b" Icon={Clock} sub="status=done" />
+        {/* Real bug fix (2026-09-08): this used to only ever populate
+            while the current filter tab happened to already be exactly
+            "done" — a filter state that had no button anywhere to reach,
+            so this card always showed 0 for every real user. Now reads
+            the real, independently-computed stats.pending_review count
+            (2,099 real resumes on this tenant), regardless of which
+            filter tab is currently active. */}
+        <KpiCard label="Pending Review" value={stats?.pending_review} color="#f59e0b" Icon={Clock} sub="re-parsed, awaiting a decision" />
         <KpiCard label="Total Auto-Created" value={stats?.total_auto_candidates} color="#0f766e" Icon={CheckCircle} />
         <KpiCard label="Pending Processing" value={stats?.pending_emails} color="#7c3aed" Icon={Zap} />
         {avgMatch != null && <KpiCard label="Avg JD Match" value={`${avgMatch}%`} color="#0891b2" Icon={Target} sub={`${withMatch} scored`} />}
@@ -943,7 +976,11 @@ function ResumeInboxPageInner() {
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name, email, file, subject…" style={{ width: '100%', padding: '8px 12px 8px 30px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, background: '#fff', boxSizing: 'border-box' }} />
         </div>
 
-        {['all', 'auto_accepted', 'needs_review', 'low_confidence', 'approved', 'rejected'].map(s => <button key={s} data-testid={`resume-inbox-status-${s}`} onClick={() => updateStatusFilter(s)} style={{ padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: statusFilter === s ? '#1e40af' : '#fff', color: statusFilter === s ? '#fff' : '#64748b', border: '1px solid ' + (statusFilter === s ? '#1e40af' : '#e2e8f0'), textTransform: 'capitalize', whiteSpace: 'nowrap' }}>{s === 'auto_accepted' ? 'Auto-Accepted' : s === 'needs_review' ? 'Review Needed' : s === 'low_confidence' ? 'Manual Entry' : s}</button>)}
+        {/* Real bug fix (2026-09-08): 'done' (set by the Re-parse action —
+            2,099 real rows on this tenant) had no filter button at all,
+            making the single largest real review backlog unreachable
+            through the UI except via a hand-typed ?status=done URL param. */}
+        {['all', 'auto_accepted', 'needs_review', 'done', 'low_confidence', 'approved', 'rejected'].map(s => <button key={s} data-testid={`resume-inbox-status-${s}`} onClick={() => updateStatusFilter(s)} style={{ padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: statusFilter === s ? '#1e40af' : '#fff', color: statusFilter === s ? '#fff' : '#64748b', border: '1px solid ' + (statusFilter === s ? '#1e40af' : '#e2e8f0'), textTransform: 'capitalize', whiteSpace: 'nowrap' }}>{s === 'auto_accepted' ? 'Auto-Accepted' : s === 'needs_review' ? 'Review Needed' : s === 'done' ? 'Re-parsed' : s === 'low_confidence' ? 'Manual Entry' : s}</button>)}
 
         <div style={{ display:'flex', alignItems:'center', gap:6 }}>
         <select value={jobFilter} onChange={e => { setJobFilter(e.target.value); if (typeof window !== 'undefined') { const u = new URL(window.location.href); if (e.target.value) u.searchParams.set('req', e.target.value); else u.searchParams.delete('req'); window.history.replaceState({}, '', u.toString()); }}} style={{ padding: '8px 12px', border: `1px solid ${jobFilter ? '#7c3aed' : '#e2e8f0'}`, borderRadius: 8, fontSize: 13, background: jobFilter ? '#faf5ff' : '#fff', cursor: 'pointer', minWidth: 140, fontWeight: jobFilter ? 700 : 400, color: jobFilter ? '#7c3aed' : undefined }}>

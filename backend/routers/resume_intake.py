@@ -107,10 +107,27 @@ async def intake_stats(owned: str = Query(None), actor: Actor = Depends(get_acto
                   AND (im.auto_processed IS NOT TRUE)
                   AND im.attachments IS NOT NULL AND im.attachments!='[]'""",
                 actor.tenant_id)
+        # Real bug fix (2026-09-08): parse_status='done' (set by the
+        # Re-parse action) was a real, sizeable backlog — 2,099 rows on
+        # this tenant at the time this was found — with no status-filter
+        # button anywhere in the UI to reach it, and the "Review Needed"
+        # KPI card's own sub-label ("status=done") was structurally
+        # impossible to populate for anyone since that filter state could
+        # only ever be set via a hand-typed URL param, never a click.
+        # This is the real, independently-scoped count that card now
+        # reads, instead of the old `statusFilter==='done' ? items.length
+        # : undefined` hack (which showed nothing for basically everyone).
+        pending_review = await conn.fetchval(f"""
+            SELECT COUNT(*) FROM resume_files rf
+            LEFT JOIN candidates c ON c.id = rf.candidate_id
+            WHERE rf.tenant_id=$1 AND rf.parse_status='done'
+              AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE){mine_cond}""",
+            actor.tenant_id, *mine_params)
     return {
         'today': dict(today) if today else {},
         'total_auto_candidates': total_auto,
         'pending_emails': pending,
+        'pending_review': pending_review,
         'by_source': [dict(r) for r in by_source],
     }
 
@@ -197,6 +214,7 @@ async def intake_queue(
             SELECT rf.id, rf.job_board, rf.job_board_label, rf.source_email,
                    rf.file_name, rf.file_path, rf.mime_type, rf.file_size,
                    rf.parse_status, rf.created_at, rf.parsed_data, rf.requisition_id,
+                   rf.error_msg, rf.parse_confidence,
                    c.id as candidate_id, c.full_name, c.email, c.phone,
                    c.skills, c.total_exp_mo, c.location, c.current_employer,
                    c.current_designation, c.source_label, c.auto_created, c.jd_match_score,
@@ -550,6 +568,15 @@ async def merge_candidates(cand_id: str, merge_id: str, actor: Actor = Depends(g
     from services.dedup_service import merge_duplicate_candidates
     async with db.tenant_conn(actor.tenant_id) as conn:
         result = await merge_duplicate_candidates(conn, str(actor.tenant_id), cand_id, merge_id)
+        if 'error' not in result:
+            # Real bug fix (2026-09-08), same dedup_status gap as the
+            # check above — a completed merge is the clearest possible
+            # "this is resolved" signal; re-link (already handled by
+            # merge_duplicate_candidates) means every resume_files row
+            # now pointing at the survivor was just part of a real merge.
+            await conn.execute(
+                "UPDATE resume_files SET dedup_status='merged' WHERE tenant_id=$1 AND candidate_id=$2",
+                actor.tenant_id, cand_id)
     if 'error' in result:
         raise HTTPException(404, result['error'])
     return result
@@ -575,6 +602,19 @@ async def find_duplicates(cand_id: str, actor: Actor = Depends(get_actor)):
             'current_company': cand['current_employer'],
         }
         result = await check_duplicate(conn, str(actor.tenant_id), parsed)
+        # Real bug fix (2026-09-08): dedup_status is a real, dedicated
+        # resume_files column — but nothing anywhere ever wrote to it
+        # (confirmed live: all 7,701 rows on this tenant sat at the
+        # default 'new' forever). The one real signal that exists is
+        # this check actually running — persist its outcome onto every
+        # resume_files row tied to this candidate, so a later reviewer
+        # (or a future "already vetted" filter) doesn't have to guess
+        # whether a dup check ever happened.
+        found_real_dup = result.matched_candidate_id and result.matched_candidate_id != cand_id
+        await conn.execute(
+            "UPDATE resume_files SET dedup_status=$1 WHERE tenant_id=$2 AND candidate_id=$3",
+            'checked_duplicate' if found_real_dup else 'checked_unique',
+            actor.tenant_id, cand_id)
         # If we matched ourselves, look for others
         if result.matched_candidate_id == cand_id:
             return {'duplicates': [], 'decision': 'SELF_MATCH'}
