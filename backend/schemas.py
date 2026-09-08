@@ -101,6 +101,7 @@ class CandidateCreate(BaseModel):
     expected_ctc: Optional[float] = None
     current_ctc: Optional[float] = None
     notice_period_days: Optional[int] = None
+    is_serving_notice: Optional[bool] = None
 
 
 class CandidateUpdate(BaseModel):
@@ -120,6 +121,7 @@ class CandidateUpdate(BaseModel):
     expected_ctc: Optional[float] = None
     current_ctc: Optional[float] = None
     notice_period_days: Optional[int] = None
+    is_serving_notice: Optional[bool] = None
 
 
 class RequisitionCreate(BaseModel):

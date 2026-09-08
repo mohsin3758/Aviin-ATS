@@ -109,7 +109,7 @@ const EMPTY = {
   full_name:'',email:'',phone:'',location:'',desired_location:'',
   current_employer:'',current_designation:'',
   total_exp_mo:0,expected_ctc:'' as any,current_ctc:'' as any,
-  notice_period_days:'' as any,linkedin_url:'',source:'linkedin',
+  notice_period_days:'' as any,is_serving_notice:'' as any,linkedin_url:'',source:'linkedin',
   skills:[] as string[],resume_text:'',
 };
 const INP:any = {width:'100%',border:'1px solid #e2e8f0',borderRadius:'8px',padding:'9px 12px',fontSize:'13px',outline:'none',color:'#1e293b',background:'white',boxSizing:'border-box'};
@@ -1235,7 +1235,9 @@ export default function CandidatesPage() {
       desired_location:full.desired_location||'',
       current_employer:full.current_employer||'',current_designation:full.current_designation||'',
       total_exp_mo:full.total_exp_mo||0,expected_ctc:full.expected_ctc||'',current_ctc:full.current_ctc||'',
-      notice_period_days:full.notice_period_days||'',linkedin_url:full.linkedin_url||'',
+      notice_period_days:full.notice_period_days||'',
+      is_serving_notice:full.is_serving_notice===true?'yes':full.is_serving_notice===false?'no':'',
+      linkedin_url:full.linkedin_url||'',
       source:full.source||'linkedin',skills:full.skills||[],resume_text:full.resume_text||''});
     setEditId(d.id);setErr('');resetDocState();setShowModal(true);
     try { const res:any = await apiFetch(`/candidates/${d.id}/skill-experience`); setSkillExpRows(res.rows||[]); } catch { /* non-blocking */ }
@@ -1275,6 +1277,29 @@ export default function CandidatesPage() {
     }
     if (!editId && !resumeFile){setErr('A resume file (PDF, Word or image) is required');return;}
     if (!editId && Number(form.notice_period_days)>0 && !lwdFile){setErr('LWD Confirmation upload is required when a Notice Period is given');return;}
+    // REAL FEATURE (2026-09-09, reported live: "make it mandatory... in
+    // the add new candidate form") — enforced here, at the UI layer only,
+    // same established convention as full_name/location above and the
+    // resume/LWD checks just above this — POST /candidates itself stays
+    // permissive since resume auto-intake, personal resume links, and the
+    // WhatsApp bot all call it with genuinely partial data (see
+    // schemas.py's CandidateCreate.location docstring for the full
+    // reasoning). Only applies when adding a brand-new candidate, never
+    // when editing an existing one — an old record missing one of these
+    // newly-required fields must still stay editable.
+    if (!editId) {
+      const missing:string[] = [];
+      if (!form.email.trim()) missing.push('Email');
+      if (!form.phone.trim()) missing.push('Phone');
+      if (!form.desired_location.trim()) missing.push('Desired Location');
+      if (!form.current_employer.trim()) missing.push('Current Employer');
+      if (!form.current_designation.trim()) missing.push('Current Designation');
+      if (!form.total_exp_mo) missing.push('Years Experience');
+      if (form.expected_ctc===''||form.expected_ctc===null) missing.push('Expected CTC');
+      if (form.current_ctc===''||form.current_ctc===null) missing.push('Current CTC');
+      if (form.is_serving_notice!=='yes'&&form.is_serving_notice!=='no') missing.push('Notice Serving Period');
+      if (missing.length){setErr(`Required: ${missing.join(', ')}`);return;}
+    }
     if (!editId && !skipDupCheck && (form.email||form.phone)) {
       const p=new URLSearchParams();
       if(form.email) p.append('email',form.email);
@@ -1289,7 +1314,8 @@ export default function CandidatesPage() {
       const payload={...form,total_exp_mo:Number(form.total_exp_mo)||0,
         expected_ctc:form.expected_ctc?Number(form.expected_ctc):null,
         current_ctc:form.current_ctc?Number(form.current_ctc):null,
-        notice_period_days:form.notice_period_days?Number(form.notice_period_days):null};
+        notice_period_days:form.notice_period_days?Number(form.notice_period_days):null,
+        is_serving_notice:form.is_serving_notice==='yes'?true:form.is_serving_notice==='no'?false:null};
       let candId = editId;
       if(editId) await apiFetch(`/candidates/${editId}`,{method:'PUT',body:JSON.stringify(payload)});
       else       { const created:any = await apiFetch('/candidates',{method:'POST',body:JSON.stringify(payload)}); candId = created.id; }
@@ -1836,9 +1862,9 @@ export default function CandidatesPage() {
           </div>
         )}
         <SectionDivider label="Personal Information"/>
-        <FormRow><FormField label="Full Name" required><input style={INP} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))}/></FormField><FormField label="Email"><input type="email" style={INP} placeholder="rahul@example.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></FormField></FormRow>
+        <FormRow><FormField label="Full Name" required><input style={INP} placeholder="e.g. Rahul Sharma" value={form.full_name} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))}/></FormField><FormField label="Email" required={!editId}><input type="email" style={INP} placeholder="rahul@example.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></FormField></FormRow>
         <FormRow>
-          <FormField label="Phone" hint={form.phone.trim()?(()=>{const d=form.phone.replace(/\D/g,'').length;return d<10||d>12?`⚠ ${d} digit${d===1?'':'s'} — needs 10 (or 12 with country code)`:`✓ ${d} digits`;})():'10 digits, or 12 with the 91 country code'}>
+          <FormField label="Phone" required={!editId} hint={form.phone.trim()?(()=>{const d=form.phone.replace(/\D/g,'').length;return d<10||d>12?`⚠ ${d} digit${d===1?'':'s'} — needs 10 (or 12 with country code)`:`✓ ${d} digits`;})():'10 digits, or 12 with the 91 country code'}>
             <input style={INP} placeholder="+91 9876543210" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))}/>
           </FormField>
           <FormField label="Current Location" required><input style={INP} placeholder="e.g. Bengaluru, Karnataka" value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))}/></FormField>
@@ -1869,7 +1895,7 @@ export default function CandidatesPage() {
             <Check size={12}/> No duplicates found — this phone/email is not already in the database
           </div>
         )}
-        <FormRow><FormField label="Desired Location" hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField>
+        <FormRow><FormField label="Desired Location" required={!editId} hint="Where the candidate wants to work — leave blank if same as current"><input style={INP} placeholder="e.g. Hyderabad, Telangana" value={form.desired_location} onChange={e=>setForm(f=>({...f,desired_location:e.target.value}))}/></FormField>
           <FormField label="LinkedIn URL">
             <div style={{display:'flex',gap:'6px'}}>
               <input style={{...INP,flex:1}} placeholder="https://linkedin.com/in/..." value={form.linkedin_url} onChange={e=>setForm(f=>({...f,linkedin_url:e.target.value}))}/>
@@ -1898,15 +1924,23 @@ export default function CandidatesPage() {
         </FormRow>
         <FormRow><FormField label="Source"><select style={INP} value={form.source} onChange={e=>setForm(f=>({...f,source:e.target.value}))}>{SRC.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></FormField><div/></FormRow>
         <SectionDivider label="Professional Details"/>
-        <FormRow><FormField label="Current Employer"><input style={INP} placeholder="e.g. Infosys" value={form.current_employer} onChange={e=>setForm(f=>({...f,current_employer:e.target.value}))}/></FormField><FormField label="Current Designation"><input style={INP} placeholder="e.g. Senior Engineer" value={form.current_designation} onChange={e=>setForm(f=>({...f,current_designation:e.target.value}))}/></FormField></FormRow>
-        <FormRow cols={3}><FormField label="Years Experience" hint={form.total_exp_mo>0?`= ${Math.floor(Number(form.total_exp_mo)/12)}y ${Number(form.total_exp_mo)%12}m`:'e.g. 4 = 4 years'}><input type="number" style={INP} min={0} max={50} step={0.5} placeholder="e.g. 4" value={form.total_exp_mo?+(Number(form.total_exp_mo)/12).toFixed(1):''} onChange={e=>setForm(f=>({...f,total_exp_mo:Math.round(Number(e.target.value||0)*12)}))}/></FormField><FormField label="Notice Period (days)"><input type="number" style={INP} min={0} max={365} placeholder="e.g. 30" value={form.notice_period_days} onChange={e=>setForm(f=>({...f,notice_period_days:e.target.value}))}/></FormField></FormRow>
+        <FormRow><FormField label="Current Employer" required={!editId}><input style={INP} placeholder="e.g. Infosys" value={form.current_employer} onChange={e=>setForm(f=>({...f,current_employer:e.target.value}))}/></FormField><FormField label="Current Designation" required={!editId}><input style={INP} placeholder="e.g. Senior Engineer" value={form.current_designation} onChange={e=>setForm(f=>({...f,current_designation:e.target.value}))}/></FormField></FormRow>
+        <FormRow cols={3}><FormField label="Years Experience" required={!editId} hint={form.total_exp_mo>0?`= ${Math.floor(Number(form.total_exp_mo)/12)}y ${Number(form.total_exp_mo)%12}m`:'e.g. 4 = 4 years'}><input type="number" style={INP} min={0} max={50} step={0.5} placeholder="e.g. 4" value={form.total_exp_mo?+(Number(form.total_exp_mo)/12).toFixed(1):''} onChange={e=>setForm(f=>({...f,total_exp_mo:Math.round(Number(e.target.value||0)*12)}))}/></FormField><FormField label="Notice Period (days)"><input type="number" style={INP} min={0} max={365} placeholder="e.g. 30" value={form.notice_period_days} onChange={e=>setForm(f=>({...f,notice_period_days:e.target.value}))}/></FormField>
+          <FormField label="Notice Serving Period" required={!editId} hint="Is the candidate currently serving their notice period?">
+            <select style={INP} value={form.is_serving_notice} onChange={e=>setForm(f=>({...f,is_serving_notice:e.target.value}))}>
+              <option value="">Select…</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>
+          </FormField>
+        </FormRow>
         {!editId&&(
           <FormField label="LWD Confirmation" required={Number(form.notice_period_days)>0} hint={Number(form.notice_period_days)>0?'Required — upload the Last Working Day confirmation':'Only required if a Notice Period is entered above'}>
             <input type="file" accept=".pdf,.doc,.docx,image/*" style={INP} onChange={e=>setLwdFile(e.target.files?.[0]||null)}/>
             {lwdFile&&<div style={{fontSize:'11px',color:'#166534',marginTop:'4px'}}>✓ {lwdFile.name}</div>}
           </FormField>
         )}
-        <FormRow><FormField label="Expected CTC" hint="Annual, e.g. 1500000 = 15 LPA"><input type="number" style={INP} placeholder="e.g. 1500000" value={form.expected_ctc} onChange={e=>setForm(f=>({...f,expected_ctc:e.target.value}))}/></FormField><FormField label="Current CTC"><input type="number" style={INP} placeholder="e.g. 1200000" value={form.current_ctc} onChange={e=>setForm(f=>({...f,current_ctc:e.target.value}))}/></FormField></FormRow>
+        <FormRow><FormField label="Expected CTC" required={!editId} hint="Annual, e.g. 1500000 = 15 LPA"><input type="number" style={INP} placeholder="e.g. 1500000" value={form.expected_ctc} onChange={e=>setForm(f=>({...f,expected_ctc:e.target.value}))}/></FormField><FormField label="Current CTC" required={!editId}><input type="number" style={INP} placeholder="e.g. 1200000" value={form.current_ctc} onChange={e=>setForm(f=>({...f,current_ctc:e.target.value}))}/></FormField></FormRow>
         <SectionDivider label="Skills"/>
         <div style={{display:'flex',gap:'8px',marginBottom:'8px'}}>
           <input style={{...INP,flex:1}} placeholder="Type a skill and press Enter" value={skIn} onChange={e=>setSkIn(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();addSk(skIn);}}}/>
