@@ -44,6 +44,23 @@ except ImportError:
 # Minimum characters to consider pdfminer extraction successful
 PDFMINER_MIN_CHARS = 100
 
+# REAL BUG FIX (2026-09-09, reported live: "(cid:127)" showing up literally
+# in a generated resume's Professional Summary, right where a bullet point
+# belongs). A well-known pdfminer limitation: when a PDF's embedded font
+# (often Word/Canva-exported bullet-list fonts) has no usable ToUnicode
+# CMap, pdfminer can't resolve a glyph to a real character and prints the
+# raw Character ID as literal "(cid:N)" text instead. There's no reliable
+# way to recover WHICH character it actually was (font-specific, and
+# guessing wrong — e.g. assuming it's always a bullet — would silently
+# fabricate content that was never actually verified), so this strips the
+# artifact rather than guess-replacing it: honest missing formatting beats
+# a wrong guess baked into a real candidate's resume.
+_CID_ARTIFACT_RE = re.compile(r'\(cid:\d+\)\s*')
+
+
+def _strip_cid_artifacts(text: str) -> str:
+    return _CID_ARTIFACT_RE.sub('', text or '')
+
 # Supported image MIME types for direct OCR
 IMAGE_MIMES = {
     'image/jpeg', 'image/jpg', 'image/png', 'image/tiff',
@@ -241,7 +258,7 @@ def extract_text_with_ocr_fallback(
         pdfminer_text = ''
         if PDFMINER_AVAILABLE:
             try:
-                pdfminer_text = pdfminer_extract_text(BytesIO(data)) or ''
+                pdfminer_text = _strip_cid_artifacts(pdfminer_extract_text(BytesIO(data)) or '')
             except Exception:
                 pdfminer_text = ''
 
