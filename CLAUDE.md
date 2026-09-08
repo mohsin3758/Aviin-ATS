@@ -263,6 +263,65 @@ phase is a token leak; fix it before starting the next phase.
   scripts/claude-auto-resume.sh detect it and auto-send "continue"
   (see 24/7 OPERATION) — never silently abandon a phase
 
+## RESOURCE SAFETY (added 2026-09-08, after a real CPU/disk incident —
+keep this current as new safeguards land, same spirit as AUTO-FIX RULES)
+
+**What's automatically protected right now:**
+| Safeguard | What it does | Schedule | Verified |
+|---|---|---|---|
+| WAHA session auto-recovery (`backend/services/waha_health.py`) | Detects a WhatsApp session stuck disconnected too long, stops it before it piles up CPU, notifies the affected user | Every 15 min (in-app scheduler) | ✅ live, real notification tested |
+| `scripts/resource-monitor.sh` (host cron, independent of the app) | Logs load/CPU-steal/WAHA-CPU trend; same stuck-session backstop even if the backend itself is down | Every 5 min | ✅ live, cron confirmed running |
+| `scripts/weekly-cleanup.sh` | Prunes Docker build cache before it silently balloons to 20–25GB+ (a repeat problem in this project's history) | Sundays 3 AM UTC | ✅ ran for real — reclaimed 4.531GB live on first run |
+
+Root cause of the original incident (3 WhatsApp sessions stuck in
+`SCAN_QR_CODE` for days, each holding a full Chromium process open) can't
+recur silently now — it gets caught and stopped within 15–45 minutes
+instead of running for days.
+
+**Habits for every session on this VPS:**
+- Start with `bash scripts/status-check.sh` — phase status, container
+  health, and the resource-monitor's own recent trend log in one shot.
+- After any heavy work (a big rebuild, a long verification pass, several
+  parallel test runs), glance at `docker stats` and `uptime` before
+  walking away — a stray background process is cheap to catch
+  immediately, expensive to notice a week later.
+- Don't leave test/WhatsApp/browser sessions half-connected — a WAHA
+  session sitting in `SCAN_QR_CODE` is exactly what caused the original
+  incident; either finish connecting it or stop it.
+- `iostat -c 1 2`'s `%steal` column being high does NOT by itself mean
+  "someone else's VM is hogging the host" — Hostinger's own account-level
+  CPU cap/throttle (tied to a weekly-reset allowance, see the 2026-09-08
+  incident) looks IDENTICAL to real hypervisor noisy-neighbor contention
+  from inside the VM. Don't assume either cause without checking further
+  (Hostinger support can see the account-level cap state directly; we
+  can't from inside the VM) — and don't blame it purely on "external,
+  nothing we can do" without first checking whether OUR OWN sustained
+  work (a long build, several browser-automation runs back to back) is
+  what's actually driving the sustained usage that triggered it.
+- Real, low-risk operational settings are worth checking too, not just
+  app code — a healthcheck interval that's too tight (Postgres's
+  `pg_isready` was firing every 5s continuously for 8+ days before the
+  2026-09-08 fix to 15s) adds up to real, avoidable overhead on a
+  CPU-capped VPS, even though it looked harmless in isolation.
+
+**Code-quality discipline that prevents resource waste:**
+- Test scheduled/background jobs manually before trusting the schedule.
+  `weekly-cleanup.sh` looked correct on paper but reclaimed 0B on its
+  first real run — an age filter was silently wrong for how often this
+  repo rebuilds. Caught by actually running it, not by reading the code.
+- Watch for unbounded retry/polling loops with no backoff — this project
+  has a real precedent for this exact failure class (an earlier IMAP
+  retry-storm bug). A loop that retries forever on failure with no
+  backoff is a CPU/DB-connection leak waiting to happen.
+- Any new headless-browser or Chromium-backed integration (WhatsApp,
+  screenshot generation, etc.) needs an explicit "how does this get
+  cleaned up if it never connects" answer before shipping — that gap is
+  exactly what caused the original incident.
+- A single `docker stats` reading can be a misleading momentary spike,
+  not a sustained problem — confirm via `docker top`'s cumulative
+  CPU-time column, or by re-sampling `docker stats` a few times a couple
+  seconds apart, before concluding a container is genuinely the cause.
+
 ## ZERO-TOKEN AUDIT (run at the end of EVERY phase)
 `bash scripts/zerotoken-check.sh` scans the full repo (code + config
 + env + compose files) for any reference to a paid/external AI API
