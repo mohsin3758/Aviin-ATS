@@ -32,8 +32,10 @@ docker commands.
 - DB: PostgreSQL 16 + pgvector, multi-tenant via row-level security
 - Embeddings: BGE-small-en-v1.5 (384 dims) at http://embed:8081
 - Generation: Qwen2.5-1.5B via Ollama at http://ollama:11434
-- Job queue: Postgres `ai_jobs` table polled by a worker (never
-  Redis/Celery/BullMQ)
+- Background jobs: APScheduler (AsyncIOScheduler) in-process, backend/
+  scheduler.py — ~15 interval/cron jobs (resume backlog, embeddings,
+  SLA/task escalations, WAHA session health, etc.). No queue table, no
+  separate worker process.
 - Automation: n8n at http://n8n:5678 | WhatsApp: WAHA at
   http://waha:3000
 - OCR: Tesseract + OpenCV | Auth: JWT (tenant_id + role + user_id
@@ -99,6 +101,9 @@ degradation fallback for when it's down.
   refused -> check the `db` healthcheck; "relation does not exist" ->
   re-run `sql/*.sql` in order; Ollama model missing -> `docker exec
   aviin_ollama ollama pull qwen2.5:1.5b-instruct-q4_K_M`
+- Filtering a soft-deleted row across a LEFT JOIN needs `IS NOT
+  FALSE`, never `= true` — NULL must pass or the LEFT JOIN collapses
+  and orphan rows vanish silently
 
 ## Do not touch without explicit evidence
 - Never bulk-delete/modify candidates or `resume_files` by name-
