@@ -402,8 +402,18 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
     # re-derivation from resume_text that would silently discard it.
     override = candidate.get("_override_body_text")
     if override is not None:
+        # REAL BUG FIX (2026-09-09): the resume content editor is now a
+        # real rich-text editor (see services/rich_text.py) -- override is
+        # HTML, not plain text. Every visual theme except the ones that
+        # call _resolve_body_blocks() below (full rich rendering: real
+        # bold/tables/bullets) still goes through THIS function and would
+        # otherwise show raw "<b>"/"<table>" tags as literal visible text.
+        # Flattened to clean plain text here so every theme stays correct
+        # -- never loses the KAE's real edited content, just formatting
+        # fidelity on themes that haven't been upgraded to the richer path.
+        from services.rich_text import parse_html_blocks, blocks_to_plain_text
         heading = "PROJECTS" if config["project_mode"] == "focus" else "PROFESSIONAL SUMMARY"
-        return heading, override
+        return heading, blocks_to_plain_text(parse_html_blocks(override))
 
     resume_text = candidate.get("resume_text") or ""
     if config["project_mode"] == "hide":
@@ -436,6 +446,27 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
     text = _strip_bullet_only_lines(text)
     text = _normalize_whitespace(text)
     return heading, text
+
+
+def _resolve_body_blocks(candidate: dict, config: dict):
+    """Real rich rendering (2026-09-09, reported live: "resume editor
+    features and option should be like as MS Word file... bullet to
+    table and all features") -- returns (heading, blocks) with real
+    bold/italic/underline/font/table/bullet-list flowables (see
+    services/rich_text.py) when the KAE has actually edited the resume
+    content, or (heading, None) when there's no edit, telling the caller
+    to fall back to _resolve_body_text's existing plain-extraction path
+    unchanged. Only wired into the Classic PDF/DOCX renderers for now --
+    the default, most-used theme -- not yet every visual theme; every
+    OTHER theme still renders a real edit correctly, just as clean plain
+    text via _resolve_body_text's own override branch, never raw HTML
+    tags and never silently reverting to the pre-edit content."""
+    override = candidate.get("_override_body_text")
+    if override is None:
+        return "", None
+    from services.rich_text import parse_html_blocks
+    heading = "PROJECTS" if config["project_mode"] == "focus" else "PROFESSIONAL SUMMARY"
+    return heading, parse_html_blocks(override)
 
 
 def _company_line(candidate: dict, config: dict) -> Optional[str]:
@@ -615,32 +646,45 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
         story.append(Paragraph("KEY SKILLS", h2))
         story.append(Paragraph(_esc(", ".join(skills)), body))
 
-    heading, text = _resolve_body_text(candidate, cfg)
-    if text.strip():
-        story.append(Paragraph(heading, h2))
-        # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
-        # body at 2600 chars regardless of how much real content
-        # _resolve_body_text() actually returned -- for a dense, multi-
-        # role resume, the entire Professional Experience/Education/
-        # Certifications section (everything past the opening summary
-        # paragraph) was silently cut off with an ellipsis, even after
-        # today's earlier fix restored the full text into the pipeline.
-        # SimpleDocTemplate/python-docx both paginate naturally across as
-        # many pages as the real content needs -- no reason to
-        # artificially truncate before handing it to them.
-        # Real improvement (2026-08-18): _classify_lines() auto-bullets real
-        # achievement sentences under a role that never had a literal bullet
-        # character in the extracted text -- a common case, since many
-        # source resumes convey their bullets as a layout property of the
-        # original document rather than a character in the text stream --
-        # in addition to preserving lines that already had a real one.
-        for line_text, kind in _classify_lines(text):
-            if kind == 'bullet':
-                story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
-            elif kind == 'subhead':
-                story.append(Paragraph(_esc(line_text), subhead))
-            else:
-                story.append(Paragraph(_esc(line_text), body))
+    # REAL FEATURE (2026-09-09): a genuine KAE edit renders as real
+    # flowables -- bold/italic/underline/font/color inline, real bullet
+    # and numbered lists, real bordered tables (see services/rich_text.py
+    # and _resolve_body_blocks's own docstring for why only Classic has
+    # this so far). No edit -> blocks is None -> the existing plain-
+    # extraction path below runs completely unchanged.
+    rt_heading, rt_blocks = _resolve_body_blocks(candidate, cfg)
+    if rt_blocks is not None:
+        from services.rich_text import blocks_to_pdf_flowables
+        if rt_blocks:
+            story.append(Paragraph(rt_heading, h2))
+            story.extend(blocks_to_pdf_flowables(rt_blocks, body, bullet))
+    else:
+        heading, text = _resolve_body_text(candidate, cfg)
+        if text.strip():
+            story.append(Paragraph(heading, h2))
+            # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
+            # body at 2600 chars regardless of how much real content
+            # _resolve_body_text() actually returned -- for a dense, multi-
+            # role resume, the entire Professional Experience/Education/
+            # Certifications section (everything past the opening summary
+            # paragraph) was silently cut off with an ellipsis, even after
+            # today's earlier fix restored the full text into the pipeline.
+            # SimpleDocTemplate/python-docx both paginate naturally across as
+            # many pages as the real content needs -- no reason to
+            # artificially truncate before handing it to them.
+            # Real improvement (2026-08-18): _classify_lines() auto-bullets real
+            # achievement sentences under a role that never had a literal bullet
+            # character in the extracted text -- a common case, since many
+            # source resumes convey their bullets as a layout property of the
+            # original document rather than a character in the text stream --
+            # in addition to preserving lines that already had a real one.
+            for line_text, kind in _classify_lines(text):
+                if kind == 'bullet':
+                    story.append(Paragraph(_esc(line_text), bullet, bulletText='•'))
+                elif kind == 'subhead':
+                    story.append(Paragraph(_esc(line_text), subhead))
+                else:
+                    story.append(Paragraph(_esc(line_text), body))
 
     client_line = _client_line(client_name, cfg)
     story.extend(_pdf_footer_flowables(cfg, client_line, small))
@@ -926,36 +970,52 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
         r.font.color.rgb = PRIMARY
         doc.add_paragraph(", ".join(skills))
 
-    heading, text = _resolve_body_text(candidate, cfg)
-    if text.strip():
-        h = doc.add_paragraph()
-        r = h.add_run(heading)
-        r.bold = True
-        r.font.color.rgb = PRIMARY
-        # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
-        # body at 2600 chars regardless of how much real content
-        # _resolve_body_text() actually returned -- for a dense, multi-
-        # role resume, the entire Professional Experience/Education/
-        # Certifications section (everything past the opening summary
-        # paragraph) was silently cut off with an ellipsis, even after
-        # today's earlier fix restored the full text into the pipeline.
-        # SimpleDocTemplate/python-docx both paginate naturally across as
-        # many pages as the real content needs -- no reason to
-        # artificially truncate before handing it to them.
-        # Real improvement (2026-08-18): a real bulleted paragraph (Word's
-        # built-in "List Bullet" style, available by default -- no custom
-        # numbering XML needed) instead of a literal "• " prefix on a plain
-        # paragraph, which had no hanging indent -- a wrapped bullet line
-        # fell back to the left margin instead of aligning under the text.
-        for line_text, kind in _classify_lines(text):
-            if kind == 'bullet':
-                doc.add_paragraph(line_text, style='List Bullet')
-                continue
-            pp = doc.add_paragraph()
-            r = pp.add_run(line_text)
-            if kind == 'subhead':
-                r.bold = True
-                r.font.color.rgb = DARK
+    # REAL FEATURE (2026-09-09): same real-flowables upgrade as the PDF
+    # Classic renderer above -- a genuine KAE edit becomes real
+    # bold/italic/underline/font/color runs, real "List Bullet"/"List
+    # Number" styled paragraphs, and a real docx table (see
+    # services/rich_text.py). No edit -> rt_blocks is None -> the
+    # existing plain-extraction path below runs completely unchanged.
+    rt_heading, rt_blocks = _resolve_body_blocks(candidate, cfg)
+    if rt_blocks is not None:
+        from services.rich_text import blocks_to_docx
+        if rt_blocks:
+            h = doc.add_paragraph()
+            r = h.add_run(rt_heading)
+            r.bold = True
+            r.font.color.rgb = PRIMARY
+            blocks_to_docx(doc, rt_blocks)
+    else:
+        heading, text = _resolve_body_text(candidate, cfg)
+        if text.strip():
+            h = doc.add_paragraph()
+            r = h.add_run(heading)
+            r.bold = True
+            r.font.color.rgb = PRIMARY
+            # REAL BUG FIX (2026-08-18): this used to hard-cap the rendered
+            # body at 2600 chars regardless of how much real content
+            # _resolve_body_text() actually returned -- for a dense, multi-
+            # role resume, the entire Professional Experience/Education/
+            # Certifications section (everything past the opening summary
+            # paragraph) was silently cut off with an ellipsis, even after
+            # today's earlier fix restored the full text into the pipeline.
+            # SimpleDocTemplate/python-docx both paginate naturally across as
+            # many pages as the real content needs -- no reason to
+            # artificially truncate before handing it to them.
+            # Real improvement (2026-08-18): a real bulleted paragraph (Word's
+            # built-in "List Bullet" style, available by default -- no custom
+            # numbering XML needed) instead of a literal "• " prefix on a plain
+            # paragraph, which had no hanging indent -- a wrapped bullet line
+            # fell back to the left margin instead of aligning under the text.
+            for line_text, kind in _classify_lines(text):
+                if kind == 'bullet':
+                    doc.add_paragraph(line_text, style='List Bullet')
+                    continue
+                pp = doc.add_paragraph()
+                r = pp.add_run(line_text)
+                if kind == 'subhead':
+                    r.bold = True
+                    r.font.color.rgb = DARK
 
     client_line = _client_line(client_name, cfg)
     _docx_footer(doc, cfg, client_line)

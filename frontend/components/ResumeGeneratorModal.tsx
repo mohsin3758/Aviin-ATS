@@ -3,6 +3,19 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch, useFetch } from '@/lib/useFetch';
 import { getToken } from '@/lib/auth';
 import { FileText, X, Download, Send, History, Loader2, CheckCircle } from 'lucide-react';
+import { RichTextEditor } from './RichTextEditor';
+
+// Real, safe seed for the rich-text summary editor's very first load --
+// the auto-extracted text is plain (never contains real markup of its
+// own), so this only ever needs to escape genuine HTML-special
+// characters and turn real line breaks into <br> -- never a full HTML
+// parser, since the input here is guaranteed plain by construction
+// (backend/routers/resume_generator.py's preview endpoint).
+function plainTextToHtml(text: string): string {
+  const escaped = text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<div>${escaped.split('\n').join('<br>')}</div>`;
+}
 
 interface Props {
   candidate: { id: string; full_name: string; latest_resume_file_name?: string };
@@ -89,6 +102,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
   // null means "not yet loaded" -- distinct from an intentionally blanked
   // field (empty string), which a real edit can produce.
   const [contentEdits, setContentEdits] = useState<{ display_name: string; designation: string; company: string; skills: string; summary: string } | null>(null);
+  const [editorResetKey, setEditorResetKey] = useState(0);
 
   function applyTemplate(t: any) {
     setTemplateId(t.id);
@@ -147,7 +161,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
           designation: r.designation || '',
           company: r.company || '',
           skills: (r.skills || []).join(', '),
-          summary: r.body_snippet || '',
+          summary: plainTextToHtml(r.body_snippet || ''),
         });
       }
     } catch { /* preview is best-effort */ }
@@ -348,7 +362,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
               <div style={{ marginBottom: '16px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <span style={label}>✏️ Edit Resume Content</span>
-                  <button type="button" onClick={() => setContentEdits(null)}
+                  <button type="button" onClick={() => { setContentEdits(null); setEditorResetKey(k => k + 1); }}
                     style={{ fontSize: '10.5px', fontWeight: 600, color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}>
                     ↺ Reset to auto-extracted
                   </button>
@@ -372,9 +386,31 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                   <input style={inputStyle} value={contentEdits.skills} onChange={e => setContentEdits({ ...contentEdits, skills: e.target.value })} />
                 </div>
                 <div>
-                  <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>{preview?.section_heading || 'Professional Summary'}</label>
-                  <textarea style={{ ...inputStyle, minHeight: '140px', resize: 'vertical', fontFamily: 'inherit' }}
-                    value={contentEdits.summary} onChange={e => setContentEdits({ ...contentEdits, summary: e.target.value })} />
+                  <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>
+                    {preview?.section_heading || 'Professional Summary'}
+                  </label>
+                  {/* REAL SCOPE NOTE (2026-09-09): full rich rendering
+                      (real bold/tables/bullets in the actual generated
+                      document) is wired up for the Classic theme only so
+                      far -- every other theme still uses this same real
+                      edited text, just flattened to clean plain text
+                      server-side (never raw HTML tags, never reverted).
+                      Never claim more than what a given theme actually
+                      does. */}
+                  {visualTheme === 'classic' ? (
+                    <div style={{ fontSize: '10px', color: '#16a34a', marginBottom: '4px' }}>✓ Font, size, bold/italic, bullet/numbered lists, and tables render exactly like this in the generated document.</div>
+                  ) : (
+                    <div style={{ fontSize: '10px', color: '#b45309', marginBottom: '4px' }}>⚠ This theme renders your words as plain text (formatting/tables not yet applied) — switch to the Classic theme above for full formatting in the generated document.</div>
+                  )}
+                  {/* Real bug fix (2026-09-09): a contentEditable editor
+                      only ever seeds its DOM from `value` on first mount
+                      (see RichTextEditor's own seeding effect -- writing
+                      innerHTML on every render would reset the cursor
+                      mid-type). Reset needs a genuinely fresh DOM node to
+                      pick up the newly re-fetched auto-extracted content,
+                      not just a new prop value the mounted instance would
+                      otherwise ignore -- key forces that remount. */}
+                  <RichTextEditor key={editorResetKey} value={contentEdits.summary} onChange={html => setContentEdits({ ...contentEdits, summary: html })} minHeight="160px" placeholder="Type the resume's summary/experience content here…" />
                 </div>
               </div>
             )}
