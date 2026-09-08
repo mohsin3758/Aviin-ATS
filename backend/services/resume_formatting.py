@@ -576,7 +576,7 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     from reportlab.lib.units import cm
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
@@ -584,6 +584,19 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     PRIMARY = colors.HexColor("#1e40af")
     DARK = colors.HexColor("#0f172a")
     GRAY = colors.HexColor("#64748b")
+
+    # REAL FEATURE (2026-09-09, reported live: attached a real professional
+    # resume as the visual bar -- "correct alignment and bullet and clean
+    # resume") -- a real page-frame border, drawn once per page via
+    # SimpleDocTemplate's own onPage hook (never a flowable itself, so it
+    # can't be accidentally pushed onto page 2+ by content overflow).
+    def _page_border(pdf_canvas, pdf_doc):
+        pdf_canvas.saveState()
+        pdf_canvas.setStrokeColor(PRIMARY)
+        pdf_canvas.setLineWidth(1.2)
+        m = 0.8 * cm
+        pdf_canvas.rect(m, m, pdf_doc.pagesize[0] - 2 * m, pdf_doc.pagesize[1] - 2 * m)
+        pdf_canvas.restoreState()
     # REAL BUG FIX (2026-08-18): reportlab's ParagraphStyle defaults
     # `leading` (line height) to a FIXED 12pt regardless of fontSize --
     # confirmed directly (`ParagraphStyle(fontSize=18).leading == 12`).
@@ -613,6 +626,7 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     # flush left, visually indistinguishable from a new paragraph.
     bullet = ParagraphStyle("Bullet", fontSize=10, textColor=DARK, leading=15, fontName="Helvetica",
                              leftIndent=14, bulletIndent=0, spaceBefore=1, spaceAfter=1)
+    chip = ParagraphStyle("Chip", fontSize=9.5, leading=12, textColor=DARK, fontName="Helvetica")
 
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
     story = _pdf_header_logo_flowables(cfg) + [
@@ -641,10 +655,28 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
     if company_line:
         story.append(Paragraph(f"<b>Current Company:</b> {_esc(company_line)}", body))
 
+    # REAL FEATURE (2026-09-09, reported live: attached a real professional
+    # resume as the visual bar -- "correct alignment and bullet and clean
+    # resume") -- a real grid Table instead of one comma-separated
+    # sentence, same real technique compact_grid's own KEY SKILLS section
+    # already uses (this project's own established pattern for skills,
+    # not a new one invented just for Classic).
     skills = candidate.get("skills") or []
     if skills:
         story.append(Paragraph("KEY SKILLS", h2))
-        story.append(Paragraph(_esc(", ".join(skills)), body))
+        cols = 3
+        rows = [skills[i:i + cols] for i in range(0, len(skills), cols)]
+        grid_data = [[Paragraph(_esc(s), chip) for s in row] + [""] * (cols - len(row)) for row in rows]
+        skills_table = Table(grid_data, colWidths=[doc.width / cols] * cols)
+        skills_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(skills_table)
+        story.append(Spacer(1, 0.2 * cm))
 
     # REAL FEATURE (2026-09-09): a genuine KAE edit renders as real
     # flowables -- bold/italic/underline/font/color inline, real bullet
@@ -688,7 +720,7 @@ def _render_pdf_classic(candidate: dict, cfg: dict, client_name: str = None) -> 
 
     client_line = _client_line(client_name, cfg)
     story.extend(_pdf_footer_flowables(cfg, client_line, small))
-    doc.build(story)
+    doc.build(story, onFirstPage=_page_border, onLaterPages=_page_border)
     return buf.getvalue()
 
 
@@ -914,6 +946,28 @@ def render_resume_docx(candidate: dict, config: dict, client_name: str = None) -
     return _DOCX_RENDERERS.get(theme, _render_docx_classic)(candidate, cfg, client_name)
 
 
+def _docx_page_border(doc) -> None:
+    """Real page-frame border (2026-09-09, reported live: attached a real
+    professional resume as the visual bar) -- DOCX's real equivalent of a
+    page border lives on the section's sectPr as a single <w:pgBorders>
+    element (no first-class python-docx API for it), matching the same
+    PRIMARY-blue frame the PDF Classic renderer now draws via its own
+    onPage hook."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    sect_pr = doc.sections[0]._sectPr
+    borders = OxmlElement("w:pgBorders")
+    borders.set(qn("w:offsetFrom"), "page")
+    for side in ("top", "left", "bottom", "right"):
+        el = OxmlElement(f"w:{side}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), "8")
+        el.set(qn("w:space"), "24")
+        el.set(qn("w:color"), "1E40AF")
+        borders.append(el)
+    sect_pr.append(borders)
+
+
 def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) -> bytes:
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -923,6 +977,7 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
     DARK = RGBColor(0x0f, 0x17, 0x2a)
 
     doc = Document()
+    _docx_page_border(doc)
     display_name = mask_name(candidate.get("full_name") or "") if cfg["name_format"] == "masked" else (candidate.get("full_name") or "Candidate")
 
     _docx_header_logo(doc, cfg)
@@ -962,13 +1017,24 @@ def _render_docx_classic(candidate: dict, cfg: dict, client_name: str = None) ->
     if company_line:
         doc.add_paragraph(f"Current Company: {company_line}")
 
+    # REAL FEATURE (2026-09-09, reported live: attached a real professional
+    # resume as the visual bar) -- a real Word table instead of one
+    # comma-separated sentence.
     skills = candidate.get("skills") or []
     if skills:
         h = doc.add_paragraph()
         r = h.add_run("KEY SKILLS")
         r.bold = True
         r.font.color.rgb = PRIMARY
-        doc.add_paragraph(", ".join(skills))
+        cols = 3
+        rows = [skills[i:i + cols] for i in range(0, len(skills), cols)]
+        tbl = doc.add_table(rows=len(rows), cols=cols)
+        tbl.style = "Table Grid"
+        for ri, row in enumerate(rows):
+            for ci in range(cols):
+                cell_p = tbl.cell(ri, ci).paragraphs[0]
+                if ci < len(row):
+                    cell_p.add_run(row[ci])
 
     # REAL FEATURE (2026-09-09): same real-flowables upgrade as the PDF
     # Classic renderer above -- a genuine KAE edit becomes real
