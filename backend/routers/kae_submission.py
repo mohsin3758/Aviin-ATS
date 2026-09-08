@@ -1507,6 +1507,44 @@ _RESUME_LABELS = {
 }
 
 
+async def _resolve_resume_bytes(tenant_id: str, candidate_id: str, candidate: dict, resume_style: str, cfg: dict) -> bytes:
+    """REAL FEATURE (2026-09-09, reported live: attached a real
+    professionally-formatted resume, "correct alignment and bullet and
+    clean resume") -- 'redacted_original' used to mean the exact same
+    flattened-plain-text compositional render as every other style, just
+    with contact fields hidden in the config -- never the candidate's
+    actual original document. Now tries a real, true redaction of the
+    candidate's own latest uploaded PDF first (see services/
+    pdf_redact.py's own docstring for why this genuinely removes the
+    phone/email, not just draws a box over still-recoverable text) --
+    100% of the source document's real layout/tables/bold survives.
+    Falls back to the existing compositional renderer only when the
+    original isn't a PDF, has no file on disk, or genuinely can't be
+    processed -- every OTHER style is completely unaffected."""
+    if resume_style == "redacted_original":
+        async with db.tenant_conn(tenant_id) as conn:
+            # parse_status != 'non_resume_doc' -- resume_files also holds
+            # stray JD-file uploads (see resume_intake.py's own queue
+            # filter using the same exclusion); without it the "latest
+            # upload" for a candidate could resolve to a job description,
+            # not their actual resume.
+            file_row = await conn.fetchrow(
+                """SELECT file_path, mime_type FROM resume_files
+                   WHERE candidate_id=$1 AND tenant_id=$2 AND parse_status != 'non_resume_doc'
+                   ORDER BY created_at DESC LIMIT 1""",
+                candidate_id, tenant_id)
+        if file_row and file_row["file_path"] and (
+            "pdf" in (file_row["mime_type"] or "").lower() or file_row["file_path"].lower().endswith(".pdf")
+        ):
+            abs_path = Path("/app") / file_row["file_path"].lstrip("/")
+            if abs_path.exists():
+                from services.pdf_redact import redact_pdf_original
+                redacted = redact_pdf_original(abs_path.read_bytes())
+                if redacted is not None:
+                    return redacted
+    return render_resume_pdf(candidate, cfg)
+
+
 @router.post("/applications/{application_id}/submit-to-kae")
 async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor = Depends(get_actor)):
     if body.resume_style not in _RESUME_STYLES:
@@ -1542,7 +1580,7 @@ async def submit_to_kae(application_id: str, body: SubmitToKaeIn, actor: Actor =
             cfg["visual_theme"] = body.visual_theme
         if body.logo_position:
             cfg["logo_position"] = body.logo_position
-        resume_bytes = render_resume_pdf(candidate, cfg)
+        resume_bytes = await _resolve_resume_bytes(actor.tenant_id, str(row["candidate_id"]), candidate, body.resume_style, cfg)
         filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
 
     return await _do_kae_submission(
@@ -2607,7 +2645,7 @@ async def _do_client_submission_batch(
                 cfg["visual_theme"] = visual_theme
             if logo_position:
                 cfg["logo_position"] = logo_position
-            resume_bytes = render_resume_pdf(candidate, cfg)
+            resume_bytes = await _resolve_resume_bytes(tenant_id, str(row["candidate_id"]), candidate, resume_style, cfg)
             filename = build_resume_filename(row["full_name"], row["current_designation"], row["total_exp_mo"], "pdf")
             attachments.append((filename, resume_bytes, "pdf"))
 
@@ -2791,7 +2829,7 @@ async def submit_to_client(
             cfg["visual_theme"] = body.visual_theme
         if body.logo_position:
             cfg["logo_position"] = body.logo_position
-        resume_bytes = render_resume_pdf(candidate, cfg)
+        resume_bytes = await _resolve_resume_bytes(actor.tenant_id, str(row["candidate_id"]), candidate, body.resume_style, cfg)
         filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
 
     return await _do_client_submission(
@@ -2911,7 +2949,7 @@ async def submit_to_client_batch(
                     cfg["visual_theme"] = body.visual_theme
                 if body.logo_position:
                     cfg["logo_position"] = body.logo_position
-                resume_bytes = render_resume_pdf(candidate, cfg)
+                resume_bytes = await _resolve_resume_bytes(actor.tenant_id, str(row["candidate_id"]), candidate, body.resume_style, cfg)
                 filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
                 single = await _do_client_submission(
                     actor.tenant_id, valid_ids[0], actor, resume_bytes, filename, body.resume_style,
