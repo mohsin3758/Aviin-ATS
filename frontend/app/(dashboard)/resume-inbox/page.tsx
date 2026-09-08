@@ -900,14 +900,35 @@ function ResumeInboxPageInner() {
   const [loadingMore, setLoadingMore] = useState(false);
   useEffect(() => { setAccumItems((queueData?.items || []) as ResumeItem[]); }, [queueData]);
   const [autoLoadFails, setAutoLoadFails] = useState(0);
+  // REAL BUG FIX (2026-09-08, reported live: filtering to "Personal Resume
+  // Link" still showed a Naukri-sourced candidate). Root cause confirmed
+  // via live backend logs: the background auto-loader below fires a
+  // loadMore() page-2+ request built from whatever filter was active AT
+  // THAT MOMENT, using plain apiFetch — unlike the page-1 fetch via
+  // useFetch (which has its own `cancelled` guard), this had no check
+  // that the filter was STILL the same by the time the response actually
+  // arrived. Switching source chips quickly (naukri -> personal_link,
+  // clearly visible in the real request log: several source= values
+  // fired within one second) let a SLOW, stale naukri-filtered page
+  // land AFTER accumItems had already been reset for the new
+  // personal_link filter, and it got silently appended on top —
+  // contaminating the "Personal Resume Link" result list with a genuine
+  // Naukri row. queueUrlRef always holds the CURRENT filter combo (offset
+  // stripped); a response is only applied if it still matches when it
+  // actually arrives, otherwise it's discarded as stale.
+  const queueUrlRef = useRef(queueUrl);
+  useEffect(() => { queueUrlRef.current = queueUrl; }, [queueUrl]);
   const loadMore = async () => {
     setLoadingMore(true);
+    const requestSignature = queueUrl;
     try {
       const url = `/resume-intake/queue?status=${statusFilter}${sourceFilter ? `&source=${sourceFilter}` : ''}${jobFilter && jobFilter !== 'unmatched' ? `&req_id=${jobFilter}` : ''}${ownedFilter ? `&owned=${ownedFilter}` : ''}${extraFilterQs}&limit=${PAGE_SIZE}&offset=${accumItems.length}`;
       const more = await apiFetch(url);
+      if (requestSignature !== queueUrlRef.current) return; // filter changed while this was in flight — stale, discard
       setAccumItems(prev => [...prev, ...((more?.items || []) as ResumeItem[])]);
       setAutoLoadFails(0);
     } catch (e: any) {
+      if (requestSignature !== queueUrlRef.current) return;
       setAutoLoadFails(f => { if (f === 0) showToast('Error loading more: ' + e.message, false); return f + 1; });
     } finally { setLoadingMore(false); }
   };
