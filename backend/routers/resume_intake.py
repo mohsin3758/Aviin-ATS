@@ -258,8 +258,8 @@ async def intake_queue(
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
             LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
-            LEFT JOIN requisitions r ON r.id=rf.requisition_id
-            LEFT JOIN requisitions mr ON mr.id=c.matched_requisition_id
+            LEFT JOIN requisitions r ON r.id=rf.requisition_id AND r.is_active IS NOT FALSE
+            LEFT JOIN requisitions mr ON mr.id=c.matched_requisition_id AND mr.is_active IS NOT FALSE
             LEFT JOIN user_email_accounts recv_ua ON recv_ua.id = im.account_id
             LEFT JOIN users recv_u ON recv_u.id = recv_ua.user_id
             LEFT JOIN LATERAL (
@@ -335,7 +335,7 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
                    (own.recruiter_id IS NOT NULL) AS source_recruiter_registered
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
-            LEFT JOIN requisitions r ON r.id=rf.requisition_id
+            LEFT JOIN requisitions r ON r.id=rf.requisition_id AND r.is_active IS NOT FALSE
             LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
             LEFT JOIN user_email_accounts recv_ua ON recv_ua.id = im.account_id
             LEFT JOIN users recv_u ON recv_u.id = recv_ua.user_id
