@@ -225,6 +225,43 @@ async def recommend_template(candidate_id: str, requisition_id: Optional[str] = 
 
 # ─────────────────────────── Preview (52.4) ───────────────────────────
 
+class ContentOverrides(BaseModel):
+    """REAL FEATURE (2026-09-09, reported live: "not able to edit in the
+    resume... edit and add anything in the resume"). Every field here, when
+    given, is the KAE's own already-reviewed final text -- it wins over
+    whatever auto-extraction/config would otherwise have produced, in both
+    the live preview AND the real generated PDF/DOCX (see
+    _apply_content_overrides below, and the matching override checks in
+    services/resume_formatting.py's _resolve_body_text/_company_line).
+    skills is a single comma-separated string (what a plain text input
+    edits), not a list -- split server-side."""
+    display_name: Optional[str] = None
+    designation: Optional[str] = None
+    company: Optional[str] = None
+    skills: Optional[str] = None
+    summary: Optional[str] = None
+
+
+def _apply_content_overrides(candidate: dict, cfg: dict, overrides: Optional[ContentOverrides]) -> dict:
+    if not overrides:
+        return candidate
+    c = dict(candidate)
+    if overrides.display_name is not None:
+        c["full_name"] = overrides.display_name
+        # Already the exact final text the KAE reviewed -- re-masking it
+        # via name_format='masked' would silently mangle a real edit.
+        cfg["name_format"] = "full"
+    if overrides.designation is not None:
+        c["current_designation"] = overrides.designation
+    if overrides.company is not None:
+        c["_override_company"] = overrides.company
+    if overrides.skills is not None:
+        c["skills"] = [s.strip() for s in overrides.skills.split(",") if s.strip()]
+    if overrides.summary is not None:
+        c["_override_body_text"] = overrides.summary
+    return c
+
+
 class PreviewIn(BaseModel):
     template_id: Optional[str] = None
     name_format: Optional[str] = None
@@ -239,6 +276,7 @@ class PreviewIn(BaseModel):
     visual_theme: Optional[str] = None
     logo_position: Optional[str] = None
     requisition_id: Optional[str] = None
+    content_overrides: Optional[ContentOverrides] = None
 
 
 @router.post("/candidates/{candidate_id}/preview")
@@ -263,6 +301,7 @@ async def preview_resume(candidate_id: str, body: PreviewIn, actor: Actor = Depe
                    WHERE r.id=$1 AND r.tenant_id=$2""", body.requisition_id, actor.tenant_id)
 
     cfg = _config_from_body(body, template or None)
+    candidate = _apply_content_overrides(candidate, cfg, body.content_overrides)
     display_name = mask_name(candidate["full_name"] or "") if cfg["name_format"] == "masked" else (candidate["full_name"] or "Candidate")
     heading, text = _resolve_body_text(candidate, cfg)
     return {
@@ -274,7 +313,12 @@ async def preview_resume(candidate_id: str, body: PreviewIn, actor: Actor = Depe
         "company": _company_line(candidate, cfg),
         "skills": candidate["skills"] or [],
         "section_heading": heading,
-        "body_snippet": (text[:600] + ("…" if len(text) > 600 else "")) if text else "",
+        # REAL BUG FIX (2026-09-09): used to hard-truncate at 600 chars --
+        # harmless when this was read-only, but this is now what an
+        # editable summary box gets seeded from, and silently cutting off
+        # the rest of a real candidate's resume there would look like data
+        # loss the moment they opened the editor. Full text, always.
+        "body_snippet": text or "",
         "client_line": _client_line(client_name, cfg),
         "config": cfg,
     }
@@ -332,6 +376,7 @@ async def _generate_one(candidate_id: str, body: "GenerateIn", actor: Actor) -> 
             actor.tenant_id, candidate_id)) or 1
 
     cfg = _config_from_body(body, template or None)
+    candidate = _apply_content_overrides(candidate, cfg, body.content_overrides)
     display_name = mask_name(candidate["full_name"] or "") if cfg["name_format"] == "masked" else (candidate["full_name"] or "Candidate")
 
     try:

@@ -77,6 +77,18 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
   const [recommendation, setRecommendation] = useState<any>(null);
   const [versions, setVersions] = useState<any[] | null>(null);
   const applied = useRef(false);
+  // REAL FEATURE (2026-09-09, reported live: "not able to edit in the
+  // resume and it should be full view with editing features... to edit
+  // and add anything in the resume"). Seeded ONCE from the first real
+  // preview response (auto-extracted content) so the KAE starts from
+  // exactly what's already there, not a blank box -- see runPreview's own
+  // seeding logic. Once set, it's the real source of truth sent as
+  // content_overrides on every subsequent preview/generate call, so what
+  // gets typed here is exactly what lands in the actual generated PDF/
+  // DOCX (backend: _apply_content_overrides in resume_generator.py).
+  // null means "not yet loaded" -- distinct from an intentionally blanked
+  // field (empty string), which a real edit can produce.
+  const [contentEdits, setContentEdits] = useState<{ display_name: string; designation: string; company: string; skills: string; summary: string } | null>(null);
 
   function applyTemplate(t: any) {
     setTemplateId(t.id);
@@ -116,16 +128,31 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
     visual_theme: visualTheme,
     logo_position: logoPosition,
     requisition_id: requisitionId || undefined,
-  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, visualTheme, logoPosition, requisitionId]);
+    content_overrides: contentEdits || undefined,
+  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, visualTheme, logoPosition, requisitionId, contentEdits]);
 
   const runPreview = useCallback(async () => {
     setLoadingPreview(true);
     try {
       const r = await apiFetch(`/resume-generator/candidates/${candidate.id}/preview`, { method: 'POST', body: JSON.stringify(configBody()) });
       setPreview(r);
+      // Seed the editable fields from the real auto-extracted content the
+      // very first time (or after an explicit Reset, which nulls this back
+      // out) -- never again after that, so the KAE's own typed edits are
+      // never silently overwritten by a later debounced re-preview (e.g.
+      // from switching visual theme).
+      if (!contentEdits) {
+        setContentEdits({
+          display_name: r.display_name || '',
+          designation: r.designation || '',
+          company: r.company || '',
+          skills: (r.skills || []).join(', '),
+          summary: r.body_snippet || '',
+        });
+      }
     } catch { /* preview is best-effort */ }
     setLoadingPreview(false);
-  }, [candidate.id, configBody]);
+  }, [candidate.id, configBody, contentEdits]);
 
   // Live preview — do not generate the final document until the recruiter
   // explicitly clicks Generate (spec 52.4). Debounced so toggling several
@@ -309,6 +336,48 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
 
           {/* Right: live preview */}
           <div style={{ flex: '1 1 45%', padding: '18px 22px', overflowY: 'auto', background: '#f8fafc' }}>
+            {/* REAL FEATURE (2026-09-09, reported live: "not able to edit
+                in the resume... edit and add anything") -- plain-text
+                edit fields for exactly the content shown below (name,
+                designation, company, skills, summary), seeded from the
+                real auto-extracted values. What's typed here is sent as
+                content_overrides on every preview/generate call, so the
+                Live Preview below updates with it and the real generated
+                PDF/DOCX uses it too -- not a separate mockup. */}
+            {contentEdits && (
+              <div style={{ marginBottom: '16px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                  <span style={label}>✏️ Edit Resume Content</span>
+                  <button type="button" onClick={() => setContentEdits(null)}
+                    style={{ fontSize: '10.5px', fontWeight: 600, color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}>
+                    ↺ Reset to auto-extracted
+                  </button>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
+                  <div>
+                    <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Name</label>
+                    <input style={inputStyle} value={contentEdits.display_name} onChange={e => setContentEdits({ ...contentEdits, display_name: e.target.value })} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Designation</label>
+                    <input style={inputStyle} value={contentEdits.designation} onChange={e => setContentEdits({ ...contentEdits, designation: e.target.value })} />
+                  </div>
+                </div>
+                <div style={{ marginBottom: '8px' }}>
+                  <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Company</label>
+                  <input style={inputStyle} value={contentEdits.company} onChange={e => setContentEdits({ ...contentEdits, company: e.target.value })} />
+                </div>
+                <div style={{ marginBottom: '8px' }}>
+                  <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Key Skills (comma-separated)</label>
+                  <input style={inputStyle} value={contentEdits.skills} onChange={e => setContentEdits({ ...contentEdits, skills: e.target.value })} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>{preview?.section_heading || 'Professional Summary'}</label>
+                  <textarea style={{ ...inputStyle, minHeight: '140px', resize: 'vertical', fontFamily: 'inherit' }}
+                    value={contentEdits.summary} onChange={e => setContentEdits({ ...contentEdits, summary: e.target.value })} />
+                </div>
+              </div>
+            )}
             <span style={label}>Live Preview {loadingPreview && <Loader2 size={11} style={{ display: 'inline', marginLeft: '4px', verticalAlign: 'middle' }} />}</span>
             {preview ? (
               visualTheme === 'modern_sidebar' ? (

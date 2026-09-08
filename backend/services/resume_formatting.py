@@ -393,6 +393,18 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
     entirely; 'include' is the normal full extracted text."""
     from services.improved_parser import extract_projects_section, extract_summary_section
 
+    # REAL FEATURE (2026-09-09, reported live: "not able to edit in the
+    # resume... edit and add anything in the resume") -- a KAE-edited
+    # summary (set on the candidate dict by resume_generator.py's
+    # _apply_content_overrides, never a real DB column) always wins,
+    # completely bypassing extraction -- this is deliberately what the
+    # KAE actually typed and reviewed in the live preview, not a fresh
+    # re-derivation from resume_text that would silently discard it.
+    override = candidate.get("_override_body_text")
+    if override is not None:
+        heading = "PROJECTS" if config["project_mode"] == "focus" else "PROFESSIONAL SUMMARY"
+        return heading, override
+
     resume_text = candidate.get("resume_text") or ""
     if config["project_mode"] == "hide":
         return "", ""
@@ -427,6 +439,12 @@ def _resolve_body_text(candidate: dict, config: dict) -> tuple[str, str]:
 
 
 def _company_line(candidate: dict, config: dict) -> Optional[str]:
+    # Same real-KAE-edit override as _resolve_body_text above -- wins over
+    # company_mode entirely once set, since it's the exact text the KAE
+    # already reviewed live.
+    override = candidate.get("_override_company")
+    if override is not None:
+        return override or None
     employer = candidate.get("current_employer") or ""
     if config["company_mode"] == "hide":
         return None
