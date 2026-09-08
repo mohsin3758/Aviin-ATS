@@ -678,8 +678,12 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
             })}
           </div>
         )}
-        {/* Resume preview */}
-        {candidate.resume_text && (
+        {/* Resume preview — real fix (2026-09-08): reads from fullCand (the
+            real, already-fetched GET /candidates/{id} detail, same pattern
+            latest_resume_file_id/name right below already use), not the
+            bare `candidate` list prop — the list endpoint no longer carries
+            resume_text at all (a real performance fix). */}
+        {fullCand?.resume_text && (
           <div style={{padding:'14px 22px',flex:1}}>
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'8px'}}>
               <div style={{fontSize:'11px',fontWeight:'600',color:'#64748b'}}>RESUME EXTRACT</div>
@@ -696,7 +700,7 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
                 <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{fullCand.latest_resume_file_name}</span>
               </div>
             )}
-            <pre style={{fontSize:'11px',color:'#374151',lineHeight:'1.5',whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:'200px',overflowY:'auto',background:'#f8fafc',padding:'10px',borderRadius:'6px',margin:0}}>{candidate.resume_text.slice(0,800)}{candidate.resume_text.length>800?'...':''}</pre>
+            <pre style={{fontSize:'11px',color:'#374151',lineHeight:'1.5',whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:'200px',overflowY:'auto',background:'#f8fafc',padding:'10px',borderRadius:'6px',margin:0}}>{fullCand.resume_text.slice(0,800)}{fullCand.resume_text.length>800?'...':''}</pre>
           </div>
         )}
       </div>
@@ -1218,12 +1222,21 @@ export default function CandidatesPage() {
   const toggleSkillExpRole = (r:string)=>setSkillExpForm(f=>({...f,role_types:f.role_types.includes(r)?f.role_types.filter(x=>x!==r):[...f.role_types,r]}));
   const openCreate = ()=>{setForm({...EMPTY});setEditId(null);setErr('');setDupWarning(null);setSkipDupCheck(false);resetDocState();setShowModal(true);};
   const openEdit   = async(d:any)=>{
-    setForm({full_name:d.full_name||'',email:d.email||'',phone:d.phone||'',location:d.location||'',
-      desired_location:d.desired_location||'',
-      current_employer:d.current_employer||'',current_designation:d.current_designation||'',
-      total_exp_mo:d.total_exp_mo||0,expected_ctc:d.expected_ctc||'',current_ctc:d.current_ctc||'',
-      notice_period_days:d.notice_period_days||'',linkedin_url:d.linkedin_url||'',
-      source:d.source||'linkedin',skills:d.skills||[],resume_text:d.resume_text||''});
+    // Real fix (2026-09-08): the list endpoint no longer returns resume_text
+    // (a real performance fix — see backend/routers/candidates.py's
+    // LIST_FIELDS comment). `d` here is a bare list-row item, so
+    // d.resume_text is now always empty — fetch the real, full detail
+    // record first (same lazy on-open fetch pattern already used by
+    // CandidateDrawer/JdCandidatePreviewPanel) so the Edit form's resume
+    // text field is genuinely populated, not silently blanked.
+    let full: any = d;
+    try { full = await apiFetch(`/candidates/${d.id}`); } catch { /* fall back to d */ }
+    setForm({full_name:full.full_name||'',email:full.email||'',phone:full.phone||'',location:full.location||'',
+      desired_location:full.desired_location||'',
+      current_employer:full.current_employer||'',current_designation:full.current_designation||'',
+      total_exp_mo:full.total_exp_mo||0,expected_ctc:full.expected_ctc||'',current_ctc:full.current_ctc||'',
+      notice_period_days:full.notice_period_days||'',linkedin_url:full.linkedin_url||'',
+      source:full.source||'linkedin',skills:full.skills||[],resume_text:full.resume_text||''});
     setEditId(d.id);setErr('');resetDocState();setShowModal(true);
     try { const res:any = await apiFetch(`/candidates/${d.id}/skill-experience`); setSkillExpRows(res.rows||[]); } catch { /* non-blocking */ }
   };

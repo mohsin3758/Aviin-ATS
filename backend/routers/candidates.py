@@ -28,6 +28,18 @@ FIELDS = (
     "ai_match_score, color_indicator, last_activity, created_at, updated_at"
 )
 
+# Real, confirmed performance fix (2026-09-08): list_candidates() reused
+# the same FIELDS as the single-candidate detail endpoint — including
+# resume_text, a real TEXT column averaging 6.8KB and up to 55KB per
+# candidate in this tenant (37MB total across 5,665 active candidates).
+# Every default 50-row page load was pulling ~340KB of resume text the
+# list view never renders (confirmed via a real frontend grep — the one
+# place resume_text is shown in a list-adjacent UI, CandidateDrawer,
+# already does its own separate GET /candidates/{id} detail fetch).
+# LIST_FIELDS is FIELDS minus resume_text; the detail endpoint keeps
+# using the full FIELDS unchanged.
+LIST_FIELDS = FIELDS.replace("resume_text, ", "")
+
 @router.get("")
 async def list_candidates(
     search:   Optional[str] = Query(None),
@@ -181,7 +193,7 @@ async def list_candidates(
                       "'readiness_grade',cs.readiness_grade,'requisition_title',r.title)"
                       " FROM candidate_scores cs LEFT JOIN requisitions r ON r.id=cs.requisition_id"
                       " WHERE cs.candidate_id=c.id ORDER BY cs.readiness_index DESC NULLS LAST LIMIT 1) AS top_match_json")
-    flds = ", ".join("c." + f.strip() for f in FIELDS.split(","))
+    flds = ", ".join("c." + f.strip() for f in LIST_FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
         rows  = await conn.fetch(
