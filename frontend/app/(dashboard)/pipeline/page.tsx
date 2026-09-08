@@ -2120,6 +2120,42 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // genuine new row (its own SL No) in the cumulative tracking sheet.
   const [additionalCandidates, setAdditionalCandidates] = useState<{ application_id: string; candidate_name: string }[]>([]);
   const [showAddPicker, setShowAddPicker] = useState(false);
+  // REAL GAP FIX (2026-09-08, reported live: "how i know its sent or not?
+  // there is no option to check... no sent mail box to verify"). Two real
+  // things were already there but easy to miss/incomplete: a toast on
+  // send (transient), and the SUBMISSION HISTORY list below — but it only
+  // ever queried THIS application's own submissions, so once a combined
+  // batch send included Lahari B, her own real candidate_submissions row
+  // never showed up anywhere in this modal, only the anchor's. Fetches
+  // each additional candidate's own history too, so every candidate in
+  // the batch gets their own real ✓ Sent / ✗ Failed confirmation, not
+  // just the anchor.
+  const [additionalHistory, setAdditionalHistory] = useState<Record<string, any[]>>({});
+  // Names, keyed by application_id, surviving the post-send chip clear too
+  // -- additionalHistory alone has no candidate name to label each row with
+  // once its chip is gone.
+  const [additionalNames, setAdditionalNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!additionalCandidates.length) return;
+    setAdditionalNames(prev => ({ ...prev, ...Object.fromEntries(additionalCandidates.map(c => [c.application_id, c.candidate_name])) }));
+  }, [additionalCandidates]);
+  // Deliberately never clears additionalHistory when additionalCandidates
+  // empties out (send() clears the picker chips right after a successful
+  // send so the KAE can start a fresh batch) -- merges newly-fetched
+  // entries in instead, so Lahari's own just-sent confirmation stays
+  // visible below even after her chip is gone. A reopened modal remounts
+  // this whole component, so there's no real staleness risk.
+  const fetchAdditionalHistory = useCallback(async (ids: { application_id: string }[]) => {
+    if (!ids.length) return;
+    const entries = await Promise.all(ids.map(async c => {
+      try {
+        const d = await apiFetch(`/applications/${c.application_id}/submissions`);
+        return [c.application_id, (d || []).filter((h: any) => h.direction === 'kae_to_client')] as const;
+      } catch { return [c.application_id, []] as const; }
+    }));
+    setAdditionalHistory(prev => ({ ...prev, ...Object.fromEntries(entries) }));
+  }, []);
+  useEffect(() => { fetchAdditionalHistory(additionalCandidates); }, [additionalCandidates, fetchAdditionalHistory]);
 
   useEffect(() => {
     if (preview && !initialized) {
@@ -2240,6 +2276,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         showToast(ok === total ? `Sent all ${total} ✓` : `Sent ${ok}/${total} — check individual results`, ok > 0);
         const anchorResult = (r.results || []).find((x: any) => x.application_id === appId);
         stageBumped = !!anchorResult?.stage_bumped_to_submitted;
+        fetchAdditionalHistory(additionalCandidates);
         setAdditionalCandidates([]);
       } else {
         const r = await apiFetch(`/applications/${appId}/submit-to-client`, { method: 'POST', body: JSON.stringify(body) });
@@ -2651,18 +2688,36 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px', background: '#16A34A', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.7 : 1 }}>
         <Send size={13} /> {sending ? 'Sending…' : 'Approve & Send to Client'}
       </button>
+      {/* REAL GAP FIX (2026-09-08, reported live: "how i know its sent or
+          not... no sent mail box to verify") — a toast alone is
+          transient, and SUBMISSION HISTORY below only ever shows up once
+          a record exists. This link to the real, persistent Sent mailbox
+          (every email this app sends is logged to candidate_messages,
+          see routers/communications.py's _log()) is always here, so
+          there's always a real way to go double-check a send, not just
+          right after clicking it. */}
+      <a href="/conversations" target="_blank" rel="noreferrer" style={{ fontSize: 10, fontWeight: 700, color: '#2563EB', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+        <ExternalLink size={11} /> View in Sent Mailbox (Email / Conversations) →
+      </a>
 
-      {history.length > 0 && (
+      {(history.length > 0 || Object.values(additionalHistory).some(h => h.length > 0)) && (
         <div>
           <span style={lbl}>SUBMISSION HISTORY</span>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {history.map((h: any) => (
               <div key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', background: '#F8FAFC', border: '1px solid #F1F5F9', borderRadius: 8, fontSize: 11 }}>
                 {h.status === 'sent' ? <CheckCircle size={12} color="#16A34A" /> : <AlertTriangle size={12} color="#DC2626" />}
-                <span style={{ flex: 1 }}>SL#{h.field_values?.sl_no} to {(h.to_emails || []).join(', ') || 'client'} · {h.template_name || 'Template'}</span>
+                <span style={{ flex: 1 }}>{h.status === 'sent' ? 'Sent' : 'Failed'} · SL#{h.field_values?.sl_no} to {(h.to_emails || []).join(', ') || 'client'} · {h.template_name || 'Template'}</span>
                 <span style={{ color: '#94A3B8' }}>{new Date(h.sent_at).toLocaleDateString()}</span>
               </div>
             ))}
+            {Object.entries(additionalHistory).flatMap(([appIdKey, rows]) => rows.map((h: any) => (
+              <div key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', background: '#F8FAFC', border: '1px solid #F1F5F9', borderRadius: 8, fontSize: 11 }}>
+                {h.status === 'sent' ? <CheckCircle size={12} color="#16A34A" /> : <AlertTriangle size={12} color="#DC2626" />}
+                <span style={{ flex: 1 }}>{h.status === 'sent' ? 'Sent' : 'Failed'} · {additionalNames[appIdKey] || 'Additional candidate'} — SL#{h.field_values?.sl_no} to {(h.to_emails || []).join(', ') || 'client'} · {h.template_name || 'Template'}</span>
+                <span style={{ color: '#94A3B8' }}>{new Date(h.sent_at).toLocaleDateString()}</span>
+              </div>
+            )))}
           </div>
         </div>
       )}
