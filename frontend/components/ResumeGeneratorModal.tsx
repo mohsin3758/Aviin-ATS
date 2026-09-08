@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch, useFetch } from '@/lib/useFetch';
 import { getToken } from '@/lib/auth';
-import { FileText, X, Download, Send, History, Loader2, CheckCircle } from 'lucide-react';
+import { FileText, X, Download, Send, History, Loader2, CheckCircle, Maximize2, Minimize2 } from 'lucide-react';
 import { RichTextEditor } from './RichTextEditor';
 
 // Real, safe seed for the rich-text summary editor's very first load --
@@ -103,6 +103,13 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
   // field (empty string), which a real edit can produce.
   const [contentEdits, setContentEdits] = useState<{ display_name: string; designation: string; company: string; skills: string; summary: string } | null>(null);
   const [editorResetKey, setEditorResetKey] = useState(0);
+  // REAL GAP FIX (2026-09-09, reported live: "resume should be full not
+  // half right side view and full max size view and real resume page") --
+  // the fixed 960px-wide modal squeezed the Live Preview into a cramped
+  // half-column fighting the edit panel for room. Same real one-click
+  // enlarge pattern already proven elsewhere in this app (pipeline/
+  // page.tsx's ClientSubmissionMoveModal), not a new one invented here.
+  const [enlarged, setEnlarged] = useState(false);
 
   function applyTemplate(t: any) {
     setTemplateId(t.id);
@@ -219,7 +226,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
 
   return (
     <div style={overlay} onClick={onClose}>
-      <div style={{ background: 'white', borderRadius: '16px', width: '100%', maxWidth: '960px', maxHeight: '92vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
+      <div style={{ background: 'white', borderRadius: '16px', width: '100%', maxWidth: enlarged ? '98vw' : '960px', height: enlarged ? '95vh' : undefined, maxHeight: '95vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.25)', transition: 'max-width 0.15s ease' }} onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '18px 22px', borderBottom: '1px solid #f1f5f9' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -237,13 +244,17 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
             <button onClick={loadVersions} style={{ display: 'flex', alignItems: 'center', gap: '5px', border: '1px solid #e2e8f0', background: 'white', borderRadius: '7px', padding: '6px 10px', fontSize: '11.5px', fontWeight: 600, color: '#374151', cursor: 'pointer' }}>
               <History size={12} /> Versions
             </button>
+            <button onClick={() => setEnlarged(v => !v)} title={enlarged ? 'Restore size' : 'Full view'}
+              style={{ display: 'flex', alignItems: 'center', gap: '5px', border: '1px solid #e2e8f0', background: enlarged ? '#eff6ff' : 'white', borderRadius: '7px', padding: '6px 10px', fontSize: '11.5px', fontWeight: 600, color: enlarged ? '#1e40af' : '#374151', cursor: 'pointer' }}>
+              {enlarged ? <Minimize2 size={12} /> : <Maximize2 size={12} />} {enlarged ? 'Restore' : 'Full View'}
+            </button>
             <button onClick={onClose} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#94a3b8' }}><X size={18} /></button>
           </div>
         </div>
 
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
           {/* Left: configuration */}
-          <div style={{ flex: '1 1 55%', padding: '18px 22px', overflowY: 'auto', borderRight: '1px solid #f1f5f9' }}>
+          <div style={{ flex: enlarged ? '0 0 400px' : '1 1 55%', padding: '18px 22px', overflowY: 'auto', borderRight: '1px solid #f1f5f9' }}>
             {recommendation?.template && (
               <div style={{ fontSize: '11.5px', color: '#7c3aed', background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '7px 10px', marginBottom: '14px' }}>
                 Recommended: <strong>{recommendation.template.name}</strong> — {recommendation.reason}
@@ -415,6 +426,17 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
               </div>
             )}
             <span style={label}>Live Preview {loadingPreview && <Loader2 size={11} style={{ display: 'inline', marginLeft: '4px', verticalAlign: 'middle' }} />}</span>
+            {/* REAL GAP FIX (2026-09-09, reported live: "resume should be
+                full not half right side view and full max size view and
+                real resume page") -- a real page-mockup frame (off-white
+                surface, generous max-width matching a real printed page,
+                a drop shadow) around the exact same theme-rendered card
+                every branch below already builds -- none of those 8
+                branches were touched, just wrapped, so the enlarge toggle
+                above and this frame are what actually make the preview
+                read as a real page instead of a cramped half-column. */}
+            <div style={{ background: '#e2e8f0', borderRadius: '10px', padding: enlarged ? '28px' : '16px', display: 'flex', justifyContent: 'center' }}>
+              <div style={{ width: '100%', maxWidth: enlarged ? '820px' : '520px', boxShadow: '0 4px 18px rgba(15,23,42,0.12)', borderRadius: '10px' }}>
             {preview ? (
               visualTheme === 'modern_sidebar' ? (
                 <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden', display: 'flex', fontSize: '12px' }}>
@@ -619,6 +641,8 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
             ) : (
               <div style={{ fontSize: '12px', color: '#94a3b8' }}>Loading preview…</div>
             )}
+              </div>
+            </div>
 
             {result && (
               <div style={{ marginTop: '14px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '12px' }}>
