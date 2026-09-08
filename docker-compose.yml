@@ -15,10 +15,18 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./sql:/docker-entrypoint-initdb.d:ro
     healthcheck:
+      # Real fix (2026-09-08): was firing pg_isready every 5s, continuously,
+      # for the container's whole life — the one outlier interval in this
+      # file (every other healthcheck here already uses 15s). Flagged
+      # directly by Hostinger support while investigating a real, severe
+      # CPU-steal/throttle incident as a genuine, if minor, contributing
+      # factor. 15s still gives a down DB a fast enough detection window
+      # (backend's own healthcheck already retries on top of this) while
+      # cutting the check frequency 3x.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ats}"]
-      interval: 5s
+      interval: 15s
       timeout: 5s
-      retries: 10
+      retries: 5
     networks: [aviin]
 
   embed:
