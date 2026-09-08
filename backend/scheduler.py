@@ -2129,6 +2129,13 @@ def start_scheduler():
     # the last run of the previously-manual-only embed_writer.py script.
     scheduler.add_job(fill_missing_embeddings, "interval", minutes=10,
                       id="fill_missing_embeddings", replace_existing=True)
+    # Every 15 min — real, automated recovery for a WAHA session stuck
+    # waiting on a QR scan (2026-09-08 real incident: 3 sessions sat
+    # disconnected for days, each keeping a full Chromium process alive,
+    # driving hypervisor CPU-steal into the 90%+ range and exhausting
+    # Hostinger's burst-CPU reset budget — see check_waha_session_health).
+    scheduler.add_job(check_waha_session_health, "interval", minutes=15,
+                      id="waha_session_health", replace_existing=True)
     # Daily at 03:00 IST — data-minimization purge for device monitoring
     # (active-window log + browsing history). Consent/device/enrollment
     # rows are kept (they're the audit trail of who agreed to what), only
@@ -2221,6 +2228,32 @@ async def purge_old_device_monitoring_data():
                 logger.info(f"device monitoring purge tenant={tid}: activity={a} browsing={b}")
     except Exception as e:
         logger.error(f"purge_old_device_monitoring_data error: {e}")
+
+
+async def check_waha_session_health():
+    """Every 15 min — real, automated recovery for a WAHA WhatsApp session
+    stuck waiting on a QR scan (2026-09-08).
+
+    Real incident this closes: 3 sessions (2 shared company numbers, 1
+    personal connection attempt) sat in SCAN_QR_CODE for days — each one
+    keeps a full, persistent headless Chromium process alive the whole
+    time it exists, regardless of whether anyone's connected — driving
+    this VPS's hypervisor CPU-steal into the 90%+ range and exhausting
+    Hostinger's burst-CPU reset budget (confirmed live: aviin_waha spiked
+    to 1,349% CPU across repeated samples on a 4-core box). Found and
+    fixed manually once; see services/waha_health.py for the real logic
+    (never touches a WORKING session, requires a 45-min real grace
+    period, always leaves a trace — never a silent kill)."""
+    logger.info("scheduler: WAHA session health check running")
+    try:
+        from services import waha_health
+        result = await waha_health.check_and_recover_stuck_sessions()
+        if result.get("stopped"):
+            logger.warning(f"WAHA session health: auto-stopped {result['stopped']}")
+        if result.get("errors"):
+            logger.error(f"WAHA session health errors: {result['errors']}")
+    except Exception as e:
+        logger.error(f"check_waha_session_health error: {e}")
 
 
 async def run_gdpr_archive():
