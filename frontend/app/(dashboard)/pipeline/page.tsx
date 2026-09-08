@@ -2120,6 +2120,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // genuine new row (its own SL No) in the cumulative tracking sheet.
   const [additionalCandidates, setAdditionalCandidates] = useState<{ application_id: string; candidate_name: string }[]>([]);
   const [showAddPicker, setShowAddPicker] = useState(false);
+  const [showResumeGenerator, setShowResumeGenerator] = useState(false);
   // REAL GAP FIX (2026-09-08, reported live: "how i know its sent or not?
   // there is no option to check... no sent mail box to verify"). Two real
   // things were already there but easy to miss/incomplete: a toast on
@@ -2549,7 +2550,25 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       </div>
 
       <div>
-        <span style={lbl}>RESUME FORMAT</span>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={lbl}>RESUME FORMAT</span>
+          {/* REAL GAP FIX (2026-09-09, reported live: "Resume view and
+              generate option should be there on client sharing... view
+              features should be there before sharing with client") — the
+              style presets below only ever pick a fixed rendering; there
+              was no way to actually SEE the generated resume, or
+              customize it (mask company/client name, pick a visual
+              theme, show/hide contact fields), before sending. Opens the
+              same real Resume Generator (live preview + Generate) already
+              used from the candidate profile page — not a new feature,
+              just wired into this flow too. */}
+          {preview.candidate_id && (
+            <button data-testid="submit-client-open-resume-generator" onClick={() => setShowResumeGenerator(true)}
+              style={{ fontSize: 10, fontWeight: 700, color: '#2563EB', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+              🖊 Generate & Preview Resume →
+            </button>
+          )}
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           {[
             { key: 'clean_generated', label: 'Clean Summary', hint: 'Generated one-pager, no contact info' },
@@ -2720,6 +2739,15 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
             )))}
           </div>
         </div>
+      )}
+      {showResumeGenerator && preview.candidate_id && (
+        <ResumeGeneratorModal
+          candidate={{ id: preview.candidate_id, full_name: preview.auto_values?.candidate_name || '' }}
+          requisitionId={preview.requisition_id || undefined}
+          clientName={preview.client_name || undefined}
+          onClose={() => setShowResumeGenerator(false)}
+          hideSubmitToKae
+        />
       )}
     </div>
   );

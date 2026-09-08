@@ -9,6 +9,16 @@ interface Props {
   requisitionId?: string;
   clientName?: string;
   onClose: () => void;
+  // REAL BUG FIX (2026-09-09): "Generate & Submit" (submit_to_kae=true)
+  // sends this straight to the recruiter->KAE hop (_do_kae_submission) --
+  // correct from the candidate profile page, but wrong and confusing when
+  // this same modal is opened from INSIDE the later Submit-to-Client flow
+  // (the candidate is already past that stage there) -- would silently
+  // re-fire a KAE submission email and stage bump that doesn't belong to
+  // what the caller is actually doing. Callers in a client-facing context
+  // pass this true to hide that specific action; every other real caller
+  // (unset) keeps the original behavior unchanged.
+  hideSubmitToKae?: boolean;
 }
 
 const radioRow: React.CSSProperties = { display: 'flex', gap: '8px', flexWrap: 'wrap' };
@@ -41,7 +51,7 @@ function LogoChip({ position, dark }: { position: 'top_left' | 'top_right' | 'no
   );
 }
 
-export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onClose }: Props) {
+export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onClose, hideSubmitToKae }: Props) {
   const { data: templates } = useFetch<any[]>('/resume-generator/templates');
   const { data: visualThemes } = useFetch<any[]>('/resume-generator/visual-themes');
   const { data: logoPositionOptions } = useFetch<any[]>('/resume-generator/logo-position-options');
@@ -539,7 +549,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
         {/* Footer actions */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', padding: '14px 22px', borderTop: '1px solid #f1f5f9' }}>
           <button onClick={onClose} style={{ padding: '9px 18px', borderRadius: '8px', border: '1px solid #e2e8f0', background: 'white', cursor: 'pointer', fontSize: '13px', fontWeight: 600, color: '#374151' }}>Cancel</button>
-          {requisitionId && (
+          {requisitionId && !hideSubmitToKae && (
             <button onClick={() => generate(true)} disabled={generating} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '9px 18px', borderRadius: '8px', border: 'none', background: generating ? '#94a3b8' : '#7c3aed', color: 'white', cursor: generating ? 'not-allowed' : 'pointer', fontSize: '13px', fontWeight: 600 }}>
               <Send size={13} /> Generate &amp; Submit
             </button>
