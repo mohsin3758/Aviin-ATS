@@ -192,7 +192,7 @@ async def list_candidates(
     top_match_sub = ("(SELECT json_build_object('readiness_index',cs.readiness_index,"
                       "'readiness_grade',cs.readiness_grade,'requisition_title',r.title)"
                       " FROM candidate_scores cs LEFT JOIN requisitions r ON r.id=cs.requisition_id"
-                      " WHERE cs.candidate_id=c.id ORDER BY cs.readiness_index DESC NULLS LAST LIMIT 1) AS top_match_json")
+                      " WHERE cs.candidate_id=c.id AND r.is_active IS NOT FALSE ORDER BY cs.readiness_index DESC NULLS LAST LIMIT 1) AS top_match_json")
     flds = ", ".join("c." + f.strip() for f in LIST_FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
@@ -1186,7 +1186,7 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
                       cs.scored_at, cs.requisition_id, r.title AS requisition_title,
                       r.skills_required
                FROM candidate_scores cs LEFT JOIN requisitions r ON r.id=cs.requisition_id
-               WHERE cs.candidate_id=$1 AND cs.tenant_id=$2
+               WHERE cs.candidate_id=$1 AND cs.tenant_id=$2 AND r.is_active IS NOT FALSE
                ORDER BY cs.scored_at DESC LIMIT 5""",
             candidate_id, actor.tenant_id)
         # Current pipeline stage (most-recently-updated real application),
