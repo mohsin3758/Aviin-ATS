@@ -123,11 +123,26 @@ async def intake_stats(owned: str = Query(None), actor: Actor = Depends(get_acto
             WHERE rf.tenant_id=$1 AND rf.parse_status='done'
               AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE){mine_cond}""",
             actor.tenant_id, *mine_params)
+        # Real gap fix (2026-09-08): 1,403 real resumes (18% of this
+        # tenant's queue at the time this was found) have no candidate_id
+        # at all — no dedicated way anywhere to see "these are the ones
+        # still needing a decision on whether they even become a
+        # candidate." A genuinely unlinked resume, by definition, has no
+        # candidate row for the mine_cond ownership half to match against
+        # — only the mailbox-ownership half of that condition can ever
+        # apply here, so mine_cond (built above for the candidate_ownership
+        # EXISTS clause) is reused as-is; it degrades correctly.
+        unlinked = await conn.fetchval(f"""
+            SELECT COUNT(*) FROM resume_files rf
+            WHERE rf.tenant_id=$1 AND rf.candidate_id IS NULL
+              AND rf.parse_status NOT IN ('rejected','non_resume_doc','not_a_resume'){mine_cond}""",
+            actor.tenant_id, *mine_params)
     return {
         'today': dict(today) if today else {},
         'total_auto_candidates': total_auto,
         'pending_emails': pending,
         'pending_review': pending_review,
+        'unlinked': unlinked,
         'by_source': [dict(r) for r in by_source],
     }
 
@@ -150,6 +165,11 @@ async def intake_queue(
     kae: str = Query(None),
     date_from: str = Query(None),
     date_to: str = Query(None),
+    # Real gap fix (2026-09-08): "1,403 resumes have no candidate record
+    # at all — no dedicated way to filter to just those" — a resume that
+    # never became a candidate (parsing gave up, or nobody's decided yet)
+    # is exactly the kind of item most likely to need a human's attention.
+    unlinked: bool = Query(False),
     limit: int = Query(100, le=500),
     offset: int = Query(0),
     actor: Actor = Depends(get_actor)
@@ -158,6 +178,8 @@ async def intake_queue(
         # (candidate_id may be NULL — a resume not yet linked to a
         # candidate must still show up for review)
         conditions = ['rf.tenant_id=$1', '(rf.candidate_id IS NULL OR c.is_active IS NOT FALSE)']
+        if unlinked:
+            conditions.append('rf.candidate_id IS NULL')
         params = [actor.tenant_id]
         p = 2
         if status == 'all':
@@ -214,7 +236,7 @@ async def intake_queue(
             SELECT rf.id, rf.job_board, rf.job_board_label, rf.source_email,
                    rf.file_name, rf.file_path, rf.mime_type, rf.file_size,
                    rf.parse_status, rf.created_at, rf.parsed_data, rf.requisition_id,
-                   rf.error_msg, rf.parse_confidence,
+                   rf.error_msg, rf.parse_confidence, rf.reject_reason, rf.reject_notes,
                    c.id as candidate_id, c.full_name, c.email, c.phone,
                    c.skills, c.total_exp_mo, c.location, c.current_employer,
                    c.current_designation, c.source_label, c.auto_created, c.jd_match_score,
@@ -301,6 +323,7 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
         row = await conn.fetchrow("""
             SELECT rf.*, c.full_name, c.email, c.phone, c.skills, c.total_exp_mo,
                    c.location, c.current_employer, c.current_designation,
+                   c.resume_text,
                    r.title as requisition_title,
                    pl.stage as pipeline_stage, pl.pipeline_job,
                    sc.readiness_index AS live_match_score,
@@ -481,13 +504,29 @@ async def approve_resume(resume_file_id: str, actor: Actor = Depends(get_actor))
     return {'status': 'approved'}
 
 
+_VALID_REJECT_REASONS = {'not_a_resume', 'duplicate', 'poor_quality', 'wrong_role', 'spam', 'other'}
+
+
 @router.post('/{resume_file_id}/reject')
-async def reject_resume(resume_file_id: str, actor: Actor = Depends(get_actor)):
+async def reject_resume(resume_file_id: str, body: dict = None, actor: Actor = Depends(get_actor)):
+    # Real gap fix (2026-09-08): Reject was a single click with zero
+    # record of why — every real "Rejected" resume in this tenant carried
+    # no reason at all. body is genuinely optional (a bare POST with no
+    # body — e.g. an older client, or a bulk-reject caller — still works
+    # exactly as before), but when a reason is given it's validated
+    # against the same real CHECK constraint the DB itself enforces, so a
+    # caller gets a clean 400 instead of a raw constraint-violation 500.
+    body = body or {}
+    reason = body.get('reason')
+    notes = (body.get('notes') or '').strip() or None
+    if reason and reason not in _VALID_REJECT_REASONS:
+        raise HTTPException(400, f"Unknown reject reason '{reason}'")
     async with db.tenant_conn(actor.tenant_id) as conn:
         await conn.execute(
-            "UPDATE resume_files SET parse_status='rejected' WHERE id=$1 AND tenant_id=$2",
-            resume_file_id, actor.tenant_id)
-    return {'status': 'rejected'}
+            """UPDATE resume_files SET parse_status='rejected', reject_reason=$3, reject_notes=$4,
+               rejected_by=$5, rejected_at=now() WHERE id=$1 AND tenant_id=$2""",
+            resume_file_id, actor.tenant_id, reason, notes, actor.user_id)
+    return {'status': 'rejected', 'reason': reason}
 
 
 @router.post('/{resume_file_id}/update-and-approve')

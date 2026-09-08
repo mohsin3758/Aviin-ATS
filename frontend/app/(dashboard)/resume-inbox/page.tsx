@@ -35,6 +35,16 @@ interface ResumeItem {
   // gave zero indication of WHY, even when the system had already
   // recorded a real reason. Now surfaced in the detail drawer.
   error_msg?: string; parse_confidence?: number;
+  // Real gap fix (2026-09-08): Reject used to be a single click with no
+  // record of why — now optionally captured and shown back.
+  reject_reason?: string; reject_notes?: string;
+  // Real gap fix (2026-09-08): candidates.resume_text already existed and
+  // is used elsewhere (the full-page resume view) but was never fetched
+  // here — forcing a full file download just to read a resume. Only ever
+  // populated via the single-record detail fetch (GET /resume-intake/
+  // {id}), same as original_source/other_senders above — never present
+  // on a plain queue row.
+  resume_text?: string;
   candidate_id?: string; full_name?: string; email?: string; phone?: string;
   skills?: string[]; total_exp_mo?: number; location?: string;
   current_employer?: string; current_designation?: string; source_label?: string;
@@ -92,6 +102,16 @@ interface ResumeItem {
 const SOURCE_COLORS: Record<string, string> = { naukri: '#4f46e5', linkedin: '#0a66c2', indeed: '#003a9b', shine: '#f59e0b', monster: '#7c3aed', timesjobs: '#dc2626', freshersworld: '#059669', iimjobs: '#0891b2', hirist: '#7c3aed', instahyre: '#db2777', cutshort: '#ea580c', internshala: '#2563eb', apna: '#16a34a', workindia: '#9333ea', glassdoor: '#00a47c', jora: '#f97316', simplyhired: '#64748b', jobsforher: '#ec4899', quikr: '#b45309', rozgar: '#0369a1', sensehq: '#1d4ed8', direct: '#475569', referral: '#0f766e', wellfound: '#000000', dice: '#ff7a59', toptal: '#3863f6', upwork: '#14a800', freelancer: '#29b2fe', fiverr: '#1dbf73', remoteok: '#c65bcf', weworkremotely: '#3a4959', bayt: '#8dc63f', gulftalent: '#f04e30', ziprecruiter: '#589e37', careerbuilder: '#2f4f8f', snagajob: '#e01f26', ncs_gov: '#0b5394', ambitionbox: '#ff5722' };
 const STATUS_CFG: Record<string, { color: string; Icon: any; label: string }> = { auto_accepted: { color: '#059669', Icon: CheckCircle, label: 'Auto-Accepted' }, needs_review: { color: '#f59e0b', Icon: Clock, label: 'Review Needed' }, low_confidence: { color: '#dc2626', Icon: AlertCircle, label: 'Manual Entry' }, done: { color: '#f59e0b', Icon: Clock, label: 'Pending Review' }, approved: { color: '#059669', Icon: CheckCircle, label: 'Approved' }, pending: { color: '#94a3b8', Icon: Clock, label: 'Pending' }, failed: { color: '#dc2626', Icon: XCircle, label: 'Failed' }, no_resume: { color: '#cbd5e1', Icon: AlertCircle, label: 'No Resume' }, rejected: { color: '#dc2626', Icon: XCircle, label: 'Rejected' } };
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api';
+// Real gap fix (2026-09-08): matches resume_intake.py's own
+// _VALID_REJECT_REASONS / the DB CHECK constraint exactly.
+const REJECT_REASONS: { key: string; label: string }[] = [
+  { key: 'not_a_resume', label: 'Not a resume (JD/other document)' },
+  { key: 'duplicate', label: 'Duplicate submission' },
+  { key: 'poor_quality', label: 'Poor quality / unreadable' },
+  { key: 'wrong_role', label: 'Wrong role / not relevant' },
+  { key: 'spam', label: 'Spam / irrelevant sender' },
+  { key: 'other', label: 'Other' },
+];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const gx = (mo: number) => { if (!mo) return 'Fresher'; const y = Math.floor(mo / 12), m = mo % 12; return y ? `${y}y${m ? ` ${m}m` : ''}` : `${mo}mo`; };
@@ -216,6 +236,44 @@ function EditApproveModal({ item, onClose, onSave }: { item: ResumeItem; onClose
   );
 }
 
+// ─── Reject Reason Modal ──────────────────────────────────────────────────────
+// Real gap fix (2026-09-08): Reject was a single click with zero record of
+// why — inconsistent with the structured rejection-reason system already
+// built for the Pipeline board's own candidate rejections. Resume-level
+// rejection is a genuinely different concept (this file/submission is junk,
+// not "this candidate isn't a fit for a role"), so it gets its own small,
+// dedicated reason set rather than reusing the pipeline's job-fit taxonomy.
+function RejectReasonModal({ onClose, onConfirm }: { onClose: () => void; onConfirm: (reason: string, notes: string) => void }) {
+  const [reason, setReason] = useState('not_a_resume');
+  const [notes, setNotes] = useState('');
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 2500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={onClose}>
+      <div style={{ background: '#fff', borderRadius: 14, width: '100%', maxWidth: 420, padding: 22 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#1e293b' }}>Reject Resume</h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: 20 }}>✕</button>
+        </div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 8 }}>REASON</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+          {REJECT_REASONS.map(r => (
+            <label key={r.key} data-testid={`reject-reason-${r.key}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#374151', cursor: 'pointer', padding: '6px 8px', borderRadius: 8, background: reason === r.key ? '#fef2f2' : 'transparent' }}>
+              <input type="radio" name="reject-reason" checked={reason === r.key} onChange={() => setReason(r.key)} />
+              {r.label}
+            </label>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 6 }}>NOTES (OPTIONAL)</div>
+        <textarea data-testid="reject-reason-notes" value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+          placeholder="Any extra context…" style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, boxSizing: 'border-box', resize: 'vertical', marginBottom: 16 }} />
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: '10px', background: '#f1f5f9', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          <button data-testid="reject-reason-confirm" onClick={() => onConfirm(reason, notes)} style={{ flex: 2, padding: '10px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>✕ Reject</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Detail Drawer ────────────────────────────────────────────────────────────
 const PIPELINE_STAGES = [
   { key:'sourced',       label:'Sourced',       color:'#6366f1' },
@@ -231,8 +289,17 @@ const PIPELINE_STAGES = [
   { key:'hold',          label:'Hold',          color:'#94a3b8' },
 ];
 
-function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, onCheckDups, showToast }: { item: ResumeItem; onClose: () => void; onApprove: () => void; onReject: () => void; onReparse: () => void; onEdit: () => void; onCheckDups?: () => void; showToast: (msg: string, ok?: boolean) => void; }) {
+function DetailDrawer({ item, onClose, onApprove, onRequestReject, onReparse, onEdit, onCheckDups, showToast, onNext, onPrev, hasNext, hasPrev, positionLabel }: { item: ResumeItem; onClose: () => void; onApprove: () => void; onRequestReject: () => void; onReparse: () => void; onEdit: () => void; onCheckDups?: () => void; showToast: (msg: string, ok?: boolean) => void; onNext?: () => void; onPrev?: () => void; hasNext?: boolean; hasPrev?: boolean; positionLabel?: string; }) {
   const { data: stageConfig } = useFetch<any[]>('/settings/pipeline-stages');
+  // Real gap fix (2026-09-08): a lazy single-record fetch — the drawer
+  // previously only ever had whatever the queue row already carried,
+  // which never included resume_text (no reason to bloat every list
+  // response with full resume text) or original_source/other_senders
+  // (a pre-existing dead feature — the fields were fully typed and
+  // rendered below, but nothing ever fetched them, so they were always
+  // undefined in the live UI). One fetch on drawer-open fixes both.
+  const { data: fullDetail, loading: detailLoading } = useFetch<any>(`/resume-intake/${item.id}`);
+  const [resumePreviewOpen, setResumePreviewOpen] = useState(false);
   const LIVE_STAGES = (stageConfig || [])
     .filter((s: any) => s.is_visible && !['rejected', 'hold'].includes(s.stage_key))
     .sort((a: any, b: any) => a.display_order - b.display_order)
@@ -289,7 +356,7 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end' }} onClick={onClose}>
       <div data-testid="resume-inbox-drawer" data-item-id={item.id} style={{ width: 480, maxWidth: '96vw', height: '100%', background: '#fff', boxShadow: '-4px 0 24px rgba(0,0,0,0.15)', overflowY: 'auto', padding: 24 }} onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
           <div>
             <SourceBadge source={item.job_board || 'direct'} label={item.job_board_label || 'Direct'} />
             <h2 style={{ margin: '8px 0 2px', fontSize: 18, fontWeight: 800, color: '#1e293b' }}>{item.full_name || pd.name || '—'}</h2>
@@ -297,6 +364,26 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: 20 }}>✕</button>
         </div>
+
+        {/* Real gap fix (2026-09-08): reviewing meant open -> decide ->
+            close -> find the next row -> click again, real friction on a
+            queue in the thousands. Next/Prev walk the exact same filtered/
+            sorted `items` list the table renders, so this always matches
+            what's visibly next on screen — plus the same shortcuts are
+            wired to arrow keys in the parent (see keydown handler below). */}
+        {(onNext || onPrev) && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, padding: '6px 4px', borderBottom: '1px solid #f1f5f9' }}>
+            <button data-testid="resume-inbox-drawer-prev" onClick={onPrev} disabled={!hasPrev}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', cursor: hasPrev ? 'pointer' : 'default', color: hasPrev ? '#1e40af' : '#cbd5e1', fontSize: 12, fontWeight: 700, padding: '4px 6px' }}>
+              ← Prev
+            </button>
+            {positionLabel && <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>{positionLabel}</span>}
+            <button data-testid="resume-inbox-drawer-next" onClick={onNext} disabled={!hasNext}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', cursor: hasNext ? 'pointer' : 'default', color: hasNext ? '#1e40af' : '#cbd5e1', fontSize: 12, fontWeight: 700, padding: '4px 6px' }}>
+              Next →
+            </button>
+          </div>
+        )}
 
         {/* Status row */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -442,6 +529,31 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
               blob-fetch pattern — this was the one remaining raw link. */}
           <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#059669', fontSize: 12, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}><Download size={12} /> Download</button></div></div>}
 
+        {/* Real gap fix (2026-09-08): candidates.resume_text already
+            existed and is used elsewhere (the full-page resume view) but
+            was never shown here — forcing a full file download just to
+            read a resume, the single biggest process-speed tax on a
+            queue this size. Collapsed by default (a resume can run
+            thousands of characters) — one click reveals it, lazily
+            fetched via fullDetail above. */}
+        {item.file_name && (
+          <div style={{ marginBottom: 16 }}>
+            <button data-testid="resume-inbox-preview-toggle" onClick={() => setResumePreviewOpen(o => !o)}
+              style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '8px 12px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, fontSize: 12, fontWeight: 700, color: '#1e40af', cursor: 'pointer' }}>
+              <FileText size={13} /> {resumePreviewOpen ? 'Hide' : 'Preview'} Resume Text
+              <ChevronDown size={13} style={{ marginLeft: 'auto', transform: resumePreviewOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
+            </button>
+            {resumePreviewOpen && (
+              <div data-testid="resume-inbox-preview-text" style={{ marginTop: 8, padding: 12, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, maxHeight: 320, overflowY: 'auto', fontSize: 12, lineHeight: 1.6, color: '#374151', whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace, monospace' }}>
+                {detailLoading ? 'Loading…' :
+                 fullDetail?.resume_text ? fullDetail.resume_text :
+                 item.candidate_id ? 'No extracted text available for this resume.' :
+                 "This resume hasn't been linked to a candidate yet — extracted text isn't available until it is."}
+              </div>
+            )}
+          </div>
+        )}
+
         {item.email_subject && <div style={{ marginBottom: 16 }}><div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>ORIGINAL EMAIL</div><div style={{ fontSize: 13, color: '#374151', fontStyle: 'italic' }}>{item.email_subject}</div><div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>From: {item.source_email} · {fdt(item.email_received_at || item.created_at)}</div></div>}
         {/* Sender-based attribution (2026-09-07 Golden Rule): Source
             Recruiter is who actually SENT this email (ownership/KPI
@@ -474,15 +586,19 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
                 distinctly once it differs from the current owner above
                 (a later resubmission/transfer moved ownership on), plus
                 any other real senders who also tried to submit this same
-                candidate while it was already owned. */}
-            {item.original_source && item.original_source.recruiter_email?.toLowerCase() !== item.source_recruiter_email?.toLowerCase() && (
+                candidate while it was already owned. Real bug fix
+                (2026-09-08): these came from a lazy single-record fetch
+                (fullDetail) — the plain queue row (item) never carried
+                either field, so this whole block was dead in practice
+                despite being fully built. */}
+            {fullDetail?.original_source && fullDetail.original_source.recruiter_email?.toLowerCase() !== item.source_recruiter_email?.toLowerCase() && (
               <div style={{ fontSize: 12, color: '#64748b' }}>
-                🕐 Original source: <b>{item.original_source.recruiter_name}</b> ({item.original_source.recruiter_email})
+                🕐 Original source: <b>{fullDetail.original_source.recruiter_name}</b> ({fullDetail.original_source.recruiter_email})
               </div>
             )}
-            {!!item.other_senders?.length && (
+            {!!fullDetail?.other_senders?.length && (
               <div style={{ fontSize: 12, color: '#64748b' }}>
-                Also submitted by: {item.other_senders.map(s => s.recruiter_name).join(', ')}
+                Also submitted by: {fullDetail.other_senders.map((s: any) => s.recruiter_name).join(', ')}
               </div>
             )}
           </div>
@@ -578,7 +694,16 @@ function DetailDrawer({ item, onClose, onApprove, onReject, onReparse, onEdit, o
           <button onClick={onApprove} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#059669', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><CheckCircle size={13} /> Quick Approve</button>
           <button onClick={onReparse} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#f1f5f9', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><RotateCcw size={13} /> Re-parse</button>
           {item.candidate_id && onCheckDups && <button onClick={onCheckDups} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Layers size={13} /> Check Dupes</button>}
-          {item.parse_status !== 'rejected' && <button onClick={onReject} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><XCircle size={13} /> Reject</button>}
+          {/* Real gap fix (2026-09-08): Reject no longer fires immediately
+              — opens the reason picker built above, same reasoning as the
+              Pipeline board's own structured rejection system. */}
+          {item.parse_status !== 'rejected' && <button data-testid="resume-inbox-reject-btn" onClick={onRequestReject} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><XCircle size={13} /> Reject</button>}
+          {item.parse_status === 'rejected' && item.reject_reason && (
+            <div style={{ gridColumn: '1/-1', fontSize: 11, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '8px 10px' }}>
+              Rejected — <b>{REJECT_REASONS.find(r => r.key === item.reject_reason)?.label || item.reject_reason}</b>
+              {item.reject_notes && <div style={{ marginTop: 2, color: '#991b1b' }}>{item.reject_notes}</div>}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -685,12 +810,16 @@ function ResumeInboxPageInner() {
   const [kaeFilter, setKaeFilter] = useState('');
   const [dateFromFilter, setDateFromFilter] = useState('');
   const [dateToFilter, setDateToFilter] = useState('');
+  // Real gap fix (2026-09-08): 1,403 real resumes (18%) have no candidate
+  // record at all — no dedicated way to find just those.
+  const [unlinkedFilter, setUnlinkedFilter] = useState(false);
   const extraFilterQs =
     (recruiterFilter ? `&recruiter=${encodeURIComponent(recruiterFilter)}` : '') +
     (senderEmailFilter ? `&sender_email=${encodeURIComponent(senderEmailFilter)}` : '') +
     (kaeFilter ? `&kae=${encodeURIComponent(kaeFilter)}` : '') +
     (dateFromFilter ? `&date_from=${dateFromFilter}` : '') +
-    (dateToFilter ? `&date_to=${dateToFilter}` : '');
+    (dateToFilter ? `&date_to=${dateToFilter}` : '') +
+    (unlinkedFilter ? `&unlinked=true` : '');
 
   // Sync jobFilter with ?req= URL param
   useEffect(() => { const r = _sp?.get('req') || ''; if (r !== jobFilter) setJobFilter(r); }, [_sp]);
@@ -718,12 +847,14 @@ function ResumeInboxPageInner() {
     const st = _sp?.get('status'); if (st) setStatusFilter(st);
     const sr = _sp?.get('source'); if (sr) setSourceFilter(sr);
     const ow = _sp?.get('owned'); if (ow) setOwnedFilter(ow);
+    const ul = _sp?.get('unlinked'); if (ul === 'true') setUnlinkedFilter(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [restoreItemId] = useState<string>(() => _sp?.get('item') || '');
   const updateStatusFilter = (v: string) => { setStatusFilter(v); setUrlParam('status', v === 'all' ? '' : v); };
   const updateSourceFilter = (v: string) => { setSourceFilter(v); setUrlParam('source', v); };
   const updateOwnedFilter = (v: string) => { setOwnedFilter(v); setUrlParam('owned', v); };
+  const updateUnlinkedFilter = (v: boolean) => { setUnlinkedFilter(v); setUrlParam('unlinked', v ? 'true' : ''); };
 
   const [search, setSearch] = useState('');
   const [processing, setProcessing] = useState(false);
@@ -905,6 +1036,112 @@ function ResumeInboxPageInner() {
     restoredRef.current = true;
   }, [items, restoreItemId]);
 
+  // ── Real gap fix (2026-09-08): Next/Prev navigation ─────────────────────
+  // Reviewing used to mean open -> decide -> close -> find the next row ->
+  // click again — real friction on a queue in the thousands. Walks the
+  // exact same filtered/sorted `items` list the table renders, so it
+  // always matches what's visibly next on screen.
+  const currentIndex = selected ? items.findIndex(r => r.id === selected.id) : -1;
+  const goNext = () => { if (currentIndex >= 0 && currentIndex < items.length - 1) setSelected(items[currentIndex + 1]); };
+  const goPrev = () => { if (currentIndex > 0) setSelected(items[currentIndex - 1]); };
+
+  // ── Real gap fix (2026-09-08): reject-reason modal, lifted to the parent
+  // (not owned by DetailDrawer) specifically so the keyboard shortcut below
+  // can open it too, not just a click on the Reject button.
+  const [rejectModalOpen, setRejectModalOpen] = useState(false);
+  const confirmReject = async (reason: string, notes: string) => {
+    if (!selected) return;
+    setRejectModalOpen(false);
+    await doAction(selected.id, 'reject', { reason, notes });
+  };
+
+  // ── Real gap fix (2026-09-08): keyboard shortcuts ────────────────────────
+  // Only active while the drawer is open and no other modal is stacked on
+  // top of it, and never while focus is inside a real text input (search
+  // box, filter fields, the reject-reason notes textarea, etc.) so typing
+  // "r" into a filter never accidentally opens the reject modal. Escape
+  // always closes whichever layer is on top, regardless of focus.
+  useEffect(() => {
+    if (!selected) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (rejectModalOpen) { setRejectModalOpen(false); return; }
+        if (editItem) { setEditItem(null); return; }
+        if (dedupTarget) { setDedupTarget(null); return; }
+        setSelected(null);
+        return;
+      }
+      if (editItem || dedupTarget || rejectModalOpen) return;
+      const tag = (document.activeElement?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); goNext(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); goPrev(); }
+      else if (e.key === 'a' || e.key === 'A') { doAction(selected.id, 'approve'); }
+      else if (e.key === 'r' || e.key === 'R') { if (selected.parse_status !== 'rejected') setRejectModalOpen(true); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, editItem, dedupTarget, rejectModalOpen, currentIndex, items]);
+
+  // ── Real gap fix (2026-09-08): bulk move-to-stage ────────────────────────
+  // Bulk actions were Approve/Reject only. Reuses the exact same, already-
+  // proven POST /candidates/bulk-assign the Pipeline board's own Add
+  // Candidate modal and the Candidates page's bulk-assign-to-requisition
+  // modal both already call — no new backend endpoint, no second, drifting
+  // implementation of "add these candidates to this job at this stage."
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
+  const [bulkMoveReqId, setBulkMoveReqId] = useState('');
+  const [bulkMoveStage, setBulkMoveStage] = useState('');
+  const [bulkMoveBusy, setBulkMoveBusy] = useState(false);
+  const { data: bulkMoveStages } = useFetch<any[]>(bulkMoveOpen ? '/settings/pipeline-stages' : null);
+  const bulkMoveStageOptions = (bulkMoveStages || [])
+    .filter((s: any) => s.is_visible && s.stage_key !== 'rejected')
+    .sort((a: any, b: any) => a.display_order - b.display_order);
+  const runBulkMove = async () => {
+    if (!bulkMoveReqId || !bulkMoveStage) return;
+    const candidateIds = Array.from(selectedIds)
+      .map(id => items.find(r => r.id === id)?.candidate_id)
+      .filter((cid): cid is string => !!cid);
+    const skippedNoCandidateCount = selectedIds.size - candidateIds.length;
+    if (!candidateIds.length) { showToast('None of the selected resumes have a linked candidate yet', false); return; }
+    setBulkMoveBusy(true);
+    try {
+      const r = await apiFetch('/candidates/bulk-assign', { method: 'POST', body: JSON.stringify({ candidate_ids: candidateIds, requisition_id: bulkMoveReqId, stage: bulkMoveStage }) });
+      showToast(`✓ Moved ${r.created} to ${r.stage} on "${r.requisition_title}"` + (r.skipped ? ` (${r.skipped} already there)` : '') + (skippedNoCandidateCount ? ` — ${skippedNoCandidateCount} skipped (no candidate yet)` : ''));
+      setBulkMoveOpen(false); setBulkMoveReqId(''); setBulkMoveStage(''); setSelectedIds(new Set());
+    } catch (e: any) { showToast('Error: ' + e.message, false); }
+    finally { setBulkMoveBusy(false); }
+  };
+
+  // ── Real gap fix (2026-09-08): CSV export ────────────────────────────────
+  // No backend endpoint needed — the data's already loaded client-side.
+  // Exports the current selection if anything's selected, otherwise every
+  // currently-loaded row matching the active filters (not just what's on
+  // screen — accumItems already holds everything auto-loaded so far).
+  const exportCsv = () => {
+    const rows = selectedIds.size ? items.filter(r => selectedIds.has(r.id)) : items;
+    if (!rows.length) { showToast('Nothing to export', false); return; }
+    const cols = ['Name', 'Email', 'Phone', 'Status', 'Source', 'Skills', 'Experience', 'Source Recruiter', 'KAE', 'Job Match', 'Match %', 'Received', 'Added'];
+    const esc = (v: any) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+    const lines = [cols.map(esc).join(',')];
+    for (const r of rows) {
+      const skills = (r.skills || r.parsed_data?.skills || []).join('; ');
+      lines.push([
+        r.full_name || r.parsed_data?.name || '', r.email || r.parsed_data?.email || '', r.phone || r.parsed_data?.phone || '',
+        r.parse_status || '', r.job_board_label || '', skills, gx(r.total_exp_mo || 0),
+        r.source_recruiter_name || '', r.kae_name || '', r.requisition_title || r.matched_jd_title || '',
+        getMatchScore(r) != null ? `${getMatchScore(r)}%` : '', fdt(r.email_received_at || r.created_at), fdt(r.created_at),
+      ].map(esc).join(','));
+    }
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `resume-inbox-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+
   const today = stats?.today || {};
   const bySrc: any[] = stats?.by_source || [];
 
@@ -1008,11 +1245,22 @@ function ResumeInboxPageInner() {
         <span style={{ color: '#94a3b8', fontSize: 12 }}>to</span>
         <input data-testid="resume-inbox-filter-date-to" type="date" value={dateToFilter} onChange={e => setDateToFilter(e.target.value)}
           title="Received to" style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12 }} />
-        {(recruiterFilter || senderEmailFilter || kaeFilter || dateFromFilter || dateToFilter) && (
-          <button data-testid="resume-inbox-filters-clear" onClick={() => { setRecruiterFilter(''); setSenderEmailFilter(''); setKaeFilter(''); setDateFromFilter(''); setDateToFilter(''); }}
+        {/* Real gap fix (2026-09-08): "1,403 resumes have no candidate
+            record at all — no dedicated way to filter to just those." */}
+        <button data-testid="resume-inbox-filter-unlinked" onClick={() => updateUnlinkedFilter(!unlinkedFilter)}
+          title="Resumes with no candidate record yet"
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', background: unlinkedFilter ? '#7c3aed' : '#fff', color: unlinkedFilter ? '#fff' : '#7c3aed', border: '1px solid ' + (unlinkedFilter ? '#7c3aed' : '#ddd6fe') }}>
+          🔗 Unlinked Only{stats?.unlinked != null ? ` (${stats.unlinked})` : ''}
+        </button>
+        {(recruiterFilter || senderEmailFilter || kaeFilter || dateFromFilter || dateToFilter || unlinkedFilter) && (
+          <button data-testid="resume-inbox-filters-clear" onClick={() => { setRecruiterFilter(''); setSenderEmailFilter(''); setKaeFilter(''); setDateFromFilter(''); setDateToFilter(''); updateUnlinkedFilter(false); }}
             style={{ fontSize: 11, color: '#dc2626', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>✕ Clear filters</button>
         )}
-        <a href="/recruiter-tracking" style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: '#1e40af', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+        <button data-testid="resume-inbox-export-csv" onClick={exportCsv} title="Export current selection, or all currently loaded rows"
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', background: '#fff', color: '#374151', border: '1px solid #e2e8f0', marginLeft: 'auto' }}>
+          <Download size={12} /> Export CSV
+        </button>
+        <a href="/recruiter-tracking" style={{ fontSize: 12, fontWeight: 600, color: '#1e40af', textDecoration: 'none', whiteSpace: 'nowrap' }}>
           📊 Recruiter / Sender Tracking →
         </a>
       </div>
@@ -1023,7 +1271,43 @@ function ResumeInboxPageInner() {
           <span style={{ fontSize: 13, fontWeight: 600 }}>{selectedIds.size} selected</span>
           <button onClick={() => bulkAction('approve')} style={{ padding: '6px 14px', background: '#059669', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>✓ Approve All</button>
           <button onClick={() => bulkAction('reject')} style={{ padding: '6px 14px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>✕ Reject All</button>
+          {/* Real gap fix (2026-09-08): bulk actions used to be Approve/
+              Reject only. Reuses the same POST /candidates/bulk-assign the
+              Pipeline board's Add Candidate modal already calls. */}
+          <button data-testid="resume-inbox-bulk-move" onClick={() => setBulkMoveOpen(true)} style={{ padding: '6px 14px', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>→ Move to Pipeline</button>
+          <button onClick={exportCsv} style={{ padding: '6px 14px', background: 'rgba(255,255,255,0.15)', color: '#fff', border: '1px solid rgba(255,255,255,0.3)', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Export Selected</button>
           <button onClick={() => setSelectedIds(new Set())} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 12 }}>Clear</button>
+        </div>
+      )}
+
+      {bulkMoveOpen && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 2500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={() => !bulkMoveBusy && setBulkMoveOpen(false)}>
+          <div style={{ background: '#fff', borderRadius: 14, width: '100%', maxWidth: 420, padding: 22 }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#1e293b' }}>Move {selectedIds.size} to Pipeline</h2>
+              <button onClick={() => setBulkMoveOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: 20 }}>✕</button>
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 14 }}>
+              Only resumes already linked to a candidate can be moved — any without one yet will be skipped.
+            </div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#64748b', display: 'block', marginBottom: 4 }}>Client / Role</label>
+            <select data-testid="resume-inbox-bulk-move-req" value={bulkMoveReqId} onChange={e => setBulkMoveReqId(e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, marginBottom: 12, boxSizing: 'border-box' }}>
+              <option value="">Select role…</option>
+              {reqList.map((r: any) => <option key={r.id} value={r.id}>{r.title}</option>)}
+            </select>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#64748b', display: 'block', marginBottom: 4 }}>Stage</label>
+            <select data-testid="resume-inbox-bulk-move-stage" value={bulkMoveStage} onChange={e => setBulkMoveStage(e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, marginBottom: 18, boxSizing: 'border-box' }}>
+              <option value="">Select stage…</option>
+              {bulkMoveStageOptions.map((s: any) => <option key={s.stage_key} value={s.stage_key}>{s.label}</option>)}
+            </select>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setBulkMoveOpen(false)} disabled={bulkMoveBusy} style={{ flex: 1, padding: '10px', background: '#f1f5f9', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+              <button data-testid="resume-inbox-bulk-move-confirm" onClick={runBulkMove} disabled={bulkMoveBusy || !bulkMoveReqId || !bulkMoveStage}
+                style={{ flex: 2, padding: '10px', background: (bulkMoveBusy || !bulkMoveReqId || !bulkMoveStage) ? '#94a3b8' : '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: (bulkMoveBusy || !bulkMoveReqId || !bulkMoveStage) ? 'not-allowed' : 'pointer' }}>
+                {bulkMoveBusy ? 'Moving…' : `Move ${selectedIds.size}`}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1271,9 +1555,12 @@ function ResumeInboxPageInner() {
         )}
       </div>
 
-      {selected && <DetailDrawer item={selected} onClose={() => setSelected(null)} onApprove={() => doAction(selected.id, 'approve')} onReject={() => doAction(selected.id, 'reject')} onReparse={() => doAction(selected.id, 'reparse')} onEdit={() => { setEditItem(selected); setSelected(null); }}  onCheckDups={selected.candidate_id ? () => setDedupTarget(selected.candidate_id!) : undefined} showToast={showToast} />}
+      {selected && <DetailDrawer item={selected} onClose={() => setSelected(null)} onApprove={() => doAction(selected.id, 'approve')} onRequestReject={() => setRejectModalOpen(true)} onReparse={() => doAction(selected.id, 'reparse')} onEdit={() => { setEditItem(selected); setSelected(null); }}  onCheckDups={selected.candidate_id ? () => setDedupTarget(selected.candidate_id!) : undefined} showToast={showToast}
+        onNext={goNext} onPrev={goPrev} hasNext={currentIndex >= 0 && currentIndex < items.length - 1} hasPrev={currentIndex > 0}
+        positionLabel={currentIndex >= 0 ? `${currentIndex + 1} of ${items.length}` : undefined} />}
       {editItem && <EditApproveModal item={editItem} onClose={() => setEditItem(null)} onSave={handleEditSave} />}
       {dedupTarget && <DedupModal candidateId={dedupTarget} onClose={() => setDedupTarget(null)} />}
+      {rejectModalOpen && selected && <RejectReasonModal onClose={() => setRejectModalOpen(false)} onConfirm={confirmReject} />}
 
       {toast && <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', background: toastOk ? '#1e293b' : '#dc2626', color: '#fff', padding: '12px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 16px rgba(0,0,0,0.3)', whiteSpace: 'nowrap' }}>{toast}</div>}
     </div>
