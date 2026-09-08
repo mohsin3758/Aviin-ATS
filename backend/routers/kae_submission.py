@@ -167,8 +167,11 @@ def _format_skill_summary_default(rows) -> str:
         if r.get("project_name"):
             detail.append(r["project_name"])
         if r.get("duration_from") or r.get("duration_to"):
-            df = r["duration_from"].strftime("%b %Y") if r.get("duration_from") else "?"
-            dt = r["duration_to"].strftime("%b %Y") if r.get("duration_to") else "Present"
+            # duration_from/duration_to are free TEXT (sql/85_candidate_skill_
+            # experience.sql) -- recruiters enter "Jan 2024", "2024", "Current",
+            # not real dates -- render as-is, never .strftime().
+            df = r["duration_from"] or "?"
+            dt = r["duration_to"] or "Present"
             detail.append(f"{df} - {dt}")
         if r.get("role_types"):
             detail.append("/".join(r["role_types"]))
