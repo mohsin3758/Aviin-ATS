@@ -2120,23 +2120,6 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // genuine new row (its own SL No) in the cumulative tracking sheet.
   const [additionalCandidates, setAdditionalCandidates] = useState<{ application_id: string; candidate_name: string }[]>([]);
   const [showAddPicker, setShowAddPicker] = useState(false);
-  // REAL BUG FIX (2026-09-08, reported live: "details are not adding in
-  // the tracking sheet as a 2nd candidate... should extract all details
-  // with skills and technology") — the actual SEND already gives each
-  // batch candidate their own real, separately-extracted row (backend
-  // sends one email per candidate, see submit_to_client_batch's own
-  // docstring) — that part was never broken. What was genuinely missing
-  // is that this PREVIEW never fetched or showed anything for an added
-  // candidate at all, so a KAE had no way to SEE Lahari's skills/details
-  // were really there before sending — reads exactly like "her details
-  // aren't being extracted" even though they always would have been.
-  // Each additional candidate gets their own real preview fetch here
-  // (their own _app_context, same as the anchor), rendered as its own
-  // small one-row table below — never merged into the anchor's table,
-  // since that would misrepresent the real "separate email per
-  // candidate" behavior the 2026-09-03 fix deliberately established.
-  const [additionalPreviews, setAdditionalPreviews] = useState<Record<string, { columns: any[]; rows: any[] } | null>>({});
-  const [additionalPreviewLoading, setAdditionalPreviewLoading] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (preview && !initialized) {
@@ -2151,9 +2134,14 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
     }
   }, [preview, initialized]);
 
-  // Re-fetch the live table whenever what would actually be sent changes.
-  // Debounced so toggling several hidden-column eyes in quick succession
-  // doesn't fire a request per click.
+  // Re-fetch the live table whenever what would actually be sent changes
+  // -- including which additional batch candidates are attached, so this
+  // one table always shows every candidate's own real row combined
+  // together exactly as _do_client_submission_batch will actually send
+  // them (one shared email, real fix 2026-09-08 reversing the earlier
+  // 2026-09-03 separate-email-per-candidate design). Debounced so
+  // toggling several hidden-column eyes (or adding/removing a candidate)
+  // in quick succession doesn't fire a request per click.
   useEffect(() => {
     if (!initialized) return;
     const t = setTimeout(async () => {
@@ -2163,40 +2151,14 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         if (templateId) params.set('template_id', templateId);
         if (toContactId) params.set('contact_id', toContactId);
         if (hiddenKeys.length) params.set('hidden_columns', hiddenKeys.join(','));
+        if (additionalCandidates.length) params.set('additional_application_ids', additionalCandidates.map(c => c.application_id).join(','));
         const d = await apiFetch(`/applications/${appId}/submit-to-client/tracking-preview?${params.toString()}`);
         setTrackingPreview(d);
       } catch { /* the main form still works even if this live preview fails to load */ }
       finally { setTrackingLoading(false); }
     }, 350);
     return () => clearTimeout(t);
-  }, [appId, templateId, toContactId, hiddenKeys, initialized]);
-
-  // Same live preview, once per additional batch candidate — each is a
-  // real, independent fetch keyed to that candidate's own application_id
-  // (their own resume-parsed skills/details), never derived from or
-  // merged with the anchor's row.
-  useEffect(() => {
-    if (!initialized || !additionalCandidates.length) return;
-    const t = setTimeout(async () => {
-      const params = new URLSearchParams();
-      if (templateId) params.set('template_id', templateId);
-      if (toContactId) params.set('contact_id', toContactId);
-      if (hiddenKeys.length) params.set('hidden_columns', hiddenKeys.join(','));
-      const qs = params.toString();
-      await Promise.all(additionalCandidates.map(async c => {
-        setAdditionalPreviewLoading(prev => ({ ...prev, [c.application_id]: true }));
-        try {
-          const d = await apiFetch(`/applications/${c.application_id}/submit-to-client/tracking-preview?${qs}`);
-          setAdditionalPreviews(prev => ({ ...prev, [c.application_id]: d }));
-        } catch {
-          setAdditionalPreviews(prev => ({ ...prev, [c.application_id]: null }));
-        } finally {
-          setAdditionalPreviewLoading(prev => ({ ...prev, [c.application_id]: false }));
-        }
-      }));
-    }, 350);
-    return () => clearTimeout(t);
-  }, [additionalCandidates, templateId, toContactId, hiddenKeys, initialized]);
+  }, [appId, templateId, toContactId, hiddenKeys, additionalCandidates, initialized]);
 
   useEffect(() => {
     if (resumeStyle === 'manual' && !manualDraft) {
@@ -2445,11 +2407,21 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
               </thead>
               <tbody>
                 {(trackingPreview.rows || []).map((r: any, i: number) => {
-                  const isLast = i === (trackingPreview.rows!.length - 1);
+                  // REAL BUG FIX (2026-09-08): every row this preview shows
+                  // is a brand-new candidate about to be sent (never real
+                  // history — see _client_tracking_sheet_rows'/the combined
+                  // preview endpoint's own docstrings), so ALL rows are
+                  // "SENDING NOW," not just the last one. Only the ANCHOR's
+                  // row (the candidate this modal was opened for, always
+                  // index 0) is bound to the editable `fields` state — a
+                  // manual override the KAE typed can never silently land
+                  // on someone else's row, matching the backend's own
+                  // field_values-applies-to-the-anchor-only rule.
+                  const isAnchor = i === 0;
                   return (
-                    <tr key={i} style={{ background: isLast ? '#EFF6FF' : (i % 2 ? '#F8FAFC' : '#fff') }}>
+                    <tr key={i} style={{ background: isAnchor ? '#EFF6FF' : (i % 2 ? '#F8FAFC' : '#fff') }}>
                       {trackingPreview.columns!.map((c: any) => {
-                        const editable = isLast && c.key !== 'sl_no';
+                        const editable = isAnchor && c.key !== 'sl_no';
                         const isMultiline = c.key === 'skill_summary';
                         const minW = TRACKING_COL_MIN_WIDTH[c.key] || 90;
                         return (
@@ -2474,11 +2446,9 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                               )
                             ) : (
                               <span style={{ whiteSpace: isMultiline ? 'pre-line' : 'normal', wordBreak: 'break-word' }}>
-                                {((isLast ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')}
+                                {((isAnchor ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')}
                                 {c.key === 'sl_no' && (
-                                  isLast
-                                    ? <span data-testid="tracking-row-status-new" style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: '#DBEAFE', color: '#1D4ED8', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>SENDING NOW</span>
-                                    : <span data-testid="tracking-row-status-sent" style={{ marginLeft: 6, fontSize: 9, background: '#F1F5F9', color: '#64748B', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>✓ Already Sent</span>
+                                  <span data-testid="tracking-row-status-new" style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: '#DBEAFE', color: '#1D4ED8', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>SENDING NOW</span>
                                 )}
                               </span>
                             )}
@@ -2497,8 +2467,8 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
           </div>
         )}
         <p style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
-          This is the exact table that will be sent — including every real candidate already submitted to this client
-          for this role. Earlier rows are the client's real submission history and can't be changed. Need a different
+          This is the exact table that will be sent, in ONE email — real, sequential SL Nos continuing this role's
+          history, but only the candidate(s) being submitted right now are shown here. Need a different
           or extra column? <a href="/ops-settings?tab=templates" target="_blank" rel="noreferrer" style={{ fontWeight: 700, color: '#2563EB' }}>Add/Edit Columns →</a>
         </p>
       </div>
@@ -2536,49 +2506,9 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         {additionalCandidates.length > 0 && resumeStyle === 'manual' && (
           <p style={{ fontSize: 10, color: '#B45309', marginTop: 4 }}>Manual Editing only describes one person — pick a different resume format below to send this batch.</p>
         )}
-        {/* Each added candidate goes out as their OWN separate email with
-            their OWN single-row sheet (never merged into the table above)
-            — this shows exactly that row per candidate, so a KAE can see
-            their real extracted skills/details before sending. */}
-        {additionalCandidates.map(c => {
-          const p = additionalPreviews[c.application_id];
-          const loading = additionalPreviewLoading[c.application_id];
-          return (
-            <div key={c.application_id} style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#1E40AF', marginBottom: 4 }}>
-                {c.candidate_name} — will be sent as its own separate email {loading && '(loading…)'}
-              </div>
-              {p?.columns?.length ? (
-                <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8 }}>
-                  <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 11 }}>
-                    <thead>
-                      <tr>
-                        {p.columns.map((col: any) => (
-                          <th key={col.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'normal', minWidth: TRACKING_COL_MIN_WIDTH[col.key] || 90 }}>{col.label}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(p.rows || []).map((r: any, i: number) => (
-                        <tr key={i} style={{ background: '#EFF6FF' }}>
-                          {p.columns.map((col: any) => (
-                            <td key={col.key} style={{ padding: '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top', minWidth: TRACKING_COL_MIN_WIDTH[col.key] || 90 }}>
-                              <span style={{ whiteSpace: col.key === 'skill_summary' ? 'pre-line' : 'normal', wordBreak: 'break-word' }}>{r[col.key] || ''}</span>
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div style={{ fontSize: 11, color: '#94A3B8', padding: 8, border: '1px dashed #E2E8F0', borderRadius: 8 }}>
-                  {loading ? 'Loading…' : 'Could not load this candidate\'s row.'}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {additionalCandidates.length > 0 && (
+          <p style={{ fontSize: 10, color: '#64748B', marginTop: 4 }}>Every candidate above appears as their own row in the SAME tracking sheet table and goes out in ONE combined email, each with their own resume attached — see the table above.</p>
+        )}
       </div>
 
       <div>

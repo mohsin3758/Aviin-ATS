@@ -2019,6 +2019,7 @@ async def submit_to_client_tracking_preview(
     template_id: Optional[str] = None,
     contact_id: Optional[str] = None,
     hidden_columns: Optional[str] = None,
+    additional_application_ids: Optional[str] = None,
     actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
 ):
     """Re-render the real, live tracking table whenever the KAE changes
@@ -2027,10 +2028,26 @@ async def submit_to_client_tracking_preview(
     picking a different template doesn't re-fetch everything else
     (contacts, resume text, etc). hidden_columns is a comma-separated
     list, matching how a plain GET query param carries a list most
-    simply."""
+    simply.
+
+    additional_application_ids (2026-09-08, reported live: "its should be
+    add in the same tracking sheet table... not a separate one" —
+    following the same combined-send reversal as
+    _do_client_submission_batch) — a comma-separated list of the "Also
+    submit these candidates" ids, so this preview shows the REAL combined
+    multi-row table exactly as _do_client_submission_batch would send it,
+    not just the anchor's own row. Any id on a different requisition than
+    the anchor is silently skipped here too, same real safety guard the
+    actual send applies."""
     hidden_list = [h for h in (hidden_columns or "").split(",") if h]
+    extra_ids = [a for a in (additional_application_ids or "").split(",") if a and a != application_id]
     async with db.tenant_conn(actor.tenant_id) as conn:
         row, auto_values = await _app_context(conn, application_id)
+        extra_auto_values = []
+        for extra_id in extra_ids:
+            extra_row, extra_av = await _app_context(conn, extra_id)
+            if extra_row["requisition_id"] == row["requisition_id"]:
+                extra_auto_values.append(extra_av)
         template = None
         if template_id:
             template = await conn.fetchrow(
@@ -2050,8 +2067,15 @@ async def submit_to_client_tracking_preview(
             raise HTTPException(400, "No client tracking sheet template available")
         columns = _jsonb(template["columns"], [])
         visible_columns = [c for c in columns if c["key"] not in hidden_list]
-        sheet_rows, _, _ = await _client_tracking_sheet_rows(
-            conn, actor.tenant_id, row["requisition_id"], auto_values, hidden_list)
+        if extra_auto_values:
+            prior_count = await conn.fetchval(
+                "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
+                row["requisition_id"])
+            all_auto_values = [auto_values, *extra_auto_values]
+            sheet_rows = [{**av, "sl_no": str((prior_count or 0) + 1 + i)} for i, av in enumerate(all_auto_values)]
+        else:
+            sheet_rows, _, _ = await _client_tracking_sheet_rows(
+                conn, actor.tenant_id, row["requisition_id"], auto_values, hidden_list)
     return {
         "tracking_html": _build_tracking_html_table(visible_columns, sheet_rows),
         # Same real structured columns/rows as the main preview endpoint —
@@ -2442,6 +2466,292 @@ async def _do_client_submission(
     return out
 
 
+async def _do_client_submission_batch(
+    tenant_id: str, application_ids: list[str], actor: Actor,
+    resume_style: str, template_id: Optional[str], columns_override: Optional[list], hidden_columns: list,
+    field_values: Optional[dict], to_emails_override: Optional[list], cc_self: bool, save_as_default: bool,
+    contact_id: Optional[str] = None, default_scope: str = "client",
+    subject_override: Optional[str] = None, body_override: Optional[str] = None,
+    visual_theme: Optional[str] = None, logo_position: Optional[str] = None,
+) -> list[dict]:
+    """Real fix (2026-09-08, reported live: "its should be add in the same
+    tracking sheet table... not a separate one and email also in the same
+    email not a separately"). The 2026-09-03 batch feature (see
+    submit_to_client_batch's own docstring) deliberately split a multi-
+    candidate batch into one separate email per candidate — direct, live
+    feedback the same week now asks for the opposite for candidates
+    submitted TOGETHER in one action: one combined table (each candidate's
+    own row, real sequential SL No), one email, every candidate's own
+    resume attached. _client_tracking_sheet_rows() and _build_tracking_
+    html_table()/template_merge.fill_*_template() already natively support
+    N rows — the only reason a batch ever produced N separate 1-row
+    emails was that _do_client_submission() was called once per candidate;
+    this is the real combined-send sibling used instead whenever a batch
+    has more than one candidate. Every safeguard the single-candidate path
+    has (client-contact resolution, template resolution, hidden-column
+    redaction, save-as-default scoping) runs once, from the anchor
+    (application_ids[0]) since they all share the same client/requisition.
+    What must still happen PER candidate, and does: their own
+    candidate_submissions audit row, event_outbox + audit_log entries, and
+    the atomic stage bump to 'submitted' — each sharing the one real
+    Message-ID this function actually sent, so a client's reply still
+    correlates to every included candidate's own message thread."""
+    async with db.tenant_conn(tenant_id) as conn:
+        contexts = []
+        for app_id in application_ids:
+            row, auto_values = await _app_context(conn, app_id)
+            contexts.append((app_id, row, auto_values))
+        anchor_row = contexts[0][1]
+        client_id = anchor_row["client_id"]
+        if not client_id:
+            raise HTTPException(400, "This requisition has no client linked — cannot resolve a recipient")
+        kae_scope = actor.user_id if actor.role in ("kae", "kam") else None
+        contacts = await _resolve_client_contacts(conn, tenant_id, client_id, kae_user_id=kae_scope)
+        primary_contact = next((c for c in contacts if str(c["id"]) == str(contact_id)), None) if contact_id else (contacts[0] if contacts else None)
+        if not to_emails_override and not primary_contact:
+            raise HTTPException(400, "No client contact is configured — add one under Companies > this client > Contacts")
+        scope_contact_id = primary_contact["id"] if primary_contact else None
+
+        template = None
+        if template_id:
+            template = await conn.fetchrow(
+                "SELECT * FROM tracking_sheet_templates WHERE id=$1 AND tenant_id=$2 AND direction='kae_to_client'",
+                template_id, tenant_id)
+            if not template:
+                raise HTTPException(404, "Tracking sheet template not found")
+        else:
+            template = await _resolve_template(
+                conn, tenant_id, client_id, "kae_to_client",
+                client_contact_id=scope_contact_id, requisition_id=anchor_row["requisition_id"])
+        if not template and not columns_override:
+            raise HTTPException(400, "No client tracking sheet template available — create one under Ops Settings > Templates")
+        columns = columns_override if columns_override else _jsonb(template["columns"], [])
+        visible_columns = [c for c in columns if c["key"] not in (hidden_columns or [])]
+
+        client_row = await conn.fetchrow("SELECT name FROM clients WHERE id=$1", client_id)
+        recruiter_email = actor.email
+        signature_html = await email_tracking.resolve_user_signature_html(conn, tenant_id, actor.user_id)
+        used_template_id = template["id"] if template else None
+
+        if save_as_default and columns_override:
+            # Same scoped-default-save logic as _do_client_submission,
+            # applied once from the anchor candidate's own context only —
+            # the template-save side effect only ever needs to happen once
+            # per send, matching the single-candidate path's own rule.
+            scope_requisition_id = anchor_row["requisition_id"] if default_scope == "requisition" else None
+            scope_client_contact_id = scope_contact_id if default_scope == "contact" else None
+            if default_scope == "requisition":
+                existing_scoped_default = await conn.fetchrow(
+                    """SELECT id FROM tracking_sheet_templates
+                       WHERE tenant_id=$1 AND requisition_id=$2 AND direction='kae_to_client' AND is_default""",
+                    tenant_id, scope_requisition_id)
+                scope_label = f"{anchor_row['role_title'] or 'Role'} — Project Tracking Sheet"
+            elif default_scope == "contact":
+                existing_scoped_default = await conn.fetchrow(
+                    """SELECT id FROM tracking_sheet_templates
+                       WHERE tenant_id=$1 AND client_contact_id=$2 AND direction='kae_to_client' AND is_default""",
+                    tenant_id, scope_client_contact_id)
+                scope_label = f"{primary_contact['contact_name'] if primary_contact else 'SPOC'} — SPOC Tracking Sheet"
+            else:
+                existing_scoped_default = await conn.fetchrow(
+                    """SELECT id FROM tracking_sheet_templates
+                       WHERE tenant_id=$1 AND client_id=$2 AND direction='kae_to_client' AND is_default
+                         AND client_contact_id IS NULL AND requisition_id IS NULL""",
+                    tenant_id, client_id)
+                scope_label = f"{client_row['name'] if client_row else 'Client'} — Client Tracking Sheet"
+            if existing_scoped_default:
+                await conn.execute(
+                    "UPDATE tracking_sheet_templates SET columns=$1, updated_at=now() WHERE id=$2",
+                    json.dumps(columns_override), existing_scoped_default["id"])
+                used_template_id = existing_scoped_default["id"]
+            else:
+                await _unset_other_defaults(conn, tenant_id, client_id, "kae_to_client",
+                                             client_contact_id=scope_client_contact_id, requisition_id=scope_requisition_id)
+                new_tpl = await conn.fetchrow(
+                    """INSERT INTO tracking_sheet_templates
+                         (tenant_id, client_id, client_contact_id, requisition_id, name, columns, is_default, direction, created_by)
+                       VALUES ($1,$2,$3,$4,$5,$6,true,'kae_to_client',$7) RETURNING id""",
+                    tenant_id, client_id, scope_client_contact_id, scope_requisition_id,
+                    scope_label, json.dumps(columns_override), actor.user_id)
+                used_template_id = new_tpl["id"]
+
+        # One combined sheet: real, sequential SL No per candidate, sharing
+        # the same continuing count _client_tracking_sheet_rows itself uses.
+        prior_count = await conn.fetchval(
+            "SELECT count(*) FROM candidate_submissions WHERE requisition_id=$1 AND direction='kae_to_client'",
+            anchor_row["requisition_id"])
+        sheet_rows = [{**auto_values, "sl_no": str((prior_count or 0) + 1 + i)}
+                      for i, (_, _, auto_values) in enumerate(contexts)]
+        # field_values overrides (whatever the KAE typed in the modal)
+        # apply only to the anchor's own row — matches the single-candidate
+        # and original batch behavior: one person's override text can
+        # never silently land on someone else's row.
+        overrides = {k: v for k, v in (field_values or {}).items() if v not in (None, "")}
+        if overrides:
+            sheet_rows[0] = {**sheet_rows[0], **overrides, "sl_no": sheet_rows[0]["sl_no"]}
+        hidden_set = set(hidden_columns or [])
+        merge_rows = ([{k: ("" if k in hidden_set else v) for k, v in r.items()} for r in sheet_rows]
+                      if hidden_set else sheet_rows)
+
+        # Every candidate's own resume, each its own real attachment.
+        attachments = []
+        for app_id, row, _ in contexts:
+            candidate = {
+                "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
+                "location": row["location"], "current_employer": row["current_employer"],
+                "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
+                "skills": row["skills"], "resume_text": row["resume_text"],
+            }
+            cfg = {**_STYLE_CONFIGS[resume_style]}
+            if visual_theme:
+                cfg["visual_theme"] = visual_theme
+            if logo_position:
+                cfg["logo_position"] = logo_position
+            resume_bytes = render_resume_pdf(candidate, cfg)
+            filename = build_resume_filename(row["full_name"], row["current_designation"], row["total_exp_mo"], "pdf")
+            attachments.append((filename, resume_bytes, "pdf"))
+
+        body_html_extra = ""
+        if template and template["template_type"] == "file" and template["file_path"]:
+            abs_path = Path("/app") / template["file_path"].lstrip("/")
+            if abs_path.exists():
+                raw = abs_path.read_bytes()
+                ext = abs_path.suffix.lower()
+                if ext == ".xlsx":
+                    merged = template_merge.fill_xlsx_template(raw, merge_rows)
+                    attachments.append((f"Tracking_Sheet_{client_row['name'] if client_row else ''}.xlsx".replace(" ", "_"),
+                                         merged, "vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                elif ext == ".docx":
+                    merged = template_merge.fill_docx_template(raw, merge_rows)
+                    attachments.append((template["file_name"] or "Tracking_Sheet.docx", merged,
+                                         "vnd.openxmlformats-officedocument.wordprocessingml.document"))
+                else:  # .pdf — attached as-is, table also included below (see _do_client_submission)
+                    attachments.append((template["file_name"] or "Tracking_Sheet_Template.pdf", raw, "pdf"))
+                    body_html_extra = _build_tracking_html_table(visible_columns, sheet_rows)
+        else:
+            body_html_extra = _build_tracking_html_table(visible_columns, sheet_rows)
+
+        if to_emails_override:
+            to_recipients = list(to_emails_override)
+            cc_recipients = [c["email"] for c in contacts if c["email"] not in to_recipients] + \
+                             ([recruiter_email] if cc_self and recruiter_email else [])
+            contact_name_for_greeting = None
+        else:
+            to_recipients = [primary_contact["email"]]
+            cc_recipients = [c["email"] for c in contacts if c["id"] != primary_contact["id"] and c["email"]] + \
+                             ([recruiter_email] if cc_self and recruiter_email else [])
+            contact_name_for_greeting = primary_contact["contact_name"]
+
+        default_subject, default_body = _default_client_email_text(
+            anchor_row["role_title"], contact_name_for_greeting, actor.full_name)
+        subject = (subject_override or "").strip() or default_subject
+        body_text = (body_override or "").strip() or default_body
+        message_id_header = email_tracking.generate_message_id()
+        email_sent, email_error = await _send_kae_email(
+            tenant_id, to_recipients, cc_recipients, subject, body_text, attachments,
+            body_html_extra=body_html_extra,
+            message_id_header=message_id_header,
+            signature_html=signature_html,
+        )
+
+        # Per candidate from here: their own audit row, event/outbox,
+        # audit log, and stage bump — everything _do_client_submission's
+        # tail does, just reusing the one shared email_sent/message_id
+        # result instead of sending again.
+        results = []
+        for i, (app_id, row, _) in enumerate(contexts):
+            final_values = sheet_rows[i]
+            sub_row = await conn.fetchrow(
+                """INSERT INTO candidate_submissions
+                     (tenant_id, application_id, candidate_id, requisition_id, client_id, template_id,
+                      resume_style, field_values, recipient_emails, to_emails, status, error_message, sent_by,
+                      direction, hidden_columns, recipient_contact_id, trigger_source)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'kae_to_client',$14,$15,'manual') RETURNING *""",
+                tenant_id, app_id, row["candidate_id"], row["requisition_id"], client_id,
+                used_template_id, resume_style, json.dumps(final_values),
+                list(dict.fromkeys(to_recipients + cc_recipients)), to_recipients,
+                "sent" if email_sent else "failed", email_error, actor.user_id,
+                hidden_columns or [], primary_contact["id"] if (primary_contact and not to_emails_override) else None,
+            )
+            await _log_candidate_message(
+                conn, tenant_id, row["candidate_id"], app_id, "email", subject, body_text,
+                "sent" if email_sent else "failed", actor.user_id,
+                to_email=", ".join(to_recipients), cc=", ".join(cc_recipients) if cc_recipients else None,
+                client_id=client_id,
+                client_contact_id=primary_contact["id"] if (primary_contact and not to_emails_override) else None,
+                recipient_type="client", message_id_header_override=message_id_header,
+            )
+            await events.write_outbox(
+                conn, tenant_id, "candidate.submitted_to_client",
+                {"application_id": app_id, "candidate_id": str(row["candidate_id"]),
+                 "client_id": str(client_id), "email_sent": email_sent},
+                f"candidate.submitted_to_client:{sub_row['id']}",
+            )
+            _audit_before_stage = await conn.fetchval("SELECT stage FROM applications WHERE id=$1", app_id)
+            await events.write_audit(
+                conn, tenant_id, actor.user_id, "submit_to_client", "application", app_id,
+                before={"stage": _audit_before_stage},
+                after={"to": to_recipients, "cc": cc_recipients, "resume_style": resume_style,
+                       "email_sent": email_sent, "sl_no": final_values["sl_no"], "hidden_columns": hidden_columns,
+                       "saved_as_default": bool(save_as_default and columns_override and i == 0),
+                       "batch_combined_send": True},
+            )
+            bumped = False
+            old_stage_at_bump = None
+            if await is_valid_stage(conn, tenant_id, "submitted"):
+                bump_row = await conn.fetchrow(
+                    """WITH prev AS (SELECT stage AS old_stage FROM applications WHERE id=$1)
+                       UPDATE applications a SET stage='submitted', updated_at=now()
+                       FROM prev
+                       WHERE a.id=$1 AND prev.old_stage = ANY($2)
+                       RETURNING prev.old_stage""",
+                    app_id, list(_PRE_SUBMIT_CLIENT_STAGES),
+                )
+                if bump_row:
+                    bumped = True
+                    old_stage_at_bump = bump_row["old_stage"]
+                    await events.write_outbox(
+                        conn, tenant_id, "application.stage_changed",
+                        {"application_id": app_id, "from": old_stage_at_bump, "to": "submitted", "reason": "submit_to_client"},
+                        f"application.stage_changed:{app_id}:{sub_row['sent_at'].isoformat()}",
+                    )
+                    await conn.execute(
+                        """INSERT INTO pipeline_movements
+                             (tenant_id, candidate_id, application_id, stage_from, stage_to, reason, triggered_by)
+                           VALUES ($1,$2,$3,$4,'submitted','submit_to_client',$5)""",
+                        tenant_id, row["candidate_id"], app_id, old_stage_at_bump,
+                        str(actor.user_id) if actor.user_id else "system",
+                    )
+                    await conn.execute(
+                        """INSERT INTO candidate_activities
+                             (tenant_id, candidate_id, user_id, activity_type, title, description)
+                           VALUES ($1,$2,$3,'status_change','Stage changed',$4)""",
+                        tenant_id, row["candidate_id"], actor.user_id,
+                        f"{old_stage_at_bump.replace('_',' ').title()} → Submitted",
+                    )
+            out = dict(sub_row)
+            out["field_values"] = _jsonb(out["field_values"], {})
+            out["email_sent"] = email_sent
+            out["email_error"] = email_error
+            out["stage_bumped_to_submitted"] = bumped
+            out["candidate_id"] = str(row["candidate_id"])
+            out["candidate_name"] = row["full_name"]
+            results.append(out)
+
+    for (app_id, row, _), out in zip(contexts, results):
+        if out["stage_bumped_to_submitted"] and row["email"]:
+            try:
+                from routers.applications import _notify_stage_change_bg
+                asyncio.create_task(_notify_stage_change_bg(
+                    row["candidate_id"], "submitted", row["email"], row["full_name"], tenant_id,
+                    requisition_id=row["requisition_id"], application_id=app_id,
+                ))
+            except Exception as _ex:
+                print(f"Submitted-stage candidate notification dispatch error: {_ex}")
+
+    return results
+
+
 @router.post("/applications/{application_id}/submit-to-client")
 async def submit_to_client(
     application_id: str, body: SubmitToClientIn,
@@ -2507,25 +2817,26 @@ async def submit_to_client_batch(
     """Real feature (2026-09-03, reported live on the tracking-sheet
     preview: "option to add new row" -- clarified via direct back-and-
     forth to mean submitting several DIFFERENT real candidates for the
-    same role to the same client in one action, each getting their own
-    real send (a genuine new SL No, matching the tracking sheet's own
-    continuing count), instead of repeating the whole Submit-to-Client
-    flow once per candidate. Real fix, same day, later: each send now
-    shows only ITS OWN candidate's row (see _client_tracking_sheet_rows'
-    own docstring) -- so a batch of 3 produces 3 separate real emails,
-    each showing exactly 1 row, never all 3 candidates combined into one
-    shared table.
+    same role to the same client in one action, each getting a genuine
+    new SL No, matching the tracking sheet's own continuing count,
+    instead of repeating the whole Submit-to-Client flow once per
+    candidate.
 
-    Deliberately a thin batch WRAPPER around the exact same, already-
-    proven _do_client_submission() -- called once per candidate,
-    SEQUENTIALLY, never concurrently: each call's own sl_no computation
-    (_client_tracking_sheet_rows) reads the real, just-committed prior
-    row, so sequencing is what keeps SL Nos correctly consecutive across
-    the whole batch. Never a second, parallel send engine -- every real
-    safeguard the single-candidate path already has (HITL role gate,
-    SPOC-visibility scoping, hidden-column redaction, stage-bump race
-    safety, notification dispatch) applies identically to every
-    candidate in the batch, for free.
+    REAL FIX (2026-09-08, reported live: "its should be add in the same
+    tracking sheet table like in shahana not a separate one and email
+    also in the same email not a separately... if lahari sent the email
+    through this both and pipeline move also change"). A same-day-later
+    fix on 2026-09-03 had gone the other way -- split a batch into one
+    separate email per candidate. Direct, explicit live feedback now
+    reverses that for candidates submitted TOGETHER in one action: every
+    candidate goes out in ONE combined table (each their own real row,
+    still their own real extracted skills/details) inside ONE email,
+    each with their own resume attached -- see
+    _do_client_submission_batch's own docstring for the real send. What
+    was NEVER actually broken, batch or not: each candidate always got
+    their own real pipeline-stage bump to 'submitted' -- that already
+    happens once per candidate inside _do_client_submission_batch,
+    unchanged from the single-send path.
 
     manual_resume is deliberately not supported here -- one hand-typed
     summary can't correctly describe several different real people;
@@ -2536,9 +2847,17 @@ async def submit_to_client_batch(
     candidate) apply ONLY to the first (anchor) candidate -- applying
     one person's specific override text to someone else's row would be
     wrong, and the template-save side effect only needs to happen once.
-    One candidate's real failure (a missing client contact, an
-    unrelated requisition, a transient send error) never aborts the
-    rest of the batch -- each result is independently captured."""
+    A candidate on an unrelated requisition is still filtered out and
+    reported as skipped before the real combined send ever fires (never
+    silently included just because a caller passed a stray id) -- but
+    since every included candidate now genuinely shares ONE real SMTP
+    send, a send-level failure (no client contact configured, transient
+    SMTP error) is no longer independently isolated per candidate the
+    way a mismatched-requisition skip still is: one combined email
+    either reaches the client for everyone in it, or (rare, surfaced as
+    a real error) it doesn't, for all of them together -- there is no
+    way to genuinely send an email to some recipients in a batch and not
+    others from one real send."""
     if body.resume_style == "manual":
         raise HTTPException(400, "resume_style 'manual' is not supported for a batch submission — pick a style that renders from each candidate's own profile, or remove the extra candidates")
     if body.resume_style not in _RESUME_STYLES:
@@ -2559,57 +2878,84 @@ async def submit_to_client_batch(
     anchor_req_id = anchor_row["requisition_id"]
 
     results = []
-    for i, app_id in enumerate(all_ids):
-        try:
-            async with db.tenant_conn(actor.tenant_id) as conn:
-                row, _ = await _app_context(conn, app_id)
-            # Real safety guard: every candidate in the batch must be a
-            # real applicant on the SAME requisition (same client, same
-            # role) the anchor was opened for -- never silently include
-            # someone from an unrelated role just because a caller passed
-            # a stray id.
-            if row["requisition_id"] != anchor_req_id:
-                results.append({"application_id": app_id, "candidate_id": str(row["candidate_id"]),
-                                 "candidate_name": row["full_name"], "email_sent": False,
-                                 "error": "Not on the same requisition as the anchor candidate — skipped"})
-                continue
-            candidate = {
-                "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
-                "location": row["location"], "current_employer": row["current_employer"],
-                "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
-                "skills": row["skills"], "resume_text": row["resume_text"],
-            }
-            cfg = {**_STYLE_CONFIGS[body.resume_style]}
-            if body.visual_theme:
-                cfg["visual_theme"] = body.visual_theme
-            if body.logo_position:
-                cfg["logo_position"] = body.logo_position
-            resume_bytes = render_resume_pdf(candidate, cfg)
-            filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
+    valid_ids = []
+    for app_id in all_ids:
+        async with db.tenant_conn(actor.tenant_id) as conn:
+            row, _ = await _app_context(conn, app_id)
+        # Real safety guard: every candidate in the batch must be a real
+        # applicant on the SAME requisition (same client, same role) the
+        # anchor was opened for -- never silently include someone from
+        # an unrelated role just because a caller passed a stray id.
+        if row["requisition_id"] != anchor_req_id:
+            results.append({"application_id": app_id, "candidate_id": str(row["candidate_id"]),
+                             "candidate_name": row["full_name"], "email_sent": False,
+                             "error": "Not on the same requisition as the anchor candidate — skipped"})
+            continue
+        valid_ids.append(app_id)
 
-            is_anchor = (i == 0)
-            result = await _do_client_submission(
-                actor.tenant_id, app_id, actor, resume_bytes, filename, body.resume_style,
-                _RESUME_LABELS.get(body.resume_style, body.resume_style),
-                template_id=body.template_id, columns_override=body.columns if is_anchor else None,
-                hidden_columns=body.hidden_columns, field_values=body.field_values if is_anchor else {},
-                to_emails_override=body.to_emails, cc_self=body.cc_self,
-                save_as_default=body.save_as_default if is_anchor else False,
-                contact_id=body.contact_id, default_scope=body.default_scope,
-                subject_override=body.email_subject, body_override=body.email_body,
-            )
-            results.append({
-                "application_id": app_id, "candidate_id": str(row["candidate_id"]),
-                "candidate_name": row["full_name"], "email_sent": result["email_sent"],
-                "email_error": result.get("email_error"),
-                "stage_bumped_to_submitted": result["stage_bumped_to_submitted"],
-                "submission_id": str(result["id"]),
-            })
+    if valid_ids:
+        try:
+            if len(valid_ids) == 1:
+                # Exactly one real candidate (no valid additional ones) —
+                # the original, already-proven single-send path, unchanged.
+                async with db.tenant_conn(actor.tenant_id) as conn:
+                    row, _ = await _app_context(conn, valid_ids[0])
+                candidate = {
+                    "full_name": row["full_name"], "phone": row["phone"], "email": row["email"],
+                    "location": row["location"], "current_employer": row["current_employer"],
+                    "current_designation": row["current_designation"], "total_exp_mo": row["total_exp_mo"],
+                    "skills": row["skills"], "resume_text": row["resume_text"],
+                }
+                cfg = {**_STYLE_CONFIGS[body.resume_style]}
+                if body.visual_theme:
+                    cfg["visual_theme"] = body.visual_theme
+                if body.logo_position:
+                    cfg["logo_position"] = body.logo_position
+                resume_bytes = render_resume_pdf(candidate, cfg)
+                filename = build_resume_filename(candidate["full_name"], candidate["current_designation"], candidate["total_exp_mo"], "pdf")
+                single = await _do_client_submission(
+                    actor.tenant_id, valid_ids[0], actor, resume_bytes, filename, body.resume_style,
+                    _RESUME_LABELS.get(body.resume_style, body.resume_style),
+                    template_id=body.template_id, columns_override=body.columns,
+                    hidden_columns=body.hidden_columns, field_values=body.field_values,
+                    to_emails_override=body.to_emails, cc_self=body.cc_self,
+                    save_as_default=body.save_as_default,
+                    contact_id=body.contact_id, default_scope=body.default_scope,
+                    subject_override=body.email_subject, body_override=body.email_body,
+                )
+                results.append({
+                    "application_id": valid_ids[0], "candidate_id": str(row["candidate_id"]),
+                    "candidate_name": row["full_name"], "email_sent": single["email_sent"],
+                    "email_error": single.get("email_error"),
+                    "stage_bumped_to_submitted": single["stage_bumped_to_submitted"],
+                    "submission_id": str(single["id"]),
+                })
+            else:
+                batch_results = await _do_client_submission_batch(
+                    actor.tenant_id, valid_ids, actor, body.resume_style,
+                    template_id=body.template_id, columns_override=body.columns,
+                    hidden_columns=body.hidden_columns, field_values=body.field_values,
+                    to_emails_override=body.to_emails, cc_self=body.cc_self,
+                    save_as_default=body.save_as_default, contact_id=body.contact_id,
+                    default_scope=body.default_scope,
+                    subject_override=body.email_subject, body_override=body.email_body,
+                    visual_theme=body.visual_theme, logo_position=body.logo_position,
+                )
+                for r in batch_results:
+                    results.append({
+                        "application_id": str(r["application_id"]), "candidate_id": r["candidate_id"],
+                        "candidate_name": r["candidate_name"], "email_sent": r["email_sent"],
+                        "email_error": r.get("email_error"),
+                        "stage_bumped_to_submitted": r["stage_bumped_to_submitted"],
+                        "submission_id": str(r["id"]),
+                    })
         except HTTPException as he:
-            results.append({"application_id": app_id, "candidate_id": None, "candidate_name": None,
-                             "email_sent": False, "error": str(he.detail)})
+            for app_id in valid_ids:
+                results.append({"application_id": app_id, "candidate_id": None, "candidate_name": None,
+                                 "email_sent": False, "error": str(he.detail)})
         except Exception as ex:
-            results.append({"application_id": app_id, "candidate_id": None, "candidate_name": None,
-                             "email_sent": False, "error": str(ex)})
+            for app_id in valid_ids:
+                results.append({"application_id": app_id, "candidate_id": None, "candidate_name": None,
+                                 "email_sent": False, "error": str(ex)})
 
     return {"results": results, "total": len(results), "sent": sum(1 for r in results if r.get("email_sent"))}
