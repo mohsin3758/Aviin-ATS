@@ -22,6 +22,7 @@ interface SenderRow {
   recruiter_name: string;
   recruiter_email: string;
   is_registered: boolean;
+  is_portal_feed: boolean;
   status_label: string;
   total_candidates: number;
   stages: StageCount[];
@@ -145,7 +146,9 @@ export default function RecruiterTrackingPage() {
                     <div style={{ color: '#94a3b8', fontSize: 11 }}>{s.recruiter_email}</div>
                   </td>
                   <td style={{ padding: '10px 12px' }}>
-                    {s.is_registered
+                    {s.is_portal_feed
+                      ? <span style={{ fontSize: 10, fontWeight: 700, color: '#4338ca', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 6, padding: '2px 8px' }}>AUTOMATED JOB PORTAL FEED</span>
+                      : s.is_registered
                       ? <span style={{ fontSize: 10, fontWeight: 700, color: '#059669', background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 6, padding: '2px 8px' }}>ACTIVE ATS USER</span>
                       : <span style={{ fontSize: 10, fontWeight: 700, color: '#b45309', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 6, padding: '2px 8px' }}>UNREGISTERED ATS USER</span>}
                   </td>

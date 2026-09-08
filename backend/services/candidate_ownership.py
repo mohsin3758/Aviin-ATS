@@ -33,6 +33,25 @@ _PUBLIC_EMAIL_PROVIDERS = {
     'yopmail.com', 'aol.com', 'zoho.com', 'msn.com',
 }
 
+# Real bug fix (2026-09-08, found via a live "deep check" of the
+# Recruiter/Sender Tracking report — one recruiter's mailbox showed 3,147
+# "submitted" candidates, ~2,900 more than anyone else). Confirmed via
+# real data: naukri.com's own automated relay format
+# ("shazia.sap.fico.gmail@naukri.com" — not a real person's address, the
+# candidate's own email wrapped by Naukri's forwarding system) accounted
+# for 2,655 of this tenant's real resume_files rows, all silently falling
+# into the "external sender = the candidate applying directly, the
+# receiving recruiter genuinely sourced this" fallback below — correct
+# reasoning for a genuine 1:1 candidate application, wrong for a bulk,
+# automated, third-party job-portal forward that has nothing to do with
+# any one recruiter's own sourcing effort. A domain here still resolves
+# ownership to the receiving recruiter (unchanged — someone still needs
+# to functionally work the candidate), it just gets tagged with a
+# distinct source='job_portal_feed' instead of 'personal_mailbox', so
+# recruiter_attribution.py's report can show it honestly instead of
+# misattributing it to whoever's mailbox happened to receive the feed.
+_JOB_PORTAL_RELAY_DOMAINS = {'naukri.com'}
+
 
 async def resolve_sender_identity(conn, tenant_id: str, from_email: str,
                                    from_name: str = '', account_id: Optional[str] = None) -> Optional[dict]:
@@ -88,7 +107,15 @@ async def resolve_sender_identity(conn, tenant_id: str, from_email: str,
     if not is_internal_domain:
         # External sender = the candidate applying directly. Golden Rule
         # doesn't apply — the receiving recruiter genuinely sourced this.
-        return await _fallback_to_receiving_mailbox()
+        # EXCEPT a known job-portal relay domain (see _JOB_PORTAL_RELAY_
+        # DOMAINS above) — that's an automated bulk forward, not a real
+        # person emailing this recruiter specifically; ownership still
+        # resolves to the receiving recruiter (unchanged workflow), but
+        # tagged distinctly so it's never counted as their own submission.
+        result = await _fallback_to_receiving_mailbox()
+        if result and sender_domain in _JOB_PORTAL_RELAY_DOMAINS:
+            result["via"] = "job_portal_feed"
+        return result
 
     user_row = await conn.fetchrow(
         "SELECT id, full_name, email FROM users WHERE tenant_id=$1 AND lower(email)=$2 AND is_active",
@@ -96,6 +123,28 @@ async def resolve_sender_identity(conn, tenant_id: str, from_email: str,
     if user_row:
         return {"user_id": str(user_row["id"]), "email": user_row["email"],
                 "name": user_row["full_name"], "registered": True, "via": "sender_email"}
+
+    # Real bug fix (2026-09-08, found via a live "deep check" of real
+    # ownership data): a real user's actual SENDING mailbox can genuinely
+    # differ from their ATS *login* email (users.email) — confirmed live,
+    # a real active recruiter's own connected work mailbox
+    # (mohsinkhan@aviintech.com, proven live-working IMAP/SMTP credentials)
+    # was silently falling through to "Temporary Sender Record" on every
+    # single one of his real sent emails, because his ATS login is a
+    # different address (a personal Gmail) — the users.email check above
+    # can never match a real connected mailbox that isn't also someone's
+    # login. Checking user_email_accounts closes this: any real, active
+    # connected mailbox for a real, active user is just as much "this
+    # sender exists in ATS" as their login email is.
+    mailbox_row = await conn.fetchrow(
+        """SELECT u.id, u.full_name, ua.email FROM user_email_accounts ua
+           JOIN users u ON u.id = ua.user_id AND u.is_active
+           WHERE ua.tenant_id=$1 AND lower(ua.email)=$2 AND ua.is_active
+           ORDER BY ua.is_default DESC LIMIT 1""",
+        tenant_id, from_email)
+    if mailbox_row:
+        return {"user_id": str(mailbox_row["id"]), "email": mailbox_row["email"],
+                "name": mailbox_row["full_name"], "registered": True, "via": "sender_email"}
 
     # Internal domain, no matching registered user yet — Temporary Sender
     # Record. Real name if the email's own From: header gave one, else a
@@ -113,6 +162,29 @@ async def resolve_sender_identity(conn, tenant_id: str, from_email: str,
     local_part = from_email.split('@')[0]
     if not display_name or display_name.lower() in (from_email.lower(), local_part.lower()):
         display_name = local_part.replace('.', ' ').replace('-', ' ').replace('_', ' ').title()
+
+    # Real bug fix (2026-09-08, found via the same live deep check): the
+    # SAME real unregistered sender's stored name kept flip-flopping
+    # between a proper one ("Faisal K", from an email whose own From:
+    # header gave a real display name) and a raw local-part fallback
+    # ("faisal.k", from a later email that didn't) — confirmed live
+    # across 14 real senders — because claim_ownership() stores whatever
+    # name THIS particular call derives, with no memory of a better name
+    # already on file. Once any real name has ever been recorded for this
+    # exact sender email, keep using it — never regress a real name back
+    # to a raw-local-part fallback just because one specific email
+    # happened to omit a display name. A genuinely new, real display name
+    # (not itself a raw fallback) is still allowed to update it.
+    existing_name = await conn.fetchval(
+        """SELECT recruiter_name FROM candidate_ownership
+           WHERE tenant_id=$1 AND recruiter_id IS NULL AND lower(recruiter_email)=$2
+           AND recruiter_name IS NOT NULL
+           ORDER BY (lower(recruiter_name) NOT IN (lower($3), lower($4))) DESC, updated_at DESC LIMIT 1""",
+        tenant_id, from_email, from_email, local_part)
+    is_raw_fallback = display_name.lower() == local_part.replace('.', ' ').replace('-', ' ').replace('_', ' ').title().lower()
+    if existing_name and is_raw_fallback and existing_name.lower() not in (from_email.lower(), local_part.lower()):
+        display_name = existing_name
+
     return {"user_id": None, "email": from_email, "name": display_name[:200],
             "registered": False, "via": "unregistered_sender"}
 

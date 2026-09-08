@@ -91,26 +91,40 @@ async def _sender_tracking_rows(conn, tenant_id: str, date_from, date_to):
     # ('claimed') owner of at least one candidate, plus which candidates
     # each one has ever owned — all-time, from the append-only history,
     # not the mutable current-state table.
+    # Real bug fix (2026-09-08): source='job_portal_feed' rows (Naukri.com
+    # auto-forwards, see candidate_ownership.py's _JOB_PORTAL_RELAY_DOMAINS)
+    # still carry the REAL receiving recruiter's identity in h.recruiter_*
+    # (ownership itself is unchanged — someone still needs to work these
+    # candidates) — routed here into one shared synthetic identity instead,
+    # so an automated bulk job-portal forward is never counted as a real
+    # person's own submission, and is still shown honestly as its own
+    # distinct row rather than silently vanishing from the report.
     identity_rows = await conn.fetch(f"""
         WITH claims AS (
             SELECT
-              COALESCE(h.recruiter_id::text, 'email:' || lower(h.recruiter_email)) AS identity_key,
-              h.recruiter_id, h.recruiter_email, h.recruiter_name, h.created_at, h.candidate_id
+              CASE WHEN h.source='job_portal_feed' THEN 'portal:job_feed'
+                   ELSE COALESCE(h.recruiter_id::text, 'email:' || lower(h.recruiter_email)) END AS identity_key,
+              CASE WHEN h.source='job_portal_feed' THEN NULL ELSE h.recruiter_id END AS recruiter_id,
+              CASE WHEN h.source='job_portal_feed' THEN 'job-portal-feed' ELSE h.recruiter_email END AS recruiter_email,
+              CASE WHEN h.source='job_portal_feed' THEN 'Job Portal Feed (Naukri.com, auto-forwarded)' ELSE h.recruiter_name END AS recruiter_name,
+              (h.source='job_portal_feed') AS is_portal_feed,
+              h.created_at, h.candidate_id
             FROM candidate_ownership_history h
             WHERE h.tenant_id=$1 AND h.action='claimed'{date_clause}
         ),
         latest AS (
-            SELECT DISTINCT ON (identity_key) identity_key, recruiter_id, recruiter_email, recruiter_name
+            SELECT DISTINCT ON (identity_key) identity_key, recruiter_id, recruiter_email, recruiter_name, is_portal_feed
             FROM claims ORDER BY identity_key, created_at DESC
         )
         SELECT l.identity_key, l.recruiter_id, l.recruiter_email,
                COALESCE(u.full_name, l.recruiter_name) AS recruiter_name,
                (l.recruiter_id IS NOT NULL) AS is_registered,
+               l.is_portal_feed,
                array_agg(DISTINCT c.candidate_id) AS candidate_ids
         FROM latest l
         JOIN claims c ON c.identity_key = l.identity_key
         LEFT JOIN users u ON u.id = l.recruiter_id
-        GROUP BY l.identity_key, l.recruiter_id, l.recruiter_email, l.recruiter_name, u.full_name
+        GROUP BY l.identity_key, l.recruiter_id, l.recruiter_email, l.recruiter_name, l.is_portal_feed, u.full_name
     """, *id_params)
 
     results = []
@@ -138,12 +152,20 @@ async def _sender_tracking_rows(conn, tenant_id: str, date_from, date_to):
         joinees = await conn.fetchval(
             "SELECT COUNT(DISTINCT id) FROM placements WHERE tenant_id=$1 AND candidate_id = ANY($2::uuid[])",
             tenant_id, candidate_ids)
+        is_portal_feed = row["is_portal_feed"]
+        if is_portal_feed:
+            status_label = "Automated Job Portal Feed"
+        elif row["is_registered"]:
+            status_label = "Active ATS User"
+        else:
+            status_label = "Unregistered ATS User"
         results.append({
             "recruiter_id": str(row["recruiter_id"]) if row["recruiter_id"] else None,
             "recruiter_name": row["recruiter_name"],
             "recruiter_email": row["recruiter_email"],
             "is_registered": row["is_registered"],
-            "status_label": "Active ATS User" if row["is_registered"] else "Unregistered ATS User",
+            "is_portal_feed": is_portal_feed,
+            "status_label": status_label,
             "total_candidates": len(candidate_ids),
             "stages": [{"key": k, "label": stage_labels.get(k, k), "count": stage_counts.get(k, 0)} for k in stage_order],
             "offers": int(offers or 0),
