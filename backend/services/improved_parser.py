@@ -260,6 +260,78 @@ for canonical, aliases in TECH_SKILLS.items():
         _SKILL_LOOKUP[alias.lower()] = canonical
 
 
+_SIG_DIVIDER_RE = re.compile(r'^[ \t]*[-_]{2,}[ \t]*$')
+_SIG_CONTACT_LINE_RE = re.compile(r'^[ \t]*[a-z]{1,2}\s*:\s*(.+?)\s*$', re.I)
+_SIG_STRONG_SIGNAL_RE = re.compile(r'\d{6,}|@|https?://|www\.', re.I)
+
+
+def strip_email_signature_block(text: str) -> str:
+    """Real, general bug fix (2026-09-09) — see services/skill_experience_
+    parser.py's parse_tracking_sheet_candidate_fields() for the confirmed
+    live incident this generalizes from: extract_location_v2 below
+    returned "Mumbai" for a real candidate not because anything in her
+    OWN resume or the recruiter's tracking-sheet data said so, but
+    because it appeared in the SENDER'S OWN email signature block ("b:
+    Bangalore, Kalaburagi, Mumbai, Delhi & Hyderabad" — his company's
+    office cities) — every extractor in this file that scans free-flowing
+    text has no notion of "whose sentence is this," so a stranger's
+    signature reads as if it were the candidate's own self-description.
+    A tracking-sheet-specific override already exists for that one
+    reported case; this is the deeper, general fix — applied once, here,
+    to the EMAIL BODY text specifically (never the resume attachment
+    text itself, which is always genuinely the candidate's own document
+    and is never touched by this function) before it's combined into the
+    text every extractor in this module scans.
+
+    Cuts the text at the first of:
+      1. A standalone divider line ("--", "___", the common RFC 3676 /
+         email-client-inserted signature delimiter).
+      2. 2+ CONSECUTIVE short "x: value" lines (a single/double-letter
+         prefix — m:/o:/e:/c:/f:/w:/t:/p:/d:/b: and similar — deliberately
+         narrow so it never collides with a real recruiter's own
+         multi-word tracking-sheet lines like "Total Exp: 7 Yrs", which
+         use full-word labels, not a bare 1-2 letter one) where at least
+         one line in that run carries a real contact signal (a 6+ digit
+         phone number, an @ address, or a URL) — confirmed exactly
+         against the real reported email's own "m: +91 9035520831" /
+         "o: 888-444-9990" / "b: Bangalore, Kalaburagi, Mumbai..." block.
+
+    Deliberately conservative: returns the ORIGINAL text unchanged if
+    neither pattern is found — never guesses at a signature that might
+    not be one, the same discipline as every other extractor here."""
+    if not text:
+        return text
+    lines = text.split('\n')
+    cut_at = None
+    i = 0
+    while i < len(lines):
+        if _SIG_DIVIDER_RE.match(lines[i]):
+            cut_at = i
+            break
+        m = _SIG_CONTACT_LINE_RE.match(lines[i])
+        if m:
+            has_strong = bool(_SIG_STRONG_SIGNAL_RE.search(m.group(1)))
+            count = 1
+            k = i + 1
+            while k < len(lines):
+                mk = _SIG_CONTACT_LINE_RE.match(lines[k])
+                if not mk:
+                    break
+                if _SIG_STRONG_SIGNAL_RE.search(mk.group(1)):
+                    has_strong = True
+                count += 1
+                k += 1
+            if count >= 2 and has_strong:
+                cut_at = i
+                break
+            i = k if k > i else i + 1
+            continue
+        i += 1
+    if cut_at is None:
+        return text
+    return '\n'.join(lines[:cut_at]).rstrip()
+
+
 def extract_skills_from_text(text: str) -> list[str]:
     """
     Keyword-based skill extraction.

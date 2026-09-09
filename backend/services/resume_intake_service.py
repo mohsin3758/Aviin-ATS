@@ -17,7 +17,9 @@ try:
     DEDUP_AVAILABLE = True
 except ImportError:
     DEDUP_AVAILABLE = False
-from services.improved_parser import parse_resume_v2, extract_skills_from_text, calc_confidence
+from services.improved_parser import (
+    parse_resume_v2, extract_skills_from_text, calc_confidence, strip_email_signature_block,
+)
 
 
 def _clean_text(text: str) -> str:
@@ -1079,6 +1081,21 @@ async def process_email_for_resume(
         # extraction, which only got a second, narrower, word-specific
         # denylist entry alongside this general fix.
         body_text_clean = re.sub(r'<https?://[^>\s]*>', '', body_text.replace('\x00', ' '))
+        # REAL BUG FIX (2026-09-09, reported live: extract_location_v2
+        # returned "Mumbai" for a real candidate -- not from anything in
+        # HER own resume or the recruiter's tracking-sheet data, but from
+        # the SENDER'S OWN email signature block, "b: Bangalore,
+        # Kalaburagi, Mumbai, Delhi & Hyderabad", his company's office
+        # cities). Every extractor below scans this combined text with no
+        # notion of "whose sentence is this" -- stripped here, at the one
+        # point the email body is decoded, same convention as the URL-
+        # delinkification fix just above, so every downstream extractor
+        # (name/email/phone/company/location/experience/skills) is
+        # protected at once, not just the one field that happened to get
+        # reported. Only ever touches body_text_clean (the email's own
+        # wrapper text) -- resume_text (the actual attachment, genuinely
+        # the candidate's own document) is never passed through this.
+        body_text_clean = strip_email_signature_block(body_text_clean)
         # REAL BUG FIX (2026-08-18): full_text used to be capped at 6000
         # chars and that SAME capped value fed both the document classifier
         # AND parse_resume_v2()'s real field extraction. For a dense multi-
