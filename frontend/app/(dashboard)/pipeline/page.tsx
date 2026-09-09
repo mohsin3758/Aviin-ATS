@@ -833,6 +833,7 @@ function PipelineInner() {
       {/* ── ADD CANDIDATE MODAL ─────────────────────────────────────────── */}
       {addCandidateOpen && selectedJobId && (
         <AddCandidateModal jobId={selectedJobId} board={board} stages={STAGES}
+          jobTitle={selectedJob?.title} clientName={selectedJob?.client_name}
           // REAL BUG FIX (2026-08-31): when a specific stage tab (e.g.
           // "Interested") is active, the recruiter is already looking
           // at that column and clicked "Add Candidate" from inside it -
@@ -3259,7 +3260,7 @@ function BooleanSearchModal({ jobId, onClose }: any) {
   );
 }
 
-function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdded }: any) {
+function AddCandidateModal({ jobId, board, stages, defaultStage, jobTitle, clientName, onClose, onAdded }: any) {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
@@ -3275,9 +3276,22 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
   const { data: matchData, loading } = useFetch<any>(`/requisitions/${jobId}/match-candidates?limit=300`);
   const matches: any[] = Array.isArray(matchData?.matches) ? matchData.matches : [];
 
-  const alreadyIn = new Set<string>(
-    Object.values(board || {}).flat().map((a: any) => a.candidate_id)
+  // REAL BUG FIX (2026-09-09, reported live: "which one job/requisition
+  // is in pipeline, its should be highlight with job/requisition and
+  // recruiter name so i can identify easily"). This modal is always
+  // scoped to one requisition (jobId/board both come from the currently
+  // selected job) -- "already in pipeline" can only ever mean "already
+  // in THIS job's pipeline" -- but the badge used to say only that generic
+  // phrase with no further detail, giving no way to tell WHICH stage they
+  // were already at or who owns that application without leaving this
+  // modal. Now carries the real stage + recruiter straight from `board`
+  // (already returned by /requisitions/{id}/pipeline, see
+  // requisitions.py's requisition_pipeline) so the row itself answers it.
+  const alreadyInMap = new Map<string, { stage: string; recruiter_name: string | null }>(
+    Object.values(board || {}).flat().map((a: any) => [a.candidate_id, { stage: a.stage, recruiter_name: a.recruiter_name }])
   );
+  const alreadyIn = new Set<string>(alreadyInMap.keys());
+  const stageLabel = (key?: string) => (stages || []).find((s: any) => s.key === key)?.label || key || 'unknown stage';
 
   const q = search.trim().toLowerCase();
   const items: any[] = (matches || []).filter((c: any) =>
@@ -3320,7 +3334,10 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
         <div style={{ padding: '16px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 800, color: '#1E293B' }}>Add Candidate to Pipeline</div>
-            <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Ranked by JD match — highest score first</div>
+            <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>
+              Ranked by JD match — highest score first
+              {jobTitle && <> · for <span style={{ fontWeight: 700, color: '#475569' }}>{jobTitle}</span>{clientName ? ` (${clientName})` : ''}</>}
+            </div>
           </div>
           <button onClick={onClose} style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#94A3B8' }}><X size={14} /></button>
         </div>
@@ -3328,6 +3345,8 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
           <AddCandidatePreviewPanel
             candidateId={previewCandidateId}
             isIn={alreadyIn.has(previewCandidateId)}
+            inStageLabel={alreadyInMap.get(previewCandidateId) ? stageLabel(alreadyInMap.get(previewCandidateId)!.stage) : null}
+            inRecruiterName={alreadyInMap.get(previewCandidateId)?.recruiter_name || null}
             isSelected={selected.has(previewCandidateId)}
             onToggle={() => toggle(previewCandidateId)}
             onBack={() => setPreviewCandidateId(null)}
@@ -3391,7 +3410,10 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
                       <Eye size={9} /> View Profile
                     </button>
                     {isIn && (
-                      <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>already in pipeline</span>
+                      <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>
+                        already in pipeline · {stageLabel(alreadyInMap.get(c.candidate_id)?.stage)}
+                        {alreadyInMap.get(c.candidate_id)?.recruiter_name ? ` · owner: ${alreadyInMap.get(c.candidate_id)?.recruiter_name}` : ' · unassigned'}
+                      </span>
                     )}
                   </div>
                   <div style={{ fontSize: 11, color: '#64748B', marginTop: 1 }}>
@@ -3444,8 +3466,8 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, onClose, onAdde
 // is coupled to this modal's own local `board`/`alreadyIn` state).
 // Fetched on demand only when a recruiter actually clicks "View Profile"
 // on one candidate, not eagerly for every ranked match.
-function AddCandidatePreviewPanel({ candidateId, isIn, isSelected, onToggle, onBack }: {
-  candidateId: string; isIn: boolean; isSelected: boolean; onToggle: () => void; onBack: () => void;
+function AddCandidatePreviewPanel({ candidateId, isIn, inStageLabel, inRecruiterName, isSelected, onToggle, onBack }: {
+  candidateId: string; isIn: boolean; inStageLabel?: string | null; inRecruiterName?: string | null; isSelected: boolean; onToggle: () => void; onBack: () => void;
 }) {
   const { data: c, loading } = useFetch<any>(`/candidates/${candidateId}`);
   if (loading || !c) {
@@ -3483,7 +3505,7 @@ function AddCandidatePreviewPanel({ candidateId, isIn, isSelected, onToggle, onB
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         {isIn ? (
           <span style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#F8FAFC', fontSize: 12, fontWeight: 700, color: '#64748B' }}>
-            Already in this pipeline
+            Already in this pipeline · {inStageLabel || 'unknown stage'} · {inRecruiterName ? `owner: ${inRecruiterName}` : 'unassigned'}
           </span>
         ) : (
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #BFDBFE', background: isSelected ? '#EFF6FF' : '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#1E40AF' }}>
