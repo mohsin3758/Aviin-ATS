@@ -1563,7 +1563,18 @@ function ResumeInboxPageInner() {
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={e => { e.stopPropagation(); setEditItem(r); }} title="Edit & Approve" style={{ padding: '4px 8px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Edit</button>
                           <button onClick={e => { e.stopPropagation(); downloadResumeFile(r.id, r.file_name); }} title="Download resume file" style={{ padding: '4px 6px', background: 'none', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', color: '#374151', display: 'flex', alignItems: 'center' }}><Download size={11} /></button>
-                          {r.candidate_id && <a href={`/candidates/${r.candidate_id}`} onClick={e => e.stopPropagation()} style={{ padding: '4px 6px', color: '#1e40af', fontSize: 11, fontWeight: 600, textDecoration: 'none', display: 'flex', alignItems: 'center' }}><ExternalLink size={11} /></a>}
+                          {/* REAL BUG FIX (2026-09-09, reported live: "back
+                              button is not working... it should go there
+                              only"): this was the one candidate link on this
+                              page missing target="_blank" -- every sibling
+                              link here (near-duplicate banner, resume-match
+                              banner, "View in ATS" button) already opens the
+                              profile in a new tab with the same ExternalLink
+                              icon, so this row-level one landing in the SAME
+                              tab (discarding the Resume Inbox queue's own
+                              scroll/filter state on the way back) was the
+                              inconsistent one, not a deliberate choice. */}
+                          {r.candidate_id && <a href={`/candidates/${r.candidate_id}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ padding: '4px 6px', color: '#1e40af', fontSize: 11, fontWeight: 600, textDecoration: 'none', display: 'flex', alignItems: 'center' }}><ExternalLink size={11} /></a>}
                         </div>
                       </td>
                     </tr>

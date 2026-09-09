@@ -198,7 +198,15 @@ export default function NdaDocumentsPage() {
                           style={{ width: 28, height: 28, borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0 }}>
                           <Download size={12} style={{ color: '#64748b' }} />
                         </button>
-                        <a href={`/candidates/${n.candidate_id || ''}`} title="Open candidate"
+                        {/* REAL BUG FIX (2026-09-09, reported live: "back
+                            button is not working... it should go there
+                            only"): opens in a new tab, matching the
+                            ExternalLink icon it already shows and the same
+                            established pattern used for every other
+                            "open candidate elsewhere" link in this app —
+                            landing back here in the SAME tab would have
+                            discarded this table's own scroll/filter state. */}
+                        <a href={`/candidates/${n.candidate_id || ''}`} title="Open candidate" target="_blank" rel="noreferrer"
                           style={{ width: 28, height: 28, borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}>
                           <ExternalLink size={12} style={{ color: '#64748b' }} />
                         </a>

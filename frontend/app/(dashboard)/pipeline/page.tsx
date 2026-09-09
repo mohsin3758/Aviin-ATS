@@ -1325,6 +1325,7 @@ function RejectionReasonCard({ appId }: { appId: string }) {
 
 // ── Profile Tab ───────────────────────────────────────────────────────────────
 function ProfileTab({ app, apiUrl }: any) {
+  const router = useRouter();
   const skills: string[] = app.skills || [];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1371,7 +1372,19 @@ function ProfileTab({ app, apiUrl }: any) {
           <Download size={13} /> Download Resume
         </button>
       )}
-      <a href={`/candidates/${app.candidate_id}`} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 14px', background: '#1E40AF', color: '#fff', borderRadius: 8, textDecoration: 'none', fontSize: 12, fontWeight: 700, width: 'fit-content' }}>
+      {/* REAL BUG FIX (2026-09-09, reported live: "back button is not
+          working... if i open profile some other option, its should go
+          there only"). A plain <a href> here forced a hard, full-page
+          browser reload instead of a Next.js client-side navigation --
+          the URL "Back" landed on was technically correct, but a hard
+          reload discards the Pipeline board's own client-side state
+          (open drawer, scroll position, filters), unlike the router's
+          own client-side cache, which restores it. Same onClick-
+          intercepted router.push pattern already proven elsewhere on
+          this exact page (the Kanban card's own candidate-name link). */}
+      <a href={`/candidates/${app.candidate_id}`}
+        onClick={e => { e.preventDefault(); router.push(`/candidates/${app.candidate_id}`); }}
+        style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 14px', background: '#1E40AF', color: '#fff', borderRadius: 8, textDecoration: 'none', fontSize: 12, fontWeight: 700, width: 'fit-content' }}>
         <ExternalLink size={12} /> Full ATS Profile
       </a>
     </div>

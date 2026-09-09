@@ -860,6 +860,7 @@ function RejectionReasonCard({ appId }: { appId: string }) {
 
 // ── Profile Tab ───────────────────────────────────────────────────────────────
 function ProfileTab({ app }: any) {
+  const router = useRouter();
   const skills: string[] = app.skills || [];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -923,7 +924,14 @@ function ProfileTab({ app }: any) {
 
       {/* Links */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {/* REAL BUG FIX (2026-09-09, reported live: "back button is not
+            working... it should go there only") -- same fix as the
+            identical "Full ATS Profile" link on the Pipeline board: a
+            plain <a href> forced a hard, full-page reload that discards
+            this drawer's own state on the way back, instead of a
+            Next.js client-side navigation. */}
         <a href={`/candidates/${app.candidate_id}`}
+          onClick={e => { e.preventDefault(); router.push(`/candidates/${app.candidate_id}`); }}
           style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 14px', background: '#1E40AF', color: '#fff', borderRadius: 8, textDecoration: 'none', fontSize: 12, fontWeight: 700 }}>
           <ExternalLink size={12} /> Full ATS Profile
         </a>
