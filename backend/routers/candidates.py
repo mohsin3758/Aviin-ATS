@@ -1344,6 +1344,68 @@ async def match_candidate_against_open_jobs(candidate_id: str, actor: Actor = De
     return {"matched": len(results), "results": results}
 
 
+@router.get("/{candidate_id}/skill-verification")
+async def verify_candidate_skills(
+    candidate_id: str, requisition_id: str = Query(...), actor: Actor = Depends(get_actor),
+):
+    """Real feature (2026-09-09, Skill Verification Panel — Phase 1 of the
+    published roadmap). The recruiter's actual manual process checks
+    mandatory skills first as a hard gate, then looks at how many times
+    each skill genuinely appears in the resume — neither exists anywhere
+    in this app today: compute_skill_similarity() (used by 8 other call
+    sites app-wide) treats every required skill identically regardless of
+    mandatory/optional, and no endpoint has ever returned a per-skill
+    occurrence count. This is the seed endpoint for the whole feature —
+    later phases extend this SAME response shape (section breakdown,
+    relevant experience, shortlist recommendation) rather than adding new
+    endpoints, so this becomes the real "Verify Candidate" action once
+    every phase has shipped."""
+    from routers.ner import compute_skill_similarity, count_skill_occurrences, compute_mandatory_coverage
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow(
+            "SELECT id, full_name, skills, resume_text FROM candidates"
+            " WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
+            candidate_id, actor.tenant_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        req = await conn.fetchrow(
+            "SELECT id, title, skills_required, mandatory_skills FROM requisitions"
+            " WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
+            requisition_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+
+    all_skills = list(req["skills_required"] or [])
+    mandatory = set(req["mandatory_skills"] or [])
+    _, matched, _ = compute_skill_similarity(
+        candidate_skills=cand["skills"], required_skills=all_skills, resume_text=cand["resume_text"])
+    matched_set = set(matched)
+    # REAL BUG FIX (2026-09-09): raw counts must come from resume_text
+    # alone, never from the structured skills[] array — a skill that's
+    # only in the parsed skills tags (never actually written anywhere in
+    # the resume body) would otherwise report a count of 0 while still
+    # showing "matched": true above, a confusing contradiction on screen.
+    counts = count_skill_occurrences(cand["resume_text"], all_skills)
+    coverage = compute_mandatory_coverage(cand["skills"], cand["resume_text"], list(mandatory))
+
+    return {
+        "candidate_id": candidate_id,
+        "candidate_name": cand["full_name"],
+        "requisition_id": requisition_id,
+        "requisition_title": req["title"],
+        "mandatory_coverage": coverage,
+        "skills": [
+            {
+                "name": s,
+                "is_mandatory": s in mandatory,
+                "count": counts.get(s, 0),
+                "matched": s in matched_set,
+            }
+            for s in all_skills
+        ],
+    }
+
+
 @router.get("/{candidate_id}/standard-resume")
 async def download_standard_resume(candidate_id: str, actor: Actor = Depends(get_actor)):
     """Renders the candidate's parsed data into a clean, standardized

@@ -263,6 +263,92 @@ def compute_skill_similarity(
     return sim, matched, missing
 
 
+def count_skill_occurrences(resume_text: Optional[str], skills: Optional[list]) -> dict:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 1): every
+    caller of compute_skill_similarity() above only ever gets a yes/no per
+    skill, even though its own _in_text() already walks every occurrence
+    via re.finditer() to check for negation cues - the count was always
+    right there, just discarded once the first genuine match was found.
+    This is a deliberately separate, standalone function (not a refactor
+    of _in_text/compute_skill_similarity) so the 8 existing callers of
+    compute_skill_similarity across candidates.py/intelligence.py/
+    requisitions.py/candidate_rediscovery.py keep behaving exactly as
+    before - this only adds a new capability, it changes nothing existing.
+
+    Returns RAW occurrence counts (every regex match, negation or not) -
+    deliberately not negation-filtered. This is meant to answer "how many
+    times does this word appear," matching a literal Ctrl+F in Word/PDF
+    (the explicit comparison point this feature was requested against);
+    negation-awareness is a separate, already-solved concern that stays
+    scoped to match/no-match decisions elsewhere, not to this count.
+
+    Returns {skill_name: count} for every skill in `skills`, 0 if none
+    found or resume_text is empty."""
+    text_lower = (resume_text or "").lower()
+    out: dict = {}
+    for skill in (skills or []):
+        if not skill:
+            continue
+        if not text_lower:
+            out[skill] = 0
+            continue
+        pattern = r'(?<![a-z0-9])' + re.escape(skill.lower()) + r'(?![a-z0-9])'
+        out[skill] = len(re.findall(pattern, text_lower))
+    return out
+
+
+def compute_mandatory_coverage(
+    candidate_skills: Optional[list],
+    resume_text: Optional[str],
+    mandatory_skills: Optional[list],
+) -> dict:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 1): the
+    recruiter's real manual process checks mandatory skills FIRST, as a
+    gate, before anything else - but compute_skill_similarity() above
+    scores every required skill (mandatory or optional) identically, and
+    is used by 8 different call sites app-wide (Kanban board, every JD-
+    match modal, candidate profile AI Match panel, rediscovery, Tier-1
+    scorer) that never asked for mandatory-first weighting. Rather than
+    change that shared function's behavior for all 8 (and silently shift
+    scores across the app), this is a new, separate, additive function
+    scoped to exactly this feature.
+
+    Reuses the same word-boundary substring check compute_skill_similarity
+    already relies on (candidate's structured skills[] OR a match in the
+    resume's own text counts as found - a real skill mentioned only in a
+    project bullet, not the parsed skills tags, is still real evidence),
+    just scoped to mandatory_skills only and without compute_skill_
+    similarity's negation-cue check (mandatory coverage is meant to be a
+    strict, literal presence gate here, not a nuanced sentiment read).
+
+    Returns {mandatory_total, mandatory_found, mandatory_missing,
+    coverage_pct, gate_passed} - gate_passed is True only when every
+    mandatory skill is found (100% coverage), matching the recruiter's
+    own "all mandatory skills found" first check."""
+    cand_lower = {s.lower() for s in (candidate_skills or []) if s}
+    text_lower = (resume_text or "").lower()
+    req_list = [s for s in (mandatory_skills or []) if s]
+
+    def _found(skill: str) -> bool:
+        if skill.lower() in cand_lower:
+            return True
+        if not text_lower:
+            return False
+        pattern = r'(?<![a-z0-9])' + re.escape(skill.lower()) + r'(?![a-z0-9])'
+        return re.search(pattern, text_lower) is not None
+
+    found = [s for s in req_list if _found(s)]
+    missing = [s for s in req_list if s not in found]
+    total = len(req_list)
+    return {
+        "mandatory_total": total,
+        "mandatory_found": found,
+        "mandatory_missing": missing,
+        "coverage_pct": round(len(found) / total * 100, 1) if total else 100.0,
+        "gate_passed": len(missing) == 0,
+    }
+
+
 def score_candidate(
     parsed: dict,
     candidate_exp_mo: int = 0,
