@@ -225,6 +225,20 @@ def compute_skill_similarity(
     ever removes a false one" discipline from the word-boundary fix
     above.
 
+    Fifth real gap fix (2026-09-09, reported live: "make it same rules for
+    all skills" -- after Skill Verification Panel's own occurrence-
+    counting was fixed to recognize known short-form aliases via
+    TECH_SKILLS, e.g. bare "FICO"/"FI/CO" for "SAP FICO", the recruiter
+    asked for the SAME rule here too, not just in the newer feature).
+    _in_text() below now matches every known alias of a required skill
+    (_skill_match_pattern, defined later in this module), not just its
+    literal name -- a real resume that only ever writes "SAP FICO" as
+    "SAP FI/CO Consultant" or bare "FICO" in every role title, never the
+    literal 2-word phrase, used to be wrongly marked as missing that
+    skill everywhere in the app (Kanban board chips, JD-match modals,
+    candidate profile AI Match Score, rediscovery, Tier-1 scorer) even
+    though the resume genuinely, repeatedly evidences it.
+
     Returns (skill_similarity_0_to_1, matched_skills, missing_skills)."""
     cand_lower = {s.lower() for s in (candidate_skills or []) if s}
     text_lower = (resume_text or "").lower()
@@ -237,7 +251,7 @@ def compute_skill_similarity(
     def _in_text(term: str) -> bool:
         if not text_lower:
             return False
-        pattern = r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])'
+        pattern = _skill_match_pattern(term)
         found_any = False
         for m in re.finditer(pattern, text_lower):
             found_any = True
