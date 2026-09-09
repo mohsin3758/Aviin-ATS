@@ -337,7 +337,8 @@ async def score_candidate_against_all_open_jobs(conn, tenant_id: str, candidate_
 
 
 async def auto_score_candidate_bg(tenant_id: str, candidate_id: str,
-                                   skill_scan_text: str | None = None) -> None:
+                                   skill_scan_text: str | None = None,
+                                   skill_scan_html: str | None = None) -> None:
     """Fire-and-forget wrapper on its own fresh connection — this is now
     the ONE shared auto-score entry point every real intake path calls
     (manual add, email/WhatsApp resume intake, public apply, personal/
@@ -359,14 +360,24 @@ async def auto_score_candidate_bg(tenant_id: str, candidate_id: str,
     the STORED candidates.resume_text — attachment-only, by design —
     never contains) to scan for skill/experience rows instead of the
     plain resume_text column. None for every other call site, preserving
-    their existing, unchanged behavior."""
+    their existing, unchanged behavior.
+
+    skill_scan_html (real bug fix, 2026-09-09): the real email's raw HTML
+    body, when the intake call site has it on hand — a genuine HTML
+    <table> tracking sheet only survives as real, parseable structure in
+    the HTML; the plain-text MIME part (skill_scan_text) that same email
+    client generated flattens it to header-cells-then-value-cells with
+    no delimiters at all, which auto_populate_skill_experience's own
+    text parser structurally cannot recover a "Skill" column from. None
+    for every other call site, same as skill_scan_text above."""
     try:
         async with db.tenant_conn(tenant_id) as conn:
             n = await score_candidate_against_all_open_jobs(conn, tenant_id, candidate_id)
             print(f"[Intelligence] auto-scored candidate {candidate_id} against {n} open requisitions")
             from services.skill_experience_parser import auto_populate_skill_experience
             k = await auto_populate_skill_experience(conn, tenant_id, candidate_id,
-                                                       override_text=skill_scan_text)
+                                                       override_text=skill_scan_text,
+                                                       override_html=skill_scan_html)
             if k:
                 print(f"[Intelligence] auto-populated {k} skill-experience rows for candidate {candidate_id}")
     except Exception as e:

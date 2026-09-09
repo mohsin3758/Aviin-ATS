@@ -1023,9 +1023,22 @@ async def process_email_for_resume(
         return {'status': 'error', 'error': str(ex)}
 
     body_text = ''
+    # REAL BUG FIX (2026-09-09, reported live: a recruiter's forwarded
+    # resume carried a real HTML tracking-sheet <table> in the email
+    # body -- Skill/Total Exp/Rel Exp columns and all -- and none of it
+    # reached Skill/Project Experience, despite skill_scan_text already
+    # being passed through below. Root cause: this loop only ever
+    # captured the text/plain MIME part, so the raw HTML (the only place
+    # the table's real column structure survives -- the plain-text part
+    # the same email client generates is a flattened, delimiter-less dump
+    # of header cells then value cells) was never even collected here to
+    # pass anywhere.
+    body_html = ''
     for part in raw_msg.walk():
         if part.get_content_type() == 'text/plain':
             body_text += (part.get_payload(decode=True) or b'').decode('utf-8', errors='ignore')
+        elif part.get_content_type() == 'text/html':
+            body_html += (part.get_payload(decode=True) or b'').decode('utf-8', errors='ignore')
 
     file_path = file_name = mime_type = None
     file_size = 0
@@ -1223,8 +1236,13 @@ async def process_email_for_resume(
         # it's set inside the attachment-processing loop above, which
         # `break`s right after processing the first resume attachment, so
         # the variable itself persists past the loop, unchanged.
+        # Also pass the raw HTML body (2026-09-09 real fix) -- a genuine
+        # HTML tracking-sheet <table> only survives as real, parseable
+        # column structure there; skill_scan_text alone can't recover a
+        # "Skill" column from the flattened, delimiter-less plain-text
+        # part the same email generates.
         asyncio.create_task(auto_score_candidate_bg(
-            tenant_id, str(candidate_id), skill_scan_text=full_text))
+            tenant_id, str(candidate_id), skill_scan_text=full_text, skill_scan_html=body_html))
 
     # NOTE: if this INSERT hits uq_resume_files_msg_fname (a leftover row
     # from an earlier attempt whose imap_messages.auto_processed update

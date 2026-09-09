@@ -12,6 +12,7 @@ inclusion (silently dropping a real skill line) is the worse failure
 mode for this kind of data, matching this project's established "let a
 human confirm, don't guess silently" discipline."""
 import re
+from html.parser import HTMLParser
 from typing import Optional
 
 from services.improved_parser import _SKILL_LOOKUP
@@ -77,6 +78,159 @@ def parse_skill_summary_text(raw_text: str) -> list[dict]:
     return rows
 
 
+class _TrackingSheetTableParser(HTMLParser):
+    """Real bug fix (2026-09-09, reported live: a recruiter forwarded a
+    resume with a real HTML tracking-sheet table in the email body --
+    columns Source/SPOC/JR No/.../Skill/.../Total Exp/Rel Exp/... -- and
+    NONE of it landed in Skill/Project Experience, despite the exact
+    skill list and relevant-experience figure sitting right there).
+    Root-caused against the real email: parse_skill_summary_text() above
+    needs "Label: Value" colon-paired lines, but a real HTML <table>
+    flattened to plain text by the sender's own mail client has NO such
+    pairing at all -- every header cell, then every value cell, dumped
+    in sequence with zero delimiters, since the "Skill" column alone
+    holds 19 stacked lines (one per <br>) that destroy any 1:1
+    positional correspondence with the other columns the moment you try
+    to reconstruct it from the flattened text. The real table structure
+    (which header goes with which value, and that a "Skill" cell can
+    hold multiple <br>-separated entries) only survives in the raw HTML,
+    which this app captured in imap_messages.html_body but never parsed
+    for structure anywhere in the intake pipeline.
+
+    Walks the FIRST <table> only (a real signature-block table almost
+    always follows the actual tracking sheet in these emails, confirmed
+    live in the exact reporting email -- Faisal's own contact-card table
+    sits right after the tracking sheet's closing </table>; stopping
+    after the first table's own end tag skips it automatically). A <br>
+    inside a cell becomes a newline in that cell's own text, preserving
+    a multi-skill "Skill" column as distinct lines instead of losing the
+    boundaries the way a plain get_text() would."""
+    def __init__(self):
+        super().__init__()
+        self.rows: list[list[str]] = []
+        self._table_depth = 0
+        self._in_row = False
+        self._in_cell = False
+        self._cell_parts: list[str] = []
+        self._row_cells: list[str] = []
+        self._done = False
+
+    def handle_starttag(self, tag, attrs):
+        if self._done:
+            return
+        if tag == 'table':
+            self._table_depth += 1
+        elif self._table_depth == 1 and tag == 'tr':
+            self._in_row = True
+            self._row_cells = []
+        elif self._in_row and tag in ('td', 'th'):
+            self._in_cell = True
+            self._cell_parts = []
+        elif self._in_cell and tag == 'br':
+            self._cell_parts.append('\n')
+
+    def handle_endtag(self, tag):
+        if self._done:
+            return
+        if tag in ('td', 'th') and self._in_cell:
+            self._row_cells.append(''.join(self._cell_parts).strip())
+            self._in_cell = False
+        elif tag == 'tr' and self._in_row:
+            self.rows.append(self._row_cells)
+            self._in_row = False
+        elif tag == 'table':
+            self._table_depth -= 1
+            if self._table_depth <= 0:
+                self._done = True
+
+    def handle_data(self, data):
+        if self._in_cell:
+            self._cell_parts.append(data)
+
+
+def _find_col(headers: list[str], *keywords: str) -> Optional[int]:
+    for i, h in enumerate(headers):
+        if any(k in h for k in keywords):
+            return i
+    return None
+
+
+def parse_tracking_sheet_html(html: str) -> list[dict]:
+    """Real feature (2026-09-09) -- see _TrackingSheetTableParser above
+    for the full root-cause story. Finds the tracking sheet's real
+    "Skill" column (however many entries it holds) and its "Rel Exp" /
+    "Total Exp" column via real header names, not position guessing.
+
+    Deliberately more trusting than parse_skill_summary_text() above:
+    every entry here already survived structural proof (it came from an
+    actual named "Skill" column in a real table, not a loose "Label:
+    Value" text guess), so auto_populate_skill_experience() below skips
+    its usual taxonomy-recognition gate for these specific rows --
+    requiring "Internal Orders" or "F1-MM Integration" (real entries
+    from the reporting email, neither in this codebase's own curated
+    skill dictionary) to also match a fixed taxonomy would silently
+    drop real, deliberately-typed recruiter data.
+
+    Every skill in the column gets the SAME relevant-experience value
+    (the sheet's own Rel Exp, or Total Exp if no Rel Exp column exists)
+    -- this table format has no more granular per-skill duration
+    anywhere, so reusing the recruiter's own real, stated figure is the
+    most honest available signal, not a fabricated one.
+
+    Returns the same shape as parse_skill_summary_text() (skill_name,
+    relevant_experience, looks_like_experience) so callers don't need to
+    branch on which extractor produced a row. Returns [] whenever the
+    table doesn't clearly look like a tracking sheet (no recognizable
+    Skill column, or no candidate-identifying column alongside it) --
+    never guesses at a table that might be something else entirely, the
+    same discipline as this file's other functions."""
+    if not html or not html.strip():
+        return []
+    parser = _TrackingSheetTableParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+    rows = [r for r in parser.rows if any(c.strip() for c in r)]
+    if len(rows) < 2:
+        return []
+
+    headers = [h.strip().lower() for h in rows[0]]
+    if _find_col(headers, 'skill') is None:
+        return []
+    if _find_col(headers, 'name', 'candidate', 'email') is None:
+        return []
+
+    skill_idx = _find_col(headers, 'skill')
+    exp_idx = _find_col(headers, 'rel exp', 'relevant exp', 'relevant experience')
+    if exp_idx is None:
+        exp_idx = _find_col(headers, 'total exp', 'total experience')
+
+    data_row = rows[1]
+    if skill_idx is None or skill_idx >= len(data_row):
+        return []
+    skill_cell = data_row[skill_idx]
+    exp_value = (data_row[exp_idx].strip() if exp_idx is not None and exp_idx < len(data_row) else '') or None
+
+    out = []
+    seen = set()
+    for raw_line in re.split(r"[\r\n]+", skill_cell):
+        name = raw_line.strip().strip(",")
+        if not name or len(name) > 60:
+            continue
+        skill_name = _normalize_skill_label(name)
+        key = skill_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "skill_name": skill_name,
+            "relevant_experience": exp_value,
+            "looks_like_experience": True,
+        })
+    return out
+
+
 def _recognized_taxonomy_skill(raw: str) -> Optional[str]:
     """Real gap fix (2026-09-03), see auto_populate_skill_experience()'s
     docstring for the full story. Checks whether `raw` is a genuinely
@@ -105,7 +259,8 @@ def _recognized_taxonomy_skill(raw: str) -> Optional[str]:
 
 
 async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str,
-                                          override_text: Optional[str] = None) -> int:
+                                          override_text: Optional[str] = None,
+                                          override_html: Optional[str] = None) -> int:
     """Real, gap-audit fix (2026-09-02): candidate_skill_experience only
     ever got populated by manual entry or a human reviewing a pasted
     tracking-sheet snippet — live before this fix, 0 rows, ever, despite
@@ -164,29 +319,45 @@ async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str
     via _recognized_taxonomy_skill() below -- never its own looser step 5
     ("looks like a clean short term, keep it anyway"), which would also
     accept genuine non-skill noise like "Support"/"Migration"/"Overall"
-    and defeat the whole point of this filter."""
+    and defeat the whole point of this filter.
+
+    override_html (real bug fix, 2026-09-09): see parse_tracking_sheet_
+    html()/_TrackingSheetTableParser above for the full story -- a real
+    HTML <table> tracking sheet in the email body has no "Label: Value"
+    pairing at all once flattened to plain text (its "Skill" column
+    alone holds many stacked entries), so parse_skill_summary_text()
+    above structurally cannot see it no matter how rich override_text
+    is. When real HTML is available, table-column rows are tried FIRST
+    and, since they already carry real structural proof (a genuine named
+    "Skill" column, not a guessed "Label: Value" line), skip the
+    taxonomy-recognition gate entirely -- unlike every row below it."""
     try:
         row = await conn.fetchrow(
             "SELECT resume_text, skills FROM candidates WHERE tenant_id=$1 AND id=$2",
             tenant_id, candidate_id)
         if not row:
             return 0
-        scan_text = override_text if override_text and override_text.strip() else row["resume_text"]
-        if not scan_text:
-            return 0
         known_skills = {s.lower() for s in (row["skills"] or [])}
 
-        proposed = parse_skill_summary_text(scan_text)
         real_rows = []
-        for p in proposed:
-            if not p["looks_like_experience"]:
-                continue
-            if p["skill_name"].lower() in known_skills:
-                real_rows.append(p)
-                continue
-            canonical = _recognized_taxonomy_skill(p["skill_name"])
-            if canonical:
-                real_rows.append({**p, "skill_name": canonical})
+        if override_html and override_html.strip():
+            real_rows.extend(parse_tracking_sheet_html(override_html))
+        seen_keys = {r["skill_name"].lower() for r in real_rows}
+
+        scan_text = override_text if override_text and override_text.strip() else row["resume_text"]
+        if scan_text:
+            for p in parse_skill_summary_text(scan_text):
+                key = p["skill_name"].lower()
+                if key in seen_keys or not p["looks_like_experience"]:
+                    continue
+                if key in known_skills:
+                    real_rows.append(p)
+                    seen_keys.add(key)
+                    continue
+                canonical = _recognized_taxonomy_skill(p["skill_name"])
+                if canonical and canonical.lower() not in seen_keys:
+                    real_rows.append({**p, "skill_name": canonical})
+                    seen_keys.add(canonical.lower())
         if not real_rows:
             return 0
 
