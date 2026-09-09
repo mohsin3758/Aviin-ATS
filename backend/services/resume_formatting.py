@@ -341,26 +341,37 @@ def _classify_lines(text: str) -> list[tuple[str, str]]:
     alone -- this function reproduces that, conservatively:
 
     Returns [(display_text, kind), ...] where kind is 'subhead', 'bullet',
-    or 'body'. A plain (non-already-bulleted, non-subheading) line only
-    becomes an auto-bullet when ALL of: (a) we're inside a real
-    PROFESSIONAL EXPERIENCE-style block -- seen a "professional
-    experience"/"work experience"/"employment history" heading, OR a
-    real "Employer:" line (a resume-specific signal just as strong even
-    with no generic heading present); (b) it is NOT the line immediately
-    after an "Employer:"/"Client:" line (that slot is almost always the
-    role's own title, e.g. "SAP FICO Lead Constant" -- never an
-    achievement); (c) it reads like a real sentence (ends with '.' or is
-    a genuinely long line). Deliberately conservative in the same spirit
-    as _is_subheading() above -- never applied outside a real experience
-    block, so the PROFESSIONAL SUMMARY's own intro paragraph and other
-    prose stay untouched. Known, accepted limitation: this resume's own
-    source structure inconsistently places a role's title line after
-    "Employer:" for some roles and after "Client:" for others -- when a
-    title line is genuinely absent in a spot this heuristic expects one,
-    the very next real achievement line is conservatively left
-    unbulleted rather than risk a title line wrongly gaining a bullet."""
+    or 'body'. A plain (non-already-bulleted, non-subheading) line
+    becomes an auto-bullet unless it's the line immediately after an
+    "Employer:"/"Client:" line (that slot is almost always the role's own
+    title, e.g. "SAP FICO Lead Consultant" -- never an achievement), and
+    it reads like a real sentence (ends with '.' or is a genuinely long
+    line).
+
+    REAL BUG FIX (2026-09-09, reported live with 2 real resumes attached
+    side by side as the counter-example -- a wall of un-bulleted
+    PROFESSIONAL SUMMARY sentences next to a real reference resume whose
+    own Summary section is genuinely a bulleted list too): this used to
+    start un-bulletable and only turn on inside a detected PROFESSIONAL
+    EXPERIENCE block -- deliberately excluding PROFESSIONAL SUMMARY.
+    That gate could never actually work for the very first, most common
+    case: by the time this function ever runs, _resolve_body_text's own
+    extract_summary_section() has ALREADY stripped the leading
+    "PROFESSIONAL SUMMARY" heading text out of `text` (that's its whole
+    job -- see its own docstring), so this function was never able to
+    SEE that heading to turn bulleting on in the first place. Every real
+    caller of this function only ever passes the body content immediately
+    following an already-stripped Summary/Projects heading -- genuinely
+    always "bulletable" content by construction, confirmed against 3 real
+    reference resumes (2 auto-generated with none of their summary
+    sentences bulleted, 1 real source resume whose own equivalent section
+    is a real bulleted list) -- so this now starts True instead of
+    needing an in-text trigger it could never see. The "skip the line
+    right after Employer:/Client:" rule stays exactly as strict as
+    before, since that's a real, still-correct signal wherever it
+    appears."""
     out: list[tuple[str, str]] = []
-    in_experience = False
+    in_bulletable_section = True
     prev_was_role_header = False
     for p in _merge_wrapped_lines(text):
         bm = BULLET_LINE_RE.match(p)
@@ -369,15 +380,12 @@ def _classify_lines(text: str) -> list[tuple[str, str]]:
             prev_was_role_header = False
             continue
         if _is_subheading(p):
-            normalized = p.rstrip(':').strip().lower()
             low = p.lower()
             is_role_header = low.startswith('employer:') or low.startswith('client:')
-            if normalized in ('professional experience', 'work experience', 'employment history') or is_role_header:
-                in_experience = True
             out.append((p, 'subhead'))
             prev_was_role_header = is_role_header
             continue
-        if in_experience and not prev_was_role_header and (p.endswith('.') or len(p) > 40):
+        if in_bulletable_section and not prev_was_role_header and (p.endswith('.') or len(p) > 40):
             out.append((p, 'bullet'))
         else:
             out.append((p, 'body'))
