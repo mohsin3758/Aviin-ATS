@@ -3347,6 +3347,7 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, jobTitle, clien
             isIn={alreadyIn.has(previewCandidateId)}
             inStageLabel={alreadyInMap.get(previewCandidateId) ? stageLabel(alreadyInMap.get(previewCandidateId)!.stage) : null}
             inRecruiterName={alreadyInMap.get(previewCandidateId)?.recruiter_name || null}
+            inJobTitle={jobTitle} inClientName={clientName}
             isSelected={selected.has(previewCandidateId)}
             onToggle={() => toggle(previewCandidateId)}
             onBack={() => setPreviewCandidateId(null)}
@@ -3411,7 +3412,7 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, jobTitle, clien
                     </button>
                     {isIn && (
                       <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: '#F1F5F9', color: '#64748B' }}>
-                        already in pipeline · {stageLabel(alreadyInMap.get(c.candidate_id)?.stage)}
+                        already in pipeline · {jobTitle || 'this role'}{clientName ? ` (${clientName})` : ''} · {stageLabel(alreadyInMap.get(c.candidate_id)?.stage)}
                         {alreadyInMap.get(c.candidate_id)?.recruiter_name ? ` · owner: ${alreadyInMap.get(c.candidate_id)?.recruiter_name}` : ' · unassigned'}
                       </span>
                     )}
@@ -3466,8 +3467,8 @@ function AddCandidateModal({ jobId, board, stages, defaultStage, jobTitle, clien
 // is coupled to this modal's own local `board`/`alreadyIn` state).
 // Fetched on demand only when a recruiter actually clicks "View Profile"
 // on one candidate, not eagerly for every ranked match.
-function AddCandidatePreviewPanel({ candidateId, isIn, inStageLabel, inRecruiterName, isSelected, onToggle, onBack }: {
-  candidateId: string; isIn: boolean; inStageLabel?: string | null; inRecruiterName?: string | null; isSelected: boolean; onToggle: () => void; onBack: () => void;
+function AddCandidatePreviewPanel({ candidateId, isIn, inStageLabel, inRecruiterName, inJobTitle, inClientName, isSelected, onToggle, onBack }: {
+  candidateId: string; isIn: boolean; inStageLabel?: string | null; inRecruiterName?: string | null; inJobTitle?: string | null; inClientName?: string | null; isSelected: boolean; onToggle: () => void; onBack: () => void;
 }) {
   const { data: c, loading } = useFetch<any>(`/candidates/${candidateId}`);
   if (loading || !c) {
@@ -3505,7 +3506,7 @@ function AddCandidatePreviewPanel({ candidateId, isIn, inStageLabel, inRecruiter
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         {isIn ? (
           <span style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#F8FAFC', fontSize: 12, fontWeight: 700, color: '#64748B' }}>
-            Already in this pipeline · {inStageLabel || 'unknown stage'} · {inRecruiterName ? `owner: ${inRecruiterName}` : 'unassigned'}
+            Already in this pipeline · {inJobTitle || 'this role'}{inClientName ? ` (${inClientName})` : ''} · {inStageLabel || 'unknown stage'} · {inRecruiterName ? `owner: ${inRecruiterName}` : 'unassigned'}
           </span>
         ) : (
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 8, border: '1px solid #BFDBFE', background: isSelected ? '#EFF6FF' : '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#1E40AF' }}>
