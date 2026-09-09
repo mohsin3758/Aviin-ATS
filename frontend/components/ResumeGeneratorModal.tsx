@@ -102,6 +102,19 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
   // null means "not yet loaded" -- distinct from an intentionally blanked
   // field (empty string), which a real edit can produce.
   const [contentEdits, setContentEdits] = useState<{ display_name: string; designation: string; company: string; skills: string; summary: string } | null>(null);
+  // REAL BUG FIX (2026-09-09, reported live: a freshly generated resume's
+  // Professional Summary still showed no bullets even after the backend's
+  // own auto-bullet fix landed). Root cause: contentEdits gets seeded from
+  // the auto-extracted text ~350ms after every open (see runPreview below),
+  // and configBody() used to send the WHOLE contentEdits object as
+  // content_overrides unconditionally from that point on -- even when the
+  // KAE never touched the editor. The seed HTML (plainTextToHtml) is a
+  // single flat <div> with no bullet markup, so it silently overrode the
+  // real, already-correct auto-bulleted rendering with unbulleted plain
+  // text on every single generation. Only a field the KAE actually typed
+  // into belongs in the override -- tracked here per-field so the untouched
+  // majority of resumes still take the normal, fully-formatted path.
+  const [editedFields, setEditedFields] = useState<Set<string>>(new Set());
   const [editorResetKey, setEditorResetKey] = useState(0);
   // REAL GAP FIX (2026-09-09, reported live: "resume should be full not
   // half right side view and full max size view and real resume page") --
@@ -149,8 +162,13 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
     visual_theme: visualTheme,
     logo_position: logoPosition,
     requisition_id: requisitionId || undefined,
-    content_overrides: contentEdits || undefined,
-  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, visualTheme, logoPosition, requisitionId, contentEdits]);
+    // Only the fields the KAE actually edited go in the override -- an
+    // untouched field must fall through to the server's own auto-extracted
+    // + auto-bulleted rendering, not the flat unformatted seed text.
+    content_overrides: (contentEdits && editedFields.size > 0)
+      ? Object.fromEntries(Array.from(editedFields).map(f => [f, (contentEdits as any)[f]]))
+      : undefined,
+  }), [templateId, nameFormat, showMobile, showEmail, showLocation, companyMode, companyReplacement, projectMode, clientNameMode, clientNameReplacement, visualTheme, logoPosition, requisitionId, contentEdits, editedFields]);
 
   const runPreview = useCallback(async () => {
     setLoadingPreview(true);
@@ -373,7 +391,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
               <div style={{ marginBottom: '16px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <span style={label}>✏️ Edit Resume Content</span>
-                  <button type="button" onClick={() => { setContentEdits(null); setEditorResetKey(k => k + 1); }}
+                  <button type="button" onClick={() => { setContentEdits(null); setEditedFields(new Set()); setEditorResetKey(k => k + 1); }}
                     style={{ fontSize: '10.5px', fontWeight: 600, color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}>
                     ↺ Reset to auto-extracted
                   </button>
@@ -381,20 +399,20 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
                   <div>
                     <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Name</label>
-                    <input style={inputStyle} value={contentEdits.display_name} onChange={e => setContentEdits({ ...contentEdits, display_name: e.target.value })} />
+                    <input style={inputStyle} value={contentEdits.display_name} onChange={e => { setContentEdits({ ...contentEdits, display_name: e.target.value }); setEditedFields(prev => new Set(prev).add('display_name')); }} />
                   </div>
                   <div>
                     <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Designation</label>
-                    <input style={inputStyle} value={contentEdits.designation} onChange={e => setContentEdits({ ...contentEdits, designation: e.target.value })} />
+                    <input style={inputStyle} value={contentEdits.designation} onChange={e => { setContentEdits({ ...contentEdits, designation: e.target.value }); setEditedFields(prev => new Set(prev).add('designation')); }} />
                   </div>
                 </div>
                 <div style={{ marginBottom: '8px' }}>
                   <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Company</label>
-                  <input style={inputStyle} value={contentEdits.company} onChange={e => setContentEdits({ ...contentEdits, company: e.target.value })} />
+                  <input style={inputStyle} value={contentEdits.company} onChange={e => { setContentEdits({ ...contentEdits, company: e.target.value }); setEditedFields(prev => new Set(prev).add('company')); }} />
                 </div>
                 <div style={{ marginBottom: '8px' }}>
                   <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>Key Skills (comma-separated)</label>
-                  <input style={inputStyle} value={contentEdits.skills} onChange={e => setContentEdits({ ...contentEdits, skills: e.target.value })} />
+                  <input style={inputStyle} value={contentEdits.skills} onChange={e => { setContentEdits({ ...contentEdits, skills: e.target.value }); setEditedFields(prev => new Set(prev).add('skills')); }} />
                 </div>
                 <div>
                   <label style={{ fontSize: '10.5px', color: '#94a3b8', display: 'block', marginBottom: '3px' }}>
@@ -421,7 +439,7 @@ export function ResumeGeneratorModal({ candidate, requisitionId, clientName, onC
                       pick up the newly re-fetched auto-extracted content,
                       not just a new prop value the mounted instance would
                       otherwise ignore -- key forces that remount. */}
-                  <RichTextEditor key={editorResetKey} value={contentEdits.summary} onChange={html => setContentEdits({ ...contentEdits, summary: html })} minHeight="160px" placeholder="Type the resume's summary/experience content here…" />
+                  <RichTextEditor key={editorResetKey} value={contentEdits.summary} onChange={html => { setContentEdits({ ...contentEdits, summary: html }); setEditedFields(prev => new Set(prev).add('summary')); }} minHeight="160px" placeholder="Type the resume's summary/experience content here…" />
                 </div>
               </div>
             )}
