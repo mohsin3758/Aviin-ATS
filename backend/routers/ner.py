@@ -263,6 +263,38 @@ def compute_skill_similarity(
     return sim, matched, missing
 
 
+def _skill_match_variants(skill: str) -> list:
+    """REAL BUG FIX (2026-09-09, reported live: a real candidate's resume
+    genuinely says "SAP FICO" as that exact 2-word phrase only ONCE, but
+    says just "FICO" alone 3 more times ("SAP S/4 HANA FICO Consultant",
+    "Implementation on - FICO", "Upgradations-FICO") — real, valid
+    evidence of the skill that every function below was blind to, since
+    they all matched only the literal skill name string. This app
+    already has a real skill/alias dictionary (TECH_SKILLS in
+    services/improved_parser.py, used elsewhere for skill extraction)
+    that already lists "fico" as a known short-form alias of "SAP FICO"
+    — it just wasn't wired into any of these matching functions.
+
+    Looks up TECH_SKILLS by canonical name (case-insensitive) and
+    returns every known alias plus the skill name itself, longest-first
+    (so "sap fico" greedily consumes before the shorter "fico"
+    alternative gets a chance at the same span — same longest-first
+    alternation trick already used by the frontend's own skill
+    highlighter). Falls back to just the literal skill name for a
+    recruiter-typed custom skill with no dictionary entry (e.g. "Public
+    Cloud", "Disaster Management") — never invents aliases for those."""
+    from services.improved_parser import TECH_SKILLS
+    for canonical, aliases in TECH_SKILLS.items():
+        if canonical.lower() == skill.lower():
+            variants = {skill.lower(), *[a.lower() for a in aliases]}
+            return sorted(variants, key=len, reverse=True)
+    return [skill.lower()]
+
+
+def _skill_match_pattern(skill: str) -> str:
+    return '|'.join(r'(?<![a-z0-9])' + re.escape(v) + r'(?![a-z0-9])' for v in _skill_match_variants(skill))
+
+
 def count_skill_occurrences(resume_text: Optional[str], skills: Optional[list]) -> dict:
     """Real feature (2026-09-09, Skill Verification Panel Phase 1): every
     caller of compute_skill_similarity() above only ever gets a yes/no per
@@ -281,6 +313,8 @@ def count_skill_occurrences(resume_text: Optional[str], skills: Optional[list]) 
     (the explicit comparison point this feature was requested against);
     negation-awareness is a separate, already-solved concern that stays
     scoped to match/no-match decisions elsewhere, not to this count.
+    Counts every known alias of a skill (_skill_match_variants above),
+    not just its literal canonical name.
 
     Returns {skill_name: count} for every skill in `skills`, 0 if none
     found or resume_text is empty."""
@@ -292,8 +326,7 @@ def count_skill_occurrences(resume_text: Optional[str], skills: Optional[list]) 
         if not text_lower:
             out[skill] = 0
             continue
-        pattern = r'(?<![a-z0-9])' + re.escape(skill.lower()) + r'(?![a-z0-9])'
-        out[skill] = len(re.findall(pattern, text_lower))
+        out[skill] = len(re.findall(_skill_match_pattern(skill), text_lower))
     return out
 
 
@@ -334,8 +367,12 @@ def compute_mandatory_coverage(
             return True
         if not text_lower:
             return False
-        pattern = r'(?<![a-z0-9])' + re.escape(skill.lower()) + r'(?![a-z0-9])'
-        return re.search(pattern, text_lower) is not None
+        # REAL BUG FIX (2026-09-09): must also recognize known short-form
+        # aliases (_skill_match_variants) — a mandatory skill genuinely
+        # present in the resume only via its short form (e.g. bare "FICO"
+        # for "SAP FICO", never the literal 2-word phrase) must still
+        # pass this gate, not get wrongly rejected as missing.
+        return re.search(_skill_match_pattern(skill), text_lower) is not None
 
     found = [s for s in req_list if _found(s)]
     missing = [s for s in req_list if s not in found]
@@ -422,7 +459,11 @@ def compute_relevant_experience(resume_text: Optional[str], skills: Optional[lis
     for skill in (skills or []):
         if not skill:
             continue
-        pattern = r'(?<![a-z0-9])' + re.escape(skill.lower()) + r'(?![a-z0-9])'
+        # REAL BUG FIX (2026-09-09): a role block mentioning a skill only
+        # by its known short-form alias (e.g. bare "FICO", never the
+        # literal "SAP FICO") must still count toward that skill's
+        # relevant experience — see _skill_match_variants above.
+        pattern = _skill_match_pattern(skill)
         intervals = [
             (b["start"], b["end"]) for b in role_blocks
             if re.search(pattern, (b.get("text") or "").lower())
