@@ -60,6 +60,7 @@ LANGUAGE sql STABLE AS $$
       )), 0)::numeric / GREATEST(cardinality(req.skills_required), 1)
     ) * 100, 2) AS fit_score
   FROM candidates c, req
+  WHERE c.is_active IS NOT FALSE
   ORDER BY fit_score DESC, c.full_name
   LIMIT p_limit;
 $$;
