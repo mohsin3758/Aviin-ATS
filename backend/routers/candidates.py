@@ -180,9 +180,24 @@ async def list_candidates(
     tags_sub = ("(SELECT json_agg(json_build_object('id',ct.id,'name',ct.name,'color',ct.color) ORDER BY ct.name)"
                 " FROM candidate_tag_map ctm JOIN candidate_tags ct ON ct.id=ctm.tag_id"
                 " WHERE ctm.candidate_id=c.id) AS tags_json")
-    owner_sub = ("(SELECT json_build_object('recruiter_name',u.full_name,'recruiter_email',co.recruiter_email,"
+    # REAL BUG FIX (2026-09-09, reported live: "Diti.S is Faisal's
+    # candidate, its showing correctly ownership in resume box but not in
+    # candidate box and database, its showing unowned owner"). This used
+    # a plain JOIN (not LEFT JOIN) on users — a real, active
+    # candidate_ownership row for an unregistered sender (a "Temporary
+    # Sender Record," recruiter_id IS NULL, real name stored directly on
+    # co.recruiter_name instead — confirmed live: Faisal K's row for this
+    # exact candidate, source='unregistered_sender') has no matching
+    # users row at all, so the INNER JOIN silently produced zero rows and
+    # this whole subquery returned NULL — "Unowned" on the Candidates
+    # list, even though the Resume Inbox drawer (which calls services/
+    # candidate_ownership.py's get_ownership(), already LEFT JOIN +
+    # COALESCE'd for exactly this case) showed the real owner correctly.
+    # Same fix, same established pattern, just never applied here too.
+    owner_sub = ("(SELECT json_build_object('recruiter_name',COALESCE(u.full_name,co.recruiter_name),"
+                 "'recruiter_email',co.recruiter_email,"
                  "'expires_at',co.ownership_expires_at,'status',co.status,'source',co.source)"
-                 " FROM candidate_ownership co JOIN users u ON u.id=co.recruiter_id AND u.is_active IS NOT FALSE"
+                 " FROM candidate_ownership co LEFT JOIN users u ON u.id=co.recruiter_id AND u.is_active IS NOT FALSE"
                  " WHERE co.candidate_id=c.id) AS owner_json")
     # Best pre-computed JD-match score this candidate already has on file
     # (from resume-intake auto-score, a manual /intelligence/score call, or
