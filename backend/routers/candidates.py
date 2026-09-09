@@ -961,7 +961,9 @@ async def upload_candidate_document(
             from services.resume_intake_service import save_resume_file, extract_text_from_attachment
             from services.document_classifier import classify_document
             from services.improved_parser import parse_resume_v2
+            from services.dedup_service import check_duplicate, compute_file_hash
             file_path = save_resume_file(data, actor.tenant_id, filename)
+            file_hash = compute_file_hash(data)
             parsed: dict = {}
             try:
                 text = extract_text_from_attachment(data, mime, filename)
@@ -971,18 +973,48 @@ async def upload_candidate_document(
                     parsed["_resume_text"] = text
             except Exception:
                 parsed = {}
+            # REAL BUG FIX (2026-09-09, reported live: two candidates named
+            # "Shahana" with blank email/phone both created 86s apart from
+            # the exact same resume file, sitting side by side in the same
+            # pipeline stage). This candidate row already exists by the
+            # time a resume reaches this endpoint (Add Candidate is a
+            # 2-step create-then-upload flow) -- so unlike create_candidate's
+            # own email-duplicate 409 below, this can't stop a redundant
+            # candidate row from ever existing, but it CAN stop the
+            # resume from silently attaching to it unnoticed, the same
+            # way an email/phone collision already blocks at creation.
+            # Reuses the same Phase F engine the automated email intake
+            # pipeline already relies on (services/dedup_service.py) --
+            # file hash (works now that resume_intake_service.py's own
+            # INSERT was fixed to actually persist it), phone, LinkedIn,
+            # and name+employer fuzzy matching -- not just email, which is
+            # routinely blank on a manually-added candidate.
+            dedup_result = await check_duplicate(conn, actor.tenant_id, parsed, file_hash=file_hash)
+            if dedup_result.should_merge and dedup_result.matched_candidate_id and dedup_result.matched_candidate_id != candidate_id:
+                existing = await conn.fetchrow(
+                    "SELECT id, full_name, email, phone FROM candidates WHERE id=$1 AND is_active IS NOT FALSE",
+                    dedup_result.matched_candidate_id)
+                if existing:
+                    raise HTTPException(409, {
+                        "message": f"This resume matches an existing candidate: {existing['full_name']}",
+                        "reason": dedup_result.decision,
+                        "evidence": dedup_result.evidence[0][1] if dedup_result.evidence else None,
+                        "existing_candidate_id": str(existing["id"]),
+                        "existing_candidate_name": existing["full_name"],
+                    })
             row = await conn.fetchrow(
                 """INSERT INTO resume_files
                     (tenant_id, candidate_id, job_board, job_board_label,
                      file_name, file_path, mime_type, file_size,
-                     parse_status, parsed_data, parse_confidence, routing_decision)
-                   VALUES ($1,$2,'manual_add','Manual Add Candidate',$3,$4,$5,$6,$7,$8,$9,$10)
+                     parse_status, parsed_data, parse_confidence, routing_decision, file_hash)
+                   VALUES ($1,$2,'manual_add','Manual Add Candidate',$3,$4,$5,$6,$7,$8,$9,$10,$11)
                    RETURNING id""",
                 actor.tenant_id, candidate_id, filename, file_path, mime, len(data),
                 "auto_accepted" if parsed else "not_a_resume",
                 json.dumps(parsed) if parsed else "{}",
                 round(float(parsed.get("_confidence", 0.7) or 0.7), 3) if parsed else 0.0,
-                "auto_accepted" if parsed else "manual_upload")
+                "auto_accepted" if parsed else "manual_upload",
+                file_hash)
             if parsed.get("_resume_text"):
                 await conn.execute(
                     """UPDATE candidates SET

@@ -1240,15 +1240,26 @@ async def process_email_for_resume(
           (tenant_id,candidate_id,imap_msg_id,job_board,job_board_label,
            source_email,source_domain,file_name,file_path,mime_type,
            file_size,parse_status,parsed_data,requisition_id,
-           parse_confidence,routing_decision)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$14,$12,$13,$15,$14)
+           parse_confidence,routing_decision,file_hash)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$14,$12,$13,$15,$14,$16)
         RETURNING id""",
         tenant_id, candidate_id, msg_id, job_board, label,
         from_email, (from_email or '').split('@')[-1] if '@' in (from_email or '') else '',
         file_name, file_path, mime_type, file_size,
         json.dumps(parsed), requisition_id,
         routing_decision,   # $14 = parse_status
-        round(conf, 3))     # $15 = parse_confidence
+        round(conf, 3),     # $15 = parse_confidence
+        # REAL BUG FIX (2026-09-09, found while wiring dedup into the
+        # manual Add Candidate upload path): resume_files.file_hash has a
+        # real column + index (sql/99) and dedup_service.check_duplicate's
+        # own Stage A1 already SELECTs it -- but nothing anywhere in this
+        # codebase ever wrote it, so exact-file-hash matching against a
+        # PRIOR resume has silently never been able to find anything, on
+        # any intake path including this one. `fh` was already computed
+        # above for THIS message's own dedup check; persisting it here is
+        # what makes the NEXT duplicate upload's check_duplicate() call
+        # actually have something to match against.
+        fh)                 # $16 = file_hash
 
 
     # Phase G: write structured parse results to candidate_parsed_data

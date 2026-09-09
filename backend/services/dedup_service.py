@@ -99,6 +99,7 @@ async def check_duplicate(
             FROM resume_files rf
             JOIN candidates c ON c.id = rf.candidate_id
             WHERE rf.tenant_id=$1 AND rf.file_hash=$2 AND rf.candidate_id IS NOT NULL
+              AND c.is_active IS NOT FALSE
             LIMIT 1""", tenant_id, fh)
         if existing_rf:
             evidence.append(('file_hash', f'Identical file SHA-256={fh[:12]}...', 1.0))
@@ -112,7 +113,7 @@ async def check_duplicate(
     if email and '@' in email:
         existing = await conn.fetchval("""
             SELECT id FROM candidates
-            WHERE tenant_id=$1 AND LOWER(TRIM(email))=$2 LIMIT 1""",
+            WHERE tenant_id=$1 AND LOWER(TRIM(email))=$2 AND is_active IS NOT FALSE LIMIT 1""",
             tenant_id, email)
         if existing:
             evidence.append(('email', f'Exact email match: {email}', 1.0))
@@ -129,6 +130,7 @@ async def check_duplicate(
             SELECT id FROM candidates
             WHERE tenant_id=$1
               AND RIGHT(REGEXP_REPLACE(COALESCE(phone,''),'[^0-9]','','g'),10)=$2
+              AND is_active IS NOT FALSE
             LIMIT 1""", tenant_id, phone10)
         if existing:
             evidence.append(('phone', f'Exact phone match: ...{phone10}', 1.0))
@@ -146,7 +148,7 @@ async def check_duplicate(
             li_path = m.group(1)
             existing = await conn.fetchval("""
                 SELECT id FROM candidates
-                WHERE tenant_id=$1 AND linkedin_url ILIKE $2 LIMIT 1""",
+                WHERE tenant_id=$1 AND linkedin_url ILIKE $2 AND is_active IS NOT FALSE LIMIT 1""",
                 tenant_id, f'%linkedin.com/in/{li_path}%')
             if existing:
                 evidence.append(('linkedin_url', f'LinkedIn URL match: /in/{li_path}', 1.0))
@@ -171,6 +173,7 @@ async def check_duplicate(
                 WHERE tenant_id=$1
                   AND LOWER(current_employer) LIKE $2
                   AND full_name IS NOT NULL
+                  AND is_active IS NOT FALSE
                 LIMIT 30""", tenant_id, f'%{employer[:20]}%')
             for row in existing_rows:
                 ns = name_similarity(name, row['full_name'])
@@ -200,6 +203,7 @@ async def check_duplicate(
                 WHERE tenant_id=$1
                   AND LOWER(current_designation) LIKE $2
                   AND full_name IS NOT NULL
+                  AND is_active IS NOT FALSE
                 LIMIT 20""", tenant_id, f'%{designation[:20]}%')
             for row in existing_rows:
                 ns = name_similarity(name, row['full_name'])
@@ -221,6 +225,7 @@ async def check_duplicate(
                     WHERE tenant_id=$1
                       AND email IS NOT NULL
                       AND SPLIT_PART(LOWER(email),'@',1) = $2
+                      AND is_active IS NOT FALSE
                     LIMIT 5""", tenant_id, email_user)
                 for row in existing_rows:
                     ns = name_similarity(name, row['full_name'])
@@ -243,6 +248,7 @@ async def check_duplicate(
                 WHERE tenant_id=$1
                   AND LOWER(full_name) LIKE $2
                   AND full_name IS NOT NULL
+                  AND is_active IS NOT FALSE
                 LIMIT 15""", tenant_id,
                 f'%{name.split()[0].lower()}%')
 
@@ -259,7 +265,7 @@ async def check_duplicate(
             best_score = 0
             rows = await conn.fetch("""
                 SELECT id, full_name FROM candidates
-                WHERE tenant_id=$1 AND full_name IS NOT NULL LIMIT 200""", tenant_id)
+                WHERE tenant_id=$1 AND full_name IS NOT NULL AND is_active IS NOT FALSE LIMIT 200""", tenant_id)
             for row in rows:
                 ns = name_similarity(name, row['full_name'])
                 if ns > best_score:
