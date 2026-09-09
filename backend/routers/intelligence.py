@@ -374,12 +374,23 @@ async def auto_score_candidate_bg(tenant_id: str, candidate_id: str,
         async with db.tenant_conn(tenant_id) as conn:
             n = await score_candidate_against_all_open_jobs(conn, tenant_id, candidate_id)
             print(f"[Intelligence] auto-scored candidate {candidate_id} against {n} open requisitions")
-            from services.skill_experience_parser import auto_populate_skill_experience
+            from services.skill_experience_parser import (
+                auto_populate_skill_experience, apply_tracking_sheet_candidate_fields,
+            )
             k = await auto_populate_skill_experience(conn, tenant_id, candidate_id,
                                                        override_text=skill_scan_text,
                                                        override_html=skill_scan_html)
             if k:
                 print(f"[Intelligence] auto-populated {k} skill-experience rows for candidate {candidate_id}")
+            # Real bug fix (2026-09-09): a tracking sheet's own explicitly
+            # labeled columns (Current Organization/Location/CTC/Notice
+            # Period) are a real, structurally reliable signal that
+            # should outrank a fragile whole-document regex guess -- see
+            # apply_tracking_sheet_candidate_fields()'s own docstring for
+            # the confirmed live false-positive this corrects.
+            f = await apply_tracking_sheet_candidate_fields(conn, tenant_id, candidate_id, skill_scan_html)
+            if f:
+                print(f"[Intelligence] applied {f} tracking-sheet field(s) for candidate {candidate_id}")
     except Exception as e:
         print(f"[Intelligence] auto_score_candidate_bg failed for {candidate_id}: {e}")
 

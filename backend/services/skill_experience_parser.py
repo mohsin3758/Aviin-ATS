@@ -231,6 +231,133 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
     return out
 
 
+def _parse_ctc_to_rupees(raw: Optional[str]) -> Optional[float]:
+    """"6 LPA" / "6.5 Lakhs" / "12,00,000" -> raw rupees (candidates.
+    current_ctc/expected_ctc's real stored unit — confirmed against this
+    tenant's own existing data, e.g. 1100000 for an "11 LPA" candidate).
+    A bare small number with no unit (e.g. "6", "12") is treated as LPA —
+    the universal Indian staffing convention seen in every real tracking
+    sheet this session, and no real CTC in this domain is ever quoted as
+    a bare number under 200 in raw rupees."""
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    m = re.search(r'(\d+(?:\.\d+)?)\s*(?:lpa|lakhs?|l\b)', s)
+    if m:
+        return float(m.group(1)) * 100000
+    m = re.search(r'(\d+(?:\.\d+)?)\s*(?:cr|crore)', s)
+    if m:
+        return float(m.group(1)) * 10000000
+    m = re.search(r'([\d,]+(?:\.\d+)?)', s)
+    if m:
+        try:
+            num = float(m.group(1).replace(',', ''))
+        except ValueError:
+            return None
+        return num * 100000 if num < 200 else num
+    return None
+
+
+def _parse_notice_days(raw: Optional[str]) -> Optional[int]:
+    """"30 Days" / "1 Month" / "Immediate" -> integer days (candidates.
+    notice_period_days)."""
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    if 'immediate' in s:
+        return 0
+    m = re.search(r'(\d+)\s*day', s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'(\d+(?:\.\d+)?)\s*month', s)
+    if m:
+        return round(float(m.group(1)) * 30)
+    m = re.search(r'(\d+)', s)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def parse_tracking_sheet_candidate_fields(html: str) -> Optional[dict]:
+    """Real bug fix (2026-09-09, same reporting email as parse_tracking_
+    sheet_html above -- the recruiter's ask was "all tracking sheet
+    details should add... in the candidate box", not just skills).
+    Confirmed live: candidates.current_employer and .location for the
+    reporting candidate held actively WRONG data, not just missing data
+    -- extract_company_v2's "working at/with X" fallback regex
+    (services/improved_parser.py) misfired on this exact tracking
+    sheet's own column header text, "Duration working with current
+    company", parsing the literal words "current company" as if they
+    were a real employer name (confirmed by reproducing the exact match
+    against the real combined text before writing this). Separately,
+    extract_location_v2 returned "Mumbai" — not the candidate's real
+    "Gandinagar, Gujarat" from the tracking sheet, but a city pulled
+    from the SENDER'S OWN email signature block ("b: Bangalore,
+    Kalaburagi, Mumbai, Delhi & Hyderabad", his company's listed
+    office cities) — that function's plain city-list scan has no way to
+    tell a candidate's real location apart from any other city name
+    anywhere in the combined text, including a stranger's signature.
+
+    Both existing extractors work directly off free-flowing prose with
+    no notion of "whose sentence is this" — a real, structural
+    limitation neither this fix nor the reporting session's scope
+    attempts to redesign. What IS fixable here: when a genuine tracking-
+    sheet table is present, its own explicitly labeled columns (Current
+    Organization/Location/CTC/Notice Period) are a real, structurally
+    reliable, definitely-about-the-candidate signal that should simply
+    outrank a fragile whole-document regex guess, the same "structural
+    proof beats a text guess" reasoning already applied to skills above.
+
+    Returns None if this doesn't look like a real tracking sheet (same
+    Skill+identity-column check as parse_tracking_sheet_html), else a
+    dict with only the keys that had a real, non-empty cell value:
+    current_employer, location, current_ctc, expected_ctc,
+    notice_period_days."""
+    if not html or not html.strip():
+        return None
+    parser = _TrackingSheetTableParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return None
+    rows = [r for r in parser.rows if any(c.strip() for c in r)]
+    if len(rows) < 2:
+        return None
+
+    headers = [h.strip().lower() for h in rows[0]]
+    if _find_col(headers, 'skill') is None:
+        return None
+    if _find_col(headers, 'name', 'candidate', 'email') is None:
+        return None
+
+    data_row = rows[1]
+
+    def _cell(*keywords: str) -> Optional[str]:
+        idx = _find_col(headers, *keywords)
+        if idx is None or idx >= len(data_row):
+            return None
+        v = data_row[idx].strip()
+        return v or None
+
+    out: dict = {}
+    org = _cell('current organization', 'current company', 'current employer')
+    if org:
+        out['current_employer'] = org
+    loc = _cell('current location')
+    if loc:
+        out['location'] = loc
+    ctc_cur = _parse_ctc_to_rupees(_cell('current ctc'))
+    if ctc_cur is not None:
+        out['current_ctc'] = ctc_cur
+    ctc_exp = _parse_ctc_to_rupees(_cell('expected ctc'))
+    if ctc_exp is not None:
+        out['expected_ctc'] = ctc_exp
+    notice = _parse_notice_days(_cell('notice period'))
+    if notice is not None:
+        out['notice_period_days'] = notice
+    return out or None
+
+
 def _recognized_taxonomy_skill(raw: str) -> Optional[str]:
     """Real gap fix (2026-09-03), see auto_populate_skill_experience()'s
     docstring for the full story. Checks whether `raw` is a genuinely
@@ -383,5 +510,42 @@ async def auto_populate_skill_experience(conn, tenant_id: str, candidate_id: str
             existing_names.add(key)
             created += 1
         return created
+    except Exception:
+        return 0
+
+
+async def apply_tracking_sheet_candidate_fields(conn, tenant_id: str, candidate_id: str,
+                                                 override_html: Optional[str]) -> int:
+    """Real bug fix (2026-09-09) — applies parse_tracking_sheet_candidate_
+    fields() above to the real candidate row. Deliberately unconditional
+    (overwrites, doesn't COALESCE-only-fill): this runs exactly once, in
+    the same fire-and-forget background task as auto_populate_skill_
+    experience above, immediately after intake — before any recruiter
+    has had a chance to review or hand-correct the record, so there's no
+    real human edit at risk of being clobbered. Confirmed live: the
+    field is often already non-NULL by this point with an actively WRONG
+    value (extract_company_v2/extract_location_v2 already ran during the
+    earlier parse step and can populate garbage, e.g. "Current Company"
+    literal text or a recruiter's own signature-block city) — a plain
+    "only if NULL" fill would never correct that, only ever fill a
+    genuinely blank field. Best-effort; never raises. Returns how many
+    fields were updated."""
+    if not override_html or not override_html.strip():
+        return 0
+    try:
+        fields = parse_tracking_sheet_candidate_fields(override_html)
+        if not fields:
+            return 0
+        params: list = [tenant_id, candidate_id]
+        set_clauses = []
+        for key, value in fields.items():
+            params.append(value)
+            set_clauses.append(f"{key} = ${len(params)}")
+        await conn.execute(
+            f"UPDATE candidates SET {', '.join(set_clauses)}, updated_at = now() "
+            f"WHERE tenant_id=$1 AND id=$2",
+            *params,
+        )
+        return len(fields)
     except Exception:
         return 0
