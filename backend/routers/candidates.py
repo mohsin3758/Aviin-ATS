@@ -1348,19 +1348,19 @@ async def match_candidate_against_open_jobs(candidate_id: str, actor: Actor = De
 async def verify_candidate_skills(
     candidate_id: str, requisition_id: str = Query(...), actor: Actor = Depends(get_actor),
 ):
-    """Real feature (2026-09-09, Skill Verification Panel — Phase 1 of the
-    published roadmap). The recruiter's actual manual process checks
-    mandatory skills first as a hard gate, then looks at how many times
-    each skill genuinely appears in the resume — neither exists anywhere
-    in this app today: compute_skill_similarity() (used by 8 other call
-    sites app-wide) treats every required skill identically regardless of
-    mandatory/optional, and no endpoint has ever returned a per-skill
-    occurrence count. This is the seed endpoint for the whole feature —
-    later phases extend this SAME response shape (section breakdown,
-    relevant experience, shortlist recommendation) rather than adding new
-    endpoints, so this becomes the real "Verify Candidate" action once
-    every phase has shipped."""
-    from routers.ner import compute_skill_similarity, count_skill_occurrences, compute_mandatory_coverage
+    """Real feature (2026-09-09, Skill Verification Panel — the roadmap at
+    https://claude.ai/code/artifact/86b41cc7-ffc4-44cb-8fb1-016210c75683).
+    The recruiter's actual manual process checks mandatory skills first as
+    a hard gate, then how many times each skill genuinely appears, then
+    WHERE it appears (Skills list vs. Experience vs. Projects) — none of
+    this existed anywhere in the app before this endpoint. This is the
+    seed of the whole "Verify Candidate" action — later phases (relevant
+    experience, shortlist recommendation) extend this SAME response shape
+    rather than adding new endpoints."""
+    from routers.ner import (
+        compute_skill_similarity, count_skill_occurrences, compute_mandatory_coverage,
+        count_skill_occurrences_by_section,
+    )
     async with db.tenant_conn(actor.tenant_id) as conn:
         cand = await conn.fetchrow(
             "SELECT id, full_name, skills, resume_text FROM candidates"
@@ -1387,6 +1387,7 @@ async def verify_candidate_skills(
     # showing "matched": true above, a confusing contradiction on screen.
     counts = count_skill_occurrences(cand["resume_text"], all_skills)
     coverage = compute_mandatory_coverage(cand["skills"], cand["resume_text"], list(mandatory))
+    by_section = count_skill_occurrences_by_section(cand["resume_text"], all_skills)
 
     return {
         "candidate_id": candidate_id,
@@ -1400,6 +1401,7 @@ async def verify_candidate_skills(
                 "is_mandatory": s in mandatory,
                 "count": counts.get(s, 0),
                 "matched": s in matched_set,
+                "sections": by_section.get(s, {"skills": None, "experience": None, "projects": None}),
             }
             for s in all_skills
         ],

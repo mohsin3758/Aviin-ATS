@@ -32,19 +32,37 @@ async function downloadResume(fileId: string, fileName: string) {
 }
 
 function escapeRe(s: string) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function skillSlug(s: string) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-'); }
 
-function highlightMatched(text: string, matched: string[]): React.ReactNode {
+// REAL FEATURE (2026-09-09, Skill Verification Panel Phase 2): replaces
+// the old single-color highlightMatched() — every matched skill used to
+// render identically regardless of whether it was mandatory or optional,
+// which doesn't match the recruiter's real priority order (mandatory
+// checked first). Each occurrence also gets a stable id
+// (`mark-{skill}-{n}`) so the sidebar's skill list can click-to-jump/
+// cycle through a skill's own occurrences, which the old version had no
+// way to do at all (all matches rendered highlighted at once, passively).
+function highlightSkills(text: string, skillMeta: Record<string, { is_mandatory: boolean; matched: boolean }>): React.ReactNode {
   if (!text) return text;
-  const terms = (matched || []).filter(t => t && t.trim().length > 1);
+  const terms = Object.keys(skillMeta).filter(t => skillMeta[t]?.matched && t.trim().length > 1);
   if (terms.length === 0) return text;
   const sorted = [...new Set(terms)].sort((a, b) => b.length - a.length);
   const re = new RegExp('(' + sorted.map(escapeRe).join('|') + ')', 'gi');
-  const lowerSet = new Set(sorted.map(s => s.toLowerCase()));
+  const lowerMap = new Map(sorted.map(s => [s.toLowerCase(), s]));
   const parts = text.split(re);
+  const seenCount: Record<string, number> = {};
   return parts.map((part, i) => {
-    if (lowerSet.has(part.toLowerCase())) {
+    const canonical = lowerMap.get(part.toLowerCase());
+    if (canonical) {
+      const isMandatory = !!skillMeta[canonical]?.is_mandatory;
+      const idx = (seenCount[canonical] = (seenCount[canonical] || 0) + 1);
       return (
-        <mark key={i} style={{ background: '#bbf7d0', color: '#166534', padding: '0 2px', borderRadius: '3px', fontWeight: 700 }}>
+        <mark key={i} id={`mark-${skillSlug(canonical)}-${idx}`}
+          style={{
+            background: isMandatory ? '#bbf7d0' : '#fde68a',
+            color: isMandatory ? '#166534' : '#92400e',
+            padding: '0 2px', borderRadius: '3px', fontWeight: 700, scrollMarginTop: '80px',
+          }}>
           {part}
         </mark>
       );
@@ -63,6 +81,28 @@ export default function CandidateResumeFullPage() {
 
   const scores: any[] = Array.isArray(candidate?.ai_scores) ? candidate.ai_scores : [];
   const active = scores[scoreIdx] || null;
+
+  // REAL FEATURE (2026-09-09, Skill Verification Panel Phase 2): counts,
+  // mandatory/optional split, and Skills/Experience/Projects evidence per
+  // skill — see backend/routers/candidates.py's new GET .../skill-
+  // verification. Only fetched once a requisition is actually selected
+  // (active.requisition_id), same gating as the rest of this page.
+  const { data: verification } = useFetch<any>(
+    id && active?.requisition_id ? `/candidates/${id}/skill-verification?requisition_id=${active.requisition_id}` : null
+  );
+  const skillMeta = useMemo(() => {
+    const m: Record<string, any> = {};
+    (verification?.skills || []).forEach((s: any) => { m[s.name] = s; });
+    return m;
+  }, [verification]);
+  const [jumpIndex, setJumpIndex] = useState<Record<string, number>>({});
+  function jumpToSkill(skillName: string, count: number) {
+    if (!count) return;
+    const cur = jumpIndex[skillName] || 0;
+    const next = (cur % count) + 1;
+    setJumpIndex(prev => ({ ...prev, [skillName]: next }));
+    document.getElementById(`mark-${skillSlug(skillName)}-${next}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
 
   // REAL BUG FIX (2026-08-23): reported live — after a real match, the
   // panel told the user to manually reload the browser to see the
@@ -103,8 +143,8 @@ export default function CandidateResumeFullPage() {
   };
 
   const highlighted = useMemo(
-    () => highlightMatched(candidate?.resume_text || '', active?.matched_skills || []),
-    [candidate?.resume_text, active]
+    () => highlightSkills(candidate?.resume_text || '', skillMeta),
+    [candidate?.resume_text, skillMeta]
   );
 
   if (loading) return (
@@ -214,6 +254,65 @@ export default function CandidateResumeFullPage() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* REAL FEATURE (2026-09-09, Skill Verification Panel Phase 2):
+                the recruiter's real manual process checks mandatory skills
+                first as a gate, then how many times + WHERE each skill
+                appears — neither existed on this page before. Clicking a
+                skill jumps through its own highlighted occurrences above. */}
+            {verification && (
+              <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '18px' }}>
+                <div style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>
+                  Skill Verification
+                </div>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '8px 10px', borderRadius: '8px', marginBottom: '12px',
+                  background: verification.mandatory_coverage.gate_passed ? '#f0fdf4' : '#fef2f2',
+                  border: `1px solid ${verification.mandatory_coverage.gate_passed ? '#bbf7d0' : '#fecaca'}`,
+                }}>
+                  <span style={{ fontSize: '11px', fontWeight: '700', color: verification.mandatory_coverage.gate_passed ? '#166534' : '#991b1b' }}>
+                    Mandatory: {verification.mandatory_coverage.mandatory_found.length}/{verification.mandatory_coverage.mandatory_total} found
+                  </span>
+                  <span style={{ fontSize: '11px', fontWeight: '800', color: verification.mandatory_coverage.gate_passed ? '#166534' : '#991b1b' }}>
+                    {verification.mandatory_coverage.coverage_pct}%
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {verification.skills.map((s: any) => (
+                    <button key={s.name} onClick={() => jumpToSkill(s.name, s.count)} disabled={!s.count}
+                      title={s.count ? `Jump to occurrence ${((jumpIndex[s.name] || 0) % s.count) + 1} of ${s.count}` : 'Not found in resume text'}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        width: '100%', textAlign: 'left', padding: '6px 8px', borderRadius: '6px',
+                        border: '1px solid #f1f5f9', background: s.count ? '#fff' : '#f8fafc',
+                        cursor: s.count ? 'pointer' : 'default', fontSize: '11px',
+                      }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#0f172a', fontWeight: 600 }}>
+                        <span style={{
+                          width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
+                          background: s.is_mandatory ? '#16a34a' : '#d97706',
+                        }} />
+                        {s.name}
+                      </span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#64748b' }}>
+                        <span style={{ fontFamily: 'monospace' }}>
+                          S:{s.sections.skills ?? '—'} E:{s.sections.experience ?? '—'} P:{s.sections.projects ?? '—'}
+                        </span>
+                        <span style={{
+                          minWidth: '20px', textAlign: 'center', padding: '1px 5px', borderRadius: '4px',
+                          background: s.count ? (s.is_mandatory ? '#dcfce7' : '#fef3c7') : '#f1f5f9',
+                          color: s.count ? (s.is_mandatory ? '#166534' : '#92400e') : '#94a3b8', fontWeight: 700,
+                        }}>{s.count}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: '9.5px', color: '#94a3b8', marginTop: '8px' }}>
+                  S/E/P = occurrences in Skills / Experience / Projects sections — "—" means that resume has no distinct section to check, not zero evidence.
+                </div>
               </div>
             )}
           </div>

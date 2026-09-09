@@ -871,6 +871,70 @@ def extract_projects_section(text: str) -> Optional[str]:
     return section[:3000] if section else None
 
 
+_SKILLS_HEADING_RE = re.compile(
+    r'^\s*(?:(?:technical|key)\s+skills|core\s+competencies|skills)\s*:?\s*$',
+    re.I | re.M)
+
+_EXPERIENCE_HEADING_RE = re.compile(
+    r'^\s*(?:(?:work|professional)\s+experience|experience|employment\s+history)\s*:?\s*$',
+    re.I | re.M)
+
+
+def _extract_named_section(text: str, heading_re: 're.Pattern', self_names: set) -> Optional[str]:
+    """Shared boundary-walk behind extract_skills_section/extract_
+    experience_section below — the exact same heading-to-next-heading
+    capture already proven by extract_projects_section() above, just
+    parameterized by heading pattern instead of copy-pasted per section.
+    `self_names` lists the SECTION_HEADERS entries this section's own
+    heading can match (so the boundary scan doesn't stop at, say, a
+    second "Technical Skills" sub-heading inside the Skills block
+    itself) — same "no heading match, no guess" discipline: returns None
+    rather than fabricating a section."""
+    if not text:
+        return None
+    m = heading_re.search(text)
+    if not m:
+        return None
+    start = m.end()
+    rest = text[start:]
+    end = len(rest)
+    for line_m in re.finditer(r'^\s*([A-Za-z][A-Za-z /&\-]{2,40})\s*:?\s*$', rest, re.M):
+        candidate = line_m.group(1).strip().lower()
+        if candidate in SECTION_HEADERS and candidate not in self_names:
+            end = line_m.start()
+            break
+    section = rest[:end].strip()
+    return section[:3000] if section else None
+
+
+_SKILLS_SELF_NAMES = {'technical skills', 'key skills', 'core competencies', 'skills'}
+_EXPERIENCE_SELF_NAMES = {'work experience', 'professional experience', 'experience', 'employment history'}
+
+
+def extract_skills_section(text: str) -> Optional[str]:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 2): finds
+    a standalone Skills/Technical Skills/Key Skills/Core Competencies
+    heading and captures everything up to the next recognized section
+    header — the exact same boundary-walk convention as extract_projects_
+    section() above. Deliberately conservative: many real resumes in this
+    system (SAP consultant CVs especially) list skills inline across
+    Experience/Projects with no dedicated Skills block at all — this
+    returns None for those rather than guessing at a fake boundary, so
+    callers can distinguish "no evidence" from "no Skills section"."""
+    return _extract_named_section(text, _SKILLS_HEADING_RE, _SKILLS_SELF_NAMES)
+
+
+def extract_experience_section(text: str) -> Optional[str]:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 2): same
+    convention as extract_skills_section() above, for Work Experience/
+    Professional Experience/Employment History/Experience. Deliberately
+    excludes "Total Experience"/"Career Overview" from the heading match
+    — those are typically a single summary line ("Total Experience: 8
+    Years"), not the start of a role-by-role block, so treating either as
+    this section's boundary would silently capture unrelated content."""
+    return _extract_named_section(text, _EXPERIENCE_HEADING_RE, _EXPERIENCE_SELF_NAMES)
+
+
 _SUMMARY_HEADING_RE = re.compile(
     r'^\s*(?:professional|career|executive)?\s*(?:summary|profile|objective)\s*:?\s*$',
     re.I | re.M)

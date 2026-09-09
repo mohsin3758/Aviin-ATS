@@ -349,6 +349,43 @@ def compute_mandatory_coverage(
     }
 
 
+def count_skill_occurrences_by_section(resume_text: Optional[str], skills: Optional[list]) -> dict:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 2): breaks
+    count_skill_occurrences() above down by WHERE in the resume a skill
+    appears — Skills list vs Experience vs Projects — using the new
+    extract_skills_section()/extract_experience_section()/extract_
+    projects_section() in services/improved_parser.py.
+
+    A section that genuinely isn't found in a given resume (many real
+    resumes here, especially SAP consultant CVs, describe work inline
+    with no distinct Projects or Skills heading at all) returns None for
+    that section, not 0 — 0 means "the section exists and this skill
+    isn't in it," None means "this resume has no such section to check."
+    Collapsing that distinction to a plain zero would silently penalize a
+    candidate for their resume's formatting rather than their real
+    skills. Callers render None as "N/A," not as a failed match.
+
+    Returns {skill_name: {"skills": int|None, "experience": int|None,
+    "projects": int|None}}."""
+    from services.improved_parser import (
+        extract_skills_section, extract_experience_section, extract_projects_section,
+    )
+    sections = {
+        "skills": extract_skills_section(resume_text or ""),
+        "experience": extract_experience_section(resume_text or ""),
+        "projects": extract_projects_section(resume_text or ""),
+    }
+    out: dict = {}
+    for skill in (skills or []):
+        if not skill:
+            continue
+        out[skill] = {
+            key: (count_skill_occurrences(text, [skill])[skill] if text is not None else None)
+            for key, text in sections.items()
+        }
+    return out
+
+
 def score_candidate(
     parsed: dict,
     candidate_exp_mo: int = 0,
