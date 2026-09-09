@@ -935,6 +935,87 @@ def extract_experience_section(text: str) -> Optional[str]:
     return _extract_named_section(text, _EXPERIENCE_HEADING_RE, _EXPERIENCE_SELF_NAMES)
 
 
+_ROLE_DATE_RANGE_PATS = [
+    r'([A-Za-z]+\s+\d{4}|\d{4})\s+(?:to|–|—|-)\s+(present|current|till\s+date|till\s+now|[A-Za-z]+\s+\d{4}|\d{4})',
+    r'(\d{4})\s*[-–]\s*(\d{4}|present|current|till\s+date)',
+]
+_ROLE_MONTHS_MAP = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+    'january': 1, 'february': 2, 'march': 3, 'april': 4,
+    'june': 6, 'july': 7, 'august': 8, 'september': 9,
+    'october': 10, 'november': 11, 'december': 12,
+}
+
+
+def extract_role_blocks(text: str) -> list:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 3): splits
+    an Experience section (extract_experience_section() above) into
+    per-role blocks, each tagged with its own date range — needed to
+    attribute a skill mention to a SPECIFIC role's dates (ner.py's
+    compute_relevant_experience()), not the whole document's one
+    collapsed min/max span the way _calc_exp_from_dates() (which drives
+    total_exp_mo for every candidate today) already does.
+
+    Deliberately a NEW, separate function rather than a refactor of
+    _calc_exp_from_dates — that function is load-bearing for every
+    candidate's total experience today; duplicating its small,
+    already-proven date-range regexes here is a safer trade than risking
+    any behavior change to it.
+
+    Splits on any line matching a real date-range pattern — confirmed
+    against this app's own real resume data (e.g. "Nov 2006 to Oct 2014 -
+    IBM - SAP Consultant" is a genuine, common single-line role entry
+    here): that line starts a new role block, and everything up to the
+    NEXT such line (or end of text) belongs to it, so a skill mentioned
+    in a bullet under a role still attributes correctly even when the
+    date and the skill aren't on the same line.
+
+    Returns [{"start": date, "end": date, "text": block_text}, ...],
+    oldest first. A section with no genuine date range anywhere returns
+    []."""
+    import datetime
+    if not text:
+        return []
+    today = datetime.date.today()
+    norm = re.sub(
+        r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)-(\d{4})\b',
+        r'\1 \2', text, flags=re.I)
+    norm = re.sub(r'(\d{4})\s*-\s*([A-Za-z])', r'\1 to \2', norm)
+
+    def parse_date(s):
+        s = s.strip().lower()
+        if s in ('present', 'current', 'till date', 'till now', 'to date', 'ongoing', 'now', 'date'):
+            return today
+        m = re.match(r'([a-z]+)\s+(\d{4})', s)
+        if m and m.group(1) in _ROLE_MONTHS_MAP:
+            return datetime.date(int(m.group(2)), _ROLE_MONTHS_MAP[m.group(1)], 1)
+        m = re.match(r'^(\d{4})$', s)
+        if m:
+            return datetime.date(int(m.group(1)), 1, 1)
+        return None
+
+    lines = norm.split('\n')
+    line_dates = []
+    for i, line in enumerate(lines):
+        for pat in _ROLE_DATE_RANGE_PATS:
+            m = re.search(pat, line, re.I)
+            if m:
+                start = parse_date(m.group(1))
+                end = parse_date(m.group(2))
+                if start and end and end >= start:
+                    line_dates.append((i, start, end))
+                break
+
+    blocks = []
+    for idx, (line_i, start, end) in enumerate(line_dates):
+        next_line_i = line_dates[idx + 1][0] if idx + 1 < len(line_dates) else len(lines)
+        block_text = '\n'.join(lines[line_i:next_line_i]).strip()
+        blocks.append({"start": start, "end": end, "text": block_text})
+    blocks.sort(key=lambda b: b["start"])
+    return blocks
+
+
 _SUMMARY_HEADING_RE = re.compile(
     r'^\s*(?:professional|career|executive)?\s*(?:summary|profile|objective)\s*:?\s*$',
     re.I | re.M)

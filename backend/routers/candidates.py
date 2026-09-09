@@ -1351,16 +1351,19 @@ async def verify_candidate_skills(
     """Real feature (2026-09-09, Skill Verification Panel — the roadmap at
     https://claude.ai/code/artifact/86b41cc7-ffc4-44cb-8fb1-016210c75683).
     The recruiter's actual manual process checks mandatory skills first as
-    a hard gate, then how many times each skill genuinely appears, then
-    WHERE it appears (Skills list vs. Experience vs. Projects) — none of
-    this existed anywhere in the app before this endpoint. This is the
-    seed of the whole "Verify Candidate" action — later phases (relevant
-    experience, shortlist recommendation) extend this SAME response shape
-    rather than adding new endpoints."""
+    a hard gate, then how many times + WHERE each skill appears, then
+    relevant experience and role fit, then decides — none of this existed
+    anywhere in the app before this endpoint. This IS the full "Verify
+    Candidate" action (all 4 build phases land here in one response, not
+    scattered across separate endpoints): mandatory coverage, per-skill
+    counts, Skills/Experience/Projects evidence, auto-computed relevant
+    experience, role/domain relevance, and a final shortlist/reject
+    recommendation with itemized reasons from services/shortlist_rules.py."""
     from routers.ner import (
         compute_skill_similarity, count_skill_occurrences, compute_mandatory_coverage,
-        count_skill_occurrences_by_section,
+        count_skill_occurrences_by_section, compute_relevant_experience, compute_role_relevance,
     )
+    from services.shortlist_rules import evaluate_shortlist
     async with db.tenant_conn(actor.tenant_id) as conn:
         cand = await conn.fetchrow(
             "SELECT id, full_name, skills, resume_text FROM candidates"
@@ -1369,14 +1372,26 @@ async def verify_candidate_skills(
         if not cand:
             raise HTTPException(404, "Candidate not found")
         req = await conn.fetchrow(
-            "SELECT id, title, skills_required, mandatory_skills FROM requisitions"
-            " WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
+            "SELECT id, title, skills_required, mandatory_skills, mandatory_skill_min_years"
+            " FROM requisitions WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
             requisition_id, actor.tenant_id)
         if not req:
             raise HTTPException(404, "Requisition not found")
+        # Manually-entered project experience (candidate_skill_experience,
+        # sql/85) is shown alongside the auto-computed years below, never
+        # merged into it — see compute_relevant_experience()'s own
+        # docstring for why that table isn't safe to write auto-computed
+        # rows into.
+        manual_rows = await conn.fetch(
+            "SELECT skill_name, project_name, duration_from, duration_to, relevant_experience"
+            " FROM candidate_skill_experience WHERE candidate_id=$1 AND tenant_id=$2",
+            candidate_id, actor.tenant_id)
 
     all_skills = list(req["skills_required"] or [])
     mandatory = set(req["mandatory_skills"] or [])
+    min_years_raw = req["mandatory_skill_min_years"]
+    mandatory_skill_min_years = json.loads(min_years_raw) if isinstance(min_years_raw, str) else (min_years_raw or {})
+
     _, matched, _ = compute_skill_similarity(
         candidate_skills=cand["skills"], required_skills=all_skills, resume_text=cand["resume_text"])
     matched_set = set(matched)
@@ -1388,13 +1403,23 @@ async def verify_candidate_skills(
     counts = count_skill_occurrences(cand["resume_text"], all_skills)
     coverage = compute_mandatory_coverage(cand["skills"], cand["resume_text"], list(mandatory))
     by_section = count_skill_occurrences_by_section(cand["resume_text"], all_skills)
+    relevant_experience = compute_relevant_experience(cand["resume_text"], all_skills)
+    role_relevance = compute_role_relevance(cand["resume_text"], req["title"])
 
-    return {
+    manual_by_skill: dict = {}
+    for r in manual_rows:
+        manual_by_skill.setdefault(r["skill_name"], []).append({
+            "project_name": r["project_name"], "duration_from": r["duration_from"],
+            "duration_to": r["duration_to"], "relevant_experience": r["relevant_experience"],
+        })
+
+    verification = {
         "candidate_id": candidate_id,
         "candidate_name": cand["full_name"],
         "requisition_id": requisition_id,
         "requisition_title": req["title"],
         "mandatory_coverage": coverage,
+        "role_relevance": role_relevance,
         "skills": [
             {
                 "name": s,
@@ -1402,10 +1427,16 @@ async def verify_candidate_skills(
                 "count": counts.get(s, 0),
                 "matched": s in matched_set,
                 "sections": by_section.get(s, {"skills": None, "experience": None, "projects": None}),
+                "relevant_experience_years": relevant_experience.get(s, 0.0),
+                "min_years_required": mandatory_skill_min_years.get(s),
+                "manual_entries": manual_by_skill.get(s, []),
             }
             for s in all_skills
         ],
     }
+    verification["shortlist"] = evaluate_shortlist(
+        verification, relevant_experience, role_relevance, mandatory_skill_min_years)
+    return verification
 
 
 @router.get("/{candidate_id}/standard-resume")

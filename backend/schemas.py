@@ -135,6 +135,11 @@ class RequisitionCreate(BaseModel):
     # existing reader of that field (AI matching, Boolean search, JD
     # templates) keeps working unchanged.
     mandatory_skills: list[str] = Field(default_factory=list)
+    # Real feature (2026-09-09, Skill Verification Panel Phase 3) -- how
+    # long a mandatory skill must have been used, e.g. {"Java": 5}. Sparse
+    # by design: a mandatory skill with no entry here has no additional
+    # experience threshold beyond the plain presence check.
+    mandatory_skill_min_years: dict[str, float] = Field(default_factory=dict)
     location: Optional[str] = None
     employment_type: EmploymentType = "contract"
     # Real multi-select (2026-08-24): a requisition can now genuinely need
@@ -177,6 +182,7 @@ class RequisitionUpdate(BaseModel):
     description: Optional[str] = None
     skills_required: Optional[list[str]] = None
     mandatory_skills: Optional[list[str]] = None
+    mandatory_skill_min_years: Optional[dict[str, float]] = None
     location: Optional[str] = None
     employment_type: Optional[EmploymentType] = None
     employment_types: Optional[list[EmploymentType]] = None

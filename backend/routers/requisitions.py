@@ -22,7 +22,7 @@ router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 # jd_embedding (vector(384)) deliberately excluded - large and has no
 # asyncpg codec registered for the `vector` type.
 FIELDS = """id, tenant_id, client_id, title, description, skills_required,
-            mandatory_skills,
+            mandatory_skills, mandatory_skill_min_years,
             location, employment_type, status, positions_count, sla_hours,
             created_by, created_at, updated_at,
             experience_min, experience_max,
@@ -32,6 +32,16 @@ FIELDS = """id, tenant_id, client_id, title, description, skills_required,
             industry, client_name, approval_status,
             submission_limit_per_recruiter, is_active,
             employment_types, work_modes, shift_timing_ids"""
+
+
+def _parse_req_jsonb(d: dict) -> dict:
+    """asyncpg returns a jsonb column as a raw string, not a parsed dict —
+    same gap already handled for applications.py's app_notes/app_tags.
+    mandatory_skill_min_years (2026-09-09, Skill Verification Panel Phase
+    3) needs the same treatment everywhere a requisition dict goes out."""
+    if isinstance(d.get("mandatory_skill_min_years"), str):
+        d["mandatory_skill_min_years"] = json.loads(d["mandatory_skill_min_years"])
+    return d
 
 # Gap-audit item 09: hierarchy/approval-chain routing. requisitions.approval_
 # status existed since an early migration but defaulted to 'approved' with
@@ -158,7 +168,7 @@ async def list_requisitions(
         limit_clause = f"LIMIT {int(limit)}" if limit and limit > 0 else ""
         sql = f"SELECT {FIELDS} FROM requisitions {where} ORDER BY created_at DESC {limit_clause}"
         rows = await conn.fetch(sql, *params)
-    return [dict(r) for r in rows]
+    return [_parse_req_jsonb(dict(r)) for r in rows]
 
 
 @router.post("")
@@ -191,6 +201,7 @@ async def create_requisition(
 
     insert_cols = [
         "tenant_id", "client_id", "title", "description", "skills_required", "mandatory_skills",
+        "mandatory_skill_min_years",
         "location", "employment_type", "positions_count", "sla_hours", "created_by",
         "experience_min", "experience_max",
         "budget_min", "budget_max", "bill_rate", "bill_rate_min", "bill_rate_max",
@@ -201,7 +212,9 @@ async def create_requisition(
     ]
     insert_vals = [
         actor.tenant_id, body.client_id, body.title, body.description,
-        body.skills_required, body.mandatory_skills, body.location, employment_type_scalar,
+        body.skills_required, body.mandatory_skills,
+        json.dumps(body.mandatory_skill_min_years or {}),
+        body.location, employment_type_scalar,
         body.positions_count, body.sla_hours, actor.user_id,
         body.experience_min, body.experience_max,
         body.budget_min, body.budget_max, bill_rate_scalar, body.bill_rate_min, body.bill_rate_max,
@@ -226,7 +239,7 @@ async def create_requisition(
             *insert_vals,
         )
 
-        result = dict(row)
+        result = _parse_req_jsonb(dict(row))
         if actor.role not in APPROVAL_EXEMPT_ROLES:
             approvers = await _build_approval_chain(conn, actor.user_id)
             if approvers:
@@ -281,7 +294,7 @@ async def get_requisition(requisition_id: str, actor: Actor = Depends(get_actor)
         row = await conn.fetchrow(f"SELECT {FIELDS} FROM requisitions WHERE id = $1", requisition_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Requisition not found")
-    return dict(row)
+    return _parse_req_jsonb(dict(row))
 
 
 @router.patch("/{requisition_id}")
@@ -301,6 +314,12 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
         updates["shift_timing_ids"] = _parse_shift_timing_ids(updates["shift_timing_ids"])
     if "bill_rate_min" in updates and "bill_rate" not in updates:
         updates["bill_rate"] = updates["bill_rate_min"]
+    # Real feature (2026-09-09, Skill Verification Panel Phase 3): asyncpg
+    # needs the JSON text for a jsonb column, not a raw Python dict — same
+    # convention as the one existing jsonb write elsewhere in this
+    # codebase (applications.py's app_notes).
+    if "mandatory_skill_min_years" in updates:
+        updates["mandatory_skill_min_years"] = json.dumps(updates["mandatory_skill_min_years"] or {})
 
     params: list = []
     set_clauses = []
@@ -317,7 +336,7 @@ async def update_requisition(requisition_id: str, body: RequisitionUpdate, actor
         row = await conn.fetchrow(sql, *params)
     if row is None:
         raise HTTPException(status_code=404, detail="Requisition not found")
-    result = dict(row)
+    result = _parse_req_jsonb(dict(row))
 
     # Third "just went open" moment: explicitly reopening a filled/on_hold/
     # closed role. auto_distribute_on_open's own job_shares check makes this

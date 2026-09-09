@@ -58,6 +58,10 @@ const EMPTY_FORM = {
   bill_rate_min: '' as any, bill_rate_max: '' as any,
   skills_required: [] as string[],
   mandatory_skills: [] as string[],
+  // Real feature (2026-09-09, Skill Verification Panel Phase 3): how long
+  // a mandatory skill must have been used, e.g. { "Java": 5 } — sparse,
+  // only for skills the recruiter has explicitly set a minimum on.
+  mandatory_skill_min_years: {} as Record<string, number>,
   description: '',
 };
 
@@ -1493,6 +1497,7 @@ function RequisitionsPageInner() {
       bill_rate_max: req.bill_rate_max ?? '',
       skills_required: req.skills_required || [],
       mandatory_skills: req.mandatory_skills || [],
+      mandatory_skill_min_years: req.mandatory_skill_min_years || {},
       description: req.description || '',
     });
     setEditId(req.id); setError(''); setShowModal(true);
@@ -1554,22 +1559,41 @@ function RequisitionsPageInner() {
     setSkillInput('');
   };
   const removeSkill = (s: string) =>
-    setForm(prev => ({
-      ...prev,
-      skills_required: prev.skills_required.filter(x => x !== s),
-      mandatory_skills: prev.mandatory_skills.filter(x => x !== s),
-    }));
+    setForm(prev => {
+      const { [s]: _drop, ...restMinYears } = prev.mandatory_skill_min_years;
+      return {
+        ...prev,
+        skills_required: prev.skills_required.filter(x => x !== s),
+        mandatory_skills: prev.mandatory_skills.filter(x => x !== s),
+        mandatory_skill_min_years: restMinYears,
+      };
+    });
 
   // Mandatory Skills (2026-08-24) — a real subset of skills_required, not
   // a parallel list a recruiter has to keep in sync by hand: toggling a
   // skill's own chip flips its membership here directly.
   const toggleMandatory = (s: string) =>
-    setForm(prev => ({
-      ...prev,
-      mandatory_skills: prev.mandatory_skills.includes(s)
-        ? prev.mandatory_skills.filter(x => x !== s)
-        : [...prev.mandatory_skills, s],
-    }));
+    setForm(prev => {
+      const nowMandatory = !prev.mandatory_skills.includes(s);
+      const { [s]: _drop, ...restMinYears } = prev.mandatory_skill_min_years;
+      return {
+        ...prev,
+        mandatory_skills: nowMandatory
+          ? [...prev.mandatory_skills, s]
+          : prev.mandatory_skills.filter(x => x !== s),
+        // Real feature (2026-09-09, Skill Verification Panel Phase 3):
+        // un-marking a skill mandatory also clears any minimum-years
+        // threshold set on it — an optional skill has no such gate.
+        mandatory_skill_min_years: nowMandatory ? prev.mandatory_skill_min_years : restMinYears,
+      };
+    });
+  const setSkillMinYears = (s: string, years: string) =>
+    setForm(prev => {
+      const next = { ...prev.mandatory_skill_min_years };
+      if (years === '' || Number(years) <= 0) delete next[s];
+      else next[s] = Number(years);
+      return { ...prev, mandatory_skill_min_years: next };
+    });
 
   const handleSave = async () => {
     if (!form.title.trim()) { setError('Job title is required'); return; }
@@ -2001,6 +2025,19 @@ function RequisitionsPageInner() {
                     style={{ cursor: 'pointer', display: 'inline-flex', color: isMandatory ? '#dc2626' : '#93c5fd' }}>
                     <Star size={12} fill={isMandatory ? '#dc2626' : 'none'} />
                   </span>
+                  {/* Real feature (2026-09-09, Skill Verification Panel
+                      Phase 3): "5 years of Java required" — the Verify
+                      Candidate shortlist engine's relevant-experience rule
+                      reads this. Only shown once a skill is mandatory;
+                      optional skills have no experience gate. */}
+                  {isMandatory && (
+                    <input type="number" min={0} max={40} placeholder="yrs"
+                      value={form.mandatory_skill_min_years[s] ?? ''}
+                      onChange={e => setSkillMinYears(s, e.target.value)}
+                      onClick={e => e.stopPropagation()}
+                      title="Minimum relevant experience required for this skill (optional)"
+                      style={{ width: '38px', fontSize: '11px', padding: '2px 4px', borderRadius: '4px', border: '1px solid #fecaca', color: '#b91c1c', background: '#fff' }} />
+                  )}
                   <span onClick={() => removeSkill(s)} style={{ cursor: 'pointer', color: isMandatory ? '#fca5a5' : '#93c5fd', fontWeight: '700', fontSize: '14px', lineHeight: 1 }}>×</span>
                 </span>
               );

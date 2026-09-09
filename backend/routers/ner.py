@@ -386,6 +386,109 @@ def count_skill_occurrences_by_section(resume_text: Optional[str], skills: Optio
     return out
 
 
+def compute_relevant_experience(resume_text: Optional[str], skills: Optional[list]) -> dict:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 3): "Java
+    = 8 yrs" — how long a skill was actually USED, not the candidate's
+    total career length. Confirmed during planning that the existing
+    total-experience logic (_calc_exp_from_dates in improved_parser.py)
+    collapses every date range in a resume to one min/max span with no
+    per-role attribution, so it isn't reusable here as-is — this uses the
+    new extract_experience_section() + extract_role_blocks() (also
+    improved_parser.py) to get real per-role date spans first.
+
+    For each skill, sums the duration of every role block that mentions
+    it, merging overlapping date ranges per skill first so two roles that
+    overlap in time and both mention the same skill don't double-count
+    the overlap.
+
+    Deliberately NOT persisted anywhere (confirmed during planning:
+    candidate_skill_experience is a recruiter-owned, multi-row-per-skill
+    project ledger that gets fully deleted and reinserted on every manual
+    save — writing computed rows into it would get silently wiped the
+    next time a recruiter edits their own entries, and there's no column
+    to tell an auto row from a manual one). This is a live, on-demand
+    value only — computed fresh in the /skill-verification response,
+    shown alongside whatever the recruiter has separately entered by
+    hand, never merged with it.
+
+    Returns {skill_name: years_float}. A skill mentioned in zero role
+    blocks gets 0.0, not omitted, so callers can tell "genuinely zero"
+    from "not evaluated"."""
+    from services.improved_parser import extract_experience_section, extract_role_blocks
+    section = extract_experience_section(resume_text or "")
+    role_blocks = extract_role_blocks(section) if section else []
+
+    out: dict = {}
+    for skill in (skills or []):
+        if not skill:
+            continue
+        pattern = r'(?<![a-z0-9])' + re.escape(skill.lower()) + r'(?![a-z0-9])'
+        intervals = [
+            (b["start"], b["end"]) for b in role_blocks
+            if re.search(pattern, (b.get("text") or "").lower())
+        ]
+        if not intervals:
+            out[skill] = 0.0
+            continue
+        intervals.sort()
+        merged = [list(intervals[0])]
+        for s, e in intervals[1:]:
+            if s <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        total_months = sum((e.year - s.year) * 12 + (e.month - s.month) for s, e in merged)
+        out[skill] = round(total_months / 12, 1)
+    return out
+
+
+def compute_role_relevance(resume_text: Optional[str], requisition_title: Optional[str]) -> dict:
+    """Real feature (2026-09-09, Skill Verification Panel Phase 3): the
+    recruiter's own example was "Java Backend Developer" JD + a resume
+    whose Projects are "Payment Gateway/Loan Management/Banking APIs" —
+    domain-relevant even though nothing in that JD title appears verbatim
+    in those project names. Deliberately advisory-only, never a hard gate
+    — this is this codebase's own established convention for a fuzzy
+    signal (dedup_service.py's POSSIBLE_MATCH tier is "flag, don't
+    auto-decide"), and title-vs-project-text overlap is a much fuzzier
+    signal than an exact skill match. The shortlist rule engine
+    (services/shortlist_rules.py) uses this only to enrich its written
+    reasons, never to block a candidate on its own.
+
+    Compares the requisition's real title (always present on every
+    requisition, sql/01_phase1_schema.sql) against the candidate's own
+    Experience + Projects section text, word-boundary matching each
+    meaningful title token (skips short/generic words like "senior",
+    "developer", "engineer" that would match almost anything).
+
+    Returns {"relevant": bool, "matched_tokens": [...]}."""
+    from services.improved_parser import extract_experience_section, extract_projects_section
+    _GENERIC_ROLE_WORDS = {
+        'senior', 'junior', 'lead', 'principal', 'developer', 'engineer',
+        'consultant', 'specialist', 'associate', 'manager', 'analyst',
+        'and', 'or', 'the', 'of', 'in', 'a', 'an', 'sr', 'jr',
+    }
+    title = (requisition_title or '').strip()
+    if not title:
+        return {"relevant": False, "matched_tokens": []}
+    tokens = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9+#.]*", title) if t.lower() not in _GENERIC_ROLE_WORDS and len(t) > 2]
+    if not tokens:
+        return {"relevant": False, "matched_tokens": []}
+
+    combined = ' '.join(filter(None, [
+        extract_experience_section(resume_text or ""),
+        extract_projects_section(resume_text or ""),
+    ])).lower()
+    if not combined:
+        # No Experience/Projects section at all to check — same "no
+        # section, no guess" discipline as the section extractors
+        # themselves; never penalize, never fabricate a match.
+        return {"relevant": False, "matched_tokens": []}
+
+    matched = [t for t in tokens if re.search(r'(?<![a-z0-9])' + re.escape(t.lower()) + r'(?![a-z0-9])', combined)]
+    return {"relevant": len(matched) > 0, "matched_tokens": matched}
+
+
 def score_candidate(
     parsed: dict,
     candidate_exp_mo: int = 0,

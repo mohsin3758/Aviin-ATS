@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
 import { ResumeGeneratorModal } from '@/components/ResumeGeneratorModal';
+import { VerifyCandidateModal } from '@/components/VerifyCandidateModal';
 import {
   ArrowLeft, Mail, Phone, MessageCircle, Briefcase,
   Star, FileText, History, CheckCircle, Clock, AlertCircle,
@@ -1574,6 +1575,11 @@ export default function CandidateProfilePage() {
   const [emailOpen, setEmailOpen] = useState(false);
   const [waOpen, setWaOpen] = useState(false);
   const [resumeGenOpen, setResumeGenOpen] = useState(false);
+  // Real feature (2026-09-09, Skill Verification Panel item 7 — "Verify
+  // Candidate"): holds the requisition_id currently being verified, null
+  // when the panel is closed. A string (not a boolean) since this button
+  // lives inside the AI Match Score list, one entry per requisition.
+  const [verifyReqId, setVerifyReqId] = useState<string | null>(null);
   const [statusLinkOpen, setStatusLinkOpen] = useState(false);
   const [statusLink, setStatusLink] = useState('');
   const [statusLinkLoading, setStatusLinkLoading] = useState(false);
@@ -1917,7 +1923,16 @@ export default function CandidateProfilePage() {
                       )}
                     </div>
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:'12px',fontWeight:'700',color:'#0f172a'}}>{s.requisition_title||'Standalone score (no JD)'}</div>
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'8px'}}>
+                        <div style={{fontSize:'12px',fontWeight:'700',color:'#0f172a'}}>{s.requisition_title||'Standalone score (no JD)'}</div>
+                        {s.requisition_id && (
+                          <button onClick={() => setVerifyReqId(s.requisition_id)}
+                            title="Check mandatory skills, evidence, relevant experience, and get a shortlist recommendation"
+                            style={{flexShrink:0,fontSize:'10px',fontWeight:'700',color:'#7c3aed',background:'#f5f3ff',border:'1px solid #ddd6fe',borderRadius:'999px',padding:'2px 9px',cursor:'pointer'}}>
+                            Verify Candidate
+                          </button>
+                        )}
+                      </div>
                       {s.live_only || s.readiness_index==null ? (
                         <div style={{fontSize:'10px',color:'#94a3b8',marginTop:'2px'}}>
                           Matched {s.matched_skills?.length||0} of {(s.matched_skills?.length||0)+(s.missing_skills?.length||0)} required skills
@@ -2083,6 +2098,9 @@ export default function CandidateProfilePage() {
             ) : null}
           </div>
         </div>
+      )}
+      {verifyReqId && candidate && (
+        <VerifyCandidateModal candidateId={candidate.id} requisitionId={verifyReqId} onClose={() => setVerifyReqId(null)} />
       )}
       {emailOpen && candidate && (
         <EmailModal candidate={candidate} onClose={() => setEmailOpen(false)} />
