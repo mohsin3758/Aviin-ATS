@@ -133,7 +133,21 @@ class _TrackingSheetTableParser(HTMLParser):
         if self._done:
             return
         if tag in ('td', 'th') and self._in_cell:
-            self._row_cells.append(''.join(self._cell_parts).strip())
+            text = ''.join(self._cell_parts).strip()
+            # Real bug fix (2026-09-10, a THIRD real tracking-sheet
+            # template -- Hari Babu Gorakala's, reported by faisal.k):
+            # the sender's own Excel-to-HTML export wraps a cell in a
+            # literal leading `"` whenever the source cell contains
+            # embedded newlines, but the matching closing quote never
+            # survives the conversion -- confirmed live on two separate
+            # cells in the same real email (the Skill cell and the
+            # ECTC/Rate Card cell both start with a stray `"` that is
+            # not part of the real data). No genuine value in this
+            # domain starts with a literal quote character, so stripping
+            # a single leading one is safe and unconditional.
+            if text.startswith('"'):
+                text = text[1:].lstrip()
+            self._row_cells.append(text)
             self._in_cell = False
         elif tag == 'tr' and self._in_row:
             self.rows.append(self._row_cells)
@@ -274,6 +288,51 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
             })
         return out
 
+    # Real bug fix (2026-09-10, Hari Babu Gorakala's tracking sheet -- a
+    # THIRD real Skill-cell format): per-line "Label : N Yrs" pairs mixed
+    # in the SAME cell with genuine non-skill summary lines that use the
+    # exact same "Label: N" shape but carry no trailing Yrs unit at all
+    # (e.g. "Total Projects: 10", "Support: 3", "Migration: 1") --
+    # structurally indistinguishable from a real skill line by shape
+    # alone. A bare-fallback read of the whole cell (format 3 below)
+    # previously took each raw line -- colon and all -- as a literal
+    # "skill name", producing garbage like '"Total Projects: 10' as if
+    # it were a real skill; confirmed live against the real email.
+    # Requires an explicit ": N Yrs/Years" suffix on the line (this
+    # alone already excludes "Total Projects: 10" etc, since they carry
+    # no unit) AND the label must pass this file's own established
+    # taxonomy gate (_recognized_taxonomy_skill, the same one
+    # auto_populate_skill_experience already uses for its free-text path
+    # below) -- needed because "Overall : 13 Yrs" in the SAME real cell
+    # matches the ": N Yrs" shape exactly as well as any real skill line
+    # does (confirmed: SAP FICO/SAP COPA/S4HANA/SAP ECC/FSCM all pass the
+    # gate, Overall/Total Projects/End Implementations/Support/Migration
+    # all correctly fail it). A label that fails the gate is dropped
+    # outright, not kept as a bare name -- this whole-cell format is
+    # colon-structured, so a line that doesn't parse as a real
+    # "skill: years" pair is metadata, not an unrelated flat skill name.
+    _line_colon_years_re = re.compile(r'^(.+?)\s*:\s*(\d+(?:\.\d+)?\+?)\s*(?:yrs?|years?)\s*$', re.I)
+    colon_lines = [ln.strip().strip(',') for ln in re.split(r"[\r\n]+", skill_cell) if ln.strip()]
+    colon_matches = [_line_colon_years_re.match(ln) for ln in colon_lines]
+    if any(colon_matches):
+        for m in colon_matches:
+            if not m:
+                continue
+            raw_name, years = m.group(1).strip(), m.group(2).strip()
+            canonical = _recognized_taxonomy_skill(raw_name)
+            if not canonical:
+                continue
+            key = canonical.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "skill_name": canonical,
+                "relevant_experience": f"{years} Yrs",
+                "looks_like_experience": True,
+            })
+        return out
+
     # Real feature (2026-09-10, the canonical AVIIN ATS tracking-sheet
     # template): one skill per line, each optionally suffixed with its
     # own "- N Yrs" — the clean, recommended format this parser is built
@@ -326,11 +385,23 @@ def _parse_ctc_to_rupees(raw: Optional[str]) -> Optional[float]:
     their "per X" spellings) returns None outright so the field stays
     genuinely blank rather than confidently wrong — the same "never
     guess-correct, leave it for a human" discipline this codebase
-    already applies to candidate identity fields."""
+    already applies to candidate identity fields.
+
+    REAL BUG FIX (2026-09-10, a THIRD real tracking sheet, Hari Babu
+    Gorakala's): the same column held "1.6L/M" — a single-letter "M"
+    abbreviation for "per month", confirmed live against the real
+    email. The original qualifier regex required the FULL word
+    "month"/"day"/"hour"/"hr" after the slash, so "/M" alone matched
+    nothing and this periodic rate silently fell through to the flat-
+    LPA branch below, producing a wrong expected_ctc of 160000 (as if
+    1.6L were an ANNUAL figure) instead of being recognized as monthly.
+    Now also matches the bare single-letter abbreviations (/M, /D, /H)
+    that only ever appear directly after a slash in this exact CTC/rate
+    context, never in isolation elsewhere in a short cell value."""
     if not raw:
         return None
     s = raw.strip().lower()
-    if re.search(r'(?:/|per\s+)\s*(?:month|day|hour|hr)\b|\bmonthly\b|\bhourly\b|\bdaily\b', s):
+    if re.search(r'(?:/|per\s+)\s*(?:months?|mo|m|days?|d|hours?|hrs?|h)\b|\bmonthly\b|\bhourly\b|\bdaily\b', s):
         return None
     m = re.search(r'(\d+(?:\.\d+)?)\s*(?:lpa|lakhs?|l\b)', s)
     if m:
