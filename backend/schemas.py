@@ -112,6 +112,7 @@ class CandidateCreate(BaseModel):
     nda_received: Optional[bool] = None
     truecaller_verified: Optional[bool] = None
     monthly_contract_salary: Optional[float] = None
+    tracking_sheet_status: Optional[str] = None
 
 
 class CandidateUpdate(BaseModel):
@@ -136,6 +137,7 @@ class CandidateUpdate(BaseModel):
     nda_received: Optional[bool] = None
     truecaller_verified: Optional[bool] = None
     monthly_contract_salary: Optional[float] = None
+    tracking_sheet_status: Optional[str] = None
 
 
 class RequisitionCreate(BaseModel):

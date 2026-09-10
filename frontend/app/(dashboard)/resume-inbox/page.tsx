@@ -613,7 +613,8 @@ function DetailDrawer({ item, onClose, onApprove, onRequestReject, onReparse, on
             is the authoritative, tracking-sheet-extracted data once a
             real candidate exists. */}
         {fullDetail?.candidate_id && (fullDetail.current_ctc || fullDetail.expected_ctc || fullDetail.monthly_contract_salary ||
-          fullDetail.notice_period_days != null || fullDetail.job_type || fullDetail.nda_received != null || fullDetail.truecaller_verified != null) && (
+          fullDetail.notice_period_days != null || fullDetail.job_type || fullDetail.nda_received != null || fullDetail.truecaller_verified != null ||
+          fullDetail.tracking_sheet_status) && (
           <div style={{ marginBottom: 16, padding: 14, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
             <div style={{ fontSize: 11, fontWeight: 800, color: '#374151', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 10 }}>
               📋 Candidate Details
@@ -626,6 +627,7 @@ function DetailDrawer({ item, onClose, onApprove, onRequestReject, onReparse, on
               {fullDetail.notice_period_days != null && <div><span style={{ color: '#94a3b8' }}>Notice Period</span><div style={{ fontWeight: 600, color: '#1e293b' }}>{fullDetail.notice_period_days} days</div></div>}
               {fullDetail.nda_received != null && <div><span style={{ color: '#94a3b8' }}>NDA Received</span><div style={{ fontWeight: 600, color: fullDetail.nda_received ? '#15803d' : '#b91c1c' }}>{fullDetail.nda_received ? 'Yes' : 'No'}</div></div>}
               {fullDetail.truecaller_verified != null && <div><span style={{ color: '#94a3b8' }}>Truecaller</span><div style={{ fontWeight: 600, color: fullDetail.truecaller_verified ? '#15803d' : '#b91c1c' }}>{fullDetail.truecaller_verified ? 'Verified' : 'Not Verified'}</div></div>}
+              {fullDetail.tracking_sheet_status && <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#94a3b8' }}>Status</span><div style={{ fontWeight: 600, color: '#1e293b' }}>{fullDetail.tracking_sheet_status}</div></div>}
             </div>
           </div>
         )}

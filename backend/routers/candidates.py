@@ -19,7 +19,7 @@ FIELDS = (
     "id, tenant_id, full_name, email, phone, skills, total_exp_mo, "
     "location, desired_location, current_employer, current_designation, resume_text, source, "
     "expected_ctc, current_ctc, notice_period_days, is_serving_notice, linkedin_url, "
-    "job_type, nda_received, truecaller_verified, monthly_contract_salary, "
+    "job_type, nda_received, truecaller_verified, monthly_contract_salary, tracking_sheet_status, "
     # 2026-08-30 — real reported gap: these 4 columns were already correctly
     # stored (linkedin_url since the internal Add Candidate form's LinkedIn
     # field; interested_role/expert_skills/intermediate_skills since the
@@ -875,8 +875,8 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
                         (tenant_id,full_name,email,phone,skills,total_exp_mo,location,desired_location,
                          current_employer,current_designation,resume_text,source,expected_ctc,current_ctc,
                          notice_period_days,is_serving_notice,job_type,nda_received,truecaller_verified,
-                         monthly_contract_salary)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+                         monthly_contract_salary,tracking_sheet_status)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
                        RETURNING {FIELDS}""",
                     actor.tenant_id, body.full_name, body.email, body.phone, body.skills,
                     body.total_exp_mo, body.location, body.desired_location, body.current_employer,
@@ -884,7 +884,8 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
                     getattr(body, "expected_ctc", None), getattr(body, "current_ctc", None),
                     getattr(body, "notice_period_days", None), getattr(body, "is_serving_notice", None),
                     getattr(body, "job_type", None), getattr(body, "nda_received", None),
-                    getattr(body, "truecaller_verified", None), getattr(body, "monthly_contract_salary", None))
+                    getattr(body, "truecaller_verified", None), getattr(body, "monthly_contract_salary", None),
+                    getattr(body, "tracking_sheet_status", None))
         except Exception as exc:
             if "uq_candidates_email_per_tenant" in str(exc):
                 existing2 = await conn.fetchrow(

@@ -535,6 +535,7 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
               {label:'Monthly Rate', value:candidate.monthly_contract_salary?fc(candidate.monthly_contract_salary):'—', icon:null},
               {label:'NDA',        value:candidate.nda_received==null?'—':(candidate.nda_received?'Received':'Not Received'), icon:null},
               {label:'Truecaller', value:candidate.truecaller_verified==null?'—':(candidate.truecaller_verified?'Verified':'Not Verified'), icon:null},
+              {label:'Status',     value:candidate.tracking_sheet_status||'—', icon:null},
             ].map(({label,value,icon})=>(
               <div key={label}>
                 <div style={{fontSize:'10px',fontWeight:'600',color:'#94a3b8',textTransform:'uppercase',marginBottom:'2px'}}>{label}</div>

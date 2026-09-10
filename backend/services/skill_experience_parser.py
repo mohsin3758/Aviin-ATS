@@ -546,7 +546,8 @@ def parse_tracking_sheet_candidate_fields(html: str) -> Optional[dict]:
     Skill+identity-column check as parse_tracking_sheet_html), else a
     dict with only the keys that had a real, non-empty cell value:
     current_employer, location, current_ctc, expected_ctc,
-    notice_period_days."""
+    notice_period_days, job_type, nda_received, truecaller_verified,
+    monthly_contract_salary, tracking_sheet_status."""
     if not html or not html.strip():
         return None
     parser = _TrackingSheetTableParser()
@@ -637,6 +638,23 @@ def parse_tracking_sheet_candidate_fields(html: str) -> Optional[dict]:
             monthly = _parse_monthly_salary_to_rupees(ctc_exp_raw)
     if monthly is not None:
         out['monthly_contract_salary'] = monthly
+
+    # Real feature (2026-09-10, reported live: "keep the status... wired
+    # and extracted to notes/status"): the template's own "Status" column
+    # is genuinely free text a recruiter types ("Submitted", "On Hold",
+    # "Shortlisted", etc.) -- deliberately NOT normalized or mapped onto
+    # any of this codebase's existing `status` columns elsewhere
+    # (candidate_submissions.status is a hardcoded 'sent'/'failed' send-
+    # result enum tied to the separate KAE-resume-generator flow;
+    # candidate_ownership.status is a hardcoded 'active'/'expired'/
+    # 'transferred' ownership-lifecycle enum) -- writing this free text
+    # into either would violate its CHECK constraint or silently corrupt
+    # unrelated app state. Stored verbatim in its own field instead, the
+    # same "pass through a genuine structural column, never guess" rule
+    # this whole function already follows for every other field.
+    status_val = _cell('status')
+    if status_val:
+        out['tracking_sheet_status'] = status_val
 
     return out or None
 

@@ -1863,6 +1863,7 @@ export default function CandidateProfilePage() {
               ['Notice Period',   candidate.notice_period_days != null ? `${candidate.notice_period_days} days` : '—'],
               ['NDA Received',    candidate.nda_received == null ? '—' : (candidate.nda_received ? 'Yes' : 'No')],
               ['Truecaller Verification', candidate.truecaller_verified == null ? '—' : (candidate.truecaller_verified ? 'Verified' : 'Not Verified')],
+              ['Status',          candidate.tracking_sheet_status || '—'],
               ['Location',        candidate.location || '—'],
               ['Source',          candidate.source || '—'],
               ['Added',           fmtDate(candidate.created_at)],
