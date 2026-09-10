@@ -21,6 +21,36 @@ from services.improved_parser import (
     parse_resume_v2, extract_skills_from_text, calc_confidence, strip_email_signature_block,
 )
 
+# REAL BUG FIX (2026-09-10, reported live: a real tracking-sheet email
+# from faisal.k with a candidate's real skills/CTC/employer/location all
+# sitting right there in the HTML table -- confirmed by testing the
+# already-fixed parser directly against this exact stored email, which
+# extracted everything correctly -- yet the candidate row's updated_at
+# was IDENTICAL to its created_at, meaning nothing ever wrote to it
+# after creation. The auto-score/auto-populate call below has always
+# been a bare `asyncio.create_task(...)` with no reference kept -- per
+# Python's own asyncio docs, "the event loop only keeps weak references
+# to tasks... a task that isn't referenced elsewhere may get garbage
+# collected at any time, even before it's done." This exact call site is
+# reached from imap_bg.py's _auto_process_resume, itself one of several
+# tasks fired concurrently via asyncio.gather(*resume_tasks) for a batch
+# of new emails, which returns (and its own dedicated connection closes)
+# as soon as process_email_for_resume's own synchronous work is done --
+# well before the fire-and-forget auto-score task, which does a real
+# network call to the embed service, has any chance to finish. With
+# nothing else referencing it, it's a textbook candidate for exactly the
+# collection Python's docs warn about. A module-level strong-reference
+# set (the officially recommended fix) keeps every such task alive for
+# its full lifetime regardless of what the calling batch does.
+_background_tasks: set = set()
+
+
+def _fire_and_forget(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 def _clean_text(text: str) -> str:
     """Remove null bytes and control characters that PostgreSQL rejects.
@@ -1258,7 +1288,7 @@ async def process_email_for_resume(
         # column structure there; skill_scan_text alone can't recover a
         # "Skill" column from the flattened, delimiter-less plain-text
         # part the same email generates.
-        asyncio.create_task(auto_score_candidate_bg(
+        _fire_and_forget(auto_score_candidate_bg(
             tenant_id, str(candidate_id), skill_scan_text=full_text, skill_scan_html=body_html))
 
     # NOTE: if this INSERT hits uq_resume_files_msg_fname (a leftover row
