@@ -524,6 +524,17 @@ function CandidateDrawer({candidate,onClose,onEdit,stageMap,allTags,onTagsChange
               {label:'Notice',     value:candidate.notice_period_days>0?candidate.notice_period_days+'d':'—', icon:<Clock size={11}/>},
               {label:'Source',     value:candidate.source||'—', icon:null},
               {label:'Last Active',value:timeAgo(candidate.last_activity)||timeAgo(candidate.updated_at)||'—', icon:<Clock size={11}/>},
+              // Real feature (2026-09-10, reported live: "add the all
+              // missing Job Type, NDA status, or Truecaller
+              // verification, Monthly Contract Salary... keep in all
+              // wherever is required") — same tracking-sheet-sourced
+              // fields shown on the candidate profile page's own
+              // Details card, shown here too for the same at-a-glance
+              // preview without opening the full profile.
+              {label:'Job Type',   value:candidate.job_type||'—', icon:null},
+              {label:'Monthly Rate', value:candidate.monthly_contract_salary?fc(candidate.monthly_contract_salary):'—', icon:null},
+              {label:'NDA',        value:candidate.nda_received==null?'—':(candidate.nda_received?'Received':'Not Received'), icon:null},
+              {label:'Truecaller', value:candidate.truecaller_verified==null?'—':(candidate.truecaller_verified?'Verified':'Not Verified'), icon:null},
             ].map(({label,value,icon})=>(
               <div key={label}>
                 <div style={{fontSize:'10px',fontWeight:'600',color:'#94a3b8',textTransform:'uppercase',marginBottom:'2px'}}>{label}</div>

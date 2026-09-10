@@ -1851,9 +1851,18 @@ export default function CandidateProfilePage() {
           <h3 style={{fontSize:'14px',fontWeight:'700',color:'#0f172a',marginBottom:'14px'}}>Details</h3>
           <div style={{display:'flex',flexDirection:'column',gap:'0'}}>
             {[
+              // Real feature (2026-09-10, reported live: "add the all
+              // missing Job Type, NDA status, or Truecaller
+              // verification, Monthly Contract Salary... keep in all
+              // wherever is required") — same tracking-sheet-sourced
+              // fields as CTC/Notice Period right above, shown together.
+              ['Job Type',        candidate.job_type || '—'],
               ['Current CTC',     fmtCtc(candidate.current_ctc)],
               ['Expected CTC',    fmtCtc(candidate.expected_ctc)],
+              ['Monthly Contract Salary', fmtCtc(candidate.monthly_contract_salary)],
               ['Notice Period',   candidate.notice_period_days != null ? `${candidate.notice_period_days} days` : '—'],
+              ['NDA Received',    candidate.nda_received == null ? '—' : (candidate.nda_received ? 'Yes' : 'No')],
+              ['Truecaller Verification', candidate.truecaller_verified == null ? '—' : (candidate.truecaller_verified ? 'Verified' : 'Not Verified')],
               ['Location',        candidate.location || '—'],
               ['Source',          candidate.source || '—'],
               ['Added',           fmtDate(candidate.created_at)],

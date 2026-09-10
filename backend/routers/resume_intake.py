@@ -324,6 +324,8 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
             SELECT rf.*, c.full_name, c.email, c.phone, c.skills, c.total_exp_mo,
                    c.location, c.current_employer, c.current_designation,
                    c.resume_text,
+                   c.current_ctc, c.expected_ctc, c.notice_period_days,
+                   c.job_type, c.nda_received, c.truecaller_verified, c.monthly_contract_salary,
                    r.title as requisition_title,
                    pl.stage as pipeline_stage, pl.pipeline_job,
                    sc.readiness_index AS live_match_score,

@@ -102,6 +102,16 @@ class CandidateCreate(BaseModel):
     current_ctc: Optional[float] = None
     notice_period_days: Optional[int] = None
     is_serving_notice: Optional[bool] = None
+    # Real feature (2026-09-10, sql/122) — job_type is free text
+    # ("FTE"/"Contract"/"Freelancer"), normalized by the tracking-sheet
+    # parser before it writes here but left unconstrained at this layer
+    # for a manual entry. monthly_contract_salary is deliberately
+    # separate from expected_ctc (never conflate a periodic rate with an
+    # annual figure — the exact bug this split was built to prevent).
+    job_type: Optional[str] = None
+    nda_received: Optional[bool] = None
+    truecaller_verified: Optional[bool] = None
+    monthly_contract_salary: Optional[float] = None
 
 
 class CandidateUpdate(BaseModel):
@@ -122,6 +132,10 @@ class CandidateUpdate(BaseModel):
     current_ctc: Optional[float] = None
     notice_period_days: Optional[int] = None
     is_serving_notice: Optional[bool] = None
+    job_type: Optional[str] = None
+    nda_received: Optional[bool] = None
+    truecaller_verified: Optional[bool] = None
+    monthly_contract_salary: Optional[float] = None
 
 
 class RequisitionCreate(BaseModel):

@@ -604,6 +604,32 @@ function DetailDrawer({ item, onClose, onApprove, onRequestReject, onReparse, on
           </div>
         )}
 
+        {/* Real feature (2026-09-10, reported live: "add the all missing
+            Job Type, NDA status, or Truecaller verification, Monthly
+            Contract Salary... keep in all wherever is required") — the
+            real candidate record's own fields (fullDetail, the /resume-
+            intake/{id} fetch above), not the parsed-resume-attachment
+            preview shown lower down for an unconfirmed candidate — this
+            is the authoritative, tracking-sheet-extracted data once a
+            real candidate exists. */}
+        {fullDetail?.candidate_id && (fullDetail.current_ctc || fullDetail.expected_ctc || fullDetail.monthly_contract_salary ||
+          fullDetail.notice_period_days != null || fullDetail.job_type || fullDetail.nda_received != null || fullDetail.truecaller_verified != null) && (
+          <div style={{ marginBottom: 16, padding: 14, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: '#374151', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 10 }}>
+              📋 Candidate Details
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 16px', fontSize: 12 }}>
+              {fullDetail.job_type && <div><span style={{ color: '#94a3b8' }}>Job Type</span><div style={{ fontWeight: 600, color: '#1e293b' }}>{fullDetail.job_type}</div></div>}
+              {fullDetail.current_ctc != null && <div><span style={{ color: '#94a3b8' }}>Current CTC</span><div style={{ fontWeight: 600, color: '#1e293b' }}>₹{(fullDetail.current_ctc / 100000).toFixed(1)}L</div></div>}
+              {fullDetail.expected_ctc != null && <div><span style={{ color: '#94a3b8' }}>Expected CTC</span><div style={{ fontWeight: 600, color: '#1e293b' }}>₹{(fullDetail.expected_ctc / 100000).toFixed(1)}L</div></div>}
+              {fullDetail.monthly_contract_salary != null && <div><span style={{ color: '#94a3b8' }}>Monthly Contract Salary</span><div style={{ fontWeight: 600, color: '#1e293b' }}>₹{(fullDetail.monthly_contract_salary / 100000).toFixed(1)}L/month</div></div>}
+              {fullDetail.notice_period_days != null && <div><span style={{ color: '#94a3b8' }}>Notice Period</span><div style={{ fontWeight: 600, color: '#1e293b' }}>{fullDetail.notice_period_days} days</div></div>}
+              {fullDetail.nda_received != null && <div><span style={{ color: '#94a3b8' }}>NDA Received</span><div style={{ fontWeight: 600, color: fullDetail.nda_received ? '#15803d' : '#b91c1c' }}>{fullDetail.nda_received ? 'Yes' : 'No'}</div></div>}
+              {fullDetail.truecaller_verified != null && <div><span style={{ color: '#94a3b8' }}>Truecaller</span><div style={{ fontWeight: 600, color: fullDetail.truecaller_verified ? '#15803d' : '#b91c1c' }}>{fullDetail.truecaller_verified ? 'Verified' : 'Not Verified'}</div></div>}
+            </div>
+          </div>
+        )}
+
         {/* Move to Pipeline */}
         {item.candidate_id && (
           <div style={{ marginBottom: 16, padding: 14, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>

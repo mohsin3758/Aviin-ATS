@@ -348,6 +348,70 @@ def _parse_ctc_to_rupees(raw: Optional[str]) -> Optional[float]:
     return None
 
 
+def _parse_monthly_salary_to_rupees(raw: Optional[str]) -> Optional[float]:
+    """Real feature (2026-09-10) — the tracking-sheet template's own
+    dedicated "Monthly Contract Salary" column (candidates.
+    monthly_contract_salary): unlike _parse_ctc_to_rupees above, a
+    periodic-rate qualifier here is the EXPECTED unit, not a reason to
+    reject the value — this column only ever means "per month" by
+    definition, so "1.5 L/Month" and a bare "1.5 L" mean the same real
+    thing here. Same LPA/Lakhs parsing, never annualizes it (the whole
+    point of this being a separate column from expected_ctc is that the
+    two units are never mixed)."""
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    m = re.search(r'(\d+(?:\.\d+)?)\s*(?:lpa|lakhs?|l\b)', s)
+    if m:
+        return float(m.group(1)) * 100000
+    m = re.search(r'([\d,]+(?:\.\d+)?)', s)
+    if m:
+        try:
+            num = float(m.group(1).replace(',', ''))
+        except ValueError:
+            return None
+        return num * 100000 if num < 200 else num
+    return None
+
+
+def _normalize_job_type(raw: Optional[str]) -> Optional[str]:
+    """"FTE"/"Full Time"/"Contract"/"Freelance"/"Freelancer" -> the 3
+    canonical values the tracking-sheet template itself asks recruiters
+    to use. Checks "freelance" and "contract" before "fte" since a real
+    cell can legitimately read something like "Contract - Freelancer"
+    together; freelance is the more specific engagement type when both
+    words appear."""
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    if 'freelance' in s:
+        return 'Freelancer'
+    if 'contract' in s:
+        return 'Contract'
+    if 'fte' in s or 'full time' in s or 'full-time' in s or 'permanent' in s:
+        return 'FTE'
+    return None
+
+
+def _parse_yes_no(raw: Optional[str]) -> Optional[bool]:
+    """"Yes"/"Received"/"Verified" -> True; "No"/"Not Received"/"Not
+    Verified" -> False; blank/"Pending"/"N/A" -> None (candidates.
+    nda_received, .truecaller_verified). Negative forms are checked
+    FIRST and with word-boundary regex — "Not Received" contains the
+    substring "received", which would otherwise also match the positive
+    check below and silently flip the real answer."""
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    if not s or s in ('-', 'na', 'n/a', 'pending', 'tbd', 'tba'):
+        return None
+    if re.search(r'\bnot\s+(?:received|verified|done|matched?)\b|\bno\b|\bmismatch', s):
+        return False
+    if re.search(r'\byes\b|\breceived\b|\bverified\b|\bdone\b|\bcomplete|\bmatch(?:ed)?\b', s):
+        return True
+    return None
+
+
 def _parse_notice_days(raw: Optional[str]) -> Optional[int]:
     """"30 Days" / "1 Month" / "Immediate" -> integer days (candidates.
     notice_period_days)."""
@@ -460,6 +524,40 @@ def parse_tracking_sheet_candidate_fields(html: str) -> Optional[dict]:
     notice = _parse_notice_days(_cell('notice period'))
     if notice is not None:
         out['notice_period_days'] = notice
+
+    # Real feature (2026-09-10, reported live: "add the all missing Job
+    # Type, NDA status, or Truecaller verification, Monthly Contract
+    # Salary... keep the automatic extract and insert").
+    job_type = _normalize_job_type(_cell('job type'))
+    if job_type:
+        out['job_type'] = job_type
+    nda = _parse_yes_no(_cell('nda'))
+    if nda is not None:
+        out['nda_received'] = nda
+    truecaller = _parse_yes_no(_cell('truecaller'))
+    if truecaller is not None:
+        out['truecaller_verified'] = truecaller
+
+    # The new template's own dedicated column, tried first.
+    monthly_raw = _cell('monthly contract salary', 'monthly salary')
+    monthly = _parse_monthly_salary_to_rupees(monthly_raw)
+    if monthly is None:
+        # Real gap fix: a real older sheet (Anas A's) only ever has the
+        # single ambiguous "ECTC/Rate Card" column — its "1.50 L/Month"
+        # value correctly returns None from _parse_ctc_to_rupees above
+        # (never guess a periodic rate is annual), which used to mean
+        # this real, recruiter-typed figure was silently dropped
+        # entirely rather than stored anywhere. Now: if the only salary
+        # signal available is that same ambiguous column AND it reads as
+        # a periodic rate (ctc_exp_raw parsed to None above despite
+        # having real text), route it here instead — recovering data
+        # that already existed but had nowhere correct to land before
+        # this field existed.
+        if ctc_exp_raw and ctc_exp is None:
+            monthly = _parse_monthly_salary_to_rupees(ctc_exp_raw)
+    if monthly is not None:
+        out['monthly_contract_salary'] = monthly
+
     return out or None
 
 
