@@ -375,16 +375,25 @@ def _parse_monthly_salary_to_rupees(raw: Optional[str]) -> Optional[float]:
 
 
 def _normalize_job_type(raw: Optional[str]) -> Optional[str]:
-    """"FTE"/"Full Time"/"Contract"/"Freelance"/"Freelancer" -> the 3
-    canonical values the tracking-sheet template itself asks recruiters
-    to use. Checks "freelance" and "contract" before "fte" since a real
-    cell can legitimately read something like "Contract - Freelancer"
-    together; freelance is the more specific engagement type when both
-    words appear."""
+    """"FTE"/"Full Time"/"Contract"/"Freelance"/"Freelancer"/"Freelancing"
+    -> the 3 canonical values the tracking-sheet template itself asks
+    recruiters to use. Checks "freelance" and "contract" before "fte"
+    since a real cell can legitimately read something like "Contract -
+    Freelancer" together; freelance is the more specific engagement type
+    when both words appear.
+
+    REAL BUG FIX (2026-09-10): matched literal "freelance" as a
+    substring — but a real tracking sheet cell said "Freelancing", which
+    does NOT contain "freelance" (the words diverge at the 9th
+    character: freelanc-E vs freelanc-I-ng), so this silently returned
+    None for a real, correctly-located cell. Matches the shorter, safe
+    stem "freelanc" instead, covering freelance/freelancer/freelancing
+    uniformly — confirmed this doesn't collide with any other real
+    English word."""
     if not raw:
         return None
     s = raw.strip().lower()
-    if 'freelance' in s:
+    if 'freelanc' in s:
         return 'Freelancer'
     if 'contract' in s:
         return 'Contract'
