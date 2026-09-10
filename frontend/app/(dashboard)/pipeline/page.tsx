@@ -1432,6 +1432,16 @@ function NdaTab({ appId, showToast }: any) {
 
   const cfg = NDA_STATUS_CFG[nda.status] || NDA_STATUS_CFG.draft;
   const editable = nda.status === 'draft';
+  // Real gap fix (2026-09-10): "Send for Signature" used to disappear
+  // the instant status left 'draft', so once a link was sent there was
+  // no way to resend it at all -- not for a lost/undelivered email, and
+  // not once real expiry (scheduler.process_nda_expiry) started actually
+  // setting status='expired' after 14 days unsigned. Now shown for
+  // 'sent' and 'expired' too, as an explicit Resend action. Deliberately
+  // excludes 'e_signed'/'manually_signed' — the backend now rejects
+  // those with a 409 (see send_nda's resend guard) unless force=true.
+  const canSend = nda.status === 'draft' || nda.status === 'sent' || nda.status === 'expired';
+  const isResend = nda.status === 'sent' || nda.status === 'expired';
 
   async function saveDraft() {
     setSaving(true);
@@ -1442,6 +1452,11 @@ function NdaTab({ appId, showToast }: any) {
   }
 
   async function sendForSignature() {
+    // A 'sent' NDA has a live, still-valid link — resending invalidates
+    // it. An 'expired' one has no live link to lose, so no need to ask.
+    if (nda.status === 'sent' && !window.confirm(
+      'This candidate already has an active signing link. Resending will invalidate it and issue a new one — continue?'
+    )) return;
     setSending(true);
     try {
       const res = await apiFetch(`/applications/${appId}/nda/send`, { method: 'POST', body: JSON.stringify({ sign_method: signMethod, attachment }) });
@@ -1502,9 +1517,11 @@ function NdaTab({ appId, showToast }: any) {
         </button>
       </div>
 
-      {editable && (
+      {canSend && (
         <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 10, padding: 14, marginBottom: 14 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: '#1E40AF', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Send for Signature</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#1E40AF', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            {isResend ? 'Resend for Signature' : 'Send for Signature'}
+          </div>
           <div style={{ display: 'flex', gap: 12, marginBottom: 10 }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#374151', cursor: 'pointer' }}>
               <input type="radio" checked={signMethod === 'type_name'} onChange={() => setSignMethod('type_name')} /> Type-name signature
@@ -1527,7 +1544,7 @@ function NdaTab({ appId, showToast }: any) {
           )}
           <button onClick={sendForSignature} disabled={sending}
             style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 16px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-            <Send size={12} /> {sending ? 'Sending…' : 'Send for Signature'}
+            <Send size={12} /> {sending ? 'Sending…' : (isResend ? 'Resend for Signature' : 'Send for Signature')}
           </button>
         </div>
       )}

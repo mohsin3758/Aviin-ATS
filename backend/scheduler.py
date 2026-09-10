@@ -909,22 +909,47 @@ async def generate_ai_suggested_reminders():
                         except Exception as e:
                             logger.warning(f"AI-suggested (interview feedback) reminder failed for interview {f['interview_id']}: {e}")
 
-                    # Signal 4: candidate reached offer_accepted 3+ days ago with no
-                    # NDA on file at all — a real, common pre-onboarding gap.
+                    # Signal 4: no NDA on file at all — a real, common pre-onboarding
+                    # gap. REAL GAP FIX (2026-09-10): this used to only fire once an
+                    # application reached 'offer_accepted' 3+ days ago -- but signing
+                    # an NDA auto-advances a candidate to 'screened' (nda.py's own
+                    # _on_nda_signed), meaning NDA is meant to happen near the START
+                    # of the funnel, before screening/interviews/offer -- yet nothing
+                    # actually gates progress on it, so a candidate could pass through
+                    # the whole pipeline with zero confidentiality agreement on file
+                    # and this nudge wouldn't notice until they'd already reached
+                    # offer stage. Now also fires for any application still sitting
+                    # in a stage that comes BEFORE this tenant's own configured
+                    # 'screened' stage (via pipeline_stage_config.display_order --
+                    # never hardcode which stage keys a tenant uses) 3+ days with no
+                    # NDA — catching the gap where it actually starts. offer_accepted
+                    # stays as an explicit fallback for any tenant that removed/
+                    # renamed 'screened' entirely.
                     missing_docs = await conn.fetch(
-                        """SELECT a.id AS application_id, a.candidate_id, a.requisition_id,
+                        """WITH screened_order AS (
+                             SELECT display_order FROM pipeline_stage_config
+                             WHERE tenant_id=$1 AND stage_key='screened'
+                           )
+                           SELECT a.id AS application_id, a.candidate_id, a.requisition_id,
                                   a.assigned_recruiter_id, c.full_name, a.updated_at
                            FROM applications a
                            JOIN candidates c ON c.id = a.candidate_id
+                           LEFT JOIN pipeline_stage_config psc
+                             ON psc.tenant_id = a.tenant_id AND psc.stage_key = a.stage
                            WHERE a.tenant_id=$1 AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
-                             AND a.stage = 'offer_accepted'
                              AND a.updated_at < now() - INTERVAL '3 days'
                              AND NOT EXISTS (SELECT 1 FROM nda_documents n WHERE n.tenant_id=$1 AND n.application_id=a.id)
                              AND NOT EXISTS (
                                SELECT 1 FROM recruiter_tasks t
                                WHERE t.tenant_id=$1 AND t.application_id=a.id AND t.ai_suggested
                                  AND t.status IN ('pending','in_progress')
-                                 AND t.follow_up_reason LIKE 'NDA/document%')""",
+                                 AND t.follow_up_reason LIKE 'NDA/document%')
+                             AND (
+                               a.stage = 'offer_accepted'
+                               OR (psc.display_order IS NOT NULL
+                                   AND EXISTS (SELECT 1 FROM screened_order)
+                                   AND psc.display_order < (SELECT display_order FROM screened_order))
+                             )""",
                         tid,
                     )
                     for m in missing_docs:
@@ -934,8 +959,8 @@ async def generate_ai_suggested_reminders():
                                 await _create_ai_task(
                                     conn, tid, m["assigned_recruiter_id"], m["requisition_id"], m["application_id"],
                                     f"Missing NDA: {m['full_name']}",
-                                    f"AI-suggested — offer accepted {days} days ago, no NDA document on file yet.",
-                                    f"NDA/document missing {days} days after offer acceptance.",
+                                    f"AI-suggested — no NDA document on file yet, {days} days in this stage.",
+                                    f"NDA/document missing {days} days.",
                                     priority="high",
                                 )
                         except Exception as e:
@@ -1238,6 +1263,59 @@ async def process_ownership_expiry():
                 logger.error(f"Ownership expiry failed for tenant {tid}: {e}")
     except Exception as e:
         logger.error(f"process_ownership_expiry error: {e}")
+
+
+async def process_nda_expiry():
+    """Daily ~04:30 IST: flip nda_documents.status from 'sent' to
+    'expired' for signing links unsigned 14+ days after being sent.
+
+    REAL GAP FIX (2026-09-10, reported live: "anything missing in this
+    process?"): the CHECK constraint has allowed status='expired' since
+    the table was created (sql/12_nda_esign.sql), and every public-
+    signing error message already says "invalid OR EXPIRED" — but
+    nothing anywhere ever actually set it. A sent NDA's signing link
+    lived forever with no real expiry, contradicting the user-facing
+    text. 14 days, not the 30-day candidate_ownership window, because an
+    NDA is meant to be signed quickly near the start of the funnel
+    (signing one auto-advances the pipeline stage to 'screened') — a
+    link this stale and still unsigned is a real gap a recruiter needs
+    to act on, not routine housekeeping, so it also notifies the
+    assigned recruiter (same notifications pattern nda.py's own
+    _on_nda_signed already uses)."""
+    logger.info("scheduler: expiring stale unsigned NDA signing links")
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    stale = await conn.fetch(
+                        """SELECT nd.id, nd.application_id, a.assigned_recruiter_id, c.full_name
+                           FROM nda_documents nd
+                           JOIN applications a ON a.id = nd.application_id
+                           JOIN candidates c ON c.id = nd.candidate_id
+                           WHERE nd.tenant_id=$1 AND nd.status='sent'
+                             AND nd.sent_at < now() - INTERVAL '14 days'""",
+                        tid,
+                    )
+                    for row in stale:
+                        await conn.execute("UPDATE nda_documents SET status='expired' WHERE id=$1", row["id"])
+                        if row["assigned_recruiter_id"]:
+                            await conn.execute(
+                                """INSERT INTO notifications
+                                     (tenant_id, user_id, recipient_user_id, title, body, type, resource, resource_id, channel)
+                                   VALUES ($1,$2,$2,$3,$4,'warning','application',$5,'inapp')""",
+                                tid, row["assigned_recruiter_id"],
+                                f"NDA link expired: {row['full_name']}",
+                                f"{row['full_name']}'s NDA signing link expired after 14 days unsigned — resend it from the pipeline.",
+                                row["application_id"],
+                            )
+                    if stale:
+                        logger.info(f"NDA expiry: {len(stale)} link(s) expired for tenant {tid}")
+            except Exception as e:
+                logger.error(f"NDA expiry failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_nda_expiry error: {e}")
 
 
 async def flag_leave_conflicting_assignments():
@@ -2153,6 +2231,8 @@ def start_scheduler():
                        id="leave_conflict_flagging", replace_existing=True)
     scheduler.add_job(process_ownership_expiry, "cron", hour=4, minute=0,
                       id="ownership_expiry", replace_existing=True)
+    scheduler.add_job(process_nda_expiry, "cron", hour=4, minute=30,
+                      id="nda_expiry", replace_existing=True)
     # Workforce Intelligence (2026-08-11): hourly/daily/weekly recruiter
     # activity rollups + daily performance scoring, feeding the Activity
     # tab / Team Leaderboard — deliberately separate from the monthly,

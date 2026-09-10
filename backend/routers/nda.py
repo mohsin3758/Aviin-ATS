@@ -43,7 +43,7 @@ doc_templates_router = APIRouter(prefix="/settings/document-templates", tags=["d
 
 NDA_FIELDS = """id, tenant_id, application_id, candidate_id, draft_text, final_text,
                 status, sign_method, signatory_name, sent_at, signed_at, created_at,
-                manual_file_path, attachment_source, attached_file_name"""
+                manual_file_path, attachment_source, attached_file_name, signed_snapshot_path"""
 
 UPLOAD_DIR = Path("/app/uploads/nda")
 TEMPLATE_UPLOAD_DIR = Path("/app/uploads/document_templates")
@@ -71,6 +71,12 @@ def _default_nda_text(candidate_name: str, job_title: str, company_name: str) ->
 
 
 async def _nda_context(conn, application_id: str) -> dict:
+    # Real gap fix (2026-09-10): no is_active check meant an NDA could be
+    # generated/sent against an archived application or a soft-deleted
+    # candidate — the single most-repeated bug class in this codebase.
+    # Filtering here means every caller (_get_or_create_nda, and therefore
+    # every endpoint below it) gets a clean 404 for free instead of
+    # silently operating on a dead record.
     row = await conn.fetchrow(
         """SELECT c.full_name AS candidate_name, c.email AS candidate_email,
                   r.title AS job_title, t.name AS company_name
@@ -78,7 +84,7 @@ async def _nda_context(conn, application_id: str) -> dict:
            JOIN candidates c ON c.id = a.candidate_id
            JOIN requisitions r ON r.id = a.requisition_id
            JOIN tenants t ON t.id = a.tenant_id
-           WHERE a.id = $1""",
+           WHERE a.id = $1 AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE""",
         application_id,
     )
     return dict(row) if row else {}
@@ -275,6 +281,17 @@ async def download_nda_pdf(application_id: str, actor: Actor = Depends(get_actor
     async with db.tenant_conn(actor.tenant_id) as conn:
         nda = await _get_or_create_nda(conn, actor.tenant_id, application_id)
         ctx = await _nda_context(conn, application_id)
+    # Real gap fix (2026-09-10): once a candidate has e-signed, serve the
+    # real PDF captured at signing time (see _capture_signed_snapshot)
+    # instead of regenerating one on demand — a true certificate of
+    # record rather than a live re-render of final_text. Falls back to
+    # on-demand generation for drafts/pending NDAs and any row signed
+    # before this fix existed (no backfill — the fallback covers them
+    # correctly either way).
+    if nda["signed_snapshot_path"]:
+        abs_path = Path("/app") / nda["signed_snapshot_path"].lstrip("/")
+        if abs_path.exists():
+            return FileResponse(str(abs_path), filename=f"nda_{application_id[:8]}_signed.pdf", media_type='application/pdf')
     text = nda["final_text"] or nda["draft_text"]
     pdf_bytes = _build_nda_pdf(text, ctx.get("candidate_name", "Candidate"), ctx.get("company_name", "Aviin Technology Business Solutions Pvt Ltd"))
     fname = f"nda_{application_id[:8]}.pdf"
@@ -349,6 +366,7 @@ async def _send_email_with_pdf(tenant_id: str, to_email: str, to_name: str, subj
 class NdaSendRequest(BaseModel):
     sign_method: str = "type_name"        # 'type_name' | 'otp'
     attachment: str = "generated"          # 'generated' | 'nda_template' | 'contract_template'
+    force: bool = False
 
 
 @router.post("/{application_id}/nda/send")
@@ -360,6 +378,25 @@ async def send_nda(application_id: str, body: NdaSendRequest, actor: Actor = Dep
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         nda = await _get_or_create_nda(conn, actor.tenant_id, application_id)
+        # Real gap fix (2026-09-10): send_nda used to unconditionally
+        # overwrite status back to 'sent' with a fresh signing_token —
+        # clicking "Send" again on an already-signed candidate silently
+        # un-signed them everywhere the status is shown (candidate profile,
+        # /nda-documents list) and invalidated their original signing link
+        # (which then shows "Invalid or Expired" instead of "Already
+        # Signed", even though they did sign it). signed_at/signatory_name
+        # were left stale in the row until a second real signature
+        # overwrote them — a genuine data-integrity gap, not cosmetic.
+        # force=true is the deliberate override for the rare real need
+        # (e.g. a legally required fresh copy).
+        if nda["status"] in ("e_signed", "manually_signed") and not body.force:
+            raise HTTPException(
+                409,
+                f"This NDA was already signed by {nda['signatory_name'] or 'the candidate'} "
+                f"on {nda['signed_at'].date().isoformat() if nda['signed_at'] else 'file'}. "
+                f"Resending will reset it to pending and invalidate their existing signing link. "
+                f"Pass force=true to proceed anyway.",
+            )
         ctx = await _nda_context(conn, application_id)
         if not ctx.get("candidate_email"):
             raise HTTPException(400, "Candidate has no email address")
@@ -464,7 +501,7 @@ async def list_nda_documents(status: Optional[str] = None, actor: Actor = Depend
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             """SELECT nd.id, nd.application_id, nd.status, nd.sign_method, nd.signatory_name,
-                      nd.sent_at, nd.signed_at, nd.created_at, nd.manual_file_path,
+                      nd.sent_at, nd.signed_at, nd.created_at, nd.manual_file_path, nd.signed_snapshot_path,
                       a.candidate_id, c.full_name AS candidate_name, c.email AS candidate_email,
                       r.title AS job_title, r.id AS requisition_id
                FROM nda_documents nd
@@ -636,6 +673,24 @@ class NdaSignRequest(BaseModel):
     otp_code: Optional[str] = None
 
 
+async def _capture_signed_snapshot(conn, token: str, nda_id: str, tenant_id: str, info) -> None:
+    """Real gap fix (2026-09-10): generate + permanently save the exact
+    PDF the candidate just agreed to, instead of leaving the only record
+    a re-renderable final_text column (see download_nda_pdf). Best-effort
+    — a failure here must never fail the sign itself; the candidate's
+    signature is already durably recorded in nda_documents regardless."""
+    try:
+        text = info["final_text"] or info["draft_text"]
+        pdf_bytes = _build_nda_pdf(text, info["candidate_name"], info["company_name"])
+        folder = UPLOAD_DIR / tenant_id
+        folder.mkdir(parents=True, exist_ok=True)
+        rel_path = f"/uploads/nda/{tenant_id}/{nda_id}_signed.pdf"
+        (folder / f"{nda_id}_signed.pdf").write_bytes(pdf_bytes)
+        await conn.fetchval("SELECT set_nda_signed_snapshot_by_token($1, $2)", token, rel_path)
+    except Exception as exc:
+        print(f"NDA signed-snapshot capture failed for {nda_id}: {exc}")
+
+
 @nda_sign_public.post("/sign")
 async def sign_nda(token: str, body: NdaSignRequest):
     name = (body.signatory_name or "").strip()
@@ -653,8 +708,9 @@ async def sign_nda(token: str, body: NdaSignRequest):
             if not ok:
                 raise HTTPException(400, "Invalid or expired OTP code")
         result = await conn.fetchrow("SELECT * FROM sign_nda_by_token($1, $2)", token, name)
-    if not result:
-        raise HTTPException(400, "Signing link is invalid, already used, or expired")
+        if not result:
+            raise HTTPException(400, "Signing link is invalid, already used, or expired")
+        await _capture_signed_snapshot(conn, token, str(result["id"]), str(result["tenant_id"]), info)
 
     await _on_nda_signed(str(result["tenant_id"]), str(result["application_id"]))
     return {"signed": True, "message": "Thank you! Your e-signature has been recorded."}

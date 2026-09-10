@@ -122,6 +122,10 @@ export default function NdaDocumentsPage() {
     { key: 'sent', label: 'Awaiting Signature' },
     { key: 'e_signed', label: 'E-Signed' },
     { key: 'manually_signed', label: 'Manually Signed' },
+    // Real gap fix (2026-09-10): 'expired' was dead code until
+    // scheduler.process_nda_expiry started actually setting it (14 days
+    // unsigned) — now a real, reachable status worth its own filter tab.
+    { key: 'expired', label: 'Expired' },
   ];
 
   return (
