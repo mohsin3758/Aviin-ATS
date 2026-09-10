@@ -1318,6 +1318,65 @@ async def process_nda_expiry():
         logger.error(f"process_nda_expiry error: {e}")
 
 
+async def process_nda_candidate_reminders():
+    """Daily ~04:45 IST: real gap fix (2026-09-10, "go deep check and if
+    any features and option is missing" -> the recruiter now gets
+    notified when an NDA expires (process_nda_expiry above), but the
+    CANDIDATE never got any nudge before that -- only the one original
+    send email, ever, with no follow-up over the whole 14-day window).
+    One reminder, at the halfway point (7+ days sent, still unsigned),
+    reusing the same still-live signing link. reminder_sent_at (sql/125)
+    makes this idempotent so a daily run never double-sends."""
+    logger.info("scheduler: sending NDA signature reminders to candidates")
+    import os
+    from routers.nda import _send_email_with_pdf
+    base = os.environ.get("NEXT_PUBLIC_APP_URL", "https://ats.aviintech.com")
+    try:
+        async with db.system_conn() as conn:
+            tenant_ids = [str(r["id"]) for r in await conn.fetch("SELECT id FROM tenants")]
+        for tid in tenant_ids:
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    due = await conn.fetch(
+                        """SELECT nd.signing_token, c.email AS candidate_email, c.full_name AS candidate_name,
+                                  r.title AS job_title, t.name AS company_name
+                           FROM nda_documents nd
+                           JOIN candidates c ON c.id = nd.candidate_id
+                           JOIN applications a ON a.id = nd.application_id
+                           JOIN requisitions r ON r.id = a.requisition_id
+                           JOIN tenants t ON t.id = nd.tenant_id
+                           WHERE nd.tenant_id=$1 AND nd.status='sent' AND nd.reminder_sent_at IS NULL
+                             AND nd.sent_at < now() - INTERVAL '7 days'
+                             AND c.email IS NOT NULL""",
+                        tid,
+                    )
+                    for row in due:
+                        sign_url = f"{base}/sign-nda/{row['signing_token']}"
+                        body_text = (
+                            f'Dear {row["candidate_name"]},\n\n'
+                            f'This is a reminder that your NDA / Pre-Contract Agreement for '
+                            f'{row.get("job_title") or "your application"} is still awaiting your signature.\n\n'
+                            f'Sign online here: {sign_url}\n\n'
+                            f'Best regards,\n{row.get("company_name") or "Aviin Technology Business Solutions Pvt Ltd"}'
+                        )
+                        sent = await _send_email_with_pdf(
+                            tid, row["candidate_email"], row["candidate_name"],
+                            f'Reminder: {row.get("company_name") or "Aviin Technology Business Solutions Pvt Ltd"} - NDA / Pre-Contract Agreement',
+                            body_text,
+                        )
+                        if sent:
+                            await conn.execute(
+                                "UPDATE nda_documents SET reminder_sent_at=now() WHERE signing_token=$1",
+                                row["signing_token"],
+                            )
+                    if due:
+                        logger.info(f"NDA reminders: {len(due)} sent for tenant {tid}")
+            except Exception as e:
+                logger.error(f"NDA reminders failed for tenant {tid}: {e}")
+    except Exception as e:
+        logger.error(f"process_nda_candidate_reminders error: {e}")
+
+
 async def flag_leave_conflicting_assignments():
     """Daily 04:15 IST (2026-08-24, Assignment Dashboard research pass):
     recruiter_leave already correctly excludes someone from NEW auto-
@@ -2233,6 +2292,8 @@ def start_scheduler():
                       id="ownership_expiry", replace_existing=True)
     scheduler.add_job(process_nda_expiry, "cron", hour=4, minute=30,
                       id="nda_expiry", replace_existing=True)
+    scheduler.add_job(process_nda_candidate_reminders, "cron", hour=4, minute=45,
+                      id="nda_candidate_reminders", replace_existing=True)
     # Workforce Intelligence (2026-08-11): hourly/daily/weekly recruiter
     # activity rollups + daily performance scoring, feeding the Activity
     # tab / Team Leaderboard — deliberately separate from the monthly,

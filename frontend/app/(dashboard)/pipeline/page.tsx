@@ -1398,6 +1398,7 @@ const NDA_STATUS_CFG: Record<string, { label: string; color: string; bg: string 
   e_signed:         { label: 'E-Signed',                color: '#16A34A', bg: '#F0FDF4' },
   manually_signed:  { label: 'Manually Signed',          color: '#16A34A', bg: '#F0FDF4' },
   expired:          { label: 'Expired',                  color: '#DC2626', bg: '#FEF2F2' },
+  voided:           { label: 'Voided',                   color: '#64748B', bg: '#F1F5F9' },
 };
 
 async function downloadNdaFile(appId: string, kind: 'pdf' | 'docx') {
@@ -1442,6 +1443,10 @@ function NdaTab({ appId, showToast }: any) {
   // those with a 409 (see send_nda's resend guard) unless force=true.
   const canSend = nda.status === 'draft' || nda.status === 'sent' || nda.status === 'expired';
   const isResend = nda.status === 'sent' || nda.status === 'expired';
+  // Real gap fix (2026-09-10): mirrors the backend's own void_nda guard —
+  // a role falling through or a candidate being rejected mid-process had
+  // nowhere for a recruiter to close this out explicitly before.
+  const canVoid = nda.status === 'draft' || nda.status === 'sent' || nda.status === 'expired';
 
   async function saveDraft() {
     setSaving(true);
@@ -1449,6 +1454,14 @@ function NdaTab({ appId, showToast }: any) {
       await apiFetch(`/applications/${appId}/nda`, { method: 'PUT', body: JSON.stringify({ draft_text: draftText }) });
       showToast('NDA draft saved'); refetch();
     } catch (e: any) { showToast(String(e?.message || 'Save failed'), false); } finally { setSaving(false); }
+  }
+
+  async function voidNda() {
+    if (!window.confirm('Void this NDA? The candidate\'s signing link (if any) will stop working. This cannot be undone from here — you can always send a new one afterward.')) return;
+    try {
+      await apiFetch(`/applications/${appId}/nda/void`, { method: 'POST' });
+      showToast('NDA voided'); refetch();
+    } catch (e: any) { showToast(String(e?.message || 'Void failed'), false); }
   }
 
   async function sendForSignature() {
@@ -1480,7 +1493,7 @@ function NdaTab({ appId, showToast }: any) {
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4, flexWrap: 'wrap', gap: 6 }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700, padding: '4px 10px', borderRadius: 999, background: cfg.bg, color: cfg.color }}>
           <ShieldCheck size={11} /> {cfg.label}
         </span>
@@ -1489,7 +1502,20 @@ function NdaTab({ appId, showToast }: any) {
             {nda.signatory_name} · {ago(nda.signed_at)}
           </span>
         )}
+        {/* Real gap fix (2026-09-10): "viewed" is a real, different signal
+            from "sent" -- proof the candidate actually opened the link. */}
+        {nda.status === 'sent' && nda.first_viewed_at && (
+          <span style={{ fontSize: 10, color: '#94A3B8' }}>👁 Viewed {ago(nda.first_viewed_at)}</span>
+        )}
       </div>
+      {/* Real gap fix (2026-09-10): the signing page tells every candidate
+          "Your IP and timestamp will be recorded" -- surface that same
+          captured evidence here for whoever needs to verify a signature. */}
+      {nda.status === 'e_signed' && (nda.ip_address || nda.user_agent) && (
+        <div style={{ fontSize: 10, color: '#94A3B8', marginBottom: 8 }}>
+          Signed from {nda.ip_address || 'unknown IP'}{nda.user_agent ? ` · ${nda.user_agent.slice(0, 60)}` : ''}
+        </div>
+      )}
 
       {editable ? (
         <textarea value={draftText} onChange={e => setDraftText(e.target.value)}
@@ -1515,6 +1541,12 @@ function NdaTab({ appId, showToast }: any) {
           style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: '#F1F5F9', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
           <Download size={12} /> Word
         </button>
+        {canVoid && (
+          <button onClick={voidNda}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: '#FEF2F2', color: '#DC2626', border: '1px solid #FEE2E2', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', marginLeft: 'auto' }}>
+            <X size={12} /> Void
+          </button>
+        )}
       </div>
 
       {canSend && (

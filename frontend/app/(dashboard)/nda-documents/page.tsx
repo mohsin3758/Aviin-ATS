@@ -2,7 +2,7 @@
 import { useState, useRef } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { authHeaders, API } from '@/lib/auth';
-import { FileSignature, Download, ExternalLink, Clock, Upload, Trash2, FileText, RefreshCw } from 'lucide-react';
+import { FileSignature, Download, ExternalLink, Clock, Upload, Trash2, FileText, RefreshCw, Search, Eye } from 'lucide-react';
 
 const STATUS_BADGE: Record<string, { color: string; bg: string; label: string }> = {
   draft:            { color: '#64748b', bg: '#f1f5f9', label: 'Draft' },
@@ -10,6 +10,7 @@ const STATUS_BADGE: Record<string, { color: string; bg: string; label: string }>
   e_signed:         { color: '#16a34a', bg: '#f0fdf4', label: 'E-Signed' },
   manually_signed:  { color: '#16a34a', bg: '#f0fdf4', label: 'Manually Signed' },
   expired:          { color: '#dc2626', bg: '#fef2f2', label: 'Expired' },
+  voided:           { color: '#64748b', bg: '#f1f5f9', label: 'Voided' },
 };
 
 const SIGN_METHOD_LABEL: Record<string, string> = {
@@ -111,10 +112,21 @@ function TemplateSlot({ docType, title, tmpl, onChanged, showToast }: any) {
 
 export default function NdaDocumentsPage() {
   const [statusFilter, setStatusFilter] = useState('');
+  const [search, setSearch] = useState('');
   const { data: ndas, loading } = useFetch<any[]>(`/nda${statusFilter ? `?status=${statusFilter}` : ''}`);
   const { data: templates, refetch: refetchTemplates } = useFetch<any>('/settings/document-templates');
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const showToast = (msg: string, ok = true) => { setToast({ msg, ok }); setTimeout(() => setToast(null), 3000); };
+
+  // Real gap fix (2026-09-10): only status-tab filtering existed before —
+  // nothing to find one candidate once the list grows. Client-side is
+  // fine at this volume (the same list a status tab already fetches whole).
+  const q = search.trim().toLowerCase();
+  const filteredNdas = (ndas || []).filter(n => !q ||
+    (n.candidate_name || '').toLowerCase().includes(q) ||
+    (n.candidate_email || '').toLowerCase().includes(q) ||
+    (n.job_title || '').toLowerCase().includes(q)
+  );
 
   const tabs = [
     { key: '', label: 'All' },
@@ -126,6 +138,7 @@ export default function NdaDocumentsPage() {
     // scheduler.process_nda_expiry started actually setting it (14 days
     // unsigned) — now a real, reachable status worth its own filter tab.
     { key: 'expired', label: 'Expired' },
+    { key: 'voided', label: 'Voided' },
   ];
 
   return (
@@ -153,13 +166,20 @@ export default function NdaDocumentsPage() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        {tabs.map(t => (
-          <button key={t.key} onClick={() => setStatusFilter(t.key)}
-            style={{ padding: '7px 14px', borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${statusFilter === t.key ? '#1e40af' : '#e2e8f0'}`, background: statusFilter === t.key ? '#eff6ff' : 'white', color: statusFilter === t.key ? '#1e40af' : '#64748b' }}>
-            {t.label}
-          </button>
-        ))}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {tabs.map(t => (
+            <button key={t.key} onClick={() => setStatusFilter(t.key)}
+              style={{ padding: '7px 14px', borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${statusFilter === t.key ? '#1e40af' : '#e2e8f0'}`, background: statusFilter === t.key ? '#eff6ff' : 'white', color: statusFilter === t.key ? '#1e40af' : '#64748b' }}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ position: 'relative', minWidth: 220 }}>
+          <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search candidate, email, or job..."
+            style={{ width: '100%', padding: '7px 10px 7px 30px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+        </div>
       </div>
 
       <div style={{ background: 'white', borderRadius: 12, border: '1px solid #e2e8f0', overflow: 'hidden' }}>
@@ -171,6 +191,11 @@ export default function NdaDocumentsPage() {
             <div style={{ fontSize: 14, fontWeight: 600, color: '#374151' }}>No NDA documents yet</div>
             <div style={{ fontSize: 12, marginTop: 4 }}>Generate one from a candidate's NDA tab on the Pipeline board</div>
           </div>
+        ) : filteredNdas.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: 60, color: '#94a3b8' }}>
+            <Search size={40} style={{ marginBottom: 12, opacity: 0.4 }} />
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#374151' }}>No matches for "{search}"</div>
+          </div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -181,7 +206,7 @@ export default function NdaDocumentsPage() {
               </tr>
             </thead>
             <tbody>
-              {(ndas || []).map((n: any) => {
+              {filteredNdas.map((n: any) => {
                 const badge = STATUS_BADGE[n.status] || STATUS_BADGE.draft;
                 return (
                   <tr key={n.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
@@ -192,6 +217,9 @@ export default function NdaDocumentsPage() {
                     <td style={{ padding: '12px 16px', fontSize: 12, color: '#475569' }}>{n.job_title}</td>
                     <td style={{ padding: '12px 16px' }}>
                       <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 999, background: badge.bg, color: badge.color }}>{badge.label}</span>
+                      {n.status === 'sent' && n.first_viewed_at && (
+                        <Eye size={11} title={`Viewed ${ago(n.first_viewed_at)}`} style={{ marginLeft: 6, color: '#94a3b8', verticalAlign: -1 }} />
+                      )}
                     </td>
                     <td style={{ padding: '12px 16px', fontSize: 12, color: '#475569' }}>{n.sign_method ? SIGN_METHOD_LABEL[n.sign_method] || n.sign_method : '—'}</td>
                     <td style={{ padding: '12px 16px', fontSize: 12, color: '#94a3b8' }}><Clock size={11} style={{ display: 'inline', marginRight: 4, verticalAlign: -1 }} />{n.sent_at ? ago(n.sent_at) : '—'}</td>

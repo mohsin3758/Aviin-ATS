@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 import asyncpg
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -43,11 +43,28 @@ doc_templates_router = APIRouter(prefix="/settings/document-templates", tags=["d
 
 NDA_FIELDS = """id, tenant_id, application_id, candidate_id, draft_text, final_text,
                 status, sign_method, signatory_name, sent_at, signed_at, created_at,
-                manual_file_path, attachment_source, attached_file_name, signed_snapshot_path"""
+                manual_file_path, attachment_source, attached_file_name, signed_snapshot_path,
+                ip_address, user_agent, first_viewed_at, reminder_sent_at"""
 
 UPLOAD_DIR = Path("/app/uploads/nda")
 TEMPLATE_UPLOAD_DIR = Path("/app/uploads/document_templates")
 ALLOWED_TEMPLATE_EXTS = {".pdf", ".doc", ".docx"}
+
+
+def _client_ip(request: Request) -> str:
+    """Real client IP behind nginx — mirrors app.py's _client_ip exactly
+    (can't import it directly: app.py imports this router, so the reverse
+    import would be circular). See app.py's own docstring for why X-Real-
+    IP (nginx-set, unspoofable from outside) is trusted over the raw
+    socket address, which nginx's host-network NAT collapses to one
+    shared value for every real visitor."""
+    xri = request.headers.get("x-real-ip")
+    if xri:
+        return xri.split(",")[0].strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def _default_nda_text(candidate_name: str, job_title: str, company_name: str) -> str:
@@ -495,6 +512,30 @@ async def manual_sign_nda(application_id: str, file: UploadFile = File(...),
     return {"signed": True, "method": "manual"}
 
 
+# ─── Void / cancel ───────────────────────────────────────────────────────────
+
+@router.post("/{application_id}/nda/void")
+async def void_nda(application_id: str, actor: Actor = Depends(require_permission("nda_documents", "update"))):
+    """Real gap fix (2026-09-10): once sent, the only paths used to be
+    sign, resend, or wait out the 14-day auto-expiry — nothing let a
+    recruiter explicitly close an NDA out when a role fell through or a
+    candidate was rejected mid-process. Restricted to draft/sent/expired
+    — an already-signed record reflects a real signature that already
+    happened and isn't something to void away; the resend guard (send_nda)
+    is the deliberate override path for that case instead."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        nda = await _get_or_create_nda(conn, actor.tenant_id, application_id)
+        if nda["status"] not in ("draft", "sent", "expired"):
+            raise HTTPException(
+                409, f"Cannot void an NDA that is already {nda['status'].replace('_', ' ')}."
+            )
+        row = await conn.fetchrow(
+            f"UPDATE nda_documents SET status='voided' WHERE application_id=$1 RETURNING {NDA_FIELDS}",
+            application_id,
+        )
+    return dict(row)
+
+
 @nda_router.get("")
 async def list_nda_documents(status: Optional[str] = None, actor: Actor = Depends(get_actor)):
     """All NDA documents for this tenant — powers the /nda-documents list page."""
@@ -502,13 +543,17 @@ async def list_nda_documents(status: Optional[str] = None, actor: Actor = Depend
         rows = await conn.fetch(
             """SELECT nd.id, nd.application_id, nd.status, nd.sign_method, nd.signatory_name,
                       nd.sent_at, nd.signed_at, nd.created_at, nd.manual_file_path, nd.signed_snapshot_path,
+                      nd.first_viewed_at,
                       a.candidate_id, c.full_name AS candidate_name, c.email AS candidate_email,
                       r.title AS job_title, r.id AS requisition_id
                FROM nda_documents nd
                JOIN applications a ON a.id = nd.application_id
                JOIN candidates c ON c.id = a.candidate_id
                JOIN requisitions r ON r.id = a.requisition_id
-               WHERE c.is_active IS NOT FALSE
+               -- Real gap fix (2026-09-10): a.is_active was never checked here
+               -- (only c.is_active) -- the single most-repeated bug class in
+               -- this codebase, now closed on this list too.
+               WHERE c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE
                  AND ($1::text IS NULL OR nd.status = $1)
                ORDER BY nd.created_at DESC""",
             status,
@@ -622,6 +667,16 @@ async def _email_recipients(tenant_id: str, user_ids: set[str], subject: str, bo
 async def get_nda_for_signing(token: str):
     async with db.system_conn() as conn:
         row = await conn.fetchrow("SELECT * FROM get_nda_by_signing_token($1)", token)
+        if row and row["status"] == "sent":
+            # Real gap fix (2026-09-10): proof the candidate actually
+            # opened the link before signing (or never opened it at all
+            # — a real, different situation from "opened but hasn't
+            # signed"), separate from get_nda_by_signing_token which
+            # stays a pure read. Best-effort, never blocks the page load.
+            try:
+                await conn.execute("SELECT mark_nda_viewed_by_token($1)", token)
+            except Exception:
+                pass
     if not row:
         raise HTTPException(404, "Signing link is invalid or expired")
     if row["status"] == "e_signed":
@@ -692,10 +747,18 @@ async def _capture_signed_snapshot(conn, token: str, nda_id: str, tenant_id: str
 
 
 @nda_sign_public.post("/sign")
-async def sign_nda(token: str, body: NdaSignRequest):
+async def sign_nda(token: str, body: NdaSignRequest, request: Request):
     name = (body.signatory_name or "").strip()
     if not name:
         raise HTTPException(400, "Please enter your full name as a signature")
+
+    # Real gap fix (2026-09-10): the signing page has always told every
+    # candidate "Your IP and timestamp will be recorded" — the timestamp
+    # was real (signed_at), the IP never was, anywhere. Standard e-sign
+    # evidentiary data (every real e-sign platform captures this); now
+    # actually captured instead of being a false claim on a legal page.
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")[:500]
 
     async with db.system_conn() as conn:
         info = await conn.fetchrow("SELECT * FROM get_nda_by_signing_token($1)", token)
@@ -707,7 +770,7 @@ async def sign_nda(token: str, body: NdaSignRequest):
             ok = await conn.fetchval("SELECT verify_nda_otp_by_token($1, $2)", token, body.otp_code)
             if not ok:
                 raise HTTPException(400, "Invalid or expired OTP code")
-        result = await conn.fetchrow("SELECT * FROM sign_nda_by_token($1, $2)", token, name)
+        result = await conn.fetchrow("SELECT * FROM sign_nda_by_token($1, $2, $3, $4)", token, name, ip, ua)
         if not result:
             raise HTTPException(400, "Signing link is invalid, already used, or expired")
         await _capture_signed_snapshot(conn, token, str(result["id"]), str(result["tenant_id"]), info)
