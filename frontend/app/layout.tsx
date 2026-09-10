@@ -37,9 +37,32 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             anywhere in this app for this - added here, app-wide, so a
             stale-chunk failure on ANY click/navigation auto-reloads once
             instead of silently doing nothing. A sessionStorage guard
-            prevents a reload loop if the real cause is something else. */}
+            prevents a reload loop if the real cause is something else.
+
+            REAL BUG FIX (2026-09-10, reported live: a blank white
+            "Application error" screen on /dashboard right after a
+            backend/frontend redeploy, with a real ChunkLoadError + a 404
+            on both a stale .js chunk and a stale .css file visible in the
+            console). Root cause: this handler's `error` listener had no
+            `capture: true` — a failed <script src> or <link rel=
+            stylesheet> load fires a genuine 'error' event on the tag
+            itself, but that event does NOT bubble (only real JS runtime
+            exceptions bubble to window), so a non-capturing window
+            listener never sees it at all. That's exactly the shape of a
+            fresh page LOAD hitting a since-redeployed server (the HTML's
+            own <script>/<link> tags reference the old build's file
+            names) — as opposed to the click/navigation-triggered dynamic
+            import() failure the original fix above already covered,
+            which throws a real catchable error. Now also catches any
+            failed _next/static resource tag via the capture phase. */}
         <script dangerouslySetInnerHTML={{__html:`(function(){
           function isChunkErr(msg){msg=String(msg||'');return /ChunkLoadError|Loading chunk [\\d]+ failed|Loading CSS chunk|Failed to fetch dynamically imported module/i.test(msg);}
+          function isStaleResource(tgt){
+            if(!tgt||!tgt.tagName)return false;
+            if(tgt.tagName!=='SCRIPT'&&tgt.tagName!=='LINK')return false;
+            var url=tgt.src||tgt.href||'';
+            return /\\/_next\\/static\\//.test(url);
+          }
           function reloadOnce(){
             try{
               var last=Number(sessionStorage.getItem('_chunkReloadAt')||0);
@@ -48,7 +71,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               location.reload();
             }catch(e){location.reload();}
           }
-          window.addEventListener('error',function(e){if(isChunkErr(e&&e.message))reloadOnce();});
+          window.addEventListener('error',function(e){
+            if(isChunkErr(e&&e.message)||isStaleResource(e&&e.target))reloadOnce();
+          },true);
           window.addEventListener('unhandledrejection',function(e){var r=e&&e.reason;if(isChunkErr(r&&(r.message||r)))reloadOnce();});
         })();`}}/>
       </head>
