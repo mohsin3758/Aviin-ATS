@@ -274,8 +274,23 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
             })
         return out
 
+    # Real feature (2026-09-10, the canonical AVIIN ATS tracking-sheet
+    # template): one skill per line, each optionally suffixed with its
+    # own "- N Yrs" — the clean, recommended format this parser is built
+    # to prefer going forward, distinct from both real ad-hoc formats
+    # already handled above (a flat name-only list, and a numbered list
+    # embedded in prose). Checked per-line so a template recruiter can
+    # freely mix a plain skill name (falls back to the shared Rel Exp/
+    # Total Exp value, exactly like the simple format) with a line that
+    # states its own years, without needing every line to match.
+    _line_years_re = re.compile(r'^(.+?)\s*[-–]\s*(\d+(?:\.\d+)?\+?)\s*(?:yrs?|years?)\s*$', re.I)
+
     for raw_line in re.split(r"[\r\n]+", skill_cell):
-        name = raw_line.strip().strip(",")
+        line = raw_line.strip().strip(",")
+        if not line:
+            continue
+        m = _line_years_re.match(line)
+        name, line_exp = (m.group(1).strip(), f"{m.group(2)} Yrs") if m else (line, exp_value)
         if not name or len(name) > 60:
             continue
         skill_name = _normalize_skill_label(name)
@@ -285,7 +300,7 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
         seen.add(key)
         out.append({
             "skill_name": skill_name,
-            "relevant_experience": exp_value,
+            "relevant_experience": line_exp,
             "looks_like_experience": True,
         })
     return out
