@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Award, TrendingUp, Banknote, Gift, Star, ChevronRight, Check, Plus } from 'lucide-react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Spinner } from '@/components/ui/Spinner';
@@ -26,10 +26,25 @@ export default function IncentivesPage() {
   // actually renders: the existing tenant-wide management view for
   // admin/manager/lead_recruiter, or a genuine personal-only dashboard
   // for everyone else.
-  const [role, setRole] = useState('admin');
-  const [roleReady, setRoleReady] = useState(false);
-  useEffect(() => { setRole(getTokenPayload()?.role || 'admin'); setRoleReady(true); }, []);
-  if (roleReady && !MGMT_ROLES.includes(role)) return <MyIncentivesView />;
+  // REAL BUG FIX (2026-09-10, same root cause found live minutes earlier
+  // on dashboard/page.tsx): role/roleReady defaulted to 'admin'/false and
+  // only corrected inside a useEffect, which by React's own ordering
+  // runs AFTER the first render -- so on that first render `roleReady`
+  // was false, the condition above short-circuited to false, and
+  // <ManagementIncentivesView /> mounted and fired all 5 of its
+  // useFetch calls for EVERY user, management or not, before the
+  // correction ever landed. The backend already force-scopes every one
+  // of those reads to the caller's own data (see the endpoint comments
+  // in incentives.py), so this was never a real data leak -- but it was
+  // still a real, visible flash of the wrong page shell (recruiter
+  // picker, approve/release UI) for a plain recruiter, plus wasted
+  // requests. A lazy useState initializer reads the real role
+  // synchronously from the JWT (already in localStorage by the time
+  // this page is ever reached) on the very first render, so the correct
+  // branch renders immediately with no flash and no roleReady gate
+  // needed at all.
+  const [role] = useState(() => getTokenPayload()?.role || 'recruiter');
+  if (!MGMT_ROLES.includes(role)) return <MyIncentivesView />;
   return <ManagementIncentivesView />;
 }
 

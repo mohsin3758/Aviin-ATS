@@ -50,7 +50,24 @@ function StatCard({ icon, label, value, color, bg, trend, href }: any) {
 
 export default function DashboardPage() {
   const [_userName, set_UserName] = useState('Admin');
-  const [_userRole, set_UserRole] = useState('admin');
+  // Real bug fix (2026-09-10, reported live: two 403s in the console —
+  // GET /analytics/redeployment-queue and GET /manager/activity-
+  // leaderboard — for a plain recruiter). _userRole defaulted to
+  // 'admin' and only got corrected by the useEffect below, which (per
+  // React's own ordering) runs AFTER the first render — so on that
+  // first render, isAdminOrLead was already true for every single user
+  // regardless of their real role, and the two admin-only useFetch
+  // calls below fire their request during THAT render's effect, before
+  // the correction ever lands. The eventual UI was correct (no admin
+  // cards shown, once _userRole corrected itself a moment later) but
+  // the damage — an unauthorized-role network request landing a 403 —
+  // had already happened. A lazy useState initializer reads the real
+  // role synchronously from the JWT (already in localStorage) on the
+  // very first render, so isAdminOrLead is never wrong even for an
+  // instant. Defaults to the least-privileged role, not 'admin' — fail
+  // closed, not open, for whatever moment the token genuinely isn't
+  // available yet (e.g. mid-redirect from /login).
+  const [_userRole, set_UserRole] = useState(() => getTokenPayload()?.role || 'recruiter');
   const isAdminOrLead = ['admin','super_admin','manager','lead_recruiter'].includes(_userRole);
   useEffect(() => { const t = getTokenPayload(); if(t?.full_name) set_UserName(t.full_name.split(' ')[0]); if(t?.role) set_UserRole(t.role); }, []);
   const [reportsVisited, setReportsVisited] = useState(false);
