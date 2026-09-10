@@ -58,16 +58,25 @@ export default function DashboardPage() {
   // first render, isAdminOrLead was already true for every single user
   // regardless of their real role, and the two admin-only useFetch
   // calls below fire their request during THAT render's effect, before
-  // the correction ever lands. The eventual UI was correct (no admin
-  // cards shown, once _userRole corrected itself a moment later) but
-  // the damage — an unauthorized-role network request landing a 403 —
-  // had already happened. A lazy useState initializer reads the real
-  // role synchronously from the JWT (already in localStorage) on the
-  // very first render, so isAdminOrLead is never wrong even for an
-  // instant. Defaults to the least-privileged role, not 'admin' — fail
-  // closed, not open, for whatever moment the token genuinely isn't
-  // available yet (e.g. mid-redirect from /login).
-  const [_userRole, set_UserRole] = useState(() => getTokenPayload()?.role || 'recruiter');
+  // the correction ever lands.
+  //
+  // FOLLOW-UP FIX (same day): the first attempt at this used a lazy
+  // useState(() => getTokenPayload()?.role || 'recruiter') initializer
+  // to read the real role synchronously — but that reads localStorage,
+  // which doesn't exist during Next.js's server-side render. The server
+  // render got the 'recruiter' fallback while the client's hydration
+  // render got the ACTUAL role from the JWT — two different values for
+  // the very same first render, which is exactly what a hydration
+  // mismatch is, and it threw React errors #418/#423 (visible live:
+  // "Uncaught Error: Minified React error #418/#423") replacing the
+  // dashboard with a client-side-only re-render on every load. The
+  // constant '' below is identical on server AND client (no localStorage
+  // read during render at all — isAdminOrLead correctly evaluates false
+  // for it, same fail-closed effect as before, with zero hydration risk).
+  // useEffect (client-only, runs AFTER hydration completes, never during
+  // it) is the only place allowed to read localStorage and correct the
+  // state — the same pattern already used one line below for _userName.
+  const [_userRole, set_UserRole] = useState('');
   const isAdminOrLead = ['admin','super_admin','manager','lead_recruiter'].includes(_userRole);
   useEffect(() => { const t = getTokenPayload(); if(t?.full_name) set_UserName(t.full_name.split(' ')[0]); if(t?.role) set_UserRole(t.role); }, []);
   const [reportsVisited, setReportsVisited] = useState(false);

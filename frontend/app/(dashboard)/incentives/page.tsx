@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Award, TrendingUp, Banknote, Gift, Star, ChevronRight, Check, Plus } from 'lucide-react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Spinner } from '@/components/ui/Spinner';
@@ -38,12 +38,28 @@ export default function IncentivesPage() {
   // in incentives.py), so this was never a real data leak -- but it was
   // still a real, visible flash of the wrong page shell (recruiter
   // picker, approve/release UI) for a plain recruiter, plus wasted
-  // requests. A lazy useState initializer reads the real role
-  // synchronously from the JWT (already in localStorage by the time
-  // this page is ever reached) on the very first render, so the correct
-  // branch renders immediately with no flash and no roleReady gate
-  // needed at all.
-  const [role] = useState(() => getTokenPayload()?.role || 'recruiter');
+  // requests.
+  //
+  // FOLLOW-UP FIX (same day): the first attempt used a lazy useState
+  // initializer to read the real role synchronously from localStorage —
+  // but localStorage doesn't exist during Next.js's server-side render,
+  // so the server rendered <MyIncentivesView>/<ManagementIncentivesView>
+  // based on the 'recruiter' fallback while the client's hydration
+  // render picked the OTHER branch based on the real JWT role for any
+  // non-recruiter — two ENTIRELY DIFFERENT component trees for the same
+  // first render, a hydration mismatch (thrown live as React errors
+  // #418/#423, the same ones dashboard/page.tsx hit for the identical
+  // reason). Fixed properly this time: `ready` starts false identically
+  // on server and client (a plain constant, no localStorage read during
+  // render), so NEITHER view — and therefore none of either view's
+  // fetches — mounts until the real role is confirmed client-side via
+  // useEffect (which only ever runs after hydration completes, never
+  // during it). The brief loading state is the only thing hydration
+  // needs to agree on, and it always does.
+  const [role, setRole] = useState('');
+  const [ready, setReady] = useState(false);
+  useEffect(() => { setRole(getTokenPayload()?.role || ''); setReady(true); }, []);
+  if (!ready) return <div style={{ display: 'flex', justifyContent: 'center', padding: 60 }}><Spinner size="lg" /></div>;
   if (!MGMT_ROLES.includes(role)) return <MyIncentivesView />;
   return <ManagementIncentivesView />;
 }
