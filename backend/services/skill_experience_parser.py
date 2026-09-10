@@ -148,9 +148,36 @@ class _TrackingSheetTableParser(HTMLParser):
             self._cell_parts.append(data)
 
 
+def _normalize_headers(raw_headers: list[str]) -> list[str]:
+    """Real bug fix (2026-09-10, reported live: a SECOND real tracking-
+    sheet template from a different recruiter -- Aiman F's -- also
+    failed to extract anything, despite the fix already shipped for the
+    first one). Root-caused against this exact real email: its header
+    cells use <br> WITHIN a single header ("Current<br>Location",
+    "Current<br>Company") -- _TrackingSheetTableParser correctly turns
+    that into an embedded newline per this module's own established
+    convention (same as a multi-skill cell), but a raw multi-word lookup
+    like "current location" then fails to match "current\nlocation" as
+    a substring. Collapsing all whitespace (including embedded
+    newlines) to single spaces before matching fixes every existing
+    lookup at once, without changing any of them."""
+    return [re.sub(r'\s+', ' ', h).strip().lower() for h in raw_headers]
+
+
 def _find_col(headers: list[str], *keywords: str) -> Optional[int]:
     for i, h in enumerate(headers):
         if any(k in h for k in keywords):
+            return i
+    return None
+
+
+def _find_col_excluding(headers: list[str], keywords: tuple, exclude: tuple) -> Optional[int]:
+    """Same as _find_col, but skips a header that also matches any of
+    `exclude` — needed for e.g. a bare "CTC" column search (real header
+    seen live: "CTC" for current, "ECTC/Rate Card" for expected) where
+    the plain substring "ctc" would otherwise also match "ECTC" itself."""
+    for i, h in enumerate(headers):
+        if any(k in h for k in keywords) and not any(x in h for x in exclude):
             return i
     return None
 
@@ -195,7 +222,7 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
     if len(rows) < 2:
         return []
 
-    headers = [h.strip().lower() for h in rows[0]]
+    headers = _normalize_headers(rows[0])
     if _find_col(headers, 'skill') is None:
         return []
     if _find_col(headers, 'name', 'candidate', 'email') is None:
@@ -214,6 +241,39 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
 
     out = []
     seen = set()
+
+    # Real bug fix (2026-09-10): a SECOND real tracking-sheet template
+    # packs per-skill years directly into the Skill cell as a numbered
+    # list embedded in prose -- "1)SAP FICO-13 Yrs 2)S4 Hana Public
+    # Cloud -4 yrs 3)ECC- 9.8 yrs..." -- genuinely richer data than the
+    # first template's flat skill list (a real per-skill figure, not one
+    # shared value), and structurally incompatible with the newline-
+    # split path below (this is one continuous prose block, not one
+    # skill per line). Tried FIRST; only a real, confirmed live email is
+    # what motivated this pattern, so it stays narrow (requires an
+    # explicit "N)" marker AND a trailing "yrs"/"years" on each entry --
+    # never guesses at a number embedded in a skill name meaning
+    # something else, e.g. "Projects - 2 End to End..." in the same real
+    # cell correctly does NOT match, since it has no trailing yrs/years).
+    numbered_pat = re.compile(r'\d+\)\s*(.+?)\s*-\s*(\d+(?:\.\d+)?\+?)\s*(?:yrs?|years?)\b', re.I)
+    numbered_matches = list(numbered_pat.finditer(re.sub(r'\s+', ' ', skill_cell)))
+    if numbered_matches:
+        for m in numbered_matches:
+            raw_name, years = m.group(1).strip().strip(","), m.group(2).strip()
+            if not raw_name or len(raw_name) > 80:
+                continue
+            skill_name = _normalize_skill_label(raw_name)
+            key = skill_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "skill_name": skill_name,
+                "relevant_experience": f"{years} Yrs",
+                "looks_like_experience": True,
+            })
+        return out
+
     for raw_line in re.split(r"[\r\n]+", skill_cell):
         name = raw_line.strip().strip(",")
         if not name or len(name) > 60:
@@ -238,10 +298,25 @@ def _parse_ctc_to_rupees(raw: Optional[str]) -> Optional[float]:
     A bare small number with no unit (e.g. "6", "12") is treated as LPA —
     the universal Indian staffing convention seen in every real tracking
     sheet this session, and no real CTC in this domain is ever quoted as
-    a bare number under 200 in raw rupees."""
+    a bare number under 200 in raw rupees.
+
+    REAL BUG FIX (2026-09-10): a real tracking sheet's own "ECTC/Rate
+    Card" column (this exact column deliberately double-purposed for
+    both a full-time annual figure and a contract/freelance periodic
+    rate) held "1.50 L/Month" for a freelance candidate — silently
+    treating that as a flat "1.5 Lakhs" annual figure would understate
+    a real ~18L/year-equivalent rate by roughly 12x, materially
+    misleading a recruiter, not just imprecise. Never guesses at the
+    conversion: a periodic-rate qualifier (/month, /day, /hour and
+    their "per X" spellings) returns None outright so the field stays
+    genuinely blank rather than confidently wrong — the same "never
+    guess-correct, leave it for a human" discipline this codebase
+    already applies to candidate identity fields."""
     if not raw:
         return None
     s = raw.strip().lower()
+    if re.search(r'(?:/|per\s+)\s*(?:month|day|hour|hr)\b|\bmonthly\b|\bhourly\b|\bdaily\b', s):
+        return None
     m = re.search(r'(\d+(?:\.\d+)?)\s*(?:lpa|lakhs?|l\b)', s)
     if m:
         return float(m.group(1)) * 100000
@@ -324,7 +399,7 @@ def parse_tracking_sheet_candidate_fields(html: str) -> Optional[dict]:
     if len(rows) < 2:
         return None
 
-    headers = [h.strip().lower() for h in rows[0]]
+    headers = _normalize_headers(rows[0])
     if _find_col(headers, 'skill') is None:
         return None
     if _find_col(headers, 'name', 'candidate', 'email') is None:
@@ -339,6 +414,13 @@ def parse_tracking_sheet_candidate_fields(html: str) -> Optional[dict]:
         v = data_row[idx].strip()
         return v or None
 
+    def _cell_excluding(keywords: tuple, exclude: tuple) -> Optional[str]:
+        idx = _find_col_excluding(headers, keywords, exclude)
+        if idx is None or idx >= len(data_row):
+            return None
+        v = data_row[idx].strip()
+        return v or None
+
     out: dict = {}
     org = _cell('current organization', 'current company', 'current employer')
     if org:
@@ -346,10 +428,18 @@ def parse_tracking_sheet_candidate_fields(html: str) -> Optional[dict]:
     loc = _cell('current location')
     if loc:
         out['location'] = loc
-    ctc_cur = _parse_ctc_to_rupees(_cell('current ctc'))
+    # REAL BUG FIX (2026-09-10): a second real tracking-sheet template
+    # uses bare "CTC" for current and "ECTC/Rate Card" for expected --
+    # neither matches "current ctc"/"expected ctc" at all. Bare "ctc" as
+    # a fallback keyword would ALSO match inside "ECTC" (a real
+    # substring), so the fallback explicitly excludes any header that
+    # also says "ectc"/"expected".
+    ctc_cur_raw = _cell('current ctc') or _cell_excluding(('ctc',), ('ectc', 'expected'))
+    ctc_cur = _parse_ctc_to_rupees(ctc_cur_raw)
     if ctc_cur is not None:
         out['current_ctc'] = ctc_cur
-    ctc_exp = _parse_ctc_to_rupees(_cell('expected ctc'))
+    ctc_exp_raw = _cell('expected ctc', 'ectc')
+    ctc_exp = _parse_ctc_to_rupees(ctc_exp_raw)
     if ctc_exp is not None:
         out['expected_ctc'] = ctc_exp
     notice = _parse_notice_days(_cell('notice period'))
