@@ -1268,7 +1268,29 @@ async def get_candidate(candidate_id: str, actor: Actor = Depends(get_actor)):
             " FROM applications a JOIN requisitions r ON r.id=a.requisition_id"
             " WHERE a.candidate_id=$1 AND a.tenant_id=$2 AND a.is_active IS NOT FALSE",
             candidate_id, actor.tenant_id)
+        # Real gap fix (2026-09-10): the profile page has only ever shown
+        # candidates.nda_received -- a self-reported "Yes/No" a recruiter
+        # typed into a tracking-sheet email, with no link at all to the
+        # real e-signature record (nda_documents: draft/sent/e_signed/
+        # manually_signed/expired/voided, tied to a specific application).
+        # A candidate can have more than one (one per application) --
+        # most-recent is the one worth surfacing on a profile-level card.
+        nda_row = await conn.fetchrow(
+            """SELECT nd.status, nd.sent_at, nd.signed_at, nd.application_id,
+                      r.title AS job_title
+               FROM nda_documents nd
+               JOIN applications a ON a.id = nd.application_id
+               JOIN requisitions r ON r.id = a.requisition_id
+               WHERE nd.candidate_id=$1 AND nd.tenant_id=$2
+               ORDER BY nd.created_at DESC LIMIT 1""",
+            candidate_id, actor.tenant_id)
     d = dict(row)
+    if nda_row:
+        d['nda_esign_status'] = nda_row['status']
+        d['nda_esign_sent_at'] = nda_row['sent_at']
+        d['nda_esign_signed_at'] = nda_row['signed_at']
+        d['nda_esign_application_id'] = str(nda_row['application_id'])
+        d['nda_esign_job_title'] = nda_row['job_title']
     if rf:
         d['latest_resume_file_id'] = str(rf['id'])
         d['latest_resume_file_name'] = rf['file_name']

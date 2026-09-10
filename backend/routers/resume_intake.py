@@ -335,7 +335,9 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
                    own.recruiter_id AS source_recruiter_id,
                    own.recruiter_name AS source_recruiter_name,
                    own.recruiter_email AS source_recruiter_email,
-                   (own.recruiter_id IS NOT NULL) AS source_recruiter_registered
+                   (own.recruiter_id IS NOT NULL) AS source_recruiter_registered,
+                   nda.status AS nda_esign_status, nda.sent_at AS nda_esign_sent_at,
+                   nda.signed_at AS nda_esign_signed_at, nda.application_id AS nda_esign_application_id
             FROM resume_files rf
             LEFT JOIN candidates c ON c.id=rf.candidate_id
             LEFT JOIN requisitions r ON r.id=rf.requisition_id AND r.is_active IS NOT FALSE
@@ -361,6 +363,17 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
                 LEFT JOIN users u ON u.id = co.recruiter_id
                 WHERE co.tenant_id=$2 AND co.candidate_id=c.id
             ) own ON c.id IS NOT NULL
+            -- Real gap fix (2026-09-10): see candidates.py's get_candidate
+            -- for the full story -- this drawer only ever showed the
+            -- self-reported nda_received boolean, never the real
+            -- e-signature record. Most-recent across this candidate's
+            -- applications, matching the same convention used there.
+            LEFT JOIN LATERAL (
+                SELECT nd.status, nd.sent_at, nd.signed_at, nd.application_id
+                FROM nda_documents nd
+                WHERE nd.tenant_id=$2 AND nd.candidate_id=c.id
+                ORDER BY nd.created_at DESC LIMIT 1
+            ) nda ON c.id IS NOT NULL
             WHERE rf.id=$1 AND rf.tenant_id=$2""",
             resume_file_id, actor.tenant_id)
     if not row:

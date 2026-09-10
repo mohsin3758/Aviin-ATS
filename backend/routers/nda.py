@@ -728,12 +728,14 @@ class NdaSignRequest(BaseModel):
     otp_code: Optional[str] = None
 
 
-async def _capture_signed_snapshot(conn, token: str, nda_id: str, tenant_id: str, info) -> None:
+async def _capture_signed_snapshot(conn, token: str, nda_id: str, tenant_id: str, info) -> Optional[bytes]:
     """Real gap fix (2026-09-10): generate + permanently save the exact
     PDF the candidate just agreed to, instead of leaving the only record
     a re-renderable final_text column (see download_nda_pdf). Best-effort
     — a failure here must never fail the sign itself; the candidate's
-    signature is already durably recorded in nda_documents regardless."""
+    signature is already durably recorded in nda_documents regardless.
+    Returns the PDF bytes on success so the caller can also email it as
+    a receipt without regenerating it a second time."""
     try:
         text = info["final_text"] or info["draft_text"]
         pdf_bytes = _build_nda_pdf(text, info["candidate_name"], info["company_name"])
@@ -742,8 +744,10 @@ async def _capture_signed_snapshot(conn, token: str, nda_id: str, tenant_id: str
         rel_path = f"/uploads/nda/{tenant_id}/{nda_id}_signed.pdf"
         (folder / f"{nda_id}_signed.pdf").write_bytes(pdf_bytes)
         await conn.fetchval("SELECT set_nda_signed_snapshot_by_token($1, $2)", token, rel_path)
+        return pdf_bytes
     except Exception as exc:
         print(f"NDA signed-snapshot capture failed for {nda_id}: {exc}")
+        return None
 
 
 @nda_sign_public.post("/sign")
@@ -773,7 +777,46 @@ async def sign_nda(token: str, body: NdaSignRequest, request: Request):
         result = await conn.fetchrow("SELECT * FROM sign_nda_by_token($1, $2, $3, $4)", token, name, ip, ua)
         if not result:
             raise HTTPException(400, "Signing link is invalid, already used, or expired")
-        await _capture_signed_snapshot(conn, token, str(result["id"]), str(result["tenant_id"]), info)
+        pdf_bytes = await _capture_signed_snapshot(conn, token, str(result["id"]), str(result["tenant_id"]), info)
+
+    # Real gap fix (2026-09-10): the candidate used to get a "Signed!"
+    # page and nothing else -- no way to ever retrieve a copy of what
+    # they agreed to again, and no receipt of their own (every real
+    # e-sign platform emails the signer their own copy). Best-effort,
+    # fire-and-forget — the signature itself is already durably recorded
+    # regardless of whether this email succeeds.
+    if pdf_bytes and info["candidate_email"]:
+        import asyncio
+        asyncio.create_task(_send_email_with_pdf(
+            str(result["tenant_id"]), info["candidate_email"], info["candidate_name"],
+            f'{info.get("company_name") or "Aviin Technology Business Solutions Pvt Ltd"} - Your Signed NDA / Pre-Contract Agreement',
+            f'Dear {info["candidate_name"]},\n\nThank you for signing your NDA / Pre-Contract Agreement for '
+            f'{info.get("job_title") or "your application"}. A copy is attached for your records.\n\n'
+            f'Best regards,\n{info.get("company_name") or "Aviin Technology Business Solutions Pvt Ltd"}',
+            pdf_bytes, "nda_signed.pdf",
+        ))
 
     await _on_nda_signed(str(result["tenant_id"]), str(result["application_id"]))
     return {"signed": True, "message": "Thank you! Your e-signature has been recorded."}
+
+
+@nda_sign_public.get("/signed-pdf")
+async def download_signed_pdf(token: str):
+    """Real gap fix (2026-09-10): a candidate revisiting their own
+    signing link after signing only ever saw "Already Signed" with no
+    way to get the document itself again. Public, token-gated (same
+    trust model as attached-file above); deliberately requires
+    status='e_signed' at the DB level (get_nda_signed_file_by_token) so
+    this can never leak a draft/pending document's content."""
+    async with db.system_conn() as conn:
+        row = await conn.fetchrow("SELECT * FROM get_nda_signed_file_by_token($1)", token)
+    if not row:
+        raise HTTPException(404, "No signed document available for this link")
+    if row["signed_snapshot_path"]:
+        abs_path = Path("/app") / row["signed_snapshot_path"].lstrip("/")
+        if abs_path.exists():
+            return FileResponse(str(abs_path), filename="nda_signed.pdf", media_type='application/pdf')
+    # Fallback for a row signed before signed_snapshot_path existed.
+    pdf_bytes = _build_nda_pdf(row["final_text"] or row["draft_text"], row["candidate_name"], row["company_name"])
+    return StreamingResponse(BytesIO(pdf_bytes), media_type='application/pdf',
+                              headers={'Content-Disposition': 'attachment; filename="nda_signed.pdf"'})

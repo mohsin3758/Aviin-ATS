@@ -101,6 +101,10 @@ interface ResumeItem {
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SOURCE_COLORS: Record<string, string> = { naukri: '#4f46e5', linkedin: '#0a66c2', indeed: '#003a9b', shine: '#f59e0b', monster: '#7c3aed', timesjobs: '#dc2626', freshersworld: '#059669', iimjobs: '#0891b2', hirist: '#7c3aed', instahyre: '#db2777', cutshort: '#ea580c', internshala: '#2563eb', apna: '#16a34a', workindia: '#9333ea', glassdoor: '#00a47c', jora: '#f97316', simplyhired: '#64748b', jobsforher: '#ec4899', quikr: '#b45309', rozgar: '#0369a1', sensehq: '#1d4ed8', direct: '#475569', referral: '#0f766e', wellfound: '#000000', dice: '#ff7a59', toptal: '#3863f6', upwork: '#14a800', freelancer: '#29b2fe', fiverr: '#1dbf73', remoteok: '#c65bcf', weworkremotely: '#3a4959', bayt: '#8dc63f', gulftalent: '#f04e30', ziprecruiter: '#589e37', careerbuilder: '#2f4f8f', snagajob: '#e01f26', ncs_gov: '#0b5394', ambitionbox: '#ff5722' };
 const STATUS_CFG: Record<string, { color: string; Icon: any; label: string }> = { auto_accepted: { color: '#059669', Icon: CheckCircle, label: 'Auto-Accepted' }, needs_review: { color: '#f59e0b', Icon: Clock, label: 'Review Needed' }, low_confidence: { color: '#dc2626', Icon: AlertCircle, label: 'Manual Entry' }, done: { color: '#f59e0b', Icon: Clock, label: 'Pending Review' }, approved: { color: '#059669', Icon: CheckCircle, label: 'Approved' }, pending: { color: '#94a3b8', Icon: Clock, label: 'Pending' }, failed: { color: '#dc2626', Icon: XCircle, label: 'Failed' }, no_resume: { color: '#cbd5e1', Icon: AlertCircle, label: 'No Resume' }, rejected: { color: '#dc2626', Icon: XCircle, label: 'Rejected' } };
+const NDA_ESIGN_LABELS: Record<string, string> = {
+  draft: 'Draft — not sent', sent: 'Awaiting Signature', e_signed: 'E-Signed',
+  manually_signed: 'Manually Signed', expired: 'Expired', voided: 'Voided',
+};
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api';
 // Real gap fix (2026-09-08): matches resume_intake.py's own
 // _VALID_REJECT_REASONS / the DB CHECK constraint exactly.
@@ -614,7 +618,7 @@ function DetailDrawer({ item, onClose, onApprove, onRequestReject, onReparse, on
             real candidate exists. */}
         {fullDetail?.candidate_id && (fullDetail.current_ctc || fullDetail.expected_ctc || fullDetail.monthly_contract_salary ||
           fullDetail.notice_period_days != null || fullDetail.job_type || fullDetail.nda_received != null || fullDetail.truecaller_verified != null ||
-          fullDetail.tracking_sheet_status) && (
+          fullDetail.tracking_sheet_status || fullDetail.nda_esign_status) && (
           <div style={{ marginBottom: 16, padding: 14, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
             <div style={{ fontSize: 11, fontWeight: 800, color: '#374151', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 10 }}>
               📋 Candidate Details
@@ -625,7 +629,12 @@ function DetailDrawer({ item, onClose, onApprove, onRequestReject, onReparse, on
               {fullDetail.expected_ctc != null && <div><span style={{ color: '#94a3b8' }}>Expected CTC</span><div style={{ fontWeight: 600, color: '#1e293b' }}>₹{(fullDetail.expected_ctc / 100000).toFixed(1)}L</div></div>}
               {fullDetail.monthly_contract_salary != null && <div><span style={{ color: '#94a3b8' }}>Monthly Contract Salary</span><div style={{ fontWeight: 600, color: '#1e293b' }}>₹{(fullDetail.monthly_contract_salary / 100000).toFixed(1)}L/month</div></div>}
               {fullDetail.notice_period_days != null && <div><span style={{ color: '#94a3b8' }}>Notice Period</span><div style={{ fontWeight: 600, color: '#1e293b' }}>{fullDetail.notice_period_days} days</div></div>}
-              {fullDetail.nda_received != null && <div><span style={{ color: '#94a3b8' }}>NDA Received</span><div style={{ fontWeight: 600, color: fullDetail.nda_received ? '#15803d' : '#b91c1c' }}>{fullDetail.nda_received ? 'Yes' : 'No'}</div></div>}
+              {fullDetail.nda_received != null && <div><span style={{ color: '#94a3b8' }}>NDA Received (self-reported)</span><div style={{ fontWeight: 600, color: fullDetail.nda_received ? '#15803d' : '#b91c1c' }}>{fullDetail.nda_received ? 'Yes' : 'No'}</div></div>}
+              {/* Real gap fix (2026-09-10, the very first question in this
+                  whole NDA investigation, finally wired up): the real
+                  e-signature record (nda_documents) -- separate from the
+                  self-reported field above, they can and do disagree. */}
+              {fullDetail.nda_esign_status && <div><span style={{ color: '#94a3b8' }}>NDA E-Signature</span><div style={{ fontWeight: 600, color: '#1e293b' }}>{NDA_ESIGN_LABELS[fullDetail.nda_esign_status] || fullDetail.nda_esign_status}</div></div>}
               {fullDetail.truecaller_verified != null && <div><span style={{ color: '#94a3b8' }}>Truecaller</span><div style={{ fontWeight: 600, color: fullDetail.truecaller_verified ? '#15803d' : '#b91c1c' }}>{fullDetail.truecaller_verified ? 'Verified' : 'Not Verified'}</div></div>}
               {fullDetail.tracking_sheet_status && <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#94a3b8' }}>Status</span><div style={{ fontWeight: 600, color: '#1e293b' }}>{fullDetail.tracking_sheet_status}</div></div>}
             </div>

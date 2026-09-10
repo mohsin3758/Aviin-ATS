@@ -60,6 +60,11 @@ function fmtCtc(n: number|null|undefined) {
   return n >= 100000 ? `₹${(n/100000).toFixed(1)}L` : `₹${Math.round(n/1000)}K`;
 }
 
+const NDA_ESIGN_LABELS: Record<string, string> = {
+  draft: 'Draft — not sent', sent: 'Awaiting Signature', e_signed: 'E-Signed',
+  manually_signed: 'Manually Signed', expired: 'Expired', voided: 'Voided',
+};
+
 // ── Resume download (auth-gated) ──────────────────────────────────────────────
 async function downloadResume(fileId: string, fileName: string) {
   const token = localStorage.getItem('airecruit_token');
@@ -1861,7 +1866,16 @@ export default function CandidateProfilePage() {
               ['Expected CTC',    fmtCtc(candidate.expected_ctc)],
               ['Monthly Contract Salary', fmtCtc(candidate.monthly_contract_salary)],
               ['Notice Period',   candidate.notice_period_days != null ? `${candidate.notice_period_days} days` : '—'],
-              ['NDA Received',    candidate.nda_received == null ? '—' : (candidate.nda_received ? 'Yes' : 'No')],
+              // Real gap fix (2026-09-10, the very first question in this
+              // whole NDA investigation, finally wired up): NDA Received
+              // is a self-reported "Yes/No" a recruiter typed into a
+              // tracking-sheet email -- no document, no signature. NDA
+              // E-Signature is the REAL record (nda_documents), tied to a
+              // specific application, previously shown nowhere on this
+              // page at all. Deliberately shown as two separate rows,
+              // not merged -- they can and do disagree.
+              ['NDA Received (self-reported)', candidate.nda_received == null ? '—' : (candidate.nda_received ? 'Yes' : 'No')],
+              ['NDA E-Signature', candidate.nda_esign_status ? (NDA_ESIGN_LABELS[candidate.nda_esign_status] || candidate.nda_esign_status) : '—'],
               ['Truecaller Verification', candidate.truecaller_verified == null ? '—' : (candidate.truecaller_verified ? 'Verified' : 'Not Verified')],
               ['Status',          candidate.tracking_sheet_status || '—'],
               ['Location',        candidate.location || '—'],

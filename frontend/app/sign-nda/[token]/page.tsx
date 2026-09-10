@@ -104,6 +104,15 @@ export default function SignNdaPage({ params }: { params: { token: string } }) {
         <div style={{ marginTop: '24px', padding: '16px', background: '#f0fdf4', borderRadius: '10px', fontSize: '13px', color: '#16a34a' }}>
           ✓ Digitally signed via AVIIN ATS secure signing
         </div>
+        {/* Real gap fix (2026-09-10): a candidate used to have no way to
+            ever get a copy of what they signed again -- a receipt email
+            is also sent now (see sign_nda), and this is the same
+            document available on demand any time this link is revisited. */}
+        <a href={`${API_BASE}/nda-sign/signed-pdf?token=${encodeURIComponent(token)}`} target="_blank" rel="noreferrer"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', marginTop: '16px', padding: '12px 24px', background: '#1e40af', color: 'white', borderRadius: '10px', textDecoration: 'none', fontSize: '14px', fontWeight: '700' }}>
+          📄 Download Your Signed Copy
+        </a>
+        <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '10px' }}>A copy has also been emailed to you.</p>
       </div>
     </div>
   );
