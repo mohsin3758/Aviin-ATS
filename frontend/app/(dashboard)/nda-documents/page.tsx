@@ -218,7 +218,9 @@ export default function NdaDocumentsPage() {
                     <td style={{ padding: '12px 16px' }}>
                       <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 999, background: badge.bg, color: badge.color }}>{badge.label}</span>
                       {n.status === 'sent' && n.first_viewed_at && (
-                        <Eye size={11} title={`Viewed ${ago(n.first_viewed_at)}`} style={{ marginLeft: 6, color: '#94a3b8', verticalAlign: -1 }} />
+                        <span title={`Viewed ${ago(n.first_viewed_at)}`} style={{ marginLeft: 6, display: 'inline-flex', verticalAlign: -2 }}>
+                          <Eye size={11} style={{ color: '#94a3b8' }} />
+                        </span>
                       )}
                     </td>
                     <td style={{ padding: '12px 16px', fontSize: 12, color: '#475569' }}>{n.sign_method ? SIGN_METHOD_LABEL[n.sign_method] || n.sign_method : '—'}</td>
