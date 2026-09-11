@@ -50,7 +50,7 @@ export default function CapturedProfilesPage() {
                 <UserPlus size={12} /> {converting === c.id ? 'Converting…' : 'Convert to Candidate'}
               </button>
             </div>
-            {dupeNotice?.id === c.id && (
+            {dupeNotice && dupeNotice.id === c.id && (
               <div style={{ marginTop: 6, fontSize: 11, color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 6, padding: '6px 10px' }}>
                 Matches an existing candidate: <strong>{dupeNotice.name}</strong> —{' '}
                 <a href={`/candidates/${dupeNotice.candidateId}`} target="_blank" rel="noreferrer" style={{ color: '#B45309', textDecoration: 'underline' }}>
