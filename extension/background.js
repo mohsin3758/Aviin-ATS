@@ -6,9 +6,18 @@
 
 const API_BASE = 'https://ats.aviintech.com/api';
 
-// Same normalization the LinkedIn adapter applies to window.location.href
-// (content-scripts/adapters/linkedin.js) -- kept identical so a URL
-// checked here and a URL later captured on Import always compare equal.
+// Version marker — logged once when this service worker starts (a fresh
+// registration happens every time the extension is reloaded at
+// chrome://extensions). Check this in the service worker's console
+// FIRST when debugging anything: if the number here doesn't match the
+// latest fix, Chrome is still running old code and nothing else in this
+// file matters yet — reload the extension again before looking further.
+const BG_VERSION = 6;
+console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
+
+// Same normalization ADAPTERS.linkedin.scrapeFn applies to
+// window.location.href — kept identical so a URL checked here and a URL
+// later captured on Import always compare equal.
 function normalizeLinkedinUrl(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -197,6 +206,7 @@ function matchAdapter(url) {
 
 async function scrapeActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  console.log('[AVIIN Import] active tab url:', tab?.url);
   if (!tab || !tab.url) return { ok: false, error: 'No active tab' };
   const adapter = matchAdapter(tab.url);
   if (!adapter) return { ok: false, error: 'not_supported_page' };
@@ -207,6 +217,13 @@ async function scrapeActiveTab() {
       target: { tabId: tab.id },
       func: adapter.scrapeFn,
     });
+    // Diagnostic aid (reported live, twice now, the same generic error
+    // with no way to tell whether the fix even ran) — this bypasses
+    // every layer of this file's OWN error-summarization logic (which
+    // could itself have a bug) and shows the literal raw result Chrome
+    // handed back. Visible in the service worker's own console, not the
+    // popup — see extension/README.md for how to open it.
+    console.log('[AVIIN Import] raw executeScript results:', JSON.stringify(results));
   } catch (e) {
     // A real, surfaced reason instead of the old generic message — e.g.
     // "Cannot access a chrome:// URL" or a permissions error would show
