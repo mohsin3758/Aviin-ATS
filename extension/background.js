@@ -100,6 +100,24 @@ const ADAPTERS = {
     // piece that will need occasional upkeep if LinkedIn changes its
     // markup — nothing else in the extension needs to change alongside it.
     scrapeFn: function scrapeLinkedinProfile() {
+      // Real gap fix (reported live: "Could not read this profile" on a
+      // page that was visibly, fully loaded — name, photo, headline all
+      // clearly rendered). The whole body used to run un-guarded: any
+      // single DOM assumption failing (a selector Chrome can't parse in
+      // this exact page variant, an unexpected null somewhere) would
+      // throw and abort the ENTIRE scrape, discarding every field that
+      // WAS successfully read along the way — and since the caller only
+      // ever looked at chrome.scripting.executeScript's `.result`, never
+      // its `.error`, that real exception was silently swallowed into a
+      // generic "could not read" message with zero diagnostic value.
+      // Every field is now read defensively (own try/catch per field),
+      // so a failure on ANY one of them still returns everything else
+      // that succeeded, plus a _debug field listing exactly which
+      // field(s) failed and why — real signal instead of a guess.
+      const debug = [];
+      function safe(label, fn, fallback) {
+        try { return fn(); } catch (e) { debug.push(`${label}: ${e?.message || e}`); return fallback; }
+      }
       function firstMatch(selectors) {
         for (const sel of selectors) {
           const el = document.querySelector(sel);
@@ -132,23 +150,23 @@ const ADAPTERS = {
         }
       }
 
-      const titleParsed = parseTitleTag();
-      const name = firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1']) || titleParsed.name;
-      const headline = firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']) || titleParsed.headline;
-      const location = firstMatch(['.pv-text-details__left-panel .text-body-small.inline.t-black--light', '.pv-text-details__left-panel .text-body-small']);
+      const titleParsed = safe('title', parseTitleTag, { name: null, headline: null });
+      const name = safe('name', () => firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1']), null) || titleParsed.name;
+      const headline = safe('headline', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null) || titleParsed.headline;
+      const location = safe('location', () => firstMatch(['.pv-text-details__left-panel .text-body-small.inline.t-black--light', '.pv-text-details__left-panel .text-body-small']), null);
 
-      let currentCompany = null;
-      const expSection = document.getElementById('experience');
-      const expContainer = expSection && expSection.closest('section');
-      const firstItem = expContainer && expContainer.querySelector('li');
-      if (firstItem) {
+      const currentCompany = safe('company', () => {
+        const expSection = document.getElementById('experience');
+        const expContainer = expSection && expSection.closest('section');
+        const firstItem = expContainer && expContainer.querySelector('li');
+        if (!firstItem) return null;
         const spans = Array.from(firstItem.querySelectorAll('span[aria-hidden="true"]'))
           .map((s) => s.textContent.trim()).filter(Boolean);
-        currentCompany = spans[1] || null; // [role title, company name, duration, location...]
-      }
+        return spans[1] || null; // [role title, company name, duration, location...]
+      }, null);
 
-      const expLines = sectionLines('experience', 10);
-      const eduLines = sectionLines('education', 6);
+      const expLines = safe('experience-section', () => sectionLines('experience', 10), []);
+      const eduLines = safe('education-section', () => sectionLines('education', 6), []);
       const resumeTextLike = [
         expLines.length ? 'Experience:\n' + expLines.join('\n') : '',
         eduLines.length ? 'Education:\n' + eduLines.join('\n') : '',
@@ -159,11 +177,12 @@ const ADAPTERS = {
         current_title: headline || null,
         current_company: currentCompany,
         location: location || null,
-        profile_url: normalizedUrl(),
-        linkedin_url: normalizedUrl(),
+        profile_url: safe('url', normalizedUrl, window.location.href),
+        linkedin_url: safe('url', normalizedUrl, window.location.href),
         email: null,
         phone: null,
         resume_text_like: resumeTextLike,
+        _debug: debug.length ? debug : undefined,
       };
     },
   },
@@ -191,12 +210,23 @@ async function scrapeActiveTab() {
   } catch (e) {
     // A real, surfaced reason instead of the old generic message — e.g.
     // "Cannot access a chrome:// URL" or a permissions error would show
-    // up here now instead of silently reading as "no name found".
-    return { ok: false, error: `Could not read this page: ${e?.message || e}` };
+    // up here now instead of silently reading as "no name found". This
+    // catches injection FAILING outright (the script never ran at all).
+    return { ok: false, error: `Could not inject the scraper: ${e?.message || e}` };
   }
-  const scraped = results && results[0] && results[0].result;
+  // Real gap fix: chrome.scripting.executeScript's per-frame result can
+  // ALSO carry an `.error` instead of `.result` if the injected function
+  // itself threw uncaught (distinct from the injection failing outright,
+  // caught above) — this was never checked, so a real in-page exception
+  // silently read as "no name found" with the actual reason discarded.
+  const frameResult = results && results[0];
+  if (frameResult && frameResult.error) {
+    return { ok: false, error: `Scraper error on the page: ${frameResult.error.message || frameResult.error}` };
+  }
+  const scraped = frameResult && frameResult.result;
   if (!scraped || !scraped.name) {
-    return { ok: false, error: 'Could not read this profile — try reloading the LinkedIn page and importing again.' };
+    const debugInfo = scraped && scraped._debug ? ` (${scraped._debug.join('; ')})` : '';
+    return { ok: false, error: `Could not read this profile — try reloading the LinkedIn page and importing again.${debugInfo}` };
   }
   return { ok: true, scraped };
 }
