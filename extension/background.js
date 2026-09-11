@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 6;
+const BG_VERSION = 7;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -135,11 +135,31 @@ const ADAPTERS = {
         }
         return null;
       }
-      function parseTitleTag() {
-        const t = document.title || '';
-        const m = t.match(/^(.*?)\s*-\s*(.*?)\s*\|\s*LinkedIn\s*$/i);
-        if (m) return { name: m[1].trim(), headline: m[2].trim() };
-        return { name: null, headline: null };
+      function metaContent(selector) {
+        const el = document.querySelector(selector);
+        const content = el && el.getAttribute('content');
+        return content ? content.trim() : null;
+      }
+      // Real gap fix (root-caused live via DevTools on a real profile):
+      // LinkedIn's CSS classes are auto-generated per deploy (confirmed:
+      // real page source shows hashed classes like "_17ca0086", not
+      // stable names like ".pv-text-details__left-panel") -- that's why
+      // every class-based selector below was quietly matching nothing,
+      // with zero exceptions, on every profile tested. Open Graph meta
+      // tags are the stable target instead: LinkedIn can't casually
+      // change og:title/og:description without breaking every
+      // WhatsApp/Slack/Facebook link preview of a profile, so unlike
+      // CSS classes they're kept accurate release to release. This is
+      // now the PRIMARY source for name/headline; DOM selectors are
+      // kept only as a secondary fallback for whatever meta tags miss.
+      function parseOgTitle() {
+        const raw = metaContent('meta[property="og:title"]') || document.title || '';
+        const t = raw.replace(/\s*\|\s*LinkedIn\s*$/i, '').trim();
+        const dashIdx = t.indexOf(' - ');
+        if (dashIdx !== -1) {
+          return { name: t.slice(0, dashIdx).trim(), headline: t.slice(dashIdx + 3).trim() };
+        }
+        return { name: t || null, headline: null };
       }
       function sectionLines(anchorId, max) {
         const section = document.getElementById(anchorId);
@@ -159,9 +179,25 @@ const ADAPTERS = {
         }
       }
 
-      const titleParsed = safe('title', parseTitleTag, { name: null, headline: null });
-      const name = safe('name', () => firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1']), null) || titleParsed.name;
-      const headline = safe('headline', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null) || titleParsed.headline;
+      // Always captured (not just on failure) so the very next console
+      // log shows the real underlying page state instead of only this
+      // function's own parsed-to-null outputs -- if fields are still
+      // empty after this fix, this line tells us exactly what LinkedIn
+      // is actually serving instead of requiring yet another guess.
+      debug.push(
+        `raw title="${document.title}" og:title="${metaContent('meta[property="og:title"]')}" ` +
+        `og:desc="${(metaContent('meta[property="og:description"]') || metaContent('meta[name="description"]') || '').slice(0, 120)}" ` +
+        `h1Count=${document.querySelectorAll('h1').length} h2Count=${document.querySelectorAll('h2').length}`
+      );
+
+      const ogParsed = safe('og-title', parseOgTitle, { name: null, headline: null });
+      const ogDescription = safe('og-description', () => metaContent('meta[property="og:description"], meta[name="description"]'), null);
+
+      const name = ogParsed.name
+        || safe('name-dom', () => firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1', 'main h2', 'h2']), null);
+      const headline = ogParsed.headline
+        || (ogDescription ? ogDescription.slice(0, 220) : null)
+        || safe('headline-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null);
       const location = safe('location', () => firstMatch(['.pv-text-details__left-panel .text-body-small.inline.t-black--light', '.pv-text-details__left-panel .text-body-small']), null);
 
       const currentCompany = safe('company', () => {
