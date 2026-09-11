@@ -20,8 +20,7 @@ One-click import of a candidate from a LinkedIn profile page into AVIIN ATS. See
 
 ## Known limits (v1)
 
-- **LinkedIn only.** Built with a per-site adapter (`content-scripts/adapters/`) so Naukri/Foundit can be added later — add a new adapter file plus one line in `background.js`'s `scrapeActiveTab()`.
+- **LinkedIn only.** Each site's scraper is a self-contained function in `background.js`'s `ADAPTERS` map (one `chrome.scripting.executeScript({func})` call per import — the reliable MV3 pattern for getting a real return value, unlike injecting a separate content-script file and reading a global back in a second call, which turned out not to be reliable enough in practice). Adding Naukri/Foundit later means adding one more `ADAPTERS` entry — nothing else changes.
 - **No email/phone scraping.** LinkedIn profiles rarely expose these without an extra click into "Contact info," which this deliberately doesn't do — those fields stay blank on the created candidate rather than being guessed.
-- **LinkedIn's DOM changes without notice.** The scraper in `content-scripts/adapters/linkedin.js` uses a few known selector patterns plus a `document.title` fallback for the name/headline. If LinkedIn changes its markup and imports start coming back empty, that adapter file is the one place to fix — nothing else in the extension needs to change.
-- **No packaged icon yet** — Chrome shows its default generic icon. Add real `icons/icon16.png` / `icon48.png` / `icon128.png` files and reference them in `manifest.json`'s `icons` field whenever branded icons are ready.
+- **LinkedIn's DOM changes without notice.** `ADAPTERS.linkedin.scrapeFn` in `background.js` uses a few known selector patterns plus a `document.title` fallback for the name/headline. If LinkedIn changes its markup and imports start coming back empty or with "Could not read this profile," that function is the one place to fix.
 - **Not published to the Chrome Web Store.** "Load unpacked" is the only distribution method for now — a real store listing (review process, privacy policy page, screenshots) is a separate future step.
