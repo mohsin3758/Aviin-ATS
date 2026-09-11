@@ -1,7 +1,25 @@
 const root = document.getElementById('root');
 
 function sendMessage(msg) {
-  return new Promise((resolve) => chrome.runtime.sendMessage(msg, resolve));
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(msg, (response) => {
+      // Real gap fix: chrome.runtime.sendMessage's callback fires with
+      // `response === undefined` (not a rejected promise) if the
+      // background service worker never called sendResponse or wasn't
+      // reachable — every caller below does `result.ok`/`result.status`
+      // on the return value, which would throw a TypeError on
+      // `undefined` instead of showing a real error message.
+      if (chrome.runtime.lastError || response === undefined) {
+        const msg = chrome.runtime.lastError?.message || 'No response from extension background — try reopening the popup.';
+        // Different callers read either .error (LOGIN) or .status/.message
+        // (IMPORT_ACTIVE_TAB) — this fallback covers both shapes so
+        // neither caller silently loses the real error text.
+        resolve({ ok: false, error: msg, status: 'error', message: msg });
+        return;
+      }
+      resolve(response);
+    });
+  });
 }
 
 function el(tag, props = {}, children = []) {

@@ -127,33 +127,46 @@ async function importProfile(scraped) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
-    switch (message?.type) {
-      case 'LOGIN': {
-        const result = await login(message.email, message.password);
-        sendResponse(result);
-        break;
-      }
-      case 'LOGOUT': {
-        await logout();
-        sendResponse({ ok: true });
-        break;
-      }
-      case 'GET_AUTH_STATE': {
-        sendResponse(await getAuthState());
-        break;
-      }
-      case 'IMPORT_ACTIVE_TAB': {
-        const scrapeResult = await scrapeActiveTab();
-        if (!scrapeResult.ok) {
-          sendResponse({ status: scrapeResult.error === 'not_supported_page' ? 'not_supported' : 'error', message: scrapeResult.error });
+    try {
+      switch (message?.type) {
+        case 'LOGIN': {
+          const result = await login(message.email, message.password);
+          sendResponse(result);
           break;
         }
-        const importResult = await importProfile(scrapeResult.scraped);
-        sendResponse(importResult);
-        break;
+        case 'LOGOUT': {
+          await logout();
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'GET_AUTH_STATE': {
+          sendResponse(await getAuthState());
+          break;
+        }
+        case 'IMPORT_ACTIVE_TAB': {
+          const scrapeResult = await scrapeActiveTab();
+          if (!scrapeResult.ok) {
+            sendResponse({ status: scrapeResult.error === 'not_supported_page' ? 'not_supported' : 'error', message: scrapeResult.error });
+            break;
+          }
+          const importResult = await importProfile(scrapeResult.scraped);
+          sendResponse(importResult);
+          break;
+        }
+        default:
+          sendResponse({ status: 'error', message: 'Unknown message' });
       }
-      default:
-        sendResponse({ status: 'error', message: 'Unknown message' });
+    } catch (e) {
+      // Real gap fix: without this, a thrown exception (a network
+      // failure calling the API, an unexpected null somewhere) meant
+      // sendResponse never ran at all -- the popup's awaited promise
+      // never resolved, leaving "Logging in…"/"Importing…" stuck on
+      // the button forever with no error shown, indistinguishable from
+      // the extension being broken. Both .error and .message are set --
+      // the LOGIN caller reads .error, the IMPORT_ACTIVE_TAB caller
+      // reads .status/.message, and this can fail during either.
+      const msg = e?.message || 'Unexpected error';
+      sendResponse({ ok: false, error: msg, status: 'error', message: msg });
     }
   })();
   return true; // keep the async sendResponse channel open
