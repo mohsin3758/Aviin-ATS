@@ -712,6 +712,33 @@ async def share_links(req_id: str, actor: Actor = Depends(get_actor)):
     # the redirect, outside anything fixable here. Plain text is reliable.
     wa_msg  = f"*{title}*\nLocation: {loc} | {req['employment_type']}\nSkills: {', '.join(skills[:4])}\nApply: {job_url}\n\n_Aviin Tech - AI Staffing_"
     share = build_share_links(job_url, title, desc, loc, skills, wa_msg)
+    portals = get_all_portals(job_url, title, desc, loc, skills, wa_msg)
+
+    # Real gap fix (2026-09-11, "deep check ... posting to linkedin"):
+    # the 2026-09-02 audit wired click_count/apply_count tracking into
+    # every REAL auto-post (Facebook/Telegram/WhatsApp Channel — see
+    # _dist_click_url above) but this manual-share endpoint's LinkedIn
+    # link still pointed straight at the untracked job_url, same as
+    # Twitter/Email — a candidate clicking through a shared LinkedIn
+    # post was invisible to job_shares.click_count/apply_count even
+    # though a job_shares row for it already exists (the frontend's
+    # share button already calls /job-sharing/log for every platform,
+    # LinkedIn included). Scoped to just this one field/list entry
+    # rather than changing build_share_links()/get_all_portals()'s own
+    # signatures, which stay job_url-only for their other real caller
+    # with no requisition context at all (GET /portals, the plain
+    # category browser — it has no tenant_id/req_id to build a tracked
+    # URL from). LinkedIn is the one genuinely real, unattended-share
+    # channel this fixes — true API auto-posting the way Facebook has
+    # would need LinkedIn's own Talent Solutions Partner approval, a
+    # business relationship with LinkedIn, not a code gap.
+    tracked_linkedin_url = _dist_click_url(actor.tenant_id, req_id, "linkedin")
+    share["linkedin"] = f"https://www.linkedin.com/sharing/share-offsite/?{urlencode({'url': tracked_linkedin_url, 'title': title, 'summary': desc})}"
+    for p in portals:
+        if p["key"] == "linkedin":
+            p["link"] = share["linkedin"]
+            break
+
     return {
         "job_url": job_url,
         # Legacy top-level fields, kept for any existing callers.
@@ -726,7 +753,7 @@ async def share_links(req_id: str, actor: Actor = Depends(get_actor)):
         # Full 70+ portal catalog with per-requisition computed links -
         # share_intent ones get a pre-filled compose URL, the rest get the
         # portal's own homepage (no public posting API exists for them).
-        "portals": get_all_portals(job_url, title, desc, loc, skills, wa_msg),
+        "portals": portals,
     }
 
 class LogShareBody(BaseModel):
