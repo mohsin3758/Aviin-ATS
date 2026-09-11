@@ -607,6 +607,15 @@ class CaptureIn(BaseModel):
     current_company: Optional[str] = None
     profile_url: Optional[str] = None
     source: str = "linkedin"
+    # Added for the browser-extension LinkedIn importer (sql/127).
+    # linkedin_url is kept distinct from the generic profile_url above --
+    # it's the exact field dedup_service.check_duplicate's Stage-A
+    # LinkedIn-URL exact-match signal reads, so it needs to reliably be
+    # a real "https://www.linkedin.com/in/..." value, not whatever a
+    # future non-LinkedIn adapter's "profile_url" happens to mean.
+    location: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    resume_text_like: Optional[str] = None
 
 
 @extension_router.get("/ping")
@@ -619,10 +628,12 @@ async def ext_capture(body: CaptureIn, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
         row = await conn.fetchrow(
             """INSERT INTO extension_captures
-                 (tenant_id, captured_by, name, email, phone, current_title, current_company, profile_url, source)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
+                 (tenant_id, captured_by, name, email, phone, current_title, current_company,
+                  profile_url, source, location, linkedin_url, resume_text_like)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *""",
             actor.tenant_id, actor.user_id, body.name, body.email, body.phone,
             body.current_title, body.current_company, body.profile_url, body.source,
+            body.location, body.linkedin_url, body.resume_text_like,
         )
     return dict(row)
 
@@ -643,6 +654,31 @@ async def ext_captures_list(converted: Optional[bool] = None, actor: Actor = Dep
 
 @extension_router.post("/captures/{capture_id}/convert")
 async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)):
+    """Real gap fix (browser-extension LinkedIn importer): this used to
+    do a raw, unconditional INSERT INTO candidates -- no duplicate check
+    at all (a real duplicate email would 500 with an unhandled
+    UniqueViolationError, not a graceful conflict), never called
+    source_attribution.record_source_attribution (every other real
+    intake path in this codebase does), used 3 different inconsistent
+    literals for the same 'source' concept across this file, and only
+    wrote 6 thin columns. Also never triggered the auto-score/auto-
+    populate-skills background task every other intake path fires.
+
+    Now: reuses dedup_service.check_duplicate (already treats
+    linkedin_url as a first-class Stage-A exact-match signal -- ideal
+    for this feature, no new matching logic needed) exactly like every
+    other real intake path in this codebase already does. EXACT_MATCH/
+    HIGH_CONFIDENCE -> refuse to create, surface the existing candidate
+    instead (409) -- never silently merge, the same discipline that
+    already governs every other dedup call site here, and the direct
+    lesson from a real corruption incident this exact codebase already
+    had (unrelated candidates silently merged via a shared placeholder
+    email once candidates.email's per-tenant UNIQUE constraint
+    collided). POSSIBLE_MATCH/NO_MATCH proceed to create, matching this
+    codebase's own established convention that POSSIBLE_MATCH is
+    advisory, never a hard block."""
+    from services.dedup_service import check_duplicate
+    from services.resume_intake_service import _fire_and_forget
     async with db.tenant_conn(actor.tenant_id) as conn:
         cap = await conn.fetchrow("SELECT * FROM extension_captures WHERE id=$1 AND tenant_id=$2",
                                    capture_id, actor.tenant_id)
@@ -650,10 +686,33 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
             raise HTTPException(404, "Capture not found")
         if cap["candidate_id"]:
             raise HTTPException(409, "Already converted")
+
+        dedup = await check_duplicate(conn, actor.tenant_id, {
+            "name": cap["name"], "email": cap["email"], "phone": cap["phone"],
+            "linkedin_url": cap["linkedin_url"], "current_company": cap["current_company"],
+        })
+        if dedup.should_merge:  # EXACT_MATCH or HIGH_CONFIDENCE
+            matched_name = await conn.fetchval(
+                "SELECT full_name FROM candidates WHERE id=$1", dedup.matched_candidate_id)
+            raise HTTPException(409, {
+                "message": "Matches an existing candidate",
+                "matched_candidate_id": dedup.matched_candidate_id,
+                "matched_candidate_name": matched_name,
+                "decision": dedup.decision,
+                "score": dedup.score,
+            })
+
+        # Never fall back to a placeholder email (e.g. the recruiter's
+        # own address) when the scrape found none -- cap["email"] is
+        # written verbatim, including NULL, the same real lesson from
+        # the corruption incident referenced above.
         cand = await conn.fetchrow(
-            """INSERT INTO candidates (tenant_id, full_name, email, phone, current_employer, source)
-               VALUES ($1,$2,$3,$4,$5,'extension') RETURNING id""",
+            """INSERT INTO candidates
+                 (tenant_id, full_name, email, phone, current_employer, location,
+                  linkedin_url, resume_text, source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
             actor.tenant_id, cap["name"], cap["email"], cap["phone"], cap["current_company"],
+            cap["location"], cap["linkedin_url"], cap["resume_text_like"], cap["source"] or "linkedin",
         )
         # HARD RULE #12 — was missing on this path entirely (found in the
         # 2026-08-09 BGV audit).
@@ -664,6 +723,18 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
         )
         await conn.execute("UPDATE extension_captures SET candidate_id=$1 WHERE id=$2",
                             cand["id"], capture_id)
+
+        from services import source_attribution
+        await source_attribution.record_source_attribution(
+            conn, actor.tenant_id, str(cand["id"]), cap["source"] or "linkedin")
+
+    # Fires on its OWN fresh connection (auto_score_candidate_bg's own
+    # docstring) -- deliberately outside the `async with` above, which
+    # has already released `conn` by this point.
+    from routers.intelligence import auto_score_candidate_bg
+    _fire_and_forget(auto_score_candidate_bg(
+        actor.tenant_id, str(cand["id"]), skill_scan_text=cap["resume_text_like"]))
+
     return {"candidate_id": str(cand["id"])}
 
 
