@@ -85,9 +85,27 @@ async function renderReady(email) {
   if (!isLinkedInProfile) {
     root.appendChild(el('div', { class: 'muted', text: 'Open a LinkedIn profile to import a candidate.' }));
   } else {
-    const btn = el('button', { text: 'Import This Profile', onclick: onImportClick });
-    root.appendChild(btn);
-    root.appendChild(el('div', { id: 'result' }));
+    // Real feature (follow-up): check before showing Import at all,
+    // so a profile already in AVIIN ATS shows that immediately instead
+    // of costing a click + a request just to find out the same thing
+    // the Import button itself would have said afterward.
+    root.appendChild(el('div', { class: 'muted', id: 'dupe-check', text: 'Checking…' }));
+    sendMessage({ type: 'CHECK_TAB_DUPLICATE' }).then((dupeResult) => {
+      const slot = document.getElementById('dupe-check');
+      if (!slot) return; // popup UI moved on (e.g. user clicked Import already)
+      slot.remove();
+      if (dupeResult?.matched) {
+        root.insertBefore(
+          statusBox('warn',
+            `Already in AVIIN ATS: <strong>${escapeHtml(dupeResult.candidate_name || 'this candidate')}</strong><br/><a href="https://ats.aviintech.com/candidates/${dupeResult.candidate_id}" target="_blank">View existing →</a>`),
+          root.lastElementChild,
+        );
+      } else {
+        const btn = el('button', { text: 'Import This Profile', onclick: onImportClick });
+        root.insertBefore(btn, root.lastElementChild);
+        root.insertBefore(el('div', { id: 'result' }), root.lastElementChild);
+      }
+    });
   }
 
   root.appendChild(el('a', {

@@ -623,6 +623,30 @@ async def ext_ping():
     return {"ok": True}
 
 
+@extension_router.get("/check-duplicate")
+async def ext_check_duplicate(linkedin_url: str, actor: Actor = Depends(get_actor)):
+    """Real feature (browser-extension LinkedIn importer, follow-up):
+    lets the popup ask "is this profile already a candidate?" the
+    moment it opens, using only the tab's URL — before injecting the
+    content script or spending a click on Import at all. Reuses the
+    exact same dedup_service.check_duplicate Stage-A linkedin_url exact-
+    match signal that ext_capture_convert's own real dedup check
+    already relies on, so "already in ATS" here and "matches an
+    existing candidate" at convert-time can never disagree. Read-only —
+    no capture row, no side effects, safe to call on every popup open."""
+    from services.dedup_service import check_duplicate
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        dedup = await check_duplicate(conn, actor.tenant_id, {"linkedin_url": linkedin_url})
+        if not dedup.should_merge:
+            return {"matched": False}
+        matched_name = await conn.fetchval("SELECT full_name FROM candidates WHERE id=$1", dedup.matched_candidate_id)
+    return {
+        "matched": True,
+        "candidate_id": dedup.matched_candidate_id,
+        "candidate_name": matched_name,
+    }
+
+
 @extension_router.post("/capture")
 async def ext_capture(body: CaptureIn, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:

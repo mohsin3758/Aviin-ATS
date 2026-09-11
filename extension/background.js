@@ -6,6 +6,28 @@
 
 const API_BASE = 'https://ats.aviintech.com/api';
 
+// Same normalization the LinkedIn adapter applies to window.location.href
+// (content-scripts/adapters/linkedin.js) -- kept identical so a URL
+// checked here and a URL later captured on Import always compare equal.
+function normalizeLinkedinUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    return u.origin + u.pathname.replace(/\/$/, '');
+  } catch (e) {
+    return rawUrl;
+  }
+}
+
+async function checkDuplicate(linkedinUrl) {
+  const token = await getToken();
+  if (!token) return { matched: false };
+  const res = await fetch(`${API_BASE}/extension/check-duplicate?linkedin_url=${encodeURIComponent(linkedinUrl)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return { matched: false };
+  return res.json();
+}
+
 async function getToken() {
   const { aviin_token, aviin_token_exp } = await chrome.storage.local.get(['aviin_token', 'aviin_token_exp']);
   if (!aviin_token) return null;
@@ -151,6 +173,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           const importResult = await importProfile(scrapeResult.scraped);
           sendResponse(importResult);
+          break;
+        }
+        case 'CHECK_TAB_DUPLICATE': {
+          // Real feature (follow-up): "is this profile already a
+          // candidate?" the moment the popup opens, using only the
+          // tab's URL -- no content-script injection, no click spent.
+          // Only reachable for a URL that already passed the same
+          // linkedin.com/in/ check scrapeActiveTab() enforces, so a
+          // profile that's actually unsupported never even asks.
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (!tab?.url || !/^https:\/\/(www\.)?linkedin\.com\/in\//.test(tab.url)) {
+            sendResponse({ matched: false });
+            break;
+          }
+          sendResponse(await checkDuplicate(normalizeLinkedinUrl(tab.url)));
           break;
         }
         default:
