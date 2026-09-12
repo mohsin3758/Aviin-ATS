@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 10;
+const BG_VERSION = 11;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -96,19 +96,23 @@ const ADAPTERS = {
   linkedin: {
     urlPattern: /^https:\/\/(www\.)?linkedin\.com\/in\//,
     // Runs INSIDE the LinkedIn page, in the extension's isolated world.
-    // Scrapes only what's reliably visible without any extra click (no
-    // "Contact info" modal) — LinkedIn profiles routinely have no
-    // visible email/phone at all, and this deliberately never invents
-    // one (see backend/routers/gap_features.py's ext_capture_convert
-    // docstring for why: a placeholder email caused a real candidate-
-    // merge corruption incident elsewhere in this codebase). LinkedIn's
-    // DOM uses obfuscated, frequently-changing class names, so several
-    // known selector patterns are tried per field, falling back to
-    // document.title (a stable "Name - Headline | LinkedIn" string
-    // LinkedIn has kept consistent for years). This function is the one
-    // piece that will need occasional upkeep if LinkedIn changes its
-    // markup — nothing else in the extension needs to change alongside it.
-    scrapeFn: function scrapeLinkedinProfile() {
+    // Also clicks the real "Contact info" link and reads whatever
+    // LinkedIn itself declares there (email/phone) -- LinkedIn profiles
+    // routinely have neither visible to a given viewer at all, and this
+    // deliberately never invents one (see backend/routers/
+    // gap_features.py's ext_capture_convert docstring for why: a
+    // placeholder email caused a real candidate-merge corruption
+    // incident elsewhere in this codebase). LinkedIn's DOM uses
+    // obfuscated, frequently-changing class names, so extraction here
+    // deliberately avoids them: Open Graph meta tags for name/headline,
+    // heading text ("Experience"/"Education"/"Skills"/"About") for
+    // sections, and fixed accessibility hooks (the "Contact info" label,
+    // [role="dialog"], mailto: links) for contact details -- all things
+    // LinkedIn can't casually rename without breaking a real feature for
+    // a real visitor. This function is the one piece that will need
+    // occasional upkeep if LinkedIn changes its markup — nothing else in
+    // the extension needs to change alongside it.
+    scrapeFn: async function scrapeLinkedinProfile() {
       // Real gap fix (reported live: "Could not read this profile" on a
       // page that was visibly, fully loaded — name, photo, headline all
       // clearly rendered). The whole body used to run un-guarded: any
@@ -126,6 +130,9 @@ const ADAPTERS = {
       const debug = [];
       function safe(label, fn, fallback) {
         try { return fn(); } catch (e) { debug.push(`${label}: ${e?.message || e}`); return fallback; }
+      }
+      async function asyncSafe(label, fn, fallback) {
+        try { return await fn(); } catch (e) { debug.push(`${label}: ${e?.message || e}`); return fallback; }
       }
       function firstMatch(selectors) {
         for (const sel of selectors) {
@@ -292,6 +299,57 @@ const ADAPTERS = {
         return null;
       }
 
+      // Real gap fix (reported live: "number and email id not extracted"
+      // -- v1 deliberately never scraped these at all, see README). This
+      // now reads them the same way a human would: click the real
+      // "Contact info" link and read whatever LinkedIn itself declares
+      // in the panel it opens. Never invents a value -- if the profile
+      // owner hasn't made an email/phone visible to this viewer (common
+      // for a 2nd/3rd-degree connection), the panel simply won't have
+      // one and this correctly returns null, same as today. mailto:
+      // links are a real HTML convention LinkedIn can't casually drop
+      // without breaking the "Send email" button itself, so that's the
+      // primary hook; phone has no such anchor, so it's read off the
+      // fixed "Phone" label the same way location was found off
+      // "Contact info". [role="dialog"] is an accessibility attribute
+      // (not a CSS class), used here for the same reason "Contact info"
+      // and mailto: were chosen -- LinkedIn can't rename it without
+      // breaking screen-reader support for the same panel.
+      async function openContactInfoAndExtract() {
+        const contactLink = Array.from(document.querySelectorAll('a'))
+          .find((a) => (a.textContent || '').trim() === 'Contact info');
+        if (!contactLink) return { email: null, phone: null };
+        contactLink.click();
+
+        let dialog = null;
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          dialog = document.querySelector('[role="dialog"]');
+          if (dialog && (dialog.querySelector('a[href^="mailto:"]') || /contact info/i.test(dialog.textContent))) break;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+        if (!dialog) return { email: null, phone: null };
+
+        const mailLink = dialog.querySelector('a[href^="mailto:"]');
+        const email = mailLink
+          ? (mailLink.textContent.trim() || decodeURIComponent(mailLink.href.replace(/^mailto:/i, '')))
+          : null;
+
+        let phone = null;
+        const labels = Array.from(dialog.querySelectorAll('h3, h2, span, div'));
+        const phoneLabel = labels.find((el) => (el.textContent || '').trim().toLowerCase() === 'phone');
+        if (phoneLabel) {
+          const sib = phoneLabel.nextElementSibling || (phoneLabel.parentElement && phoneLabel.parentElement.nextElementSibling);
+          const text = sib && sib.textContent && sib.textContent.trim();
+          if (text) phone = text;
+        }
+
+        const dismissBtn = dialog.querySelector('button[aria-label="Dismiss"], button[aria-label*="Dismiss" i], button[aria-label*="close" i]');
+        if (dismissBtn) dismissBtn.click();
+
+        return { email, phone };
+      }
+
       const aboutSection = safe('about-section', () => sectionTextByHeading('About', 800), null);
       const skillsSection = safe('skills-section', () => sectionTextByHeading('Skills', 500), null);
       const experienceSection = safe('experience-section', () => sectionTextByHeading('Experience', 2000), null);
@@ -328,6 +386,9 @@ const ADAPTERS = {
         educationSection ? 'Education:\n' + educationSection.text : '',
       ].filter(Boolean).join('\n\n') || null;
 
+      const contact = await asyncSafe('contact-info', openContactInfoAndExtract, { email: null, phone: null });
+      debug.push(`contact-info: email=${!!contact.email} phone=${!!contact.phone}`);
+
       return {
         name: name || null,
         current_title: headline || null,
@@ -335,8 +396,8 @@ const ADAPTERS = {
         location: location || null,
         profile_url: safe('url', normalizedUrl, window.location.href),
         linkedin_url: safe('url', normalizedUrl, window.location.href),
-        email: null,
-        phone: null,
+        email: contact.email || null,
+        phone: contact.phone || null,
         resume_text_like: resumeTextLike,
         _debug: debug.length ? debug : undefined,
       };
