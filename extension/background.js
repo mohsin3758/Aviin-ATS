@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 8;
+const BG_VERSION = 9;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -161,14 +161,37 @@ const ADAPTERS = {
         }
         return { name: t || null, headline: null };
       }
-      function sectionLines(anchorId, max) {
-        const section = document.getElementById(anchorId);
-        const container = section && section.closest('section');
-        if (!container) return [];
-        return Array.from(container.querySelectorAll('li'))
-          .slice(0, max)
-          .map((li) => li.textContent.replace(/\s+/g, ' ').trim())
-          .filter((t) => t && t.length > 3);
+      // Real gap fix (reported live, twice now: name/headline extract
+      // fine via og:title, but company/location/experience/education
+      // are STILL empty -- the #experience / #education anchor-id
+      // lookup below was carried over from the old code and never
+      // actually confirmed against real current markup). Section
+      // headings ("Experience", "Education", "Skills", "About") are
+      // plain, always-visible English text LinkedIn shows every
+      // visitor -- unlike a CSS class or an anchor id, hiding/renaming
+      // that text would make the section unreadable to a human, so
+      // it's the most stable hook available. This finds a section by
+      // matching a real heading element's own text, not by guessing
+      // an id or class on its container.
+      function cleanBlockText(el) {
+        const raw = (el.innerText || el.textContent || '');
+        return raw.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+      }
+      function sectionTextByHeading(headingText, maxLen) {
+        // startsWith, not ===: LinkedIn appends a live count to some
+        // headings (confirmed live: "Skills (4)", not "Skills") which
+        // an exact match silently misses.
+        const needle = headingText.toLowerCase();
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4'))
+          .filter((el) => (el.textContent || '').trim().toLowerCase().startsWith(needle));
+        for (const heading of headings) {
+          const container = heading.closest('section') || heading.parentElement;
+          if (!container) continue;
+          const lines = cleanBlockText(container).split('\n').filter((l) => !l.toLowerCase().startsWith(needle));
+          const text = lines.join('\n');
+          if (text.length > 5) return { text: text.slice(0, maxLen || 2000), lines };
+        }
+        return null;
       }
       function normalizedUrl() {
         try {
@@ -198,14 +221,15 @@ const ADAPTERS = {
       const headline = ogParsed.headline
         || (ogDescription ? ogDescription.slice(0, 220) : null)
         || safe('headline-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null);
-      // Real gap fix (reported live: name now extracts fine via og:title,
-      // but company/location/experience were still empty -- these were
-      // still on the old class-based selectors, which fail for the same
-      // reason og:title was needed for name: LinkedIn's classes are
-      // auto-generated per deploy). None of these three have a meta-tag
-      // equivalent, so instead of guessing another class name, each keys
-      // off something LinkedIn can't casually rename without breaking a
-      // real feature: a functional link href, or a fixed English label.
+      // Real gap fix (reported live TWICE: name now extracts fine via
+      // og:title, but company/location/experience were still empty on
+      // both a first attempt using href/id-based hooks AND real current
+      // profiles). Rather than guess a fourth selector blind, this now
+      // grabs each section by its heading text (see sectionTextByHeading
+      // above) and reports concretely, every time, whether each hook
+      // even found anything -- so if a field is STILL empty after this,
+      // the next console log says exactly which lookup came up empty
+      // instead of requiring another round-trip screenshot.
       function locationFromContactInfoRow() {
         const contactLink = Array.from(document.querySelectorAll('a'))
           .find((a) => (a.textContent || '').trim() === 'Contact info');
@@ -223,31 +247,38 @@ const ADAPTERS = {
         return null;
       }
 
-      const location = safe('location', locationFromContactInfoRow, null)
+      const aboutSection = safe('about-section', () => sectionTextByHeading('About', 800), null);
+      const skillsSection = safe('skills-section', () => sectionTextByHeading('Skills', 500), null);
+      const experienceSection = safe('experience-section', () => sectionTextByHeading('Experience', 2000), null);
+      const educationSection = safe('education-section', () => sectionTextByHeading('Education', 800), null);
+
+      debug.push(
+        `sections found: about=${!!aboutSection} skills=${!!skillsSection} experience=${!!experienceSection} education=${!!educationSection}`
+      );
+
+      const locationViaContact = safe('location-contact', locationFromContactInfoRow, null);
+      // Best-effort fallback: the line right after the job title in the
+      // Experience block is almost always "Company · EmploymentType"
+      // (e.g. "CipherStudio · Full-time") -- not as precise as a
+      // dedicated element, but the section text itself is now reliably
+      // found, so this beats returning nothing.
+      const companyFromExperience = safe('company-from-experience', () => {
+        if (!experienceSection || !experienceSection.lines || experienceSection.lines.length < 2) return null;
+        return experienceSection.lines[1].split(' · ')[0].trim() || null;
+      }, null);
+      debug.push(`location-contact=${JSON.stringify(locationViaContact)} company-from-experience=${JSON.stringify(companyFromExperience)}`);
+
+      const location = locationViaContact
         || safe('location-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-small.inline.t-black--light', '.pv-text-details__left-panel .text-body-small']), null);
 
       const currentCompany = safe('company-link', currentCompanyFromLink, null)
-        || safe('company-dom', () => {
-          const expSection = document.getElementById('experience');
-          const expContainer = expSection && expSection.closest('section');
-          const firstItem = expContainer && expContainer.querySelector('li');
-          if (!firstItem) return null;
-          const spans = Array.from(firstItem.querySelectorAll('span[aria-hidden="true"]'))
-            .map((s) => s.textContent.trim()).filter(Boolean);
-          return spans[1] || null; // [role title, company name, duration, location...]
-        }, null);
+        || companyFromExperience;
 
-      const expLines = safe('experience-section', () => sectionLines('experience', 10), []);
-      const eduLines = safe('education-section', () => sectionLines('education', 6), []);
-      // Diagnostic-only, always captured: whether the #experience/
-      // #education anchors exist at all right now -- if resume_text_like
-      // is still empty after this fix, this line says whether the
-      // anchors are gone/renamed (needs a different approach entirely)
-      // versus present but empty (a narrower li/section-structure fix).
-      debug.push(`sections: #experience=${!!document.getElementById('experience')} #education=${!!document.getElementById('education')} expLines=${expLines.length} eduLines=${eduLines.length}`);
       const resumeTextLike = [
-        expLines.length ? 'Experience:\n' + expLines.join('\n') : '',
-        eduLines.length ? 'Education:\n' + eduLines.join('\n') : '',
+        aboutSection ? 'About:\n' + aboutSection.text : '',
+        skillsSection ? 'Skills:\n' + skillsSection.text : '',
+        experienceSection ? 'Experience:\n' + experienceSection.text : '',
+        educationSection ? 'Education:\n' + educationSection.text : '',
       ].filter(Boolean).join('\n\n') || null;
 
       return {
