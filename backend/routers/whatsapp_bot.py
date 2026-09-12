@@ -81,6 +81,7 @@ async def _download_waha_media(media: dict) -> Optional[bytes]:
 
 async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str, whatsapp_account_id: str = None) -> str:
     from routers.intelligence import auto_score_candidate_bg
+    from services.resume_intake_service import _fire_and_forget
     """Download + parse an inbound WhatsApp resume attachment, upsert a
     candidate (same regex-NER pipeline as email intake), log a resume_files
     row, and return the WhatsApp reply text to send back."""
@@ -147,7 +148,10 @@ async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str, whatsa
     # Fire-and-forget, same convention as every other intake path (outside
     # the transaction above so an embed-service hiccup can never affect
     # whether the candidate/resume/message were actually saved).
-    asyncio.create_task(auto_score_candidate_bg(tenant_id, str(candidate_id)))
+    # Real bug fix (this session): a bare create_task() can be garbage-
+    # collected before it runs; _fire_and_forget keeps a real reference
+    # until it completes.
+    _fire_and_forget(auto_score_candidate_bg(tenant_id, str(candidate_id)))
 
     first_name = (parsed.get("name") or "").split()[0] if parsed.get("name") else ""
     greeting = f"Thanks {first_name}!" if first_name else "Thanks!"

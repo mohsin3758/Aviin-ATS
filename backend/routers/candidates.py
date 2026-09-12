@@ -919,9 +919,17 @@ async def create_candidate(body: CandidateCreate, actor: Actor = Depends(require
     # this — fire-and-forget, on its own connection, same convention as
     # resume-intake's own auto-score (never block/poison this request's
     # own transaction on a real embed-service call).
-    import asyncio
+    # Real bug fix (this session, deep-check on a live "skill/experience
+    # never populated" report): a bare asyncio.create_task() with no
+    # reference kept can be garbage-collected before it completes — this
+    # is the SAME function that also auto-populates candidate_skill_
+    # experience and applies tracking-sheet fields, so losing it here
+    # silently drops that data too, not just the AI match score. Every
+    # other call site of auto_score_candidate_bg had this same bug; all
+    # fixed together via the shared _fire_and_forget() helper.
+    from services.resume_intake_service import _fire_and_forget
     from routers.intelligence import auto_score_candidate_bg
-    asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, str(cid)))
+    _fire_and_forget(auto_score_candidate_bg(actor.tenant_id, str(cid)))
     return dict(row)
 
 
@@ -1057,9 +1065,12 @@ async def upload_candidate_document(
                     )
                 except Exception as _cpd_err:
                     print(f"[upload_document] cpd write failed: {_cpd_err}")
-                import asyncio
+                # Real bug fix (this session): see the other call site in
+                # this file for the full story — a bare create_task() here
+                # can be garbage-collected before it runs.
+                from services.resume_intake_service import _fire_and_forget
                 from routers.intelligence import auto_score_candidate_bg
-                asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, candidate_id))
+                _fire_and_forget(auto_score_candidate_bg(actor.tenant_id, candidate_id))
             return {"id": str(row["id"]), "document_type": "resume", "file_name": filename}
 
         file_path = _save_candidate_document_file(data, actor.tenant_id, filename)

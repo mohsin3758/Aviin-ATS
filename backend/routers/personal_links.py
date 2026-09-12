@@ -311,9 +311,12 @@ async def submit_resume(
                 "Applicant checked the DPDP 2023 consent box on a recruiter's personal resume-drop link.",
             )
             await source_attribution.record_source_attribution(conn, tenant_id, str(cand['id']), 'recruiter_personal_link')
-            import asyncio
+            # Real bug fix (this session): a bare create_task() can be
+            # garbage-collected before it runs; _fire_and_forget keeps a
+            # real reference until it completes.
+            from services.resume_intake_service import _fire_and_forget
             from routers.intelligence import auto_score_candidate_bg
-            asyncio.create_task(auto_score_candidate_bg(tenant_id, str(cand['id'])))
+            _fire_and_forget(auto_score_candidate_bg(tenant_id, str(cand['id'])))
         elif parsed.get("_resume_text"):
             # Existing candidate re-submitting — same gap-fill-only
             # convention as upsert_candidate()/public_apply(), never
@@ -517,9 +520,12 @@ async def submit_job_resume(
                 "Applicant checked the DPDP 2023 consent box on a recruiter's job-specific resume link.",
             )
             await source_attribution.record_source_attribution(conn, tenant_id, str(cand['id']), 'recruiter_job_link')
-            import asyncio
+            # Real bug fix (this session): a bare create_task() can be
+            # garbage-collected before it runs; _fire_and_forget keeps a
+            # real reference until it completes.
+            from services.resume_intake_service import _fire_and_forget
             from routers.intelligence import auto_score_candidate_bg
-            asyncio.create_task(auto_score_candidate_bg(tenant_id, str(cand['id'])))
+            _fire_and_forget(auto_score_candidate_bg(tenant_id, str(cand['id'])))
         elif parsed.get("_resume_text"):
             await conn.execute("""
                 UPDATE candidates SET

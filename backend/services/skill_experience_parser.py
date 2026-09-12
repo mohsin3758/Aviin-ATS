@@ -243,9 +243,18 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
         return []
 
     skill_idx = _find_col(headers, 'skill')
-    exp_idx = _find_col(headers, 'rel exp', 'relevant exp', 'relevant experience')
+    # Real bug fix (this session, root-caused live while debugging a
+    # comma-format skill cell): this tenant's own real header text is
+    # "Skill Relevant Exp" for the Skill column itself -- which ALSO
+    # contains the substring "relevant exp", so a naive search for the
+    # separate Rel-Exp/duration column matched the SKILL column right
+    # back (exp_idx == skill_idx), making exp_value the entire raw skill
+    # cell instead of a real duration. Same fix pattern as the existing
+    # CTC/ECTC exclusion just below in this file: exclude any header
+    # that also says "skill".
+    exp_idx = _find_col_excluding(headers, ('rel exp', 'relevant exp', 'relevant experience'), ('skill',))
     if exp_idx is None:
-        exp_idx = _find_col(headers, 'total exp', 'total experience')
+        exp_idx = _find_col_excluding(headers, ('total exp', 'total experience'), ('skill',))
 
     data_row = rows[1]
     if skill_idx is None or skill_idx >= len(data_row):
@@ -343,6 +352,49 @@ def parse_tracking_sheet_html(html: str) -> list[dict]:
     # Total Exp value, exactly like the simple format) with a line that
     # states its own years, without needing every line to match.
     _line_years_re = re.compile(r'^(.+?)\s*[-–]\s*(\d+(?:\.\d+)?\+?)\s*(?:yrs?|years?)\s*$', re.I)
+
+    # Real gap fix (this session, reported live: a real recruiter's
+    # tracking sheet never populated any skill/experience despite having
+    # a real, richly-detailed Skill Relevant Exp cell). A FOURTH real
+    # format, confirmed against the actual email: one comma-separated
+    # inline list in a SINGLE run-on sentence with no line breaks AT ALL
+    # ("Total Exp - 16 Years, Relevant Exp - 13+ Yeras, SAP FICO - 13+
+    # Years, SAP S/4HANA Public Cloud - 5 Years, ..., 8 Projects.") —
+    # structurally incompatible with the per-LINE format directly below
+    # (that one trusts a real line break as proof a recruiter intended
+    # separate entries; a comma has no such guarantee -- it also appears
+    # inside a single legitimate skill name like "Bank Reconciliation
+    # Statement (BRS)"). So unlike the per-line format, every comma
+    # segment here MUST pass the taxonomy recognition gate (same one
+    # the colon-years format above already uses for the identical
+    # reason) before being trusted as a real skill -- otherwise "Total
+    # Exp - 16 Years" and "Relevant Exp - 13+ Yeras" would themselves
+    # become fake "skills". Only tried when the cell has no newlines at
+    # all (a genuine multi-line cell already goes through the per-line
+    # path below) and does have commas to split on.
+    if '\n' not in skill_cell and '\r' not in skill_cell and ',' in skill_cell:
+        comma_out = []
+        comma_seen = set()
+        for raw_seg in skill_cell.split(','):
+            seg = raw_seg.strip().strip('.').strip()
+            if not seg:
+                continue
+            m = _line_years_re.match(seg)
+            raw_name, seg_exp = (m.group(1).strip(), f"{m.group(2)} Yrs") if m else (seg, exp_value)
+            canonical = _recognized_taxonomy_skill(raw_name)
+            if not canonical:
+                continue
+            key = canonical.lower()
+            if key in comma_seen:
+                continue
+            comma_seen.add(key)
+            comma_out.append({
+                "skill_name": canonical,
+                "relevant_experience": seg_exp,
+                "looks_like_experience": True,
+            })
+        if comma_out:
+            return comma_out
 
     for raw_line in re.split(r"[\r\n]+", skill_cell):
         line = raw_line.strip().strip(",")

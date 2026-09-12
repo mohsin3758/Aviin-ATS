@@ -103,6 +103,25 @@ TECH_SKILLS = {
     'SAP COPA': ['sap copa', 'copa', 'controlling profitability analysis'],
     'SAP ECC': ['sap ecc', 'ecc', 'ecc6', 'ecc 6.0', 'sap r/3', 'sap erp central component'],
     'SAP FSCM': ['fscm', 'sap fscm', 'financial supply chain management'],
+    # REAL, EVIDENCE-BASED ADDITIONS (this session): 5 genuinely distinct
+    # SAP FICO treasury/banking-connectivity sub-modules, confirmed from
+    # a real recruiter's tracking sheet ("SAP Document and Reporting
+    # Compliance (DRC) - 3+ Years, SAP Multi-Bank Connectivity (MBC),
+    # SWIFT Integration, Host-to-Host (H2H) - 5 Years, Electronic Bank
+    # Statement (EBS), Bank Reconciliation Statement (BRS) - 5 Years")
+    # that this parser's taxonomy gate was silently rejecting as
+    # unrecognized -- the exact same under-extraction complaint that
+    # motivated adding SAP COPA/ECC/FSCM above. 'swift' deliberately
+    # NOT used bare as an alias here -- see the 2026-08-18 fix just
+    # below this dict for why a bare 'swift' collides with Swift (iOS);
+    # narrower "swift integration"/"swift messaging" phrasing avoids
+    # reintroducing that exact collision.
+    'SAP DRC': ['sap drc', 'document and reporting compliance', 'drc'],
+    'SAP MBC': ['sap mbc', 'multi-bank connectivity', 'multi bank connectivity'],
+    'SWIFT Integration': ['swift integration', 'swift messaging', 'swift network'],
+    'SAP H2H': ['sap h2h', 'host-to-host', 'host to host', 'h2h integration'],
+    'SAP EBS': ['sap ebs', 'electronic bank statement'],
+    'SAP BRS': ['sap brs', 'bank reconciliation statement'],
     'SAP SD': ['sap sd', 'sales distribution', 'order to cash', 'o2c'],
     # REAL BUG FIX (2026-08-18): 'materials management'/'procurement' alone
     # are generic engineering/business terms, not SAP-specific -- they

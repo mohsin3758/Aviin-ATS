@@ -658,9 +658,12 @@ async def public_apply(
             # 2026-09-02 gap-audit fix: public apply never auto-scored at
             # all before this — same fire-and-forget convention as every
             # other real intake path.
-            import asyncio
+            # Real bug fix (this session): a bare create_task() can be
+            # garbage-collected before it runs; _fire_and_forget keeps a
+            # real reference until it completes.
+            from services.resume_intake_service import _fire_and_forget
             from routers.intelligence import auto_score_candidate_bg
-            asyncio.create_task(auto_score_candidate_bg(tenant_id, str(cand['id'])))
+            _fire_and_forget(auto_score_candidate_bg(tenant_id, str(cand['id'])))
         elif parsed.get("_resume_text"):
             # Existing candidate re-applying with a resume — same
             # gap-fill-only convention as upsert_candidate(), never

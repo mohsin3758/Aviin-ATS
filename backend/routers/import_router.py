@@ -13,6 +13,7 @@ import_router = APIRouter(prefix="/import", tags=["import"])
 @import_router.post("/candidates")
 async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get_actor)):
     from routers.intelligence import auto_score_candidate_bg
+    from services.resume_intake_service import _fire_and_forget
     content = (await file.read()).decode("utf-8", "ignore")
     reader = csv.DictReader(io.StringIO(content))
     created = updated = errors = skipped_owned = 0
@@ -80,7 +81,11 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                     # convention as every other intake path — a large import
                     # queues many background scoring tasks rather than
                     # blocking the import itself on any of them.
-                    asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, str(new_id)))
+                    # Real bug fix (this session): a bare create_task() can
+                    # be garbage-collected before it runs — _fire_and_forget
+                    # keeps a real reference (in a module-level set) until
+                    # each task completes.
+                    _fire_and_forget(auto_score_candidate_bg(actor.tenant_id, str(new_id)))
                     # Individual recruiter ownership (2026-08-11): whoever
                     # runs the bulk import individually owns every new
                     # candidate it creates for 30 days (never the existing-
@@ -112,6 +117,7 @@ async def candidate_import_template(actor: Actor=Depends(get_actor)):
 async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_actor)):
     """Import candidates from .xlsx file."""
     from routers.intelligence import auto_score_candidate_bg
+    from services.resume_intake_service import _fire_and_forget
     try:
         import openpyxl, io as _io
     except ImportError:
@@ -172,7 +178,12 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                         "VALUES ($1,$2,'resume_processing','bulk_import',TRUE,$3)",
                         actor.tenant_id, new_id, f"Added via Excel bulk import by {actor.user_id}.")
                     await source_attribution.record_source_attribution(conn, actor.tenant_id, str(new_id), 'excel_import')
-                    asyncio.create_task(auto_score_candidate_bg(actor.tenant_id, str(new_id)))
+                    # Real bug fix (this session): see import_candidates()
+                    # above — a bare create_task() here can be garbage-
+                    # collected before it runs, silently dropping the auto
+                    # score AND the skill/experience auto-population that
+                    # same background function performs.
+                    _fire_and_forget(auto_score_candidate_bg(actor.tenant_id, str(new_id)))
                     # Same individual-ownership claim as the CSV path above.
                     if actor.user_id and actor.email:
                         await ownership.claim_ownership(

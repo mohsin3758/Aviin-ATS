@@ -495,7 +495,8 @@ def merge_parsed(base: dict, llm: dict) -> dict:
 async def upsert_candidate(conn, tenant_id: str, parsed: dict,
                            job_board: str, label: str,
                            from_email: str, file_path: str, resume_text: str,
-                           received_by: dict | None = None) -> str:
+                           received_by: dict | None = None,
+                           name_fallback_email: str | None = None) -> str:
     """received_by: {"user_id", "email", "name"} identifying who gets
     ownership/submission credit — since 2026-09-07 (Golden Rule) this is
     the resolved SENDER identity from candidate_ownership.
@@ -506,7 +507,25 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
     to a users row. received_by itself is None only when there's no
     known sender AND no receiving-mailbox fallback at all (e.g. backlog
     reprocessing with no account context) — the candidate then falls into
-    the unassigned/review queue rather than guessing."""
+    the unassigned/review queue rather than guessing.
+
+    name_fallback_email (real bug fix, reported live: a candidate whose
+    real name couldn't be extracted from a tracking-sheet email got named
+    "Faisal K" -- the recruiter who FORWARDED it, not the actual
+    candidate). The caller's Phase B already computes a domain-gated
+    `email_hint` (blank when the sender is internal staff) specifically
+    so parse_resume_v2/extract_name_v2 never derives a name from an
+    internal forwarder's own address -- but this function's OWN separate
+    "is_name_junk" fallback below independently re-derived a name from
+    the RAW `from_email` parameter, completely bypassing that gating a
+    second time. Root-caused live: extract_name_v2 correctly returned
+    None for this exact email (confirmed by re-running it against the
+    real stored data), yet the candidate still ended up named after the
+    sender -- because this second fallback never got the memo. Defaults
+    to `from_email` when not given, preserving existing behavior for
+    callers with no internal-sender concept of their own (WhatsApp intake,
+    the manual-edit endpoint) -- only a caller that has already computed
+    a gated value needs to pass it here."""
     cand_email = (parsed.get('email') or '').lower().strip().lstrip('-.+@')
     # Reject: content-id emails (image001.png@...), too-short domains, no real TLD
     if cand_email:
@@ -579,7 +598,8 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
         'paynet','linkedin customer','telus','billdesk','accenture service']
     is_name_junk = not name or any(p in name_lower for p in NON_RESUME_NAMES)
     if is_name_junk:
-        name = from_email.split('@')[0].replace('.', ' ').replace('-', ' ').replace('_', ' ').title() if '@' in from_email else 'Unknown Candidate'
+        _email_for_name = from_email if name_fallback_email is None else name_fallback_email
+        name = _email_for_name.split('@')[0].replace('.', ' ').replace('-', ' ').replace('_', ' ').title() if '@' in _email_for_name else 'Unknown Candidate'
     name = name.strip()[:200]
 
     try:
@@ -1240,7 +1260,8 @@ async def process_email_for_resume(
                            "name": sender["name"], "via": src}
         candidate_id = await upsert_candidate(conn, tenant_id, parsed, job_board, label,
                                               from_email, file_path, resume_text,
-                                              received_by=received_by)
+                                              received_by=received_by,
+                                              name_fallback_email=email_hint)
     else:
         candidate_id = None
         print(f'[Routing] LOW_CONFIDENCE (conf={conf:.2f}): file stored, no candidate created')
