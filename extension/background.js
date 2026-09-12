@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 7;
+const BG_VERSION = 8;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -198,20 +198,53 @@ const ADAPTERS = {
       const headline = ogParsed.headline
         || (ogDescription ? ogDescription.slice(0, 220) : null)
         || safe('headline-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null);
-      const location = safe('location', () => firstMatch(['.pv-text-details__left-panel .text-body-small.inline.t-black--light', '.pv-text-details__left-panel .text-body-small']), null);
+      // Real gap fix (reported live: name now extracts fine via og:title,
+      // but company/location/experience were still empty -- these were
+      // still on the old class-based selectors, which fail for the same
+      // reason og:title was needed for name: LinkedIn's classes are
+      // auto-generated per deploy). None of these three have a meta-tag
+      // equivalent, so instead of guessing another class name, each keys
+      // off something LinkedIn can't casually rename without breaking a
+      // real feature: a functional link href, or a fixed English label.
+      function locationFromContactInfoRow() {
+        const contactLink = Array.from(document.querySelectorAll('a'))
+          .find((a) => (a.textContent || '').trim() === 'Contact info');
+        const row = contactLink && contactLink.parentElement;
+        if (!row) return null;
+        const text = row.textContent.replace('Contact info', '').replace(/[·•]/g, ' ').replace(/\s+/g, ' ').trim();
+        return text || null;
+      }
+      function currentCompanyFromLink() {
+        const links = document.querySelectorAll('a[href*="/company/"]');
+        for (const a of links) {
+          const text = (a.textContent || '').trim();
+          if (text) return text;
+        }
+        return null;
+      }
 
-      const currentCompany = safe('company', () => {
-        const expSection = document.getElementById('experience');
-        const expContainer = expSection && expSection.closest('section');
-        const firstItem = expContainer && expContainer.querySelector('li');
-        if (!firstItem) return null;
-        const spans = Array.from(firstItem.querySelectorAll('span[aria-hidden="true"]'))
-          .map((s) => s.textContent.trim()).filter(Boolean);
-        return spans[1] || null; // [role title, company name, duration, location...]
-      }, null);
+      const location = safe('location', locationFromContactInfoRow, null)
+        || safe('location-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-small.inline.t-black--light', '.pv-text-details__left-panel .text-body-small']), null);
+
+      const currentCompany = safe('company-link', currentCompanyFromLink, null)
+        || safe('company-dom', () => {
+          const expSection = document.getElementById('experience');
+          const expContainer = expSection && expSection.closest('section');
+          const firstItem = expContainer && expContainer.querySelector('li');
+          if (!firstItem) return null;
+          const spans = Array.from(firstItem.querySelectorAll('span[aria-hidden="true"]'))
+            .map((s) => s.textContent.trim()).filter(Boolean);
+          return spans[1] || null; // [role title, company name, duration, location...]
+        }, null);
 
       const expLines = safe('experience-section', () => sectionLines('experience', 10), []);
       const eduLines = safe('education-section', () => sectionLines('education', 6), []);
+      // Diagnostic-only, always captured: whether the #experience/
+      // #education anchors exist at all right now -- if resume_text_like
+      // is still empty after this fix, this line says whether the
+      // anchors are gone/renamed (needs a different approach entirely)
+      // versus present but empty (a narrower li/section-structure fix).
+      debug.push(`sections: #experience=${!!document.getElementById('experience')} #education=${!!document.getElementById('education')} expLines=${expLines.length} eduLines=${eduLines.length}`);
       const resumeTextLike = [
         expLines.length ? 'Experience:\n' + expLines.join('\n') : '',
         eduLines.length ? 'Education:\n' + eduLines.join('\n') : '',
