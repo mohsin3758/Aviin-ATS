@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 13;
+const BG_VERSION = 14;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -195,7 +195,21 @@ async function scrapeLinkedinProfile() {
         for (const heading of headings) {
           const container = heading.closest('section') || heading.parentElement;
           if (!container) continue;
-          const lines = cleanBlockText(container).split('\n').filter((l) => !l.toLowerCase().startsWith(needle));
+          // Strip just the heading TEXT from a line, rather than
+          // discarding the whole line -- if the heading and its first
+          // content line ever end up concatenated with no separator
+          // (browser innerText normally inserts one between block
+          // elements, but isn't guaranteed for every possible layout),
+          // dropping the whole line would silently lose real content
+          // instead of just the heading label.
+          const lines = cleanBlockText(container).split('\n')
+            .map((l) => {
+              if (!l.toLowerCase().startsWith(needle)) return l;
+              // Also drop a bare leftover count like "(4)" once the
+              // heading word itself is stripped from e.g. "Skills (4)".
+              return l.slice(needle.length).trim().replace(/^\(\d+\)$/, '').trim();
+            })
+            .filter(Boolean);
           const text = lines.join('\n');
           if (text.length > 5) return { text: text.slice(0, maxLen || 2000), lines };
         }
@@ -319,7 +333,10 @@ async function scrapeLinkedinProfile() {
       async function openContactInfoAndExtract() {
         const contactLink = Array.from(document.querySelectorAll('a'))
           .find((a) => (a.textContent || '').trim() === 'Contact info');
-        if (!contactLink) return { email: null, phone: null };
+        if (!contactLink) {
+          debug.push('contact-info: no "Contact info" link found on this page');
+          return { email: null, phone: null };
+        }
         contactLink.click();
 
         let dialog = null;
@@ -329,7 +346,21 @@ async function scrapeLinkedinProfile() {
           if (dialog && (dialog.querySelector('a[href^="mailto:"]') || /contact info/i.test(dialog.textContent))) break;
           await new Promise((resolve) => setTimeout(resolve, 150));
         }
-        if (!dialog) return { email: null, phone: null };
+        if (!dialog) {
+          // Real diagnostic gap (this session, "deep check to get mobile
+          // number and email id"): every extension-imported candidate so
+          // far has BOTH fields empty, with no way to tell whether that's
+          // because the click never opened anything (link.click() from
+          // an injected script is one plausible reason: some sites
+          // ignore script-dispatched clicks on certain interactive
+          // elements, unlike a real, OS-generated click) or because
+          // those specific profiles simply don't expose contact info to
+          // this viewer (very plausible on its own -- LinkedIn's own
+          // visibility rule, not a bug). This distinguishes the two
+          // instead of returning the same silent {null,null} either way.
+          debug.push('contact-info: clicked "Contact info" but no [role="dialog"] appeared within 2.5s');
+          return { email: null, phone: null };
+        }
 
         const mailLink = dialog.querySelector('a[href^="mailto:"]');
         const email = mailLink
@@ -343,6 +374,14 @@ async function scrapeLinkedinProfile() {
           const sib = phoneLabel.nextElementSibling || (phoneLabel.parentElement && phoneLabel.parentElement.nextElementSibling);
           const text = sib && sib.textContent && sib.textContent.trim();
           if (text) phone = text;
+        }
+        // Dialog genuinely opened but had neither -- distinguishes "this
+        // profile just doesn't expose contact info to this viewer" (a
+        // real LinkedIn visibility rule, expected to happen often) from
+        // the click/dialog-detection failing outright (the two cases
+        // above).
+        if (!email && !phone) {
+          debug.push(`contact-info: dialog opened but had no mailto: link or "Phone" label (dialog text: "${(dialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 150)}")`);
         }
 
         const dismissBtn = dialog.querySelector('button[aria-label="Dismiss"], button[aria-label*="Dismiss" i], button[aria-label*="close" i]');
@@ -390,6 +429,36 @@ async function scrapeLinkedinProfile() {
       const contact = await asyncSafe('contact-info', openContactInfoAndExtract, { email: null, phone: null });
       debug.push(`contact-info: email=${!!contact.email} phone=${!!contact.phone}`);
 
+      // Real gap fix ("deep check to get mobile number and email id"):
+      // the Contact info panel is the authoritative source when it has
+      // something, but it depends on (a) LinkedIn actually opening the
+      // panel for a script-dispatched click, which isn't guaranteed the
+      // same way a real user click is, and (b) the profile owner having
+      // chosen to expose that field to this viewer at all -- either one
+      // failing looks identical from here: empty. Some recruiters/
+      // candidates instead write their email or number directly into
+      // their headline or About/Experience text (a common practice to
+      // stay reachable) -- this reads it from there as a second, click-
+      // free path, filling in ONLY whatever the panel didn't already
+      // provide. Scoped to the headline/section text already collected
+      // above (never the raw page/DOM), so it can't pick up an
+      // unrelated email/phone from an ad, a script tag, or someone
+      // else's profile card elsewhere on the page.
+      const contactTextScan = safe('contact-text-scan', () => {
+        const blob = [headline, resumeTextLike].filter(Boolean).join('\n');
+        const emailMatch = blob.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        const phoneMatch = blob.match(/(\+?\d[\d\s().-]{8,}\d)/);
+        return {
+          email: emailMatch ? emailMatch[0] : null,
+          phone: phoneMatch ? phoneMatch[0].replace(/\s+/g, ' ').trim() : null,
+        };
+      }, { email: null, phone: null });
+      const finalEmail = contact.email || contactTextScan.email;
+      const finalPhone = contact.phone || contactTextScan.phone;
+      if (contactTextScan.email || contactTextScan.phone) {
+        debug.push(`contact-text-scan (used as fallback where panel had none): email=${!!contactTextScan.email} phone=${!!contactTextScan.phone}`);
+      }
+
       return {
         name: name || null,
         current_title: headline || null,
@@ -397,8 +466,8 @@ async function scrapeLinkedinProfile() {
         location: location || null,
         profile_url: safe('url', normalizedUrl, window.location.href),
         linkedin_url: safe('url', normalizedUrl, window.location.href),
-        email: contact.email || null,
-        phone: contact.phone || null,
+        email: finalEmail || null,
+        phone: finalPhone || null,
         resume_text_like: resumeTextLike,
         _debug: debug.length ? debug : undefined,
       };
