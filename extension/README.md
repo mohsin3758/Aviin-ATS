@@ -4,10 +4,21 @@ One-click import of a candidate from a LinkedIn profile page into AVIIN ATS. See
 
 ## Load it locally (development / not yet published)
 
-1. Open `chrome://extensions` in Chrome (or Edge's equivalent `edge://extensions`).
+This is one Manifest V3 extension that works unchanged in both Chrome and Microsoft Edge — Edge is Chromium-based and implements the exact same `chrome.*` extension APIs this uses (`storage`, `scripting`, `tabs`, `notifications`), so there's no separate Edge build or code path. Load the same `extension/` folder in whichever browser(s) you use for LinkedIn:
+
+**Chrome:**
+1. Open `chrome://extensions`.
 2. Turn on **Developer mode** (top right).
 3. Click **Load unpacked** and select this `extension/` folder.
 4. The extension icon appears in the toolbar. Pin it for easy access.
+
+**Microsoft Edge:**
+1. Open `edge://extensions`.
+2. Turn on **Developer mode** (left sidebar toggle).
+3. Click **Load unpacked** and select this same `extension/` folder.
+4. The extension icon appears in the toolbar. Pin it for easy access.
+
+Logging in, LinkedIn cookies/session, and the AVIIN ATS account are all per-browser — if you use LinkedIn in both Chrome and Edge, load the extension in each and log in to AVIIN ATS separately in each; nothing is shared between the two installs (each browser has its own `chrome.storage.local`).
 
 ## Test the flow end-to-end
 
