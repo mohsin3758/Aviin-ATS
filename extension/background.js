@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 9;
+const BG_VERSION = 10;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -214,30 +214,75 @@ const ADAPTERS = {
       );
 
       const ogParsed = safe('og-title', parseOgTitle, { name: null, headline: null });
-      const ogDescription = safe('og-description', () => metaContent('meta[property="og:description"], meta[name="description"]'), null);
+      // Real gap fix (reported live: a candidate got saved with headline
+      // "HR proBusiness Consulting and Services4,416 followers" -- text
+      // that appears NOWHERE on the actual profile page). og:description
+      // is a LinkedIn SPA meta tag; client-side navigation between
+      // profiles in the same tab doesn't reliably re-render it, so it
+      // can silently hold content left over from a DIFFERENT page/
+      // widget. Using it as a headline fallback risked writing flatly
+      // wrong text onto a candidate's record -- worse than leaving the
+      // field blank (see CLAUDE.md: never guess-correct an identity
+      // field). It's demoted to logging-only below; the DOM-derived
+      // headline (found the same structural way as location, a few
+      // lines down) is what actually replaces it.
+      const ogDescriptionRaw = safe('og-description', () => metaContent('meta[property="og:description"], meta[name="description"]'), null);
 
       const name = ogParsed.name
         || safe('name-dom', () => firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1', 'main h2', 'h2']), null);
-      const headline = ogParsed.headline
-        || (ogDescription ? ogDescription.slice(0, 220) : null)
-        || safe('headline-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null);
       // Real gap fix (reported live TWICE: name now extracts fine via
       // og:title, but company/location/experience were still empty on
       // both a first attempt using href/id-based hooks AND real current
-      // profiles). Rather than guess a fourth selector blind, this now
-      // grabs each section by its heading text (see sectionTextByHeading
-      // above) and reports concretely, every time, whether each hook
-      // even found anything -- so if a field is STILL empty after this,
-      // the next console log says exactly which lookup came up empty
-      // instead of requiring another round-trip screenshot.
-      function locationFromContactInfoRow() {
+      // profiles). Rather than guess a fifth selector blind, this walks
+      // UP from the fixed "Contact info" label until it reaches an
+      // ancestor whose own text is more than just that label -- LinkedIn
+      // wraps each short text run in its own span, so the immediate
+      // parent is often empty of anything else and a fixed single hop
+      // (the earlier attempt) undershoots the real row. The headline is
+      // then read off that row's previous sibling -- the visual order
+      // (name, headline, location) is a much more stable assumption than
+      // any specific tag or class.
+      function findLocationRow() {
         const contactLink = Array.from(document.querySelectorAll('a'))
           .find((a) => (a.textContent || '').trim() === 'Contact info');
-        const row = contactLink && contactLink.parentElement;
-        if (!row) return null;
-        const text = row.textContent.replace('Contact info', '').replace(/[·•]/g, ' ').replace(/\s+/g, ' ').trim();
-        return text || null;
+        if (!contactLink) return null;
+        let node = contactLink.parentElement;
+        for (let depth = 0; node && depth < 5; depth++) {
+          const text = node.textContent
+            .replace('Contact info', '')
+            .replace(/[·•]/g, ' ')
+            .replace(/[\d,]+\+?\s*connections?/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (text) return { node, text };
+          node = node.parentElement;
+        }
+        return null;
       }
+      const locationRow = safe('location-row', findLocationRow, null);
+      // Caught by the offline mock test before shipping (not live): a
+      // plain "take the immediately previous sibling" both undershoots
+      // when the row it wants is further back, AND wrongly grabs a
+      // company/education badge element that happens to sit between the
+      // headline and the location row. Walks back past up to a few
+      // siblings, skipping anything that IS or CONTAINS a company/school
+      // link, and stops at the name heading itself as a hard boundary.
+      const headline = safe('headline-row', () => {
+        if (!locationRow) return null;
+        let sib = locationRow.node.previousElementSibling;
+        for (let hops = 0; sib && hops < 6; hops++, sib = sib.previousElementSibling) {
+          if (/^H[1-4]$/.test(sib.tagName)) break; // reached the name heading -- stop, nothing found
+          const isBadge = (sib.matches && sib.matches('a[href*="/company/"], a[href*="/school/"]'))
+            || (sib.querySelector && sib.querySelector('a[href*="/company/"], a[href*="/school/"]'));
+          if (isBadge) continue;
+          const text = sib.textContent && sib.textContent.trim();
+          if (text && text.length > 4 && text !== name) return text;
+        }
+        return null;
+      }, null)
+        || ogParsed.headline
+        || safe('headline-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null);
+
       function currentCompanyFromLink() {
         const links = document.querySelectorAll('a[href*="/company/"]');
         for (const a of links) {
@@ -256,7 +301,6 @@ const ADAPTERS = {
         `sections found: about=${!!aboutSection} skills=${!!skillsSection} experience=${!!experienceSection} education=${!!educationSection}`
       );
 
-      const locationViaContact = safe('location-contact', locationFromContactInfoRow, null);
       // Best-effort fallback: the line right after the job title in the
       // Experience block is almost always "Company · EmploymentType"
       // (e.g. "CipherStudio · Full-time") -- not as precise as a
@@ -266,9 +310,12 @@ const ADAPTERS = {
         if (!experienceSection || !experienceSection.lines || experienceSection.lines.length < 2) return null;
         return experienceSection.lines[1].split(' · ')[0].trim() || null;
       }, null);
-      debug.push(`location-contact=${JSON.stringify(locationViaContact)} company-from-experience=${JSON.stringify(companyFromExperience)}`);
+      debug.push(
+        `og:description(unused,logging-only)="${(ogDescriptionRaw || '').slice(0, 120)}" ` +
+        `location-row=${JSON.stringify(locationRow && locationRow.text)} company-from-experience=${JSON.stringify(companyFromExperience)}`
+      );
 
-      const location = locationViaContact
+      const location = (locationRow && locationRow.text)
         || safe('location-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-small.inline.t-black--light', '.pv-text-details__left-panel .text-body-small']), null);
 
       const currentCompany = safe('company-link', currentCompanyFromLink, null)
