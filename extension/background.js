@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 12;
+const BG_VERSION = 13;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -92,27 +92,28 @@ async function getAuthState() {
 // to a single executeScript({func}) call — the standard, reliable MV3
 // content-extraction pattern. Adding a new site (Naukri, Foundit) means
 // adding one more entry to ADAPTERS below; nothing else changes.
-const ADAPTERS = {
-  linkedin: {
-    urlPattern: /^https:\/\/(www\.)?linkedin\.com\/in\//,
-    // Runs INSIDE the LinkedIn page, in the extension's isolated world.
-    // Also clicks the real "Contact info" link and reads whatever
-    // LinkedIn itself declares there (email/phone) -- LinkedIn profiles
-    // routinely have neither visible to a given viewer at all, and this
-    // deliberately never invents one (see backend/routers/
-    // gap_features.py's ext_capture_convert docstring for why: a
-    // placeholder email caused a real candidate-merge corruption
-    // incident elsewhere in this codebase). LinkedIn's DOM uses
-    // obfuscated, frequently-changing class names, so extraction here
-    // deliberately avoids them: Open Graph meta tags for name/headline,
-    // heading text ("Experience"/"Education"/"Skills"/"About") for
-    // sections, and fixed accessibility hooks (the "Contact info" label,
-    // [role="dialog"], mailto: links) for contact details -- all things
-    // LinkedIn can't casually rename without breaking a real feature for
-    // a real visitor. This function is the one piece that will need
-    // occasional upkeep if LinkedIn changes its markup — nothing else in
-    // the extension needs to change alongside it.
-    scrapeFn: async function scrapeLinkedinProfile() {
+// Runs INSIDE the LinkedIn page, in the extension's isolated world.
+// Also clicks the real "Contact info" link and reads whatever
+// LinkedIn itself declares there (email/phone) -- LinkedIn profiles
+// routinely have neither visible to a given viewer at all, and this
+// deliberately never invents one (see backend/routers/
+// gap_features.py's ext_capture_convert docstring for why: a
+// placeholder email caused a real candidate-merge corruption
+// incident elsewhere in this codebase). LinkedIn's DOM uses
+// obfuscated, frequently-changing class names, so extraction here
+// deliberately avoids them: Open Graph meta tags for name/headline,
+// heading text ("Experience"/"Education"/"Skills"/"About") for
+// sections, and fixed accessibility hooks (the "Contact info" label,
+// [role="dialog"], mailto: links) for contact details -- all things
+// LinkedIn can't casually rename without breaking a real feature for
+// a real visitor. Reused as-is for Sales Navigator (see ADAPTERS
+// below) -- a Lead page renders the same underlying profile data, just
+// inside different UI chrome, and this function reads document/window
+// state generically rather than hardcoding a linkedin.com/in/-specific
+// assumption anywhere. This function is the one piece that will need
+// occasional upkeep if LinkedIn changes its markup — nothing else in
+// the extension needs to change alongside it.
+async function scrapeLinkedinProfile() {
       // Real gap fix (reported live: "Could not read this profile" on a
       // page that was visibly, fully loaded — name, photo, headline all
       // clearly rendered). The whole body used to run un-guarded: any
@@ -401,7 +402,28 @@ const ADAPTERS = {
         resume_text_like: resumeTextLike,
         _debug: debug.length ? debug : undefined,
       };
-    },
+}
+
+const ADAPTERS = {
+  linkedin: {
+    urlPattern: /^https:\/\/(www\.)?linkedin\.com\/in\//,
+    scrapeFn: scrapeLinkedinProfile,
+  },
+  salesNavigator: {
+    // Real gap fix (reported live, "is we missing any features"): best-
+    // effort, NOT verified against a real Sales Navigator page (no
+    // Sales Navigator account/screenshot was available while building
+    // this). Reuses the exact same extraction function as a plain
+    // profile page rather than guessing new selectors -- a Lead page
+    // renders the same underlying profile data inside different UI
+    // chrome, and scrapeLinkedinProfile doesn't hardcode anything
+    // specific to linkedin.com/in/ (it reads document/window state
+    // generically). If an import here comes back with fields missing
+    // that a matching linkedin.com/in/ import gets fine, check the
+    // _debug output in the service worker console first -- same
+    // diagnostic path used to fix every other gap in this file.
+    urlPattern: /^https:\/\/(www\.)?linkedin\.com\/sales\/(lead|people)\//,
+    scrapeFn: scrapeLinkedinProfile,
   },
 };
 
@@ -454,6 +476,158 @@ async function scrapeActiveTab() {
     return { ok: false, error: `Could not read this profile — try reloading the LinkedIn page and importing again.${debugInfo}` };
   }
   return { ok: true, scraped };
+}
+
+const SEARCH_RESULTS_URL_PATTERN = /^https:\/\/(www\.)?linkedin\.com\/search\/results\/people\//;
+
+// Real gap fix (reported live, "is we missing any features"): the
+// single-profile flow above only ever handles one linkedin.com/in/
+// page at a time -- a recruiter working a list of search results had
+// to open each one individually. This reads whatever result cards are
+// ALREADY rendered on a people-search page (no scrolling/auto-paging --
+// only what a human looking at the page right now can already see,
+// same "never simulate more activity than a human click" principle as
+// the rest of this file) and returns a thin record per profile: name,
+// best-effort headline/location, and the profile URL (the one field
+// that's always reliable, since it's the link's own href). It
+// deliberately does NOT open each profile individually to enrich it
+// (company-via-/company/-link, About/Experience text, Contact info) --
+// doing that across many profiles in one click would start to look
+// like automated crawling rather than reading what's on screen, which
+// this project avoids. A thin record imported this way can always be
+// enriched later by opening that one profile and clicking "Update
+// From LinkedIn" (see ext_capture_convert's fill-blank-fields logic).
+function scrapeSearchResultsList() {
+  const debug = [];
+  function safe(label, fn, fallback) {
+    try { return fn(); } catch (e) { debug.push(`${label}: ${e?.message || e}`); return fallback; }
+  }
+  function normalizeUrl(href) {
+    try {
+      const u = new URL(href, window.location.href);
+      return u.origin + u.pathname.replace(/\/$/, '');
+    } catch (e) {
+      return href;
+    }
+  }
+  function cardLines(el) {
+    const raw = el.innerText || el.textContent || '';
+    return raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  }
+
+  // Noise lines to filter out of a card's text before guessing at
+  // name/headline/location -- LinkedIn search cards mix in degree
+  // badges, action buttons, and connection counts in varying order/
+  // positions depending on account type, so this filters by content
+  // rather than a fixed line index. Badges are often rendered as
+  // "· 2nd" (a leading separator dot) rather than a bare "2nd", so
+  // each line is stripped of leading "·"/"•" before testing.
+  const NOISE = /^(1st|2nd|3rd|\d+(st|nd|rd|th)?\+?\s*connection|connect$|message$|follow$|pending$|view profile|mutual connection|\d+\s*mutual|current:|previous:|see more$|\d+\s*followers?$)/i;
+  const stripLeadingDot = (l) => l.replace(/^[·•]+\s*/, '').trim();
+
+  const seen = new Set();
+  const results = [];
+  const links = safe('links', () => Array.from(document.querySelectorAll('a[href*="/in/"]')), []);
+  for (const link of links) {
+    if (results.length >= 25) break; // safety cap -- one page's worth, not an open-ended crawl
+    const url = safe('normalize', () => normalizeUrl(link.href), null);
+    if (!url || seen.has(url)) continue;
+    if (!/\/in\/[^/]+$/.test(safe('path', () => new URL(url).pathname, ''))) continue; // skip non-profile links (e.g. /in/ mentions in unrelated text)
+
+    const card = link.closest('li') || link.closest('[data-view-name]') || link.parentElement;
+    if (!card) continue;
+
+    const lines = safe('card-lines', () => cardLines(card), []);
+    // Real gap fix (caught before shipping, via an offline mock test):
+    // filtering noise only AFTER picking a name meant a card with no
+    // real name text (just badges/buttons) fabricated a fake candidate
+    // named "1st" or similar. Both the name fallback and headline/
+    // location now draw from the SAME noise-filtered line list, so a
+    // card with nothing real to show is skipped outright instead of
+    // producing a bogus record.
+    const cleanLines = lines.filter((l) => l && l.length > 2 && !NOISE.test(stripLeadingDot(l)));
+    let name = safe('name', () => (link.textContent || '').trim(), '') || null;
+    if (!name) name = cleanLines[0] || null;
+    if (!name) continue; // no usable name -- skip rather than create a blank/bogus candidate
+
+    const candidateLines = cleanLines.filter((l) => l !== name);
+    const headline = candidateLines[0] || null;
+    const location = candidateLines[1] || null;
+
+    seen.add(url);
+    results.push({
+      name, current_title: headline, current_company: null, location,
+      profile_url: url, linkedin_url: url, email: null, phone: null,
+      resume_text_like: null,
+    });
+  }
+  return { results, _debug: debug };
+}
+
+async function scrapeActiveTabSearchResults() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.url) return { ok: false, error: 'No active tab' };
+  if (!SEARCH_RESULTS_URL_PATTERN.test(tab.url)) return { ok: false, error: 'not_supported_page' };
+
+  let execResults;
+  try {
+    execResults = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: scrapeSearchResultsList });
+    console.log('[AVIIN Import] raw search-results scrape:', JSON.stringify(execResults));
+  } catch (e) {
+    return { ok: false, error: `Could not read this page: ${e?.message || e}` };
+  }
+  const frameResult = execResults && execResults[0];
+  if (frameResult && frameResult.error) {
+    return { ok: false, error: `Scraper error on the page: ${frameResult.error.message || frameResult.error}` };
+  }
+  const data = frameResult && frameResult.result;
+  if (!data || !data.results || !data.results.length) {
+    return { ok: false, error: 'No profiles found on this page — scroll so some results are visible, then try again.' };
+  }
+  return { ok: true, list: data.results };
+}
+
+async function importSearchResults(list) {
+  const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length };
+  for (const scraped of list) {
+    // Sequential, not parallel -- a batch of concurrent requests against
+    // a recruiter's own account looks a lot more like automation than a
+    // human clicking through a handful of imports one at a time.
+    const result = await importProfile(scraped);
+    if (result.status === 'created') summary.created += 1;
+    else if (result.status === 'updated') summary.updated += 1;
+    else if (result.status === 'no_change') summary.no_change += 1;
+    else summary.error += 1;
+  }
+  return summary;
+}
+
+// Real gap fix (reported live, "is we missing any features"): the popup
+// is a normal MV3 action popup -- Chrome tears it down the instant it
+// loses focus (clicking elsewhere, alt-tabbing). An import takes a
+// couple of seconds (scrape + the Contact info click-and-wait + two API
+// calls); if the popup closes before that finishes, sendResponse still
+// gets called but nothing is listening any more -- the import itself
+// completes or fails on the server exactly the same either way, but the
+// user never finds out and has no way to tell an early close from a
+// real failure. A system notification (independent of the popup's own
+// lifetime) closes that gap.
+function notifyImportResult(result) {
+  const title = 'AVIIN ATS Import';
+  let message;
+  switch (result.status) {
+    case 'created': message = `Imported: ${result.name || 'candidate'}`; break;
+    case 'updated': {
+      const fields = (result.updatedFields || []).join(', ');
+      message = `Updated ${result.name || 'candidate'}${fields ? ` — filled in: ${fields}` : ''}`;
+      break;
+    }
+    case 'no_change': message = `${result.name || 'Candidate'} is already up to date.`; break;
+    case 'not_supported': message = 'Open a LinkedIn profile page to import.'; break;
+    case 'error': message = result.message || 'Something went wrong.'; break;
+    default: return;
+  }
+  chrome.notifications.create('', { type: 'basic', iconUrl: 'icons/icon128.png', title, message });
 }
 
 async function importProfile(scraped) {
@@ -530,11 +704,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'IMPORT_ACTIVE_TAB': {
           const scrapeResult = await scrapeActiveTab();
           if (!scrapeResult.ok) {
-            sendResponse({ status: scrapeResult.error === 'not_supported_page' ? 'not_supported' : 'error', message: scrapeResult.error });
+            const failResult = { status: scrapeResult.error === 'not_supported_page' ? 'not_supported' : 'error', message: scrapeResult.error };
+            notifyImportResult(failResult);
+            sendResponse(failResult);
             break;
           }
           const importResult = await importProfile(scrapeResult.scraped);
+          notifyImportResult(importResult);
           sendResponse(importResult);
+          break;
+        }
+        case 'IMPORT_SEARCH_RESULTS': {
+          const listResult = await scrapeActiveTabSearchResults();
+          if (!listResult.ok) {
+            const failResult = { status: listResult.error === 'not_supported_page' ? 'not_supported' : 'error', message: listResult.error };
+            sendResponse(failResult);
+            break;
+          }
+          const summary = await importSearchResults(listResult.list);
+          chrome.notifications.create('', {
+            type: 'basic', iconUrl: 'icons/icon128.png', title: 'AVIIN ATS Import',
+            message: `Bulk import done: ${summary.created} created, ${summary.updated} updated, ${summary.no_change} already up to date, ${summary.error} failed (of ${summary.total}).`,
+          });
+          sendResponse({ status: 'batch_done', summary });
           break;
         }
         case 'CHECK_TAB_DUPLICATE': {

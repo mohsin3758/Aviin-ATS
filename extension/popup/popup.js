@@ -80,10 +80,21 @@ async function renderReady(email) {
   ]));
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const isLinkedInProfile = !!tab?.url && /^https:\/\/(www\.)?linkedin\.com\/in\//.test(tab.url);
+  const isLinkedInProfile = !!tab?.url && /^https:\/\/(www\.)?linkedin\.com\/(in|sales\/(lead|people))\//.test(tab.url);
+  const isSearchResultsPage = !!tab?.url && /^https:\/\/(www\.)?linkedin\.com\/search\/results\/people\//.test(tab.url);
 
-  if (!isLinkedInProfile) {
-    root.appendChild(el('div', { class: 'muted', text: 'Open a LinkedIn profile to import a candidate.' }));
+  if (isSearchResultsPage) {
+    // Real gap fix (reported live, "is we missing any features"): a
+    // recruiter working a list of search results had to open each
+    // profile individually before this. Reads only what's already
+    // rendered on the page (name/headline/location per card, no
+    // scrolling or auto-paging) and imports each one through the same
+    // create-or-fill-blanks pipeline as a single import.
+    const btn = el('button', { id: 'action-btn', text: 'Import All Visible Profiles', onclick: onImportSearchResultsClick });
+    root.appendChild(btn);
+    root.appendChild(el('div', { id: 'result' }));
+  } else if (!isLinkedInProfile) {
+    root.appendChild(el('div', { class: 'muted', text: 'Open a LinkedIn profile, or a LinkedIn people-search results page, to import candidates.' }));
   } else {
     // Real feature (follow-up): check before showing Import at all,
     // so a profile already in AVIIN ATS shows that immediately instead
@@ -109,7 +120,7 @@ async function renderReady(email) {
       // refreshed instead of staying stuck incomplete forever. Never
       // re-creates a duplicate, and never overwrites a value that's
       // already there.
-      const btn = el('button', { text: dupeResult?.matched ? 'Update From LinkedIn' : 'Import This Profile', onclick: onImportClick });
+      const btn = el('button', { id: 'action-btn', text: dupeResult?.matched ? 'Update From LinkedIn' : 'Import This Profile', onclick: onImportClick });
       root.insertBefore(btn, root.lastElementChild);
       root.insertBefore(el('div', { id: 'result' }), root.lastElementChild);
     });
@@ -121,7 +132,7 @@ async function renderReady(email) {
 }
 
 async function onImportClick() {
-  const btn = root.querySelector('button');
+  const btn = document.getElementById('action-btn');
   const resultDiv = document.getElementById('result');
   const originalLabel = btn.textContent; // 'Import This Profile' or 'Update From LinkedIn'
   btn.disabled = true;
@@ -151,6 +162,37 @@ async function onImportClick() {
       `Already in AVIIN ATS: <strong>${escapeHtml(result.name)}</strong> — already up to date.<br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View existing →</a>`));
   } else if (result.status === 'not_supported') {
     resultDiv.appendChild(statusBox('warn', 'Open a LinkedIn profile page to import.'));
+  } else {
+    resultDiv.appendChild(statusBox('err', escapeHtml(result.message || 'Something went wrong.')));
+  }
+}
+
+async function onImportSearchResultsClick() {
+  const btn = document.getElementById('action-btn');
+  const resultDiv = document.getElementById('result');
+  btn.disabled = true;
+  btn.textContent = 'Importing…';
+  resultDiv.innerHTML = '';
+  // Note: this can take a while (one create/dedup-check request per
+  // visible profile, done sequentially on purpose -- see
+  // importSearchResults in background.js). A completion notification
+  // fires regardless of whether this popup is still open by the time
+  // it finishes.
+  resultDiv.appendChild(el('div', { class: 'muted', text: 'Importing each visible profile — this can take a little while…' }));
+
+  const result = await sendMessage({ type: 'IMPORT_SEARCH_RESULTS' });
+
+  btn.disabled = false;
+  btn.textContent = 'Import All Visible Profiles';
+  resultDiv.innerHTML = '';
+
+  if (result.status === 'batch_done') {
+    const s = result.summary;
+    resultDiv.appendChild(statusBox('good',
+      `✓ Done: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).` +
+      `<br/><a href="https://ats.aviintech.com/captured-profiles" target="_blank">View Captured Profiles →</a>`));
+  } else if (result.status === 'not_supported') {
+    resultDiv.appendChild(statusBox('warn', 'Open a LinkedIn people-search results page to bulk import.'));
   } else {
     resultDiv.appendChild(statusBox('err', escapeHtml(result.message || 'Something went wrong.')));
   }
