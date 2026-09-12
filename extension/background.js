@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 11;
+const BG_VERSION = 12;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -489,12 +489,22 @@ async function importProfile(scraped) {
   });
   const convertData = await convertRes.json().catch(() => ({}));
 
-  if (convertRes.status === 409 && convertData?.detail?.matched_candidate_id) {
-    return { status: 'exists', match: convertData.detail };
-  }
   if (!convertRes.ok) {
     const msg = typeof convertData?.detail === 'string' ? convertData.detail : 'Could not create the candidate';
     return { status: 'error', message: msg };
+  }
+  // Real gap fix: re-importing an already-known profile used to just
+  // refuse (409) with no action -- so a candidate created back when the
+  // scraper was broken (missing company/location/skills/email/phone)
+  // had no way to pick up the fix short of manually editing it in the
+  // ATS. The backend now fills in whatever fields are currently blank
+  // on the matched candidate and reports which ones it touched; this
+  // just surfaces that outcome instead of a flat "already exists".
+  if (convertData.status === 'updated') {
+    return { status: 'updated', candidateId: convertData.candidate_id, name: convertData.candidate_name, updatedFields: convertData.updated_fields || [] };
+  }
+  if (convertData.status === 'no_change') {
+    return { status: 'no_change', candidateId: convertData.candidate_id, name: convertData.candidate_name };
   }
   return { status: 'created', candidateId: convertData.candidate_id, name: scraped.name };
 }

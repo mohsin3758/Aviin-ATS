@@ -716,15 +716,64 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
             "linkedin_url": cap["linkedin_url"], "current_company": cap["current_company"],
         })
         if dedup.should_merge:  # EXACT_MATCH or HIGH_CONFIDENCE
-            matched_name = await conn.fetchval(
-                "SELECT full_name FROM candidates WHERE id=$1", dedup.matched_candidate_id)
-            raise HTTPException(409, {
-                "message": "Matches an existing candidate",
-                "matched_candidate_id": dedup.matched_candidate_id,
-                "matched_candidate_name": matched_name,
+            # Real gap fix (reported live): re-importing an already-known
+            # profile used to just refuse with a 409 and do nothing, even
+            # when the fresh scrape had real data the existing candidate
+            # was missing -- exactly what several earlier scraper bugs
+            # this session left blank (company/location/skills/email/
+            # phone) on candidates created before those were fixed. This
+            # now fills in ONLY fields that are currently empty on the
+            # existing candidate -- never overwrites a value that's
+            # already there, so a recruiter's manual correction in the
+            # ATS can't be silently clobbered by a re-scrape.
+            matched_id = dedup.matched_candidate_id
+            existing = await conn.fetchrow(
+                "SELECT full_name, email, phone, current_employer, location, resume_text "
+                "FROM candidates WHERE id=$1", matched_id)
+            updates: dict = {}
+            if not existing["phone"] and cap["phone"]:
+                updates["phone"] = cap["phone"]
+            if not existing["current_employer"] and cap["current_company"]:
+                updates["current_employer"] = cap["current_company"]
+            if not existing["location"] and cap["location"]:
+                updates["location"] = cap["location"]
+            if not existing["resume_text"] and cap["resume_text_like"]:
+                updates["resume_text"] = cap["resume_text_like"]
+            if not existing["email"] and cap["email"]:
+                # Guard the per-tenant UNIQUE constraint -- never let a
+                # fill-blank update collide into a DIFFERENT active
+                # candidate's identity. That exact collision (a shared
+                # placeholder email silently merging unrelated people) is
+                # the real corruption incident this codebase already had.
+                conflict = await conn.fetchval(
+                    "SELECT id FROM candidates WHERE tenant_id=$1 AND email=$2 "
+                    "AND is_active IS NOT FALSE AND id<>$3",
+                    actor.tenant_id, cap["email"], matched_id)
+                if not conflict:
+                    updates["email"] = cap["email"]
+
+            if updates:
+                set_clause = ", ".join(f"{col}=${i + 2}" for i, col in enumerate(updates))
+                await conn.execute(
+                    f"UPDATE candidates SET {set_clause}, updated_at=now() WHERE id=$1",
+                    matched_id, *updates.values(),
+                )
+            await conn.execute(
+                "UPDATE extension_captures SET candidate_id=$1 WHERE id=$2", matched_id, capture_id)
+
+            if updates:
+                from routers.intelligence import auto_score_candidate_bg
+                _fire_and_forget(auto_score_candidate_bg(
+                    actor.tenant_id, str(matched_id), skill_scan_text=cap["resume_text_like"]))
+
+            return {
+                "status": "updated" if updates else "no_change",
+                "candidate_id": str(matched_id),
+                "candidate_name": existing["full_name"],
+                "updated_fields": list(updates.keys()),
                 "decision": dedup.decision,
                 "score": dedup.score,
-            })
+            }
 
         # Never fall back to a placeholder email (e.g. the recruiter's
         # own address) when the scrape found none -- cap["email"] is
@@ -759,7 +808,7 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
     _fire_and_forget(auto_score_candidate_bg(
         actor.tenant_id, str(cand["id"]), skill_scan_text=cap["resume_text_like"]))
 
-    return {"candidate_id": str(cand["id"])}
+    return {"status": "created", "candidate_id": str(cand["id"])}
 
 
 class LinkedinCaptureIn(BaseModel):

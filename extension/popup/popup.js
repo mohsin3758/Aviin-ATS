@@ -100,11 +100,18 @@ async function renderReady(email) {
             `Already in AVIIN ATS: <strong>${escapeHtml(dupeResult.candidate_name || 'this candidate')}</strong><br/><a href="https://ats.aviintech.com/candidates/${dupeResult.candidate_id}" target="_blank">View existing →</a>`),
           root.lastElementChild,
         );
-      } else {
-        const btn = el('button', { text: 'Import This Profile', onclick: onImportClick });
-        root.insertBefore(btn, root.lastElementChild);
-        root.insertBefore(el('div', { id: 'result' }), root.lastElementChild);
       }
+      // Real gap fix: shown even when already matched, not just on a
+      // genuinely new profile -- clicking it re-scrapes and fills in
+      // whatever fields are still blank on the existing candidate (see
+      // background.js's importProfile/ext_capture_convert), so a
+      // candidate created back when the scraper had gaps can be
+      // refreshed instead of staying stuck incomplete forever. Never
+      // re-creates a duplicate, and never overwrites a value that's
+      // already there.
+      const btn = el('button', { text: dupeResult?.matched ? 'Update From LinkedIn' : 'Import This Profile', onclick: onImportClick });
+      root.insertBefore(btn, root.lastElementChild);
+      root.insertBefore(el('div', { id: 'result' }), root.lastElementChild);
     });
   }
 
@@ -116,6 +123,7 @@ async function renderReady(email) {
 async function onImportClick() {
   const btn = root.querySelector('button');
   const resultDiv = document.getElementById('result');
+  const originalLabel = btn.textContent; // 'Import This Profile' or 'Update From LinkedIn'
   btn.disabled = true;
   btn.textContent = 'Importing…';
   resultDiv.innerHTML = '';
@@ -123,15 +131,24 @@ async function onImportClick() {
   const result = await sendMessage({ type: 'IMPORT_ACTIVE_TAB' });
 
   btn.disabled = false;
-  btn.textContent = 'Import This Profile';
+  btn.textContent = originalLabel;
 
   if (result.status === 'created') {
     resultDiv.appendChild(statusBox('good',
       `✓ Imported: <strong>${escapeHtml(result.name)}</strong><br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View in ATS →</a>`));
-  } else if (result.status === 'exists') {
-    const m = result.match;
+  } else if (result.status === 'updated') {
+    // Real gap fix: re-importing an already-known profile used to just
+    // say "already exists" and do nothing -- now the backend fills in
+    // whatever fields were blank on the existing candidate (never
+    // overwrites a value that's already there), so this reports what
+    // actually changed instead of a flat "nothing happened" message.
+    const fieldLabels = { phone: 'phone', current_employer: 'company', location: 'location', resume_text: 'resume/skills text', email: 'email' };
+    const added = (result.updatedFields || []).map((f) => fieldLabels[f] || f).join(', ');
+    resultDiv.appendChild(statusBox('good',
+      `✓ Updated existing candidate: <strong>${escapeHtml(result.name)}</strong><br/>Filled in: ${escapeHtml(added)}<br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View candidate →</a>`));
+  } else if (result.status === 'no_change') {
     resultDiv.appendChild(statusBox('warn',
-      `Matches an existing candidate: <strong>${escapeHtml(m.matched_candidate_name || 'this profile')}</strong><br/><a href="https://ats.aviintech.com/candidates/${m.matched_candidate_id}" target="_blank">View existing →</a>`));
+      `Already in AVIIN ATS: <strong>${escapeHtml(result.name)}</strong> — already up to date.<br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View existing →</a>`));
   } else if (result.status === 'not_supported') {
     resultDiv.appendChild(statusBox('warn', 'Open a LinkedIn profile page to import.'));
   } else {

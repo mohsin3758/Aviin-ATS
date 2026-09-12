@@ -5,28 +5,36 @@ import { UserPlus, ExternalLink } from 'lucide-react';
 
 const card: React.CSSProperties = { background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: 18 };
 
+const FIELD_LABELS: Record<string, string> = { phone: 'phone', current_employer: 'company', location: 'location', resume_text: 'resume/skills text', email: 'email' };
+function formatUpdatedFields(fields: string[]) {
+  return fields.map((f) => FIELD_LABELS[f] || f).join(', ');
+}
+
 export default function CapturedProfilesPage() {
   const { data: captures, refetch } = useFetch<any[]>('/extension/captures?converted=false');
   const { data: linkedin } = useFetch<any[]>('/extension/linkedin');
   const [converting, setConverting] = useState<string | null>(null);
-  const [dupeNotice, setDupeNotice] = useState<{ id: string; name: string; candidateId: string } | null>(null);
+  const [dupeNotice, setDupeNotice] = useState<{ id: string; kind: 'updated' | 'no_change' | 'error'; name: string; candidateId?: string; updatedFields?: string[] } | null>(null);
 
   const convert = async (id: string) => {
     setConverting(id);
     setDupeNotice(null);
     try {
-      await apiFetch(`/extension/captures/${id}/convert`, { method: 'POST' });
+      const data = await apiFetch(`/extension/captures/${id}/convert`, { method: 'POST' });
+      // Real gap fix: a capture matching an existing candidate used to
+      // just refuse (409) with no action — previously this just failed
+      // silently (the button spun, nothing visibly happened, refetch()
+      // never ran because the throw skipped it). It now fills in
+      // whatever fields are still blank on the existing candidate
+      // (never overwrites a value that's already there) and reports
+      // what happened instead of a flat failure.
+      if (data?.status === 'updated' || data?.status === 'no_change') {
+        setDupeNotice({ id, kind: data.status, name: data.candidate_name || 'this candidate', candidateId: data.candidate_id, updatedFields: data.updated_fields });
+      }
       refetch();
     } catch (e: any) {
-      // Real gap fix: convert() now runs a real duplicate check and
-      // returns 409 with match details instead of creating a second
-      // record for someone already in the database — previously this
-      // just failed silently (the button spun, nothing visibly
-      // happened, refetch() never ran because the throw skipped it).
       const detail = e?.body?.detail;
-      if (detail?.matched_candidate_id) {
-        setDupeNotice({ id, name: detail.matched_candidate_name || 'this candidate', candidateId: detail.matched_candidate_id });
-      }
+      setDupeNotice({ id, kind: 'error', name: typeof detail === 'string' ? detail : 'Could not convert this capture' });
     }
     finally { setConverting(null); }
   };
@@ -52,10 +60,21 @@ export default function CapturedProfilesPage() {
             </div>
             {dupeNotice && dupeNotice.id === c.id && (
               <div style={{ marginTop: 6, fontSize: 11, color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 6, padding: '6px 10px' }}>
-                Matches an existing candidate: <strong>{dupeNotice.name}</strong> —{' '}
-                <a href={`/candidates/${dupeNotice.candidateId}`} target="_blank" rel="noreferrer" style={{ color: '#B45309', textDecoration: 'underline' }}>
-                  View existing
-                </a>
+                {dupeNotice.kind === 'error' ? (
+                  dupeNotice.name
+                ) : dupeNotice.kind === 'updated' && dupeNotice.updatedFields?.length ? (
+                  <>Matches an existing candidate — filled in {formatUpdatedFields(dupeNotice.updatedFields)}: <strong>{dupeNotice.name}</strong></>
+                ) : (
+                  <>Matches an existing candidate — already up to date: <strong>{dupeNotice.name}</strong></>
+                )}
+                {dupeNotice.candidateId && (
+                  <>
+                    {' '}—{' '}
+                    <a href={`/candidates/${dupeNotice.candidateId}`} target="_blank" rel="noreferrer" style={{ color: '#B45309', textDecoration: 'underline' }}>
+                      View existing
+                    </a>
+                  </>
+                )}
               </div>
             )}
           </div>
