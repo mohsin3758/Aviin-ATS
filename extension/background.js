@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 26;
+const BG_VERSION = 27;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -699,6 +699,28 @@ async function scrapeLinkedinProfile() {
       // appeared, returning as soon as they have (often faster than the
       // old fixed budget) instead of only ever waiting exactly one fixed
       // amount regardless of how long this particular page load needs.
+      // Real gap fix (reported live, confirmed by the user manually
+      // scrolling that exact page themselves: Experience/Education
+      // render FINE for a real human scroll on this profile, ruling out
+      // both a LinkedIn-side restriction and a structural DOM problem --
+      // yet a full 6-second poll of window.scrollTo() calls, one after
+      // another, still found neither heading). window.scrollTo() moves
+      // the scroll position directly; it does NOT dispatch a 'wheel' or
+      // 'touch' event the way an actual mouse/trackpad gesture does. If
+      // LinkedIn's lazy-load for these specific sections is wired to a
+      // real scroll GESTURE rather than (or in addition to) the
+      // resulting scroll position/IntersectionObserver, a position-only
+      // jump can be a no-op for it -- the exact same class of gap
+      // already found and fixed for the Contact Info panel's click
+      // (needed the fuller pointerdown/mousedown/mouseup sequence, not a
+      // bare .click()). Dispatches a real wheel event alongside each
+      // scrollTo() call, giving LinkedIn's own listener the actual event
+      // type a genuine scroll produces, not just its end position.
+      function dispatchWheel(deltaY) {
+        try {
+          window.dispatchEvent(new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true, view: window }));
+        } catch (e) { /* WheelEvent may not be constructible in every context */ }
+      }
       async function ensureSectionsRendered() {
         const scrollStep = Math.max(400, Math.floor(window.innerHeight * 0.8));
         const hasHeading = (needle) => Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
@@ -709,9 +731,11 @@ async function scrapeLinkedinProfile() {
           if (hasHeading('experience') && hasHeading('education')) break;
           y += scrollStep;
           window.scrollTo(0, y);
+          dispatchWheel(scrollStep);
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
         window.scrollTo(0, 0);
+        dispatchWheel(-y);
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       await asyncSafe('ensure-sections-rendered', ensureSectionsRendered, null);
