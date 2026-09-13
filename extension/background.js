@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 23;
+const BG_VERSION = 24;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -806,6 +806,31 @@ async function scrapeActiveTab() {
   if (!tab || !tab.url) return { ok: false, error: 'No active tab' };
   const adapter = matchAdapter(tab.url);
   if (!adapter) return { ok: false, error: 'not_supported_page' };
+
+  // Real gap fix (reported live, with a real service worker console log:
+  // a re-import of a profile with a full Experience/Education history
+  // came back with EVERY field null except name/linkedin_url -- not a
+  // scraper bug this time. The active tab URL in that log was
+  // ".../details/experience/", not the main profile page -- LinkedIn's
+  // "Show all N experiences" link navigates to a dedicated sub-page that
+  // shows ONLY that one section, with no top card, no About, no Contact
+  // info link, nothing else scrapeLinkedinProfile relies on. linkedin's
+  // urlPattern (anything starting with /in/) matches this sub-page too,
+  // so the extension silently activated there and produced a near-empty
+  // "successful" scrape instead of any indication anything was wrong.
+  // Refusing up front with a specific, actionable message is far better
+  // than importing a stripped-down profile that looks like a clean
+  // success -- exactly the failure mode that took 3 rounds of guessing
+  // at the scraper itself to rule out, when the real fix was never in
+  // scrapeLinkedinProfile() at all.
+  if (/^https:\/\/(www\.)?linkedin\.com\/in\/[^/]+\/details\//.test(tab.url)) {
+    return {
+      ok: false,
+      error: 'This is a LinkedIn "details" sub-page (it only shows one section, like Experience or Education) -- '
+        + 'go back to the main profile page (the one with the photo and headline at the top) and import from there '
+        + 'to capture the full profile.',
+    };
+  }
 
   let results;
   try {
