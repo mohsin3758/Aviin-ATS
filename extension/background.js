@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 39;
+const BG_VERSION = 40;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -474,20 +474,41 @@ async function scrapeLinkedinProfile() {
       // then read off that row's previous sibling -- the visual order
       // (name, headline, location) is a much more stable assumption than
       // any specific tag or class.
+      // Real gap fix (reported live: location came back as "Certified
+      // SAP Finance Consultant | SAP FI-CA | SAP FICO | Public Cloud" --
+      // the candidate's own headline, with zero real location text at
+      // all. Traced the cascade: this picked the WRONG "Contact info"
+      // link/row for this profile -- the exact same "which duplicate
+      // element wins a first-match query" issue already found and fixed
+      // for the name field's hidden accessibility heading -- and since
+      // the headline backward-walk below starts FROM this row, it then
+      // landed one row further back than it should have and returned
+      // the NAME as the headline/designation too). A real location
+      // string never uses LinkedIn's headline convention of listing
+      // multiple specializations separated by " | " -- rejecting a
+      // candidate that looks like a headline instead of accepting on
+      // faith, and trying every "Contact info" link on the page (not
+      // just the first), stops this the same general way the name fix
+      // did: don't trust winning a query, verify the shape of what it
+      // found.
+      function looksLikeHeadlineNotLocation(text) {
+        return / \| /.test(text || '');
+      }
       function findLocationRow() {
-        const contactLink = Array.from(document.querySelectorAll('a'))
-          .find((a) => (a.textContent || '').trim() === 'Contact info');
-        if (!contactLink) return null;
-        let node = contactLink.parentElement;
-        for (let depth = 0; node && depth < 5; depth++) {
-          const text = node.textContent
-            .replace('Contact info', '')
-            .replace(/[·•]/g, ' ')
-            .replace(/[\d,]+\+?\s*connections?/gi, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (text) return { node, text };
-          node = node.parentElement;
+        const contactLinks = Array.from(document.querySelectorAll('a'))
+          .filter((a) => (a.textContent || '').trim() === 'Contact info');
+        for (const contactLink of contactLinks) {
+          let node = contactLink.parentElement;
+          for (let depth = 0; node && depth < 5; depth++) {
+            const text = node.textContent
+              .replace('Contact info', '')
+              .replace(/[·•]/g, ' ')
+              .replace(/[\d,]+\+?\s*connections?/gi, '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (text && !looksLikeHeadlineNotLocation(text)) return { node, text };
+            node = node.parentElement;
+          }
         }
         return null;
       }
@@ -935,6 +956,26 @@ function scrapeDetailsPageText() {
   function isFooterLine(line) {
     return /linkedin corporation|visit our help center|select language|recommendation transparency|^more profiles for you$|^people also viewed$|^people you may know$/i.test(line.trim());
   }
+  // Real gap fix (reported live: the Skills details page had real skill
+  // names -- SAP Hybris Billing, SAP FI-CA, AutoCAD, SAS, SPSS, R,
+  // Microsoft Office, SAP FICO -- but interspersed line-by-line with
+  // LinkedIn's own endorsement UI: "2 endorsements", "Endorse",
+  // "Endorsed by Nilesh Nikam (mutual connection)" repeated after almost
+  // every skill, plus the page's filter tabs ("All", "Industry
+  // Knowledge", "Tools & Technologies", "Other Skills") and a duplicate
+  // "Skills" heading. Unlike the sidebar/footer noise above, this is
+  // scattered THROUGHOUT the real content, not a trailing block -- a
+  // single cutoff point can't remove it, so each of these needs
+  // dropping individually, line by line, while every real skill line
+  // (which never matches any of these exact/pattern forms) stays.
+  const SKILLS_UI_NOISE_LINES = new Set(['skills', 'all', 'industry knowledge', 'tools & technologies', 'other skills', 'endorse']);
+  function isSkillsUiNoiseLine(line) {
+    const l = line.trim().toLowerCase();
+    if (SKILLS_UI_NOISE_LINES.has(l)) return true;
+    if (/^\d+\s+endorsements?$/.test(l)) return true;
+    if (/^endorsed by /.test(l)) return true;
+    return false;
+  }
   try {
     const main = document.querySelector('main') || document.body;
     const raw = main.innerText || main.textContent || '';
@@ -946,7 +987,7 @@ function scrapeDetailsPageText() {
     for (let i = 0; i < allLines.length; i++) {
       if (isDegreeLine(allLines[i])) { cutoff = Math.min(cutoff, Math.max(0, i - 1)); break; }
     }
-    const lines = allLines.slice(0, cutoff);
+    const lines = allLines.slice(0, cutoff).filter((l) => !isSkillsUiNoiseLine(l));
     return { text: lines.join('\n').slice(0, 8000) };
   } catch (e) {
     return { text: null, error: e?.message || String(e) };
