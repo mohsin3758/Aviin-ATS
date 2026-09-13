@@ -4,7 +4,7 @@
 
 set -e
 BACKUP_DIR="/var/backups/airecruit"
-DB_CONTAINER="finstack_db"
+DB_CONTAINER="aviin_db"
 DB_NAME="ats"
 DB_USER="postgres"
 DATE=$(date +%Y%m%d_%H%M%S)

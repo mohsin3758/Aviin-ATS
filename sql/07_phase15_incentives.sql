@@ -2,7 +2,7 @@
 -- ============================================================
 -- AIrecruit P15: Recruiter Performance & Incentive Engine
 -- Zero-token: pure SQL rules, no LLM calls
--- Run as: docker exec -i finstack_db psql -U postgres -d ats
+-- Run as: docker exec -i aviin_db psql -U postgres -d ats
 -- ============================================================
 
 -- Helper functions (idempotent via OR REPLACE)
