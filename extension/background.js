@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 38;
+const BG_VERSION = 39;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -135,11 +135,33 @@ async function scrapeLinkedinProfile() {
       async function asyncSafe(label, fn, fallback) {
         try { return await fn(); } catch (e) { debug.push(`${label}: ${e?.message || e}`); return fallback; }
       }
-      function firstMatch(selectors) {
+      // Real gap fix (reported live: a candidate's name came back as
+      // "Deepan Majumdar Deepan Majumdar . 1stCertified SAP Finance
+      // Consultant | SAP FI-CA | SAP FICO | Public CloudKolkata, West
+      // Bengal, IndiaMessageCertifications: ...Sumit Kelkar, Shubham
+      // Jain & 81 other mutual connections" -- every real element from
+      // the top card concatenated into one string, with the real name
+      // literally repeated at the start). That exact content --  name
+      // twice, connection degree, headline, location, the Message
+      // button, mutual connections -- is the signature of LinkedIn's own
+      // hidden accessibility-summary heading, which screen readers use
+      // to announce the whole top card at once and which also happens
+      // to be an <h1>. document.querySelector('h1') only ever returns
+      // the FIRST h1 in DOM order; if that hidden summary heading comes
+      // before the real, short, visible name heading, this always
+      // picked the wrong one. A real person's name is never anywhere
+      // close to this length, so any candidate under a selector is now
+      // rejected past a sane cap instead of accepted on faith -- and
+      // ALL elements matching a given selector are tried (not just the
+      // first), so a rejected oversized match doesn't stop this from
+      // finding the real, short one still under the same selector.
+      function firstMatch(selectors, maxLen) {
         for (const sel of selectors) {
-          const el = document.querySelector(sel);
-          const text = el && el.textContent && el.textContent.trim();
-          if (text) return text;
+          const candidates = Array.from(document.querySelectorAll(sel));
+          for (const el of candidates) {
+            const text = el && el.textContent && el.textContent.trim();
+            if (text && (!maxLen || text.length <= maxLen)) return text;
+          }
         }
         return null;
       }
@@ -439,7 +461,7 @@ async function scrapeLinkedinProfile() {
       const ogDescriptionRaw = safe('og-description', () => metaContent('meta[property="og:description"], meta[name="description"]'), null);
 
       const name = ogParsed.name
-        || safe('name-dom', () => firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1', 'main h2', 'h2']), null);
+        || safe('name-dom', () => firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1', 'main h2', 'h2'], 100), null);
       // Real gap fix (reported live TWICE: name now extracts fine via
       // og:title, but company/location/experience were still empty on
       // both a first attempt using href/id-based hooks AND real current
