@@ -72,12 +72,58 @@ function statusBox(kind, html) {
   return el('div', { class: `status-box ${kind}`, html });
 }
 
+// Real gap fix (reported live: "it was showing popup result... now
+// it's stopped"). The Experience/Education details-sub-page fallback
+// (background.js's enrichWithDetailsPages) deliberately switches the
+// browser's active tab to scrape reliably -- which is ALSO exactly
+// what makes Chrome tear this popup down before onImportClick's own
+// sendMessage() call ever resolves, every time an import needs that
+// fallback (not just on an occasional focus loss). background.js now
+// persists the finished result to chrome.storage.local specifically so
+// it can still be shown here -- on the VERY NEXT open of this popup,
+// however long after the popup actually closed -- instead of being
+// lost. Shared with onImportClick's own live rendering (below) so a
+// fix to one status's wording can't silently miss the other path, the
+// exact class of bug already found and fixed for email/phone
+// extraction earlier this file's own history.
+function buildResultStatusBox(result) {
+  if (result.status === 'created') {
+    return statusBox('good',
+      `✓ Imported: <strong>${escapeHtml(result.name)}</strong><br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View in ATS →</a>`);
+  }
+  if (result.status === 'updated') {
+    const fieldLabels = { phone: 'phone', current_employer: 'company', location: 'location', resume_text: 'resume/skills text', email: 'email' };
+    const added = (result.updatedFields || []).map((f) => fieldLabels[f] || f).join(', ');
+    return statusBox('good',
+      `✓ Updated existing candidate: <strong>${escapeHtml(result.name)}</strong><br/>Filled in: ${escapeHtml(added)}<br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View candidate →</a>`);
+  }
+  if (result.status === 'no_change') {
+    return statusBox('warn',
+      `Already in AVIIN ATS: <strong>${escapeHtml(result.name)}</strong> — already up to date.<br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View existing →</a>`);
+  }
+  if (result.status === 'not_supported') {
+    return statusBox('warn', 'Open a LinkedIn profile page to import.');
+  }
+  return statusBox('err', escapeHtml(result.message || 'Something went wrong.'));
+}
+
+const RECENT_RESULT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes -- long enough to cover the sub-page fallback's own several-second detour, short enough that a much older result never resurfaces as if it just happened
+
 async function renderReady(email) {
   root.innerHTML = '';
   root.appendChild(el('div', { class: 'user-row' }, [
     el('span', { text: email || 'Logged in' }),
     el('button', { text: 'Log out', onclick: onLogoutClick }),
   ]));
+
+  const stored = await new Promise((resolve) => chrome.storage.local.get('lastImportResult', resolve));
+  const pending = stored && stored.lastImportResult;
+  if (pending && Date.now() - pending.ts < RECENT_RESULT_WINDOW_MS) {
+    root.appendChild(el('div', { class: 'muted', text: 'Result from your last import:' }));
+    root.appendChild(buildResultStatusBox(pending.result));
+    root.appendChild(document.createElement('hr'));
+    chrome.storage.local.remove('lastImportResult'); // shown once -- don't resurface on the next open too
+  }
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const isLinkedInProfile = !!tab?.url && /^https:\/\/(www\.)?linkedin\.com\/(in|sales\/(lead|people))\//.test(tab.url);
@@ -139,32 +185,17 @@ async function onImportClick() {
   btn.textContent = 'Importing…';
   resultDiv.innerHTML = '';
 
+  // Real gap fix: the import can take long enough (the details-sub-page
+  // fallback briefly switches the browser's active tab away from this
+  // popup) that Chrome tears the popup down before this ever resolves --
+  // background.js persists the result for renderReady to pick up on the
+  // NEXT open in that case, so this path staying alive is a bonus, not
+  // the only way the result reaches the user.
   const result = await sendMessage({ type: 'IMPORT_ACTIVE_TAB' });
 
   btn.disabled = false;
   btn.textContent = originalLabel;
-
-  if (result.status === 'created') {
-    resultDiv.appendChild(statusBox('good',
-      `✓ Imported: <strong>${escapeHtml(result.name)}</strong><br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View in ATS →</a>`));
-  } else if (result.status === 'updated') {
-    // Real gap fix: re-importing an already-known profile used to just
-    // say "already exists" and do nothing -- now the backend fills in
-    // whatever fields were blank on the existing candidate (never
-    // overwrites a value that's already there), so this reports what
-    // actually changed instead of a flat "nothing happened" message.
-    const fieldLabels = { phone: 'phone', current_employer: 'company', location: 'location', resume_text: 'resume/skills text', email: 'email' };
-    const added = (result.updatedFields || []).map((f) => fieldLabels[f] || f).join(', ');
-    resultDiv.appendChild(statusBox('good',
-      `✓ Updated existing candidate: <strong>${escapeHtml(result.name)}</strong><br/>Filled in: ${escapeHtml(added)}<br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View candidate →</a>`));
-  } else if (result.status === 'no_change') {
-    resultDiv.appendChild(statusBox('warn',
-      `Already in AVIIN ATS: <strong>${escapeHtml(result.name)}</strong> — already up to date.<br/><a href="https://ats.aviintech.com/candidates/${result.candidateId}" target="_blank">View existing →</a>`));
-  } else if (result.status === 'not_supported') {
-    resultDiv.appendChild(statusBox('warn', 'Open a LinkedIn profile page to import.'));
-  } else {
-    resultDiv.appendChild(statusBox('err', escapeHtml(result.message || 'Something went wrong.')));
-  }
+  resultDiv.appendChild(buildResultStatusBox(result));
 }
 
 async function onImportSearchResultsClick() {

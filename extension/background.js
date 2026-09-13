@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 34;
+const BG_VERSION = 35;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -1262,8 +1262,25 @@ async function importSearchResults(list) {
 // completes or fails on the server exactly the same either way, but the
 // user never finds out and has no way to tell an early close from a
 // real failure. A system notification (independent of the popup's own
-// lifetime) closes that gap.
+// lifetime) was meant to close that gap.
+// Real gap fix #2 (reported live: "it was showing popup result... now
+// it's stopped" -- confirmed to be this exact scenario, not the system
+// notification). The details-sub-page fallback (see
+// enrichWithDetailsPages) deliberately switches the browser's ACTIVE
+// tab to scrape Experience/Education reliably -- but that switch is
+// ALSO exactly what makes Chrome tear down the popup, every single
+// time an import needs that fallback, not just incidentally on an
+// occasional focus loss. The system notification was supposed to cover
+// this, but turned out to depend on OS-level notification settings
+// this session couldn't fully control. Persists the result to
+// chrome.storage.local as a second, code-only channel that doesn't
+// depend on the popup surviving OR any OS setting -- popup.js shows it
+// automatically the next time the extension icon is clicked, however
+// long after the popup actually closed.
 function notifyImportResult(result) {
+  try {
+    chrome.storage.local.set({ lastImportResult: { result, ts: Date.now() } });
+  } catch (e) { /* storage full/unavailable -- the system notification below still tries */ }
   const title = 'AVIIN ATS Import';
   let message;
   switch (result.status) {
