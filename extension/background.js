@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 25;
+const BG_VERSION = 26;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -679,17 +679,40 @@ async function scrapeLinkedinProfile() {
       // any of them is read -- the same "wait for real content to
       // appear" principle already used for the Contact Info panel, just
       // driven by scroll position instead of a click.
+      // Real gap fix (reported live, with a real console log: a
+      // FIXED-BUDGET scroll -- a set number of steps, each waited a
+      // fixed 220ms -- still came back with experience=false,
+      // education=false on a profile that had successfully captured
+      // both sections on an earlier attempt just before this one, with
+      // NO code change in between. That inconsistency between identical
+      // attempts on the same profile is the signature of a real timing
+      // race, not a structural DOM problem: LinkedIn's lazy-mount can
+      // depend on a network round-trip whose duration varies between
+      // page loads (especially after an SPA client-side navigation back
+      // from a "details" sub-page, rather than a fresh full reload), so
+      // a fixed step count can simply run out before the fetch resolves
+      // one time and not another. Replaced with the same "poll for the
+      // real signal, not a fixed budget" principle already used for the
+      // Contact Info panel: keeps scrolling toward the (possibly still-
+      // growing) bottom of the page and checking after each step whether
+      // both the Experience and Education headings have actually
+      // appeared, returning as soon as they have (often faster than the
+      // old fixed budget) instead of only ever waiting exactly one fixed
+      // amount regardless of how long this particular page load needs.
       async function ensureSectionsRendered() {
         const scrollStep = Math.max(400, Math.floor(window.innerHeight * 0.8));
-        let lastHeight = 0;
-        for (let y = 0, guard = 0; y < document.body.scrollHeight && guard < 30; y += scrollStep, guard++) {
+        const hasHeading = (needle) => Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
+          .some((el) => (el.textContent || '').trim().toLowerCase().startsWith(needle));
+        const deadline = Date.now() + 6000;
+        let y = 0;
+        while (Date.now() < deadline) {
+          if (hasHeading('experience') && hasHeading('education')) break;
+          y += scrollStep;
           window.scrollTo(0, y);
-          await new Promise((resolve) => setTimeout(resolve, 220));
-          lastHeight = document.body.scrollHeight; // page can grow as more mounts in -- loop bound re-read via the condition each iteration
+          await new Promise((resolve) => setTimeout(resolve, 250));
         }
         window.scrollTo(0, 0);
         await new Promise((resolve) => setTimeout(resolve, 200));
-        return lastHeight;
       }
       await asyncSafe('ensure-sections-rendered', ensureSectionsRendered, null);
 
