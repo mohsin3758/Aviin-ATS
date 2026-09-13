@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 41;
+const BG_VERSION = 42;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -1372,7 +1372,15 @@ async function isBulkImportCancelRequested() {
 }
 
 async function importSearchResults(list, searchResultsTabId, originalUrl) {
-  const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length, cancelled: false };
+  // Real gap fix (explicit user request, after confirming live per-
+  // profile progress works: "show view link after completing the
+  // importing and updated" for EVERY candidate in the batch, not just
+  // whichever one happened to finish last). results collects one entry
+  // per profile as it completes -- name/candidateId/status(/
+  // updatedFields) -- so the final summary can list each one with its
+  // own View link instead of only aggregate counts plus one generic
+  // link to the whole Captured Profiles list.
+  const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length, cancelled: false, results: [] };
   await chrome.storage.local.set({ bulkImportStatus: 'running', bulkImportCancelRequested: false, bulkImportProgress: { current: 0, total: list.length, last: null } });
   for (let i = 0; i < list.length; i++) {
     if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
@@ -1386,6 +1394,7 @@ async function importSearchResults(list, searchResultsTabId, originalUrl) {
     else if (result.status === 'updated') summary.updated += 1;
     else if (result.status === 'no_change') summary.no_change += 1;
     else summary.error += 1;
+    summary.results.push({ name: result.name, candidateId: result.candidateId, status: result.status, updatedFields: result.updatedFields, message: result.message });
 
     // Real gap fix (reported live: "no option and click view for
     // individual view, if succesfully upload all details" -- the popup

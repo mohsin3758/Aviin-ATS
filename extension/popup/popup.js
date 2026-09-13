@@ -116,11 +116,27 @@ function buildResultStatusBox(result) {
     return statusBox('warn', 'Open a LinkedIn profile page to import.');
   }
   if (result.status === 'batch_done') {
+    // Real gap fix (explicit user request, after confirming live
+    // per-profile progress: "show view link after completing the
+    // importing and updated" for every candidate the batch touched, not
+    // just a generic link to the whole Captured Profiles list). Each
+    // entry in summary.results has the exact same shape a live single
+    // import's own result does, so this reuses buildResultStatusBox
+    // per-candidate instead of a second, parallel formatting -- the
+    // same wording/link a recruiter already knows from a single import,
+    // just repeated once per profile in this batch.
     const s = result.summary;
     const label = s.cancelled ? '✓ Bulk import stopped' : '✓ Bulk import done';
-    return statusBox('good',
-      `${label}: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).` +
-      `<br/><a href="https://ats.aviintech.com/captured-profiles" target="_blank">View Captured Profiles →</a>`);
+    const wrapper = el('div');
+    wrapper.appendChild(statusBox('good',
+      `${label}: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).`));
+    for (const item of s.results || []) {
+      wrapper.appendChild(buildResultStatusBox(item));
+    }
+    wrapper.appendChild(el('a', {
+      class: 'footer-link', href: 'https://ats.aviintech.com/captured-profiles', target: '_blank', text: 'View all in Captured Profiles →',
+    }));
+    return wrapper;
   }
   return statusBox('err', escapeHtml(result.message || 'Something went wrong.'));
 }
