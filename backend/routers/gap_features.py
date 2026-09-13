@@ -728,13 +728,21 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
             # ATS can't be silently clobbered by a re-scrape.
             matched_id = dedup.matched_candidate_id
             existing = await conn.fetchrow(
-                "SELECT full_name, email, phone, current_employer, location, resume_text "
+                "SELECT full_name, email, phone, current_employer, current_designation, location, resume_text "
                 "FROM candidates WHERE id=$1", matched_id)
             updates: dict = {}
             if not existing["phone"] and cap["phone"]:
                 updates["phone"] = cap["phone"]
             if not existing["current_employer"] and cap["current_company"]:
                 updates["current_employer"] = cap["current_company"]
+            # Real gap fix (reported live: "Technical Lead in 4aisoft" --
+            # a real, correctly-scraped headline -- was captured but
+            # never actually written to the candidate record on either
+            # the create or update path; current_designation stayed
+            # blank for every extension-imported candidate regardless of
+            # whether the scrape itself succeeded).
+            if not existing["current_designation"] and cap["current_title"]:
+                updates["current_designation"] = cap["current_title"]
             if not existing["location"] and cap["location"]:
                 updates["location"] = cap["location"]
             if not existing["resume_text"] and cap["resume_text_like"]:
@@ -781,11 +789,12 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
         # the corruption incident referenced above.
         cand = await conn.fetchrow(
             """INSERT INTO candidates
-                 (tenant_id, full_name, email, phone, current_employer, location,
-                  linkedin_url, resume_text, source)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
+                 (tenant_id, full_name, email, phone, current_employer, current_designation,
+                  location, linkedin_url, resume_text, source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id""",
             actor.tenant_id, cap["name"], cap["email"], cap["phone"], cap["current_company"],
-            cap["location"], cap["linkedin_url"], cap["resume_text_like"], cap["source"] or "linkedin",
+            cap["current_title"], cap["location"], cap["linkedin_url"], cap["resume_text_like"],
+            cap["source"] or "linkedin",
         )
         # HARD RULE #12 — was missing on this path entirely (found in the
         # 2026-08-09 BGV audit).
