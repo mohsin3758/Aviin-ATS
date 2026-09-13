@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 43;
+const BG_VERSION = 44;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Real gap fix (reported live: the popup got permanently stuck on
@@ -502,7 +502,20 @@ async function scrapeLinkedinProfile() {
       // lines down) is what actually replaces it.
       const ogDescriptionRaw = safe('og-description', () => metaContent('meta[property="og:description"], meta[name="description"]'), null);
 
-      const name = ogParsed.name
+      // Real gap fix (reported live, with a real stored record: a
+      // candidate's full_name came back as a giant blob -- name,
+      // connection degree, headline, location, the Message button, AND
+      // another candidate's own name in a "mutual connections" line --
+      // this time via ogParsed.name itself, not the DOM fallback v39
+      // already capped. Most likely cause: bulk import reuses the SAME
+      // tab across many profiles in sequence (chrome.tabs.update, not a
+      // fresh tab per profile), and LinkedIn's SPA doesn't always fully
+      // refresh every meta tag/widget between client-side navigations --
+      // this exact staleness risk is already documented and worked
+      // around for og:description just above; og:title turns out to
+      // need the same guard, not just the length cap this v39 already
+      // gave the DOM fallback path alone.
+      const name = (ogParsed.name && ogParsed.name.length <= 100 ? ogParsed.name : null)
         || safe('name-dom', () => firstMatch(['.pv-text-details__left-panel h1', 'main h1', 'h1', 'main h2', 'h2'], 100), null);
       // Real gap fix (reported live TWICE: name now extracts fine via
       // og:title, but company/location/experience were still empty on
@@ -564,9 +577,21 @@ async function scrapeLinkedinProfile() {
       // based check -- a real personal headline is essentially never
       // ALL CAPS, and institution names are a recognizable, narrow
       // vocabulary a real headline is very unlikely to consist of.
+      // Real gap fix (reported live, with a real stored record: a
+      // candidate's current_designation came back as "Rajan Verma,
+      // Parikshit Gupta & 29 other mutual connections" -- LinkedIn's own
+      // "people you both know" line, which happened to sit as the
+      // headline backward-walk's previous sibling on this profile and
+      // passed every other check (non-empty, not the name, not
+      // institution-looking). A real headline never lists other
+      // people's names as connections -- same content-shape-based
+      // rejection principle as the institution/ALL-CAPS check already
+      // here, just covering this specific, very recognizable LinkedIn
+      // UI phrase too.
       function looksLikeInstitutionOrJunk(text) {
         if (!text) return false;
         if (/\b(college|university|institute|school|academy|polytechnic)\b/i.test(text)) return true;
+        if (/\bmutual connections?\b/i.test(text)) return true;
         const letters = text.replace(/[^A-Za-z]/g, '');
         return letters.length > 8 && letters === letters.toUpperCase();
       }
