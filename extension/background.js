@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 20;
+const BG_VERSION = 21;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -340,16 +340,32 @@ async function scrapeLinkedinProfile() {
       // [role="dialog"] as a secondary check in case some other real
       // account/render DOES use it correctly.
       function findContactInfoPanel() {
+        // Real gap fix (reported live: for a profile with no Phone
+        // section at all, this climbed ALL THE WAY UP into the page's
+        // own nav menu -- "Home", "My Network", "Jobs", "Messaging"...
+        // -- because nothing at any of the first 8 ancestor levels
+        // happened to mention "phone" or "email", so it kept climbing
+        // until SOMETHING on the page coincidentally did, then picked
+        // up a wrong, unrelated email from that much wider scope. A
+        // real Contact Info popup (Profile link, Phone, Address, Email,
+        // Birthday, Connected since) is at most a few hundred
+        // characters -- capping how large a candidate container is
+        // allowed to get stops the climb before it can ever reach
+        // page-wide content like the nav.
         const heading = Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
           .find((el) => (el.textContent || '').trim().toLowerCase().startsWith('contact info'));
         if (heading) {
           let container = heading.parentElement;
-          for (let depth = 0; container && depth < 8; depth++) {
-            const text = (container.textContent || '').toLowerCase();
-            if (text.includes('phone') || text.includes('email')) return container;
+          let lastReasonable = heading.parentElement;
+          for (let depth = 0; container && depth < 6; depth++) {
+            const text = container.textContent || '';
+            if (text.length > 2000) break; // implausibly large for a real Contact Info popup -- stop, don't climb further
+            lastReasonable = container;
+            const lower = text.toLowerCase();
+            if (lower.includes('phone') || lower.includes('email')) return container;
             container = container.parentElement;
           }
-          if (heading.parentElement) return heading.parentElement;
+          return lastReasonable;
         }
         return document.querySelector('[role="dialog"]');
       }
@@ -535,11 +551,25 @@ async function scrapeLinkedinProfile() {
         }
         robustClick(contactLink);
 
+        // Real gap fix (reported live: a different profile's dialog
+        // lines came back as literally just ["Contact info"] -- the
+        // panel's OWN heading appears in the DOM before its actual
+        // content (Phone/Email/etc.) has finished rendering, and the
+        // old "ready" check only required the word "contact info" to
+        // be present anywhere -- which the heading alone already
+        // satisfies, so the poll broke out one tick too early, before
+        // there was anything real to read). Now requires the panel to
+        // show some ADDITIONAL real signal beyond just its own title.
         let dialog = null;
         const deadline = Date.now() + 2500;
         while (Date.now() < deadline) {
           dialog = findContactInfoPanel();
-          if (dialog && (dialog.querySelector('a[href^="mailto:"]') || /contact info/i.test(dialog.textContent))) break;
+          if (dialog) {
+            const text = (dialog.textContent || '').toLowerCase();
+            const hasRealContent = dialog.querySelector('a[href^="mailto:"]')
+              || text.includes('phone') || text.includes('email') || text.includes('profile');
+            if (hasRealContent) break;
+          }
           await new Promise((resolve) => setTimeout(resolve, 150));
         }
         if (!dialog) {
