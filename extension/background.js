@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 28;
+const BG_VERSION = 29;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -849,8 +849,62 @@ async function scrapeLinkedinProfile() {
         email: finalEmail || null,
         phone: finalPhone || null,
         resume_text_like: resumeTextLike,
+        // Real gap fix (reported live, repeatedly, across v22/v26/v27:
+        // three different fixes to force Experience/Education to mount
+        // on the MAIN profile page -- lazy-mount waiting, then a poll,
+        // then a real wheel event -- and a real console log STILL showed
+        // both missing after all three, even though the user confirmed
+        // a real human scroll on that exact page shows them fine. Rather
+        // than chase a 4th theory about what event/gesture LinkedIn's
+        // lazy-load actually requires, these are exposed separately (not
+        // just pre-joined into resume_text_like) so scrapeActiveTab() in
+        // background.js can fall back to scraping the dedicated
+        // /details/experience/ and /details/education/ sub-pages
+        // directly -- confirmed by the user's own copy-paste to render
+        // completely, no scroll tricks needed -- and splice in whichever
+        // is missing here, instead of leaving it permanently empty.
+        about_text: aboutSection ? aboutSection.text : null,
+        skills_text: skillsSection ? skillsSection.text : null,
+        experience_text: experienceSection ? experienceSection.text : null,
+        education_text: educationSection ? educationSection.text : null,
         _debug: debug.length ? debug : undefined,
       };
+}
+
+// Real gap fix (see the comment on scrapeLinkedinProfile's return above):
+// a lightweight, PURPOSE-BUILT scraper for the dedicated
+// /details/experience/ and /details/education/ sub-pages -- these pages
+// show ONLY that one section's full list already rendered (confirmed via
+// the user's own copy-paste, no lazy-load/scroll issue at all), so this
+// doesn't need any of the heading-search/climb/scroll machinery
+// scrapeLinkedinProfile needs for the main page. Denoises the page's own
+// chrome (nav bar, ads, "People you may know", connection-degree badges)
+// out of document.body's text by dropping recognizable boilerplate
+// lines, keeping everything else -- the real role/degree entries never
+// match this blocklist.
+function scrapeDetailsPageText() {
+  const NOISE_LINES = new Set([
+    'home', 'my network', 'jobs', 'messaging', 'notifications', 'me', 'for business', 'advertise', 'search',
+    'ad options', "don't want to see this", 'people you may know', 'more profiles for you', 'show all',
+    'follow', 'connect', 'message', 'also viewed', 'people also viewed', 'promoted', 'sponsored', 'see all',
+    'explore premium profiles', 'you might like', 'highlights', 'activity',
+  ]);
+  function isNoiseLine(line) {
+    const l = line.trim().toLowerCase();
+    if (!l) return true;
+    if (NOISE_LINES.has(l)) return true;
+    if (/^\d+(st|nd|rd|th)\b/.test(l)) return true; // "2nd degree connection" badges
+    if (/^\d+[\d,]*\+?\s*(connections?|followers?|mutual connections?)/.test(l)) return true;
+    return false;
+  }
+  try {
+    const main = document.querySelector('main') || document.body;
+    const raw = main.innerText || main.textContent || '';
+    const lines = raw.split('\n').map((l) => l.trim()).filter((l) => l && !isNoiseLine(l));
+    return { text: lines.join('\n').slice(0, 8000) };
+  } catch (e) {
+    return { text: null, error: e?.message || String(e) };
+  }
 }
 
 const ADAPTERS = {
@@ -881,6 +935,71 @@ function matchAdapter(url) {
     if (ADAPTERS[key].urlPattern.test(url)) return ADAPTERS[key];
   }
   return null;
+}
+
+// Real gap fix (see the comment on scrapeLinkedinProfile's return, and
+// scrapeDetailsPageText above): opens a details sub-page (experience or
+// education) in a background tab -- never the user's active tab, so
+// their own browsing isn't disturbed -- waits for it to actually load,
+// scrapes it with the lightweight page-specific scraper, then always
+// closes the tab (even on error) so a failed attempt never leaves a
+// stray tab open.
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    function finish() {
+      if (done) return;
+      done = true;
+      try { chrome.tabs.onUpdated.removeListener(listener); } catch (e) { /* already gone */ }
+      resolve();
+    }
+    function listener(updatedTabId, info) {
+      if (updatedTabId === tabId && info.status === 'complete') finish();
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+async function scrapeDetailsSubpage(baseProfileUrl, section) {
+  const url = `${baseProfileUrl.replace(/\/$/, '')}/details/${section}/`;
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url, active: false });
+    await waitForTabComplete(tab.id, 8000);
+    // 'complete' is network load, not necessarily full SPA hydration --
+    // the same real timing gap already found for the main profile page.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: scrapeDetailsPageText });
+    const frameResult = results && results[0];
+    const text = frameResult && frameResult.result && frameResult.result.text;
+    console.log(`[AVIIN Import] details sub-page (${section}) scrape: ${text ? text.length + ' chars' : 'nothing'}`);
+    return text || null;
+  } catch (e) {
+    console.log(`[AVIIN Import] details sub-page (${section}) scrape failed:`, e?.message || e);
+    return null;
+  } finally {
+    if (tab && tab.id) {
+      try { await chrome.tabs.remove(tab.id); } catch (e) { /* tab may already be gone */ }
+    }
+  }
+}
+
+async function enrichWithDetailsPages(scraped) {
+  if (!scraped.linkedin_url) return scraped;
+  const [experienceText, educationText] = await Promise.all([
+    !scraped.experience_text ? scrapeDetailsSubpage(scraped.linkedin_url, 'experience') : Promise.resolve(null),
+    !scraped.education_text ? scrapeDetailsSubpage(scraped.linkedin_url, 'education') : Promise.resolve(null),
+  ]);
+  if (experienceText) scraped.experience_text = experienceText;
+  if (educationText) scraped.education_text = educationText;
+  scraped.resume_text_like = [
+    scraped.about_text ? 'About:\n' + scraped.about_text : '',
+    scraped.skills_text ? 'Skills:\n' + scraped.skills_text : '',
+    scraped.experience_text ? 'Experience:\n' + scraped.experience_text : '',
+    scraped.education_text ? 'Education:\n' + scraped.education_text : '',
+  ].filter(Boolean).join('\n\n') || null;
+  return scraped;
 }
 
 async function scrapeActiveTab() {
@@ -948,6 +1067,13 @@ async function scrapeActiveTab() {
   if (!scraped || !scraped.name) {
     const debugInfo = scraped && scraped._debug ? ` (${scraped._debug.join('; ')})` : '';
     return { ok: false, error: `Could not read this profile — try reloading the LinkedIn page and importing again.${debugInfo}` };
+  }
+  // Real gap fix (see the comment on scrapeLinkedinProfile's return, and
+  // scrapeDetailsPageText above): only pays the extra-tab cost when the
+  // main page actually came up short on Experience/Education -- most
+  // profiles don't need this at all, so a normal import stays fast.
+  if (adapter === ADAPTERS.linkedin && (!scraped.experience_text || !scraped.education_text)) {
+    await enrichWithDetailsPages(scraped);
   }
   return { ok: true, scraped };
 }
