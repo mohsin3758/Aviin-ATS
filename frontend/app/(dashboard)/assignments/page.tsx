@@ -501,7 +501,7 @@ export default function AssignmentDashboardPage() {
   const { data: clients } = useFetch<any>('/clients');
   const clientList = clients?.items || clients || [];
 
-  const { data: summaryData } = useFetch<any>(mounted ? `/assignment-dashboard/summary?group_by=${groupBy}` : null);
+  const { data: summaryData, refetch: refetchSummary } = useFetch<any>(mounted ? `/assignment-dashboard/summary?group_by=${groupBy}` : null);
   const summaryRows = summaryData?.rows || [];
 
   const qs = new URLSearchParams();
@@ -512,8 +512,16 @@ export default function AssignmentDashboardPage() {
 
   // Recruiter-grouped summary always fetched separately for the top stat
   // cards, regardless of the "View by" toggle the user has selected.
-  const { data: recruiterSummary } = useFetch<any>(mounted ? '/assignment-dashboard/summary?group_by=recruiter' : null);
+  const { data: recruiterSummary, refetch: refetchRecruiterSummary } = useFetch<any>(mounted ? '/assignment-dashboard/summary?group_by=recruiter' : null);
   const recRows = recruiterSummary?.rows || [];
+
+  // Real gap (found while investigating an "everything shows 0" report):
+  // only the row list was ever refetched after an assign/reassign action —
+  // the top KPI cards and the "View by" grouped table both read from the
+  // OTHER two useFetch calls above, which had no refetch wired to any
+  // onDone handler at all, so they'd stay stale (showing pre-assignment
+  // counts) until a full page reload. All three now refresh together.
+  const refetchAll = () => { refetchList(); refetchSummary(); refetchRecruiterSummary(); };
   const totalAssigned = recRows.reduce((s: number, r: any) => s + r.total_assigned, 0);
   const totalSlaBreached = recRows.reduce((s: number, r: any) => s + r.sla_breached_count, 0);
   const totalAi = recRows.reduce((s: number, r: any) => s + r.ai_assigned, 0);
@@ -760,16 +768,16 @@ export default function AssignmentDashboardPage() {
       {historyReqId && <HistoryModal requisitionId={historyReqId} onClose={() => setHistoryReqId(null)} />}
       {showBulk && (
         <BulkReassignModal ids={Array.from(selected)} onClose={() => setShowBulk(false)}
-          onDone={() => { setSelected(new Set()); refetchList(); }} />
+          onDone={() => { setSelected(new Set()); refetchAll(); }} />
       )}
       {showBulkAssign && (
         <BulkAssignModal
           requisitionIds={Array.from(new Set(rows.filter((r: any) => selected.has(r.id)).map((r: any) => r.requisition_id)))}
           onClose={() => setShowBulkAssign(false)}
-          onDone={() => { setSelected(new Set()); refetchList(); }} />
+          onDone={() => { setSelected(new Set()); refetchAll(); }} />
       )}
       {showQuickAssign && (
-        <QuickAssignForm clients={clientList} onClose={() => setShowQuickAssign(false)} onDone={refetchList} />
+        <QuickAssignForm clients={clientList} onClose={() => setShowQuickAssign(false)} onDone={refetchAll} />
       )}
     </div>
   );
