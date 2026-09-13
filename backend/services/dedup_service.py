@@ -68,6 +68,42 @@ def name_similarity(name1: str, name2: str) -> float:
     return round(jaccard, 3)
 
 
+async def _matches_internal_staff(conn, tenant_id: str, email: str, phone10: Optional[str]) -> tuple[bool, bool]:
+    """Real gap fix (this session, root-caused live from real, severe
+    production corruption -- dozens of genuinely unrelated candidates
+    silently merged into a handful of placeholder identities over more
+    than a year, e.g. a real recruiter's own name/email/phone leaking
+    into what should have been a distinct candidate's record). Multiple
+    different upstream causes were found for HOW a staff member's own
+    contact info ends up in `parsed` (a resume's own recruiter-branded
+    header, a partner agency's requirement-sharing email misclassified
+    as a resume, a sender-identity fallback that's since been fixed in
+    several places already) -- rather than chase every possible future
+    leak path individually, this is the one place ALL of them funnel
+    through before an auto-merge happens: if the email or phone
+    check_duplicate is about to trust as "this is the same person"
+    actually belongs to a real, currently-registered internal staff
+    member, it is never a valid identity signal for a CANDIDATE no
+    matter which extractor produced it, so it's excluded here before
+    Stage A ever runs rather than trusted at face value. Checked and
+    reported independently (email vs phone) rather than as one combined
+    bool -- a genuine candidate's real email should never be discarded
+    just because their phone happened to coincidentally match a staff
+    member's, or vice versa; only the specific field that actually
+    matches staff gets excluded."""
+    email_hit = phone_hit = False
+    if email:
+        email_hit = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE tenant_id=$1 AND LOWER(email)=$2)",
+            tenant_id, email)
+    if phone10:
+        phone_hit = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE tenant_id=$1 "
+            "AND RIGHT(REGEXP_REPLACE(COALESCE(phone,''),'[^0-9]','','g'),10)=$2)",
+            tenant_id, phone10)
+    return email_hit, phone_hit
+
+
 async def check_duplicate(
     conn,
     tenant_id: str,
@@ -108,8 +144,25 @@ async def check_duplicate(
                 matched_candidate_id=str(existing_rf['candidate_id']),
                 evidence=evidence, should_merge=True)
 
-    # A2. Normalized email
+    # A2/A3 guard (real gap fix, this session): a real internal staff
+    # member's own email/phone must never be trusted as a candidate
+    # identity signal, regardless of which upstream extractor produced
+    # it -- see _matches_internal_staff's own docstring for the real,
+    # severe corruption this closes (dozens of unrelated candidates
+    # silently merged into a handful of placeholder identities over
+    # more than a year once a staff member's own contact info first
+    # leaked into one candidate record).
     email = (parsed.get('email') or '').lower().strip()
+    raw_phone = re.sub(r'[^\d]', '', parsed.get('phone') or '')
+    phone10 = raw_phone[-10:] if len(raw_phone) >= 10 else None
+    email_is_staff, phone_is_staff = await _matches_internal_staff(
+        conn, tenant_id, email if '@' in email else '', phone10)
+    if email_is_staff:
+        email = ''
+    if phone_is_staff:
+        phone10 = None
+
+    # A2. Normalized email
     if email and '@' in email:
         existing = await conn.fetchval("""
             SELECT id FROM candidates
@@ -123,8 +176,6 @@ async def check_duplicate(
                 evidence=evidence, should_merge=True)
 
     # A3. Normalized phone (last 10 digits)
-    raw_phone = re.sub(r'[^\d]', '', parsed.get('phone') or '')
-    phone10 = raw_phone[-10:] if len(raw_phone) >= 10 else None
     if phone10:
         existing = await conn.fetchval("""
             SELECT id FROM candidates
