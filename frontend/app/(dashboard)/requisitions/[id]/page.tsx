@@ -1182,16 +1182,20 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
   const [autoErr, setAutoErr] = useState('');
 
   const role = getTokenPayload()?.role || '';
-  // Manual assignment (create a brand-new one) is reachable by KAE,
-  // Manager, or Admin per request. Reassigning an ALREADY-active
-  // assignment stays a HARD RULE #10 HITL-gated action -- explicit
-  // request (2026-09-13) widened this from admin/manager-only to also
-  // include kae/kam, matching the backend's own widened require_role()
-  // on POST /assignments/{id}/reassign. Still logged the same way
+  // Manual assignment (create a brand-new one): the backend's own
+  // POST /assignments (require_role("admin","manager","kae","kam"))
+  // already permitted kam -- this frontend check was simply missing it,
+  // meaning a KAM would have submitted the Assign form only to hit a
+  // 403 the UI never explained. Added 2026-09-13, explicit request.
+  // Reassigning an ALREADY-active assignment stays a HARD RULE #10
+  // HITL-gated action -- explicit request (2026-09-13) widened this
+  // from admin/manager-only to also include kae/kam, matching the
+  // backend's own widened require_role() on POST
+  // /assignments/{id}/reassign. Still logged the same way
   // (assignment_event + audit_log, real actor/reason) regardless of
   // which of these roles performs it -- HITL means a specific, logged
   // human decision, not that only admin/manager qualify as that human.
-  const canAssignInitial = ['admin', 'super_admin', 'manager', 'kae'].includes(role);
+  const canAssignInitial = ['admin', 'super_admin', 'manager', 'kae', 'kam'].includes(role);
   const canReassignOnly = ['admin', 'super_admin', 'manager', 'kae', 'kam'].includes(role);
   const userMap = Object.fromEntries((users || []).map((u: any) => [u.id, u]));
   // REAL FEATURE ADD (2026-08-31): "not able to assign both recruiter to
