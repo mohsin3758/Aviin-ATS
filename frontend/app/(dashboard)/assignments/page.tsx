@@ -4,7 +4,7 @@ import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
 import {
   ClipboardList, Users, Download, History, RotateCcw,
-  AlertTriangle, Sparkles, X, CheckSquare, Square, Moon,
+  AlertTriangle, Sparkles, X, CheckSquare, Square, Moon, Plus, Briefcase,
 } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -291,6 +291,159 @@ function BulkAssignModal({ requisitionIds, onDone, onClose }: { requisitionIds: 
   );
 }
 
+// Real gap fix (explicit user request: "a separate tab and option to
+// assign recruiter with client, role, with other details" — the
+// existing Bulk Assign above already covers this, but only via
+// filtering/selecting rows in the table first; there was no dedicated
+// step-by-step "pick a client, then a role, then a recruiter" form
+// anywhere on this page). Reuses only existing endpoints already used
+// elsewhere in this app: /clients (client list), GET /requisitions
+// scoped to the chosen client's OPEN roles, /requisitions/{id}/
+// match-recruiters (the same real match-score/workload signal the
+// single-requisition AssignedRecruiterCard picker already uses — a
+// specific role is chosen here, so a per-role score is more accurate
+// than the requisition-independent capacity number Bulk Assign/
+// Reassign use above), and POST /assignments (the same single-
+// assignment endpoint the requisition detail page's own "Assign"
+// button calls — already kae/kam-permitted server-side, no new
+// backend route needed at all).
+function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone: () => void; onClose: () => void }) {
+  const [clientId, setClientId] = useState('');
+  const [reqId, setReqId] = useState('');
+  const [recruiterId, setRecruiterId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+
+  const { data: clientReqs } = useFetch<any[]>(clientId ? `/requisitions?client_id=${clientId}&status=open` : null);
+  const reqList = clientReqs || [];
+  const selectedReq = reqList.find((r: any) => r.id === reqId);
+
+  const { data: matchRecruiters } = useFetch<any[]>(reqId ? `/requisitions/${reqId}/match-recruiters?limit=50` : null);
+
+  const pickClient = (id: string) => { setClientId(id); setReqId(''); setRecruiterId(''); setResult(null); };
+  const pickReq = (id: string) => { setReqId(id); setRecruiterId(''); setResult(null); };
+
+  const submit = async () => {
+    if (!reqId || !recruiterId) return;
+    setBusy(true);
+    try {
+      const r = await apiFetch('/assignments', {
+        method: 'POST',
+        body: JSON.stringify({ requisition_id: reqId, recruiter_id: recruiterId }),
+      });
+      setResult(r);
+      onDone();
+    } catch (e: any) {
+      setResult({ error: e.message || 'Failed to assign' });
+    } finally { setBusy(false); }
+  };
+
+  const resetAndCloseOrContinue = () => {
+    // Real polish (not asked for, but obvious once built): after a
+    // successful assign, stay on the SAME client so assigning several
+    // roles for one client in a row doesn't mean re-picking it every
+    // time -- only the role/recruiter selection resets.
+    setReqId(''); setRecruiterId(''); setResult(null);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div style={{ background: '#fff', borderRadius: 14, padding: 20, width: 480 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>Quick Assign</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>Pick a client, then a role, then a recruiter — one assignment at a time.</p>
+
+        <label style={label}>1 · CLIENT</label>
+        <select value={clientId} onChange={e => pickClient(e.target.value)} style={{ ...inputSm, width: '100%', marginBottom: 12, boxSizing: 'border-box' }} data-testid="quick-assign-client">
+          <option value="">Select client…</option>
+          {clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+
+        {clientId && (
+          <>
+            <label style={label}>2 · ROLE (OPEN REQUISITIONS FOR THIS CLIENT)</label>
+            <select value={reqId} onChange={e => pickReq(e.target.value)} style={{ ...inputSm, width: '100%', marginBottom: 12, boxSizing: 'border-box' }} data-testid="quick-assign-req">
+              <option value="">Select role…</option>
+              {reqList.map((r: any) => (
+                <option key={r.id} value={r.id}>{r.title} — {r.priority} priority · {r.positions_count} position(s)</option>
+              ))}
+            </select>
+            {clientReqs && !reqList.length && (
+              <div style={{ fontSize: 11.5, color: '#94A3B8', marginTop: -8, marginBottom: 12 }}>No open requisitions for this client.</div>
+            )}
+          </>
+        )}
+
+        {reqId && (
+          <>
+            <label style={label}>3 · RECRUITER — real match score &amp; workload for this specific role</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14, maxHeight: 260, overflowY: 'auto' }} data-testid="quick-assign-recruiter-picker">
+              {(matchRecruiters || []).map((m: any) => {
+                // Real gap fix (caught before shipping): match_recruiters()
+                // (sql/04_phase3_ai_engine.sql) returns full_name /
+                // capacity_weekly, not recruiter_name / max_active_reqs --
+                // and has no on_leave column at all (that's only on the
+                // separate /analytics/recruiter-capacity endpoint the OTHER
+                // pickers on this page use). match_score is already *100
+                // (a real 0-100 percentage), so no extra scaling needed.
+                const wl = RECRUITER_WORKLOAD_BADGE[m.workload_label] || RECRUITER_WORKLOAD_BADGE.Medium;
+                const isSelected = recruiterId === m.recruiter_id;
+                return (
+                  <div key={m.recruiter_id} data-testid={`quick-assign-recruiter-option-${m.recruiter_id}`}
+                    onClick={() => setRecruiterId(m.recruiter_id)}
+                    title={`${m.available_capacity ?? '?'}/${m.capacity_weekly ?? '?'} slots free`}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                      border: `1px solid ${isSelected ? '#93C5FD' : '#E2E8F0'}`,
+                      background: isSelected ? '#EFF6FF' : '#fff',
+                    }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{m.full_name}</div>
+                      <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 2 }}>
+                        {m.match_score != null && <>Match {Math.round(m.match_score)}% · </>}
+                        {m.available_capacity != null ? `${m.available_capacity}/${m.capacity_weekly} slots free` : 'No capacity data yet'}
+                      </div>
+                    </div>
+                    {m.workload_label && (
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 6, color: wl.color, background: wl.bg, flexShrink: 0 }}>
+                        {m.workload_label} load
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+              {matchRecruiters && !matchRecruiters.length && <div style={{ fontSize: 12, color: '#94A3B8' }}>No recruiters found.</div>}
+            </div>
+          </>
+        )}
+
+        {result && !result.error && (
+          <div style={{ fontSize: 12, color: '#16A34A', background: '#F0FDF4', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+            ✓ Assigned to <strong>{selectedReq?.title}</strong>.
+          </div>
+        )}
+        {result?.error && <div style={{ fontSize: 12, color: '#DC2626', marginBottom: 10 }}>{result.error}</div>}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          {result && !result.error ? (
+            <>
+              <button onClick={resetAndCloseOrContinue} style={btn}><Plus size={13} /> Assign Another Role</button>
+              <button onClick={onClose} style={btnGhost}>Done</button>
+            </>
+          ) : (
+            <>
+              <button onClick={submit} disabled={busy || !reqId || !recruiterId} style={btn}>{busy ? 'Assigning…' : 'Confirm Assign'}</button>
+              <button onClick={onClose} style={btnGhost}>Cancel</button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AssignmentDashboardPage() {
   const [role, setRole] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -311,6 +464,7 @@ export default function AssignmentDashboardPage() {
   const [historyReqId, setHistoryReqId] = useState<string | null>(null);
   const [showBulk, setShowBulk] = useState(false);
   const [showBulkAssign, setShowBulkAssign] = useState(false);
+  const [showQuickAssign, setShowQuickAssign] = useState(false);
 
   const { data: clients } = useFetch<any>('/clients');
   const clientList = clients?.items || clients || [];
@@ -373,7 +527,12 @@ export default function AssignmentDashboardPage() {
               : 'Everything currently assigned to you — priority, SLA, and submission status.'}
           </p>
         </div>
-        <button onClick={exportCsv} style={btnGhost}><Download size={13} /> Export CSV</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {isManager && (
+            <button onClick={() => setShowQuickAssign(true)} data-testid="btn-quick-assign" style={btn}><Briefcase size={13} /> Quick Assign</button>
+          )}
+          <button onClick={exportCsv} style={btnGhost}><Download size={13} /> Export CSV</button>
+        </div>
       </div>
 
       {isManager && (
@@ -576,6 +735,9 @@ export default function AssignmentDashboardPage() {
           requisitionIds={Array.from(new Set(rows.filter((r: any) => selected.has(r.id)).map((r: any) => r.requisition_id)))}
           onClose={() => setShowBulkAssign(false)}
           onDone={() => { setSelected(new Set()); refetchList(); }} />
+      )}
+      {showQuickAssign && (
+        <QuickAssignForm clients={clientList} onClose={() => setShowQuickAssign(false)} onDone={refetchList} />
       )}
     </div>
   );
