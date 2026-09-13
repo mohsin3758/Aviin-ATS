@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 30;
+const BG_VERSION = 31;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -984,14 +984,31 @@ async function scrapeDetailsSubpage(baseProfileUrl, section) {
   try {
     tab = await chrome.tabs.create({ url, active: false });
     await waitForTabComplete(tab.id, 8000);
-    // 'complete' is network load, not necessarily full SPA hydration --
-    // the same real timing gap already found for the main profile page.
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: scrapeDetailsPageText });
-    const frameResult = results && results[0];
-    const text = frameResult && frameResult.result && frameResult.result.text;
-    console.log(`[AVIIN Import] details sub-page (${section}) scrape: ${text ? text.length + ' chars' : 'nothing'}`);
-    return text || null;
+    // Real gap fix (reported live: the experience sub-page came back
+    // with 4465 real chars, but the education sub-page -- opened at the
+    // same time via Promise.all, competing for the browser's resources
+    // -- came back with only 21 chars). A flat 1200ms wait after
+    // 'complete' assumed both tabs would finish hydrating in the same
+    // fixed time, which the real data disproves -- the exact same
+    // "fixed budget instead of waiting for the real signal" gap already
+    // found and fixed for the main profile page's own lazy-mounted
+    // sections. Polls instead: re-scrapes every 400ms for up to 5s,
+    // keeping whichever attempt returned the MOST text -- a details
+    // page's real content only grows as it hydrates, so more text is
+    // strictly better here, unlike the main page where a too-early read
+    // risks grabbing an unrelated wider scope.
+    let best = null;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: scrapeDetailsPageText });
+      const frameResult = results && results[0];
+      const text = frameResult && frameResult.result && frameResult.result.text;
+      if (text && (!best || text.length > best.length)) best = text;
+      if (best && best.length > 300) break; // comfortably past a loading skeleton -- treat as hydrated
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    console.log(`[AVIIN Import] details sub-page (${section}) scrape: ${best ? best.length + ' chars' : 'nothing'}${best && best.length < 300 ? ` -- short result: ${JSON.stringify(best)}` : ''}`);
+    return best || null;
   } catch (e) {
     console.log(`[AVIIN Import] details sub-page (${section}) scrape failed:`, e?.message || e);
     return null;
