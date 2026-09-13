@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 16;
+const BG_VERSION = 17;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -263,19 +263,48 @@ async function scrapeLinkedinProfile() {
       // directly while it's open, since openContactInfoAndExtract()
       // further below only knows how to CLICK OPEN a currently-closed
       // panel, not read one that's already showing.
+      // Real gap fix (reported live: email/phone STILL both empty even
+      // on a confirmed-clean scrape where the dialog genuinely opened
+      // with real data visible on screen). Two compounding fragilities,
+      // both generalized away here: (1) email assumed LinkedIn always
+      // wraps it in a real mailto: link -- but the same screenshot shows
+      // "Address" ALSO styled as blue link-like text, suggesting several
+      // Contact-info fields get link-like styling generically, not
+      // necessarily via the mailto: protocol specifically for email;
+      // (2) "check one or two fixed sibling levels" for phone is the
+      // exact same "undershoots because LinkedIn wraps things deeper
+      // than expected" problem already found and fixed for the "Contact
+      // info" row itself further up this file, just never generalized
+      // to these two fields. This climbs multiple ancestor levels (like
+      // that earlier fix) and reads the line immediately after the
+      // label in the container's own rendered text -- label-based, not
+      // link-based, so it works regardless of whether a field happens
+      // to be a real hyperlink. Shared by BOTH extraction call sites
+      // below (a dialog found already open, and one freshly opened by
+      // a click) -- a previous version duplicated this logic across
+      // both and only ever got fixed in one of them.
+      function readValueNearLabel(dialog, labelText) {
+        const needle = labelText.trim().toLowerCase();
+        const candidates = Array.from(dialog.querySelectorAll('h3, h2, span, div, dt, label'))
+          .filter((el) => (el.textContent || '').trim().toLowerCase() === needle);
+        for (const labelEl of candidates) {
+          let container = labelEl.parentElement;
+          for (let depth = 0; container && depth < 4; depth++) {
+            const raw = (container.innerText || container.textContent || '');
+            const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+            const idx = lines.findIndex((l) => l.toLowerCase() === needle);
+            if (idx !== -1 && lines.length > idx + 1) return lines[idx + 1];
+            container = container.parentElement;
+          }
+        }
+        return null;
+      }
       function extractFromOpenDialog(dialog) {
         const mailLink = dialog.querySelector('a[href^="mailto:"]');
-        const email = mailLink
+        const email = (mailLink
           ? (mailLink.textContent.trim() || decodeURIComponent(mailLink.href.replace(/^mailto:/i, '')))
-          : null;
-        let phone = null;
-        const labels = Array.from(dialog.querySelectorAll('h3, h2, span, div'));
-        const phoneLabel = labels.find((el) => (el.textContent || '').trim().toLowerCase() === 'phone');
-        if (phoneLabel) {
-          const sib = phoneLabel.nextElementSibling || (phoneLabel.parentElement && phoneLabel.parentElement.nextElementSibling);
-          const text = sib && sib.textContent && sib.textContent.trim();
-          if (text) phone = text;
-        }
+          : null) || readValueNearLabel(dialog, 'Email');
+        const phone = readValueNearLabel(dialog, 'Phone');
         return { email, phone };
       }
       const preOpenDialog = safe('pre-open-dialog', () => document.querySelector('[role="dialog"]'), null);
@@ -463,19 +492,17 @@ async function scrapeLinkedinProfile() {
           return { email: null, phone: null };
         }
 
+        // Reuses the same readValueNearLabel helper (defined once,
+        // shared with extractFromOpenDialog above) instead of
+        // duplicating this logic a second time in this second call site
+        // -- exactly the kind of duplication that let phone get fixed
+        // in one place and email stay broken in the other, last round.
         const mailLink = dialog.querySelector('a[href^="mailto:"]');
-        const email = mailLink
+        const email = (mailLink
           ? (mailLink.textContent.trim() || decodeURIComponent(mailLink.href.replace(/^mailto:/i, '')))
-          : null;
+          : null) || readValueNearLabel(dialog, 'Email');
 
-        let phone = null;
-        const labels = Array.from(dialog.querySelectorAll('h3, h2, span, div'));
-        const phoneLabel = labels.find((el) => (el.textContent || '').trim().toLowerCase() === 'phone');
-        if (phoneLabel) {
-          const sib = phoneLabel.nextElementSibling || (phoneLabel.parentElement && phoneLabel.parentElement.nextElementSibling);
-          const text = sib && sib.textContent && sib.textContent.trim();
-          if (text) phone = text;
-        }
+        const phone = readValueNearLabel(dialog, 'Phone');
         // Dialog genuinely opened but had neither -- distinguishes "this
         // profile just doesn't expose contact info to this viewer" (a
         // real LinkedIn visibility rule, expected to happen often) from
