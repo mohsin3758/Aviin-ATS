@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 19;
+const BG_VERSION = 20;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -326,7 +326,34 @@ async function scrapeLinkedinProfile() {
         const phone = readValueNearLabel(dialog, 'Phone');
         return { email, phone };
       }
-      const preOpenDialog = safe('pre-open-dialog', () => document.querySelector('[role="dialog"]'), null);
+      // Real gap fix (reported live: the panel was confirmed manually
+      // open, with real Phone/Email visibly showing, and this STILL
+      // failed to read it -- proving [role="dialog"] alone isn't a
+      // reliable way to find this panel on this account/render, since a
+      // genuinely-open panel should always be findable by that if it
+      // actually used that role). Directly confirmed via several
+      // screenshots that the panel's own title renders as a real
+      // heading reading "Contact info" -- separate from the trigger
+      // link on the page itself (a plain, non-heading <a>) -- so this
+      // is used as the primary detection signal instead of relying on
+      // an ARIA role this page may not actually set. Falls back to
+      // [role="dialog"] as a secondary check in case some other real
+      // account/render DOES use it correctly.
+      function findContactInfoPanel() {
+        const heading = Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
+          .find((el) => (el.textContent || '').trim().toLowerCase().startsWith('contact info'));
+        if (heading) {
+          let container = heading.parentElement;
+          for (let depth = 0; container && depth < 8; depth++) {
+            const text = (container.textContent || '').toLowerCase();
+            if (text.includes('phone') || text.includes('email')) return container;
+            container = container.parentElement;
+          }
+          if (heading.parentElement) return heading.parentElement;
+        }
+        return document.querySelector('[role="dialog"]');
+      }
+      const preOpenDialog = safe('pre-open-dialog', findContactInfoPanel, null);
       let preOpenContact = null;
       if (preOpenDialog) {
         preOpenContact = safe('pre-open-dialog-extract', () => extractFromOpenDialog(preOpenDialog), null);
@@ -511,7 +538,7 @@ async function scrapeLinkedinProfile() {
         let dialog = null;
         const deadline = Date.now() + 2500;
         while (Date.now() < deadline) {
-          dialog = document.querySelector('[role="dialog"]');
+          dialog = findContactInfoPanel();
           if (dialog && (dialog.querySelector('a[href^="mailto:"]') || /contact info/i.test(dialog.textContent))) break;
           await new Promise((resolve) => setTimeout(resolve, 150));
         }
@@ -527,7 +554,7 @@ async function scrapeLinkedinProfile() {
           // this viewer (very plausible on its own -- LinkedIn's own
           // visibility rule, not a bug). This distinguishes the two
           // instead of returning the same silent {null,null} either way.
-          debug.push('contact-info: clicked "Contact info" but no [role="dialog"] appeared within 2.5s');
+          debug.push('contact-info: clicked "Contact info" but no panel (by heading or [role="dialog"]) appeared within 2.5s');
           return { email: null, phone: null };
         }
 
