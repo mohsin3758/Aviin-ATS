@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 24;
+const BG_VERSION = 25;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -230,7 +230,30 @@ async function scrapeLinkedinProfile() {
               })
               .filter(Boolean);
             const text = lines.join('\n');
-            if (text.length > 5) return { text: text.slice(0, maxLen || 2000), lines };
+            if (text.length > 5) {
+              const cap = maxLen || 2000;
+              if (text.length <= cap) return { text, lines };
+              // Real gap fix (reported live, comparing the real LinkedIn
+              // Experience detail page against the ATS resume side by
+              // side: a senior candidate's real 7 roles came back with
+              // only the first 4 -- the last 3 (older, but real) jobs
+              // were silently missing). A bare text.slice(0, maxLen)
+              // truncates mid-line wherever the character cap happens to
+              // land, which can cut a role or a bullet in half AND
+              // discard everything after it. Rebuilds from whole lines
+              // up to the cap instead, so a long profile only ever loses
+              // its LAST few complete lines (if any), never a half-cut
+              // bullet, and never a role bullet later in the section that
+              // happened to still fit.
+              let acc = '';
+              const keptLines = [];
+              for (const line of lines) {
+                if (acc.length + line.length + 1 > cap) break;
+                acc += (acc ? '\n' : '') + line;
+                keptLines.push(line);
+              }
+              return { text: acc, lines: keptLines };
+            }
           }
         }
         return null;
@@ -672,7 +695,17 @@ async function scrapeLinkedinProfile() {
 
       const aboutSection = safe('about-section', () => sectionTextByHeading('About', 800), null);
       const skillsSection = safe('skills-section', () => sectionTextByHeading('Skills', 500), null);
-      const experienceSection = safe('experience-section', () => sectionTextByHeading('Experience', 2000), null);
+      // Real gap fix (reported live, side-by-side against the real
+      // LinkedIn Experience detail page): a senior candidate with 7 real
+      // roles (each with a long bullet list) only got the first 4 into
+      // resume_text_like -- the 2000-char cap here was silently cutting
+      // off a normal, real profile's tail end, not junk. Raised well
+      // past what a typical detailed multi-role profile needs; the
+      // truncation itself (see sectionTextByHeading above) now also
+      // stops at a whole line instead of slicing mid-bullet, so even a
+      // profile that still exceeds this loses only its oldest few full
+      // lines, never a half-cut one.
+      const experienceSection = safe('experience-section', () => sectionTextByHeading('Experience', 8000), null);
       const educationSection = safe('education-section', () => sectionTextByHeading('Education', 800), null);
 
       debug.push(
