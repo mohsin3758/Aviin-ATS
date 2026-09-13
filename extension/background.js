@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 18;
+const BG_VERSION = 19;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -479,6 +479,26 @@ async function scrapeLinkedinProfile() {
       // (not a CSS class), used here for the same reason "Contact info"
       // and mailto: were chosen -- LinkedIn can't rename it without
       // breaking screen-reader support for the same panel.
+      // Real gap fix (reported live, confirmed via the service worker
+      // console: "clicked 'Contact info' but no [role=\"dialog\"]
+      // appeared within 2.5s" -- the dialog was never even opening, so
+      // every label-reading fix so far never had a chance to run at
+      // all). A plain element.click() only fires a synthetic click
+      // event; some React components attach their real open-panel
+      // handler to pointerdown/mousedown instead (or require the full
+      // native event sequence a real click produces), and silently
+      // never fire on a bare .click() alone. Dispatches the fuller
+      // pointerdown -> mousedown -> mouseup -> click sequence a genuine
+      // user interaction produces, which reaches handlers a bare
+      // .click() can miss.
+      function robustClick(el) {
+        const opts = { bubbles: true, cancelable: true, view: window };
+        try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) { /* PointerEvent not available in every context */ }
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+        try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) { /* ditto */ }
+        el.click();
+      }
       async function openContactInfoAndExtract() {
         const contactLink = Array.from(document.querySelectorAll('a'))
           .find((a) => (a.textContent || '').trim() === 'Contact info');
@@ -486,7 +506,7 @@ async function scrapeLinkedinProfile() {
           debug.push('contact-info: no "Contact info" link found on this page');
           return { email: null, phone: null };
         }
-        contactLink.click();
+        robustClick(contactLink);
 
         let dialog = null;
         const deadline = Date.now() + 2500;
