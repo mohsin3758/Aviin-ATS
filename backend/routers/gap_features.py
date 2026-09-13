@@ -753,12 +753,21 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
             # refresh it, since resume_text is no longer blank. But a
             # bare "always overwrite on re-import" would risk clobbering
             # a REAL uploaded resume file's parsed text with a thinner
-            # LinkedIn scrape. Splits the two cases: refresh whenever
-            # there's no actual resume_files row for this candidate (so
-            # any existing resume_text can only have come from a prior
-            # LinkedIn capture, not an uploaded document) AND the new
-            # capture is strictly more complete than what's already
-            # there -- never replaces a good scrape with a worse one.
+            # LinkedIn scrape -- has_uploaded_resume guards exactly that.
+            # Real gap fix #2 (reported live, immediately after #1 shipped):
+            # the extension's own noise-filtering later got fixed to strip
+            # a "People Also Viewed" sidebar + LinkedIn's global footer
+            # that a prior capture had wrongly kept -- the CORRECTED,
+            # cleaner re-capture is now SHORTER than the junk-inflated one
+            # already stored, so the length-comparison here silently
+            # rejected the fix. A byte-count was always a proxy for "more
+            # complete," not the real thing, and re-import is an explicit,
+            # deliberate recruiter action each time -- there's no scenario
+            # where a fresh LinkedIn capture should lose to an older one
+            # once the real risk (an uploaded resume file) is already
+            # ruled out. Drops the length requirement entirely for that
+            # case; only true blank-vs-non-blank and the uploaded-resume
+            # guard still gate the overwrite.
             if cap["resume_text_like"]:
                 if not existing["resume_text"]:
                     updates["resume_text"] = cap["resume_text_like"]
@@ -766,7 +775,7 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
                     has_uploaded_resume = await conn.fetchval(
                         "SELECT 1 FROM resume_files WHERE candidate_id=$1 AND tenant_id=$2 LIMIT 1",
                         matched_id, actor.tenant_id)
-                    if not has_uploaded_resume and len(cap["resume_text_like"]) > len(existing["resume_text"]):
+                    if not has_uploaded_resume:
                         updates["resume_text"] = cap["resume_text_like"]
             if not existing["email"] and cap["email"]:
                 # Guard the per-tenant UNIQUE constraint -- never let a
