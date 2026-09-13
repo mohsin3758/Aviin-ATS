@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 31;
+const BG_VERSION = 32;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -978,25 +978,24 @@ function waitForTabComplete(tabId, timeoutMs) {
   });
 }
 
-async function scrapeDetailsSubpage(baseProfileUrl, section) {
+async function scrapeDetailsSubpage(baseProfileUrl, section, restoreToTabId) {
   const url = `${baseProfileUrl.replace(/\/$/, '')}/details/${section}/`;
   let tab;
   try {
-    tab = await chrome.tabs.create({ url, active: false });
+    // Real gap fix (reported live: a full 5-second poll of a BACKGROUND
+    // (active:false) tab never once returned more than "More profiles
+    // for you" -- a small sidebar widget's own heading, 21 characters,
+    // identical on every one of ~12 attempts. Not a slow hydration --
+    // Chrome deliberately deprioritizes rendering/layout work in tabs
+    // that are open but not visible on screen, which can leave a
+    // background tab's real content effectively stalled rather than
+    // just delayed. The user's own successful copy-pastes always came
+    // from a normal, VISIBLE tab -- this makes the sub-page tab visible
+    // too (briefly switching the browser to it, then switching back to
+    // the tab the recruiter was actually on) instead of trying to
+    // out-wait throttling that may never resolve.
+    tab = await chrome.tabs.create({ url, active: true });
     await waitForTabComplete(tab.id, 8000);
-    // Real gap fix (reported live: the experience sub-page came back
-    // with 4465 real chars, but the education sub-page -- opened at the
-    // same time via Promise.all, competing for the browser's resources
-    // -- came back with only 21 chars). A flat 1200ms wait after
-    // 'complete' assumed both tabs would finish hydrating in the same
-    // fixed time, which the real data disproves -- the exact same
-    // "fixed budget instead of waiting for the real signal" gap already
-    // found and fixed for the main profile page's own lazy-mounted
-    // sections. Polls instead: re-scrapes every 400ms for up to 5s,
-    // keeping whichever attempt returned the MOST text -- a details
-    // page's real content only grows as it hydrates, so more text is
-    // strictly better here, unlike the main page where a too-early read
-    // risks grabbing an unrelated wider scope.
     let best = null;
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
@@ -1016,17 +1015,28 @@ async function scrapeDetailsSubpage(baseProfileUrl, section) {
     if (tab && tab.id) {
       try { await chrome.tabs.remove(tab.id); } catch (e) { /* tab may already be gone */ }
     }
+    if (restoreToTabId) {
+      try { await chrome.tabs.update(restoreToTabId, { active: true }); } catch (e) { /* original tab may be gone */ }
+    }
   }
 }
 
-async function enrichWithDetailsPages(scraped) {
+async function enrichWithDetailsPages(scraped, originalTabId) {
   if (!scraped.linkedin_url) return scraped;
-  const [experienceText, educationText] = await Promise.all([
-    !scraped.experience_text ? scrapeDetailsSubpage(scraped.linkedin_url, 'experience') : Promise.resolve(null),
-    !scraped.education_text ? scrapeDetailsSubpage(scraped.linkedin_url, 'education') : Promise.resolve(null),
-  ]);
-  if (experienceText) scraped.experience_text = experienceText;
-  if (educationText) scraped.education_text = educationText;
+  // Sequential, not Promise.all: only one tab can be the visible/active
+  // one at a time, so opening both at once with active:true would just
+  // immediately background whichever one lost the race -- the same
+  // problem this whole fix exists to avoid, just moved to a different
+  // tab. One at a time, each fully handled (including restoring focus)
+  // before the next opens.
+  if (!scraped.experience_text) {
+    const text = await scrapeDetailsSubpage(scraped.linkedin_url, 'experience', originalTabId);
+    if (text) scraped.experience_text = text;
+  }
+  if (!scraped.education_text) {
+    const text = await scrapeDetailsSubpage(scraped.linkedin_url, 'education', originalTabId);
+    if (text) scraped.education_text = text;
+  }
   scraped.resume_text_like = [
     scraped.about_text ? 'About:\n' + scraped.about_text : '',
     scraped.skills_text ? 'Skills:\n' + scraped.skills_text : '',
@@ -1107,7 +1117,7 @@ async function scrapeActiveTab() {
   // main page actually came up short on Experience/Education -- most
   // profiles don't need this at all, so a normal import stays fast.
   if (adapter === ADAPTERS.linkedin && (!scraped.experience_text || !scraped.education_text)) {
-    await enrichWithDetailsPages(scraped);
+    await enrichWithDetailsPages(scraped, tab.id);
   }
   return { ok: true, scraped };
 }
