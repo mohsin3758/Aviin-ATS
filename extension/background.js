@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 22;
+const BG_VERSION = 23;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -189,29 +189,49 @@ async function scrapeLinkedinProfile() {
         // startsWith, not ===: LinkedIn appends a live count to some
         // headings (confirmed live: "Skills (4)", not "Skills") which
         // an exact match silently misses.
+        // Real gap fix (reported live, with a real screenshot of the
+        // actual Experience detail page showing 7 full roles): About
+        // extracted fine but Experience/Education came back completely
+        // empty -- not truncated, not partial, nothing at all. This
+        // query used to only check h1-h4, but findContactInfoPanel
+        // (elsewhere in this file) already had to add [role="heading"]
+        // for the exact same reason -- LinkedIn's own design system uses
+        // non-semantic heading elements (a styled div with an ARIA
+        // heading role) for some section types and never got that same
+        // fix applied here. Also: the old code gave up entirely if
+        // heading.closest('section') (or its immediate parent) happened
+        // to contain only the heading itself with the real entries
+        // living in a sibling container instead -- the exact "undershoots
+        // the real row" class of bug already found and fixed for company/
+        // headline extraction earlier in this file, just never
+        // generalized to this function. Now climbs up to 4 ancestor
+        // levels, same bounded pattern used everywhere else in this file,
+        // stopping at the first container with real content beyond just
+        // the heading label.
         const needle = headingText.toLowerCase();
-        const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4'))
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
           .filter((el) => (el.textContent || '').trim().toLowerCase().startsWith(needle));
         for (const heading of headings) {
-          const container = heading.closest('section') || heading.parentElement;
-          if (!container) continue;
-          // Strip just the heading TEXT from a line, rather than
-          // discarding the whole line -- if the heading and its first
-          // content line ever end up concatenated with no separator
-          // (browser innerText normally inserts one between block
-          // elements, but isn't guaranteed for every possible layout),
-          // dropping the whole line would silently lose real content
-          // instead of just the heading label.
-          const lines = cleanBlockText(container).split('\n')
-            .map((l) => {
-              if (!l.toLowerCase().startsWith(needle)) return l;
-              // Also drop a bare leftover count like "(4)" once the
-              // heading word itself is stripped from e.g. "Skills (4)".
-              return l.slice(needle.length).trim().replace(/^\(\d+\)$/, '').trim();
-            })
-            .filter(Boolean);
-          const text = lines.join('\n');
-          if (text.length > 5) return { text: text.slice(0, maxLen || 2000), lines };
+          let container = heading.closest('section') || heading.parentElement;
+          for (let depth = 0; container && depth < 4; depth++, container = container.parentElement) {
+            // Strip just the heading TEXT from a line, rather than
+            // discarding the whole line -- if the heading and its first
+            // content line ever end up concatenated with no separator
+            // (browser innerText normally inserts one between block
+            // elements, but isn't guaranteed for every possible layout),
+            // dropping the whole line would silently lose real content
+            // instead of just the heading label.
+            const lines = cleanBlockText(container).split('\n')
+              .map((l) => {
+                if (!l.toLowerCase().startsWith(needle)) return l;
+                // Also drop a bare leftover count like "(4)" once the
+                // heading word itself is stripped from e.g. "Skills (4)".
+                return l.slice(needle.length).trim().replace(/^\(\d+\)$/, '').trim();
+              })
+              .filter(Boolean);
+            const text = lines.join('\n');
+            if (text.length > 5) return { text: text.slice(0, maxLen || 2000), lines };
+          }
         }
         return null;
       }
@@ -663,9 +683,9 @@ async function scrapeLinkedinProfile() {
       // text actually exists on the page right now) instead of another
       // guess at a selector or a heading-text variant.
       if (!experienceSection || !educationSection) {
-        const allHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4'))
-          .map((h) => (h.textContent || '').trim().slice(0, 40))
-          .filter(Boolean)
+        const allHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
+          .map((h) => `${h.tagName}${h.getAttribute('role') ? '[role=heading]' : ''}:${(h.textContent || '').trim().slice(0, 40)}`)
+          .filter((s) => !s.endsWith(':'))
           .slice(0, 25);
         debug.push(`experience/education still missing -- headings on page after scroll: ${JSON.stringify(allHeadings)}`);
       }
