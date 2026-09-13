@@ -745,8 +745,29 @@ async def ext_capture_convert(capture_id: str, actor: Actor = Depends(get_actor)
                 updates["current_designation"] = cap["current_title"]
             if not existing["location"] and cap["location"]:
                 updates["location"] = cap["location"]
-            if not existing["resume_text"] and cap["resume_text_like"]:
-                updates["resume_text"] = cap["resume_text_like"]
+            # Real gap fix (reported live, "same issue" after the scraper
+            # itself was already fixed to capture Experience/Education):
+            # a fill-blank-only rule means a candidate imported BEFORE
+            # that scraper fix keeps its old, incomplete resume_text
+            # forever -- re-importing the exact same profile can never
+            # refresh it, since resume_text is no longer blank. But a
+            # bare "always overwrite on re-import" would risk clobbering
+            # a REAL uploaded resume file's parsed text with a thinner
+            # LinkedIn scrape. Splits the two cases: refresh whenever
+            # there's no actual resume_files row for this candidate (so
+            # any existing resume_text can only have come from a prior
+            # LinkedIn capture, not an uploaded document) AND the new
+            # capture is strictly more complete than what's already
+            # there -- never replaces a good scrape with a worse one.
+            if cap["resume_text_like"]:
+                if not existing["resume_text"]:
+                    updates["resume_text"] = cap["resume_text_like"]
+                else:
+                    has_uploaded_resume = await conn.fetchval(
+                        "SELECT 1 FROM resume_files WHERE candidate_id=$1 AND tenant_id=$2 LIMIT 1",
+                        matched_id, actor.tenant_id)
+                    if not has_uploaded_resume and len(cap["resume_text_like"]) > len(existing["resume_text"]):
+                        updates["resume_text"] = cap["resume_text_like"]
             if not existing["email"] and cap["email"]:
                 # Guard the per-tenant UNIQUE constraint -- never let a
                 # fill-blank update collide into a DIFFERENT active
