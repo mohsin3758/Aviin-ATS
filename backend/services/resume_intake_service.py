@@ -731,175 +731,6 @@ async def upsert_candidate(conn, tenant_id: str, parsed: dict,
     return str(new_id)
 
 
-# ─── Phase 4: Job Matching ────────────────────────────────────────────────────
-async def match_requisition(conn, tenant_id: str, subject: str, skills: list, job_board: str = ''):
-    if not subject:
-        return None
-    # Real bug fix (2026-08-20), found while root-causing the same live
-    # "nothing to sort by" report the skills-matching fix above addresses:
-    # this query had no is_active/status filter at all - a candidate could
-    # only ever match against whichever 50 requisitions happened to be
-    # MOST RECENTLY CREATED, soft-deleted or not. On a real tenant with
-    # heavy test-suite activity (this one), that window can fill up
-    # entirely with soft-deleted QA rows, crowding out every real open
-    # requisition and making a match structurally impossible regardless of
-    # how well subject/skills actually line up with a real role.
-    reqs = await conn.fetch(
-        "SELECT id, title FROM requisitions WHERE tenant_id=$1 AND is_active IS NOT FALSE"
-        " AND status='open' ORDER BY created_at DESC LIMIT 50",
-        tenant_id)
-    if not reqs:
-        return None
-    subj_lower = subject.lower()
-
-    # Source-specific patterns
-    import re as _re
-    naukri_m = _re.search(r'applied for (.+?)(?:\s+at\s+|$)', subj_lower)
-    linkedin_m = _re.search(r'new applicant(?:s)? for (.+?)(?:\s+-|$)', subj_lower)
-    indeed_m = _re.search(r'(?:applied to|application for) (.+?)(?:\s+-|$)', subj_lower)
-    extracted_title = None
-    for m in [naukri_m, linkedin_m, indeed_m]:
-        if m:
-            extracted_title = m.group(1).strip()
-            break
-
-    # 1. Exact title match from extracted pattern
-    if extracted_title:
-        for r in reqs:
-            if r['title'].lower() in extracted_title or extracted_title in r['title'].lower():
-                return str(r['id'])
-
-    # Real, severe bug found and fixed 2026-09-06, root-caused live from a
-    # user report of 1200+ genuinely unrelated candidates (plain React/
-    # Python/DevOps profiles, zero SAP skills) piling into "SAP ABAP
-    # Developer"'s pipeline. Both step 2 and step 3 below treated ANY
-    # title word past a bare length cutoff as a meaningful, discriminating
-    # match signal - but common job-title suffix/seniority words
-    # (Developer, Engineer, Consultant, Manager, ...) appear in countless
-    # unrelated real roles and carry ZERO information about which specific
-    # skill/domain a candidate needs. Confirmed directly against the real
-    # intake data: every misassigned candidate's real forwarded email
-    # subject (from the tenant's real "NVite - Naukri.com" bulk resume
-    # feed) contained the word "Developer" somewhere ("Frontend
-    # Developer", "Angular Lead, Senior Developer", "Scala OR Java
-    # Developer") - with "SAP ABAP Developer" the only real open
-    # requisition at the time, every one of those unrelated titles'
-    # shared "developer" suffix alone was enough to falsely match. This
-    # denylist excludes exactly the generic role-suffix/seniority
-    # vocabulary from being treated as a real signal in either step,
-    # while leaving genuinely specific terms (sap, abap, java, python,
-    # react, hana, ...) fully eligible - the fix narrows false-positive
-    # matching, it never removes a genuine one.
-    _GENERIC_TITLE_WORDS = {
-        'developer', 'engineer', 'consultant', 'analyst', 'manager',
-        'executive', 'specialist', 'associate', 'senior', 'junior',
-        'lead', 'officer', 'coordinator', 'administrator', 'architect',
-        'expert', 'professional', 'staff', 'principal', 'head',
-        'representative', 'assistant', 'trainee', 'intern',
-    }
-
-    # 2. General subject match
-    for r in reqs:
-        title = r['title'].lower()
-        words = [w for w in title.split() if len(w) > 3 and w not in _GENERIC_TITLE_WORDS]
-        if title in subj_lower or any(w in subj_lower for w in words):
-            return str(r['id'])
-
-    # 3. Skills-based fallback. Real bug fixed 2026-08-20 (root-caused
-    # while investigating a live "Sort by Match % does nothing" report -
-    # this was the actual cause: candidates were never getting matched to
-    # a requisition at intake at all, so there was nothing to score or
-    # sort): `skill_set & title_words` requires an EXACT match between a
-    # whole skill phrase ("sap fico") and a single title token ("sap") -
-    # a set intersection of two different string values, which can never
-    # succeed for the overwhelmingly common case of a multi-word skill
-    # against a short requisition title. Confirmed directly against a
-    # real candidate (skills incl. "SAP FICO"/"SAP HANA", title "SAP ABAP
-    # Developer") that the old check always returned an empty set despite
-    # "sap" plainly being a real, meaningful match. Fixed to check whether
-    # any significant title word appears as a substring of any skill.
-    if skills:
-        skill_set = {s.lower() for s in skills}
-        for r in reqs:
-            title_words = [w.lower() for w in r['title'].split()
-                            if len(w) > 2 and w not in _GENERIC_TITLE_WORDS]
-            if any(tw in sk for tw in title_words for sk in skill_set):
-                return str(r['id'])
-    return None
-
-
-async def _pick_round_robin_recruiter(conn, tenant_id: str):
-    """Approved item 03 (AI Auto-Assignment Engine audit): resume intake
-    never set applications.assigned_recruiter_id, so every inbound resume
-    landed fully unowned. Round-robin = least current open-application
-    load among active, not-on-leave recruiters — self-correcting, no
-    rotation-cursor table to drift out of sync. Returns None (leave
-    unassigned) if no eligible recruiter exists rather than guessing."""
-    row = await conn.fetchrow("""
-        SELECT u.id
-        FROM users u
-        LEFT JOIN applications a ON a.assigned_recruiter_id = u.id
-            AND a.tenant_id = u.tenant_id AND a.stage NOT IN ('rejected','placed')
-        WHERE u.tenant_id = $1 AND u.role = 'recruiter' AND u.is_active
-          AND NOT EXISTS (
-            SELECT 1 FROM recruiter_leave rl
-            WHERE rl.recruiter_id = u.id AND rl.tenant_id = u.tenant_id
-              AND CURRENT_DATE BETWEEN rl.start_date AND rl.end_date
-          )
-        GROUP BY u.id
-        ORDER BY COUNT(a.id) ASC, u.full_name ASC
-        LIMIT 1
-    """, tenant_id)
-    return row["id"] if row else None
-
-
-async def create_application(conn, tenant_id: str, candidate_id: str, requisition_id: str):
-    try:
-        # Individual recruiter ownership (2026-08-11) overrides round-robin
-        # entirely: if this candidate has an active 30-day ownership lock,
-        # the owner is the assigned recruiter, full stop — round-robin only
-        # ever applies as the fallback for candidates nobody currently owns.
-        from services import candidate_ownership as _ownership
-        owner = await _ownership.get_ownership(conn, tenant_id, candidate_id)
-        # A Temporary Sender Record (owner["recruiter_id"] is None — an
-        # unregistered sender, 2026-09-07) has SOURCING credit but no real
-        # user account to hand the day-to-day pipeline WORK to yet —
-        # falls back to round-robin for the work assignment only; the
-        # sourcing credit itself stays correctly with the unregistered
-        # sender via candidate_ownership, untouched here.
-        if (owner and owner["status"] == "active" and owner["recruiter_id"]
-                and owner["ownership_expires_at"] > datetime.now(timezone.utc)):
-            recruiter_id = owner["recruiter_id"]
-        else:
-            recruiter_id = await _pick_round_robin_recruiter(conn, tenant_id)
-        # Real bug fix (2026-08-20): this hardcoded 'sourced' unconditionally
-        # - the exact same flaw already found and fixed in applications.py's
-        # HTTP POST /applications (same day), just missed here since this is
-        # a separate internal function, not the HTTP endpoint. For this
-        # tenant, 'sourced' is a deliberately hidden stage - every resume
-        # auto-matched at intake landed in a real application that could
-        # never appear on the actual Kanban board, only ever visible via
-        # "already in pipeline" banners elsewhere. Same fallback as the
-        # other two creation paths (bulk-assign, POST /applications).
-        # 2026-08-25: extracted to a real shared helper — see
-        # routers.pipeline_stages.resolve_default_add_stage's own docstring.
-        from routers.pipeline_stages import resolve_default_add_stage
-        default_stage = await resolve_default_add_stage(conn, tenant_id)
-        # ON CONFLICT target must restate the partial unique index's
-        # predicate (applications_tenant_req_cand_active_key,
-        # 2026-08-20's "Remove from Pipeline" migration) — a removed
-        # (is_active=false) row falls outside that index, so this
-        # correctly inserts a fresh application rather than silently
-        # no-op-ing against a candidate someone already removed.
-        await conn.execute("""
-            INSERT INTO applications(tenant_id,requisition_id,candidate_id,stage,assigned_recruiter_id)
-            VALUES($1,$2,$3,$4,$5)
-            ON CONFLICT(tenant_id,requisition_id,candidate_id) WHERE is_active IS NOT FALSE DO NOTHING""",
-            tenant_id, requisition_id, candidate_id, default_stage, recruiter_id)
-    except Exception as e:
-        print(f'[ResumeIntake] Application insert: {e}')
-
-
 # ─── Phase 5: Notifications & Auto-Reply ─────────────────────────────────────
 async def notify_recruiters(conn, tenant_id: str, candidate_name: str,
                             designation, exp_years, job_board_label: str, candidate_id: str):
@@ -1266,19 +1097,29 @@ async def process_email_for_resume(
         candidate_id = None
         print(f'[Routing] LOW_CONFIDENCE (conf={conf:.2f}): file stored, no candidate created')
 
-    # A low_confidence resume deliberately gets no candidate (candidate_id is
-    # None) - create_application's INSERT requires a non-null candidate_id,
-    # so calling it unconditionally violated that constraint on every
-    # low-confidence item. The caught exception didn't propagate, but it
-    # left the connection's transaction in Postgres's "aborted" state for
-    # the rest of this item's processing, since catching a Python exception
-    # doesn't clear that - every later query on this same conn then failed
-    # too with "current transaction is aborted".
-    requisition_id = None
+    # Real behavior fix (reported live: candidates were showing up in a
+    # requisition's "Interested" pipeline column with nobody having put
+    # them there -- confirmed live, e.g. Parandhama Singanamala and
+    # Laxmi A both auto-landed in a real "SAP FICO" requisition's
+    # pipeline purely because their email subject line keyword-matched
+    # it via match_requisition(), with no recruiter ever choosing that
+    # pairing). This used to auto-INSERT an `applications` row (i.e.
+    # silently add the candidate to that requisition's pipeline) the
+    # instant a resume's subject/skills happened to keyword-match an
+    # open requisition -- unlike every OTHER real applications-INSERT
+    # call site in this codebase (POST /applications, bulk-assign,
+    # public apply, a recruiter's own job-specific link, an agency
+    # portal submission), which all fire only on an explicit, deliberate
+    # target: a recruiter clicking "Add to Pipeline" for a candidate
+    # THEY picked, or a candidate/agency applying to a job THEY chose.
+    # match_requisition() here is a fuzzy keyword GUESS, not an explicit
+    # choice by anyone -- the exact class of "automatic" the user
+    # explicitly asked this codebase to stop doing. Removed entirely;
+    # auto-scoring against every open job (below, unchanged) still gives
+    # a recruiter the match signal to manually add the candidate
+    # themselves, through the same real "Add to Pipeline" action used
+    # everywhere else.
     if candidate_id:
-        requisition_id = await match_requisition(conn, tenant_id, subject, parsed.get('skills', []), job_board)
-        if requisition_id:
-            await create_application(conn, tenant_id, candidate_id, requisition_id)
         # Auto-score against every real open job, not just the one JD this
         # resume happened to auto-match to ("uploaded -> instant score",
         # not wait for someone to manually trigger /intelligence/score or
