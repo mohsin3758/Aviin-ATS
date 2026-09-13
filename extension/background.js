@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 37;
+const BG_VERSION = 38;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -1293,9 +1293,26 @@ async function enrichProfileFullyByUrl(url, tabId) {
   }
 }
 
+// Real gap fix (reported live: "there is no option to stop bulk
+// importing, its working continuesly"). A bulk run can now take several
+// minutes per page (each profile visits its own page, possibly two more
+// for the details-sub-page fallback) with no way to interrupt it once
+// started -- a real problem if it was started by mistake, or the
+// recruiter just needs their browser back. Storage-backed rather than
+// an in-memory flag, since the popup that would show a Stop button is
+// frequently NOT the one that started the import (it closes every time
+// the active tab switches, per the v35/v36 fixes) -- any later popup
+// open can still request cancellation this way.
+async function isBulkImportCancelRequested() {
+  const stored = await new Promise((resolve) => chrome.storage.local.get('bulkImportCancelRequested', resolve));
+  return !!(stored && stored.bulkImportCancelRequested);
+}
+
 async function importSearchResults(list, searchResultsTabId, originalUrl) {
-  const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length };
+  const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length, cancelled: false };
+  await chrome.storage.local.set({ bulkImportStatus: 'running', bulkImportCancelRequested: false });
   for (let i = 0; i < list.length; i++) {
+    if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
     const thin = list[i];
     // Sequential, not parallel -- a batch of concurrent requests against
     // a recruiter's own account looks a lot more like automation than a
@@ -1308,11 +1325,22 @@ async function importSearchResults(list, searchResultsTabId, originalUrl) {
     else summary.error += 1;
 
     if (i < list.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, randomDelayMs(2500, 5500)));
+      // Checked in small steps rather than once per profile -- a single
+      // profile can itself take 10-30+ seconds, so only ever honoring
+      // Stop between whole profiles would feel unresponsive.
+      const delayMs = randomDelayMs(2500, 5500);
+      const stepMs = 500;
+      for (let waited = 0; waited < delayMs; waited += stepMs) {
+        if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(stepMs, delayMs - waited)));
+      }
+      if (summary.cancelled) break;
     }
   }
+  await chrome.storage.local.set({ bulkImportStatus: 'idle', bulkImportCancelRequested: false });
   // Leaves the recruiter back where they started, like a human who
-  // browsed through several profiles and returned to the results list.
+  // browsed through several profiles and returned to the results list --
+  // true whether it finished naturally or was stopped early.
   if (originalUrl) {
     try { await chrome.tabs.update(searchResultsTabId, { url: originalUrl }); } catch (e) { /* tab may be gone */ }
   }
@@ -1461,6 +1489,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'IMPORT_SEARCH_RESULTS': {
+          const statusCheck = await new Promise((resolve) => chrome.storage.local.get('bulkImportStatus', resolve));
+          if (statusCheck && statusCheck.bulkImportStatus === 'running') {
+            sendResponse({ status: 'error', message: 'A bulk import is already running — use Stop Import first if you want to start a different one.' });
+            break;
+          }
           const listResult = await scrapeActiveTabSearchResults();
           if (!listResult.ok) {
             const failResult = { status: listResult.error === 'not_supported_page' ? 'not_supported' : 'error', message: listResult.error };
@@ -1480,13 +1513,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           } catch (e) { /* storage full/unavailable -- notification below still tries */ }
           chrome.notifications.create({
             type: 'basic', iconUrl: 'icons/icon128.png', title: 'AVIIN ATS Import',
-            message: `Bulk import done: ${summary.created} created, ${summary.updated} updated, ${summary.no_change} already up to date, ${summary.error} failed (of ${summary.total}).`,
+            message: `${summary.cancelled ? 'Bulk import stopped' : 'Bulk import done'}: ${summary.created} created, ${summary.updated} updated, ${summary.no_change} already up to date, ${summary.error} failed (of ${summary.total}).`,
           }, () => {
             if (chrome.runtime.lastError) {
               console.log('[AVIIN Import] batch notification failed to show:', chrome.runtime.lastError.message);
             }
           });
           sendResponse(batchResult);
+          break;
+        }
+        case 'STOP_BULK_IMPORT': {
+          // Real gap fix (reported live: "there is no option to stop
+          // bulk importing, its working continuesly"). Only sets a flag
+          // -- importSearchResults checks it between profiles and during
+          // its own pacing delay, so this takes effect within a few
+          // seconds, not instantly (the profile already in progress
+          // finishes first; there's no safe way to abort mid-scrape
+          // without risking a half-written import).
+          await chrome.storage.local.set({ bulkImportCancelRequested: true });
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'GET_BULK_IMPORT_STATUS': {
+          const stored = await new Promise((resolve) => chrome.storage.local.get(['bulkImportStatus', 'bulkImportCancelRequested'], resolve));
+          sendResponse({
+            running: stored && stored.bulkImportStatus === 'running',
+            cancelling: !!(stored && stored.bulkImportCancelRequested),
+          });
           break;
         }
         case 'CHECK_TAB_DUPLICATE': {

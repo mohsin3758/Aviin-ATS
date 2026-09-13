@@ -68,6 +68,17 @@ async function onLogoutClick() {
   init();
 }
 
+async function onStopBulkImportClick() {
+  const btn = document.getElementById('stop-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+  await sendMessage({ type: 'STOP_BULK_IMPORT' });
+  // Re-render immediately rather than waiting for the next open -- the
+  // background loop won't have actually stopped yet (it finishes the
+  // profile already in progress first), but the popup should reflect
+  // "stopping" right away instead of looking like the click did nothing.
+  init();
+}
+
 function statusBox(kind, html) {
   return el('div', { class: `status-box ${kind}`, html });
 }
@@ -106,8 +117,9 @@ function buildResultStatusBox(result) {
   }
   if (result.status === 'batch_done') {
     const s = result.summary;
+    const label = s.cancelled ? '✓ Bulk import stopped' : '✓ Bulk import done';
     return statusBox('good',
-      `✓ Bulk import done: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).` +
+      `${label}: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).` +
       `<br/><a href="https://ats.aviintech.com/captured-profiles" target="_blank">View Captured Profiles →</a>`);
   }
   return statusBox('err', escapeHtml(result.message || 'Something went wrong.'));
@@ -129,6 +141,28 @@ async function renderReady(email) {
     root.appendChild(buildResultStatusBox(pending.result));
     root.appendChild(document.createElement('hr'));
     chrome.storage.local.remove('lastImportResult'); // shown once -- don't resurface on the next open too
+  }
+
+  // Real gap fix (reported live: "there is no option to stop bulk
+  // importing, its working continuesly"). A bulk run can take several
+  // minutes and visits many pages on its own -- this popup is very
+  // likely NOT looking at the search-results page any more by the time
+  // the recruiter reopens it (the active tab keeps switching between
+  // profiles), so this check runs BEFORE the normal tab-type branching
+  // below and, if a run is in progress, replaces the whole UI with a
+  // Stop control instead of showing a confusing/wrong Import button for
+  // whatever profile the bulk run currently happens to be on.
+  const bulkStatus = await sendMessage({ type: 'GET_BULK_IMPORT_STATUS' });
+  if (bulkStatus && bulkStatus.running) {
+    root.appendChild(statusBox(bulkStatus.cancelling ? 'warn' : 'good',
+      bulkStatus.cancelling
+        ? 'Stopping bulk import — finishing the profile already in progress…'
+        : 'Bulk import running — visiting each profile in turn. This can take several minutes.'));
+    if (!bulkStatus.cancelling) {
+      root.appendChild(el('button', { id: 'stop-btn', class: 'secondary', text: 'Stop Import', onclick: onStopBulkImportClick }));
+    }
+    root.appendChild(el('div', { class: 'muted', text: 'Safe to close this popup — the result will show here the next time you open it.' }));
+    return;
   }
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
