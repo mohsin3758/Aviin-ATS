@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 29;
+const BG_VERSION = 30;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -877,30 +877,47 @@ async function scrapeLinkedinProfile() {
 // show ONLY that one section's full list already rendered (confirmed via
 // the user's own copy-paste, no lazy-load/scroll issue at all), so this
 // doesn't need any of the heading-search/climb/scroll machinery
-// scrapeLinkedinProfile needs for the main page. Denoises the page's own
-// chrome (nav bar, ads, "People you may know", connection-degree badges)
-// out of document.body's text by dropping recognizable boilerplate
-// lines, keeping everything else -- the real role/degree entries never
-// match this blocklist.
+// scrapeLinkedinProfile needs for the main page.
+// Real gap fix (reported live: the FIRST version of this function --
+// verified only against a guessed mock, never real page output --
+// shipped with a per-line blocklist that missed most of the actual
+// noise on a real page: a "People Also Viewed" sidebar (real people's
+// names and headlines, which can't be told apart from real content by
+// word-matching alone) immediately followed by LinkedIn's global page
+// footer (Accessibility, Talent Solutions, a 30-language picker, "©
+// 2026", etc.) -- all of it got treated as real content and appended
+// to BOTH Experience and Education, and Education ended up with NO
+// real data at all, just this tail. Root cause of the missed
+// connection-degree lines specifically: the regex required a line to
+// START with a digit ("2nd"), but the real page renders it as "· 2nd"
+// (a bullet character first) -- a plain word-blocklist can never be
+// complete against arbitrary real names anyway. Replaced with a
+// structural cutoff instead of more word-guessing: truncates the WHOLE
+// remainder of the page at the first sign of either boundary --
+// LinkedIn's footer (keyed on "linkedin corporation", present on every
+// single page) or a connection-degree line ("· 2nd" etc., which also
+// drops the person-name line immediately before it, since a sidebar
+// card's name has no other distinguishing marker) -- whichever comes
+// first, keeping everything before it untouched.
 function scrapeDetailsPageText() {
-  const NOISE_LINES = new Set([
-    'home', 'my network', 'jobs', 'messaging', 'notifications', 'me', 'for business', 'advertise', 'search',
-    'ad options', "don't want to see this", 'people you may know', 'more profiles for you', 'show all',
-    'follow', 'connect', 'message', 'also viewed', 'people also viewed', 'promoted', 'sponsored', 'see all',
-    'explore premium profiles', 'you might like', 'highlights', 'activity',
-  ]);
-  function isNoiseLine(line) {
-    const l = line.trim().toLowerCase();
-    if (!l) return true;
-    if (NOISE_LINES.has(l)) return true;
-    if (/^\d+(st|nd|rd|th)\b/.test(l)) return true; // "2nd degree connection" badges
-    if (/^\d+[\d,]*\+?\s*(connections?|followers?|mutual connections?)/.test(l)) return true;
-    return false;
+  function isDegreeLine(line) {
+    return /^[·•]?\s*(1st|2nd|3rd|\d+(st|nd|rd|th))\+?\s*$/i.test(line.trim());
+  }
+  function isFooterLine(line) {
+    return /linkedin corporation|visit our help center|select language|recommendation transparency/i.test(line);
   }
   try {
     const main = document.querySelector('main') || document.body;
     const raw = main.innerText || main.textContent || '';
-    const lines = raw.split('\n').map((l) => l.trim()).filter((l) => l && !isNoiseLine(l));
+    const allLines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+    let cutoff = allLines.length;
+    for (let i = 0; i < allLines.length; i++) {
+      if (isFooterLine(allLines[i])) { cutoff = Math.min(cutoff, i); break; }
+    }
+    for (let i = 0; i < allLines.length; i++) {
+      if (isDegreeLine(allLines[i])) { cutoff = Math.min(cutoff, Math.max(0, i - 1)); break; }
+    }
+    const lines = allLines.slice(0, cutoff);
     return { text: lines.join('\n').slice(0, 8000) };
   } catch (e) {
     return { text: null, error: e?.message || String(e) };
