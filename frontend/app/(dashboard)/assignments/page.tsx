@@ -310,7 +310,13 @@ function BulkAssignModal({ requisitionIds, onDone, onClose }: { requisitionIds: 
 function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone: () => void; onClose: () => void }) {
   const [clientId, setClientId] = useState('');
   const [reqId, setReqId] = useState('');
-  const [recruiterId, setRecruiterId] = useState('');
+  // A requisition can carry more than one active recruiter at a time (the
+  // DB's assignments_one_active_per_requisition constraint was relaxed to
+  // (requisition_id, recruiter_id) specifically for this — see
+  // POST /assignments' own docstring) — real request: "recruiter can work
+  // on multiple role, one each multiple selection option should be there".
+  // Multi-select here, same convention as BulkAssignModal above.
+  const [recruiterIds, setRecruiterIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
 
@@ -319,23 +325,38 @@ function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone:
   const selectedReq = reqList.find((r: any) => r.id === reqId);
 
   const { data: matchRecruiters } = useFetch<any[]>(reqId ? `/requisitions/${reqId}/match-recruiters?limit=50` : null);
+  const recruiterNameById = Object.fromEntries((matchRecruiters || []).map((m: any) => [m.recruiter_id, m.full_name]));
 
-  const pickClient = (id: string) => { setClientId(id); setReqId(''); setRecruiterId(''); setResult(null); };
-  const pickReq = (id: string) => { setReqId(id); setRecruiterId(''); setResult(null); };
+  const pickClient = (id: string) => { setClientId(id); setReqId(''); setRecruiterIds(new Set()); setResult(null); };
+  const pickReq = (id: string) => { setReqId(id); setRecruiterIds(new Set()); setResult(null); };
+  const toggleRecruiter = (id: string) => setRecruiterIds(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
 
   const submit = async () => {
-    if (!reqId || !recruiterId) return;
+    if (!reqId || recruiterIds.size === 0) return;
     setBusy(true);
-    try {
-      const r = await apiFetch('/assignments', {
+    const ids = Array.from(recruiterIds);
+    // No bulk endpoint for a single (requisition, many recruiters) call —
+    // each is its own independent POST /assignments, same as clicking
+    // Assign N times, so one recruiter already assigned (409) doesn't
+    // block the others from going through.
+    const outcomes = await Promise.allSettled(
+      ids.map(rid => apiFetch('/assignments', {
         method: 'POST',
-        body: JSON.stringify({ requisition_id: reqId, recruiter_id: recruiterId }),
-      });
-      setResult(r);
-      onDone();
-    } catch (e: any) {
-      setResult({ error: e.message || 'Failed to assign' });
-    } finally { setBusy(false); }
+        body: JSON.stringify({ requisition_id: reqId, recruiter_id: rid }),
+      }))
+    );
+    const succeeded = outcomes.filter(o => o.status === 'fulfilled').length;
+    const failed = outcomes.length - succeeded;
+    const errors = outcomes
+      .map((o, i) => (o.status === 'rejected' ? { recruiterId: ids[i], message: (o.reason as any)?.message || 'Failed' } : null))
+      .filter(Boolean) as { recruiterId: string; message: string }[];
+    setResult({ succeeded, failed, errors });
+    setBusy(false);
+    if (succeeded > 0) onDone();
   };
 
   const resetAndCloseOrContinue = () => {
@@ -343,7 +364,7 @@ function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone:
     // successful assign, stay on the SAME client so assigning several
     // roles for one client in a row doesn't mean re-picking it every
     // time -- only the role/recruiter selection resets.
-    setReqId(''); setRecruiterId(''); setResult(null);
+    setReqId(''); setRecruiterIds(new Set()); setResult(null);
   };
 
   return (
@@ -378,7 +399,7 @@ function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone:
 
         {reqId && (
           <>
-            <label style={label}>3 · RECRUITER — real match score &amp; workload for this specific role</label>
+            <label style={label}>3 · RECRUITER(S) — select one or more, real match score &amp; workload for this specific role</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14, maxHeight: 260, overflowY: 'auto' }} data-testid="quick-assign-recruiter-picker">
               {(matchRecruiters || []).map((m: any) => {
                 // Real gap fix (caught before shipping): match_recruiters()
@@ -389,16 +410,17 @@ function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone:
                 // pickers on this page use). match_score is already *100
                 // (a real 0-100 percentage), so no extra scaling needed.
                 const wl = RECRUITER_WORKLOAD_BADGE[m.workload_label] || RECRUITER_WORKLOAD_BADGE.Medium;
-                const isSelected = recruiterId === m.recruiter_id;
+                const isSelected = recruiterIds.has(m.recruiter_id);
                 return (
                   <div key={m.recruiter_id} data-testid={`quick-assign-recruiter-option-${m.recruiter_id}`}
-                    onClick={() => setRecruiterId(m.recruiter_id)}
+                    onClick={() => toggleRecruiter(m.recruiter_id)}
                     title={`${m.available_capacity ?? '?'}/${m.capacity_weekly ?? '?'} slots free`}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
                       border: `1px solid ${isSelected ? '#93C5FD' : '#E2E8F0'}`,
                       background: isSelected ? '#EFF6FF' : '#fff',
                     }}>
+                    {isSelected ? <CheckSquare size={14} style={{ color: '#2563EB', flexShrink: 0 }} /> : <Square size={14} style={{ color: '#94A3B8', flexShrink: 0 }} />}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: '#1E293B' }}>{m.full_name}</div>
                       <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 2 }}>
@@ -420,8 +442,16 @@ function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone:
         )}
 
         {result && !result.error && (
-          <div style={{ fontSize: 12, color: '#16A34A', background: '#F0FDF4', borderRadius: 8, padding: 8, marginBottom: 10 }}>
-            ✓ Assigned to <strong>{selectedReq?.title}</strong>.
+          <div style={{ fontSize: 12, color: result.failed ? '#D97706' : '#16A34A', background: result.failed ? '#FFFBEB' : '#F0FDF4', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+            ✓ {result.succeeded} recruiter{result.succeeded === 1 ? '' : 's'} assigned to <strong>{selectedReq?.title}</strong>
+            {result.failed > 0 ? `, ${result.failed} failed` : ''}.
+            {result.errors?.length > 0 && (
+              <div style={{ marginTop: 4 }}>
+                {result.errors.map((e: any) => (
+                  <div key={e.recruiterId} style={{ color: '#DC2626' }}>{recruiterNameById[e.recruiterId] || e.recruiterId}: {e.message}</div>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {result?.error && <div style={{ fontSize: 12, color: '#DC2626', marginBottom: 10 }}>{result.error}</div>}
@@ -434,7 +464,9 @@ function QuickAssignForm({ clients, onDone, onClose }: { clients: any[]; onDone:
             </>
           ) : (
             <>
-              <button onClick={submit} disabled={busy || !reqId || !recruiterId} style={btn}>{busy ? 'Assigning…' : 'Confirm Assign'}</button>
+              <button onClick={submit} disabled={busy || !reqId || recruiterIds.size === 0} style={btn}>
+                {busy ? 'Assigning…' : `Confirm Assign${recruiterIds.size > 1 ? ` (${recruiterIds.size})` : ''}`}
+              </button>
               <button onClick={onClose} style={btnGhost}>Cancel</button>
             </>
           )}
