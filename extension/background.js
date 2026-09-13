@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 33;
+const BG_VERSION = 34;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -1278,7 +1278,19 @@ function notifyImportResult(result) {
     case 'error': message = result.message || 'Something went wrong.'; break;
     default: return;
   }
-  chrome.notifications.create('', { type: 'basic', iconUrl: 'icons/icon128.png', title, message });
+  // Real gap fix (reported live: no system notification ever appeared
+  // after a completed import, success or failure). Passing an explicit
+  // empty-string id (instead of omitting it, the documented way to let
+  // Chrome auto-generate one) is called out in real bug reports as
+  // silently failing on some Chrome versions -- and this call never
+  // checked chrome.runtime.lastError either, so a failure here had no
+  // way to ever surface. Drops the id argument entirely and logs any
+  // real error instead of failing silently.
+  chrome.notifications.create({ type: 'basic', iconUrl: 'icons/icon128.png', title, message }, () => {
+    if (chrome.runtime.lastError) {
+      console.log('[AVIIN Import] notification failed to show:', chrome.runtime.lastError.message);
+    }
+  });
 }
 
 async function importProfile(scraped) {
@@ -1373,9 +1385,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             break;
           }
           const summary = await importSearchResults(listResult.list);
-          chrome.notifications.create('', {
+          chrome.notifications.create({
             type: 'basic', iconUrl: 'icons/icon128.png', title: 'AVIIN ATS Import',
             message: `Bulk import done: ${summary.created} created, ${summary.updated} updated, ${summary.no_change} already up to date, ${summary.error} failed (of ${summary.total}).`,
+          }, () => {
+            if (chrome.runtime.lastError) {
+              console.log('[AVIIN Import] batch notification failed to show:', chrome.runtime.lastError.message);
+            }
           });
           sendResponse({ status: 'batch_done', summary });
           break;
