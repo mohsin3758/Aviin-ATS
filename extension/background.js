@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 17;
+const BG_VERSION = 18;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -283,17 +283,36 @@ async function scrapeLinkedinProfile() {
       // below (a dialog found already open, and one freshly opened by
       // a click) -- a previous version duplicated this logic across
       // both and only ever got fixed in one of them.
+      // Real gap fix (reported live, twice now, with a real screenshot
+      // this time): an exact "===" match against a label's own text is
+      // the exact same fragility already found and fixed for "Skills
+      // (4)" earlier in this file -- LinkedIn commonly appends hidden,
+      // screen-reader-only text to a label ("Phone, click to view phone
+      // number") that a real visitor never sees but which is still part
+      // of the element's textContent, silently defeating an exact
+      // match. Switched to startsWith, the same fix already applied
+      // there. Also scans a few lines past the label (not just the very
+      // next one) and skips anything that itself looks like ANOTHER
+      // known Contact-info label, in case a hidden accessibility line
+      // sits between the label and the real value.
+      const CONTACT_INFO_LABELS = ['phone', 'email', 'address', 'birthday', 'connected since', 'websites', 'im'];
       function readValueNearLabel(dialog, labelText) {
         const needle = labelText.trim().toLowerCase();
         const candidates = Array.from(dialog.querySelectorAll('h3, h2, span, div, dt, label'))
-          .filter((el) => (el.textContent || '').trim().toLowerCase() === needle);
+          .filter((el) => (el.textContent || '').trim().toLowerCase().startsWith(needle));
         for (const labelEl of candidates) {
           let container = labelEl.parentElement;
           for (let depth = 0; container && depth < 4; depth++) {
             const raw = (container.innerText || container.textContent || '');
             const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
-            const idx = lines.findIndex((l) => l.toLowerCase() === needle);
-            if (idx !== -1 && lines.length > idx + 1) return lines[idx + 1];
+            const idx = lines.findIndex((l) => l.toLowerCase().startsWith(needle));
+            if (idx !== -1) {
+              for (let j = idx + 1; j < lines.length && j <= idx + 3; j++) {
+                const cand = lines[j];
+                const isAnotherLabel = CONTACT_INFO_LABELS.some((o) => cand.toLowerCase().startsWith(o));
+                if (cand && !isAnotherLabel) return cand;
+              }
+            }
             container = container.parentElement;
           }
         }
@@ -503,13 +522,19 @@ async function scrapeLinkedinProfile() {
           : null) || readValueNearLabel(dialog, 'Email');
 
         const phone = readValueNearLabel(dialog, 'Phone');
-        // Dialog genuinely opened but had neither -- distinguishes "this
-        // profile just doesn't expose contact info to this viewer" (a
-        // real LinkedIn visibility rule, expected to happen often) from
-        // the click/dialog-detection failing outright (the two cases
-        // above).
-        if (!email && !phone) {
-          debug.push(`contact-info: dialog opened but had no mailto: link or "Phone" label (dialog text: "${(dialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 150)}")`);
+        // Dialog genuinely opened but a field is still missing --
+        // distinguishes "this profile just doesn't expose contact info
+        // to this viewer" (a real LinkedIn visibility rule, expected to
+        // happen often) from the click/dialog-detection or label-
+        // reading failing outright. Dumped LINE BY LINE (not flattened
+        // to one whitespace-collapsed string) so the real structure --
+        // including any hidden accessibility text riding along with a
+        // label -- is actually visible in the next round instead of
+        // requiring yet another guess.
+        if (!email || !phone) {
+          const rawLines = (dialog.innerText || dialog.textContent || '')
+            .split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 20);
+          debug.push(`contact-info: email=${!!email} phone=${!!phone} -- dialog lines: ${JSON.stringify(rawLines)}`);
         }
 
         const dismissBtn = dialog.querySelector('button[aria-label="Dismiss"], button[aria-label*="Dismiss" i], button[aria-label*="close" i]');
