@@ -726,19 +726,34 @@ function DetailDrawer({ item, onClose, onApprove, onRequestReject, onReparse, on
         {/* Actions */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
           {item.candidate_id && <a href={`/candidates/${item.candidate_id}`} target="_blank" rel="noreferrer" style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#1e40af', color: '#fff', borderRadius: 8, fontSize: 13, fontWeight: 700, textDecoration: 'none' }}><User size={13} /> View in ATS</a>}
-          <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fff', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Download size={13} /> Download Resume File</button>
-          <button onClick={onEdit} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Edit3 size={13} /> Edit & Approve</button>
-          <button onClick={onApprove} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#059669', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><CheckCircle size={13} /> Quick Approve</button>
-          <button onClick={onReparse} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#f1f5f9', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><RotateCcw size={13} /> Re-parse</button>
+          {/* Real feature (2026-09-13): a LinkedIn-sourced candidate has no
+              resume_files row at all — no file to download/re-parse, and
+              parse_status='auto_accepted' means there's no pending parse
+              decision for Edit & Approve/Quick Approve/Reject to act on
+              either. All five backend endpoints now 400 for these ids, so
+              hidden here rather than offering a button that can only fail
+              — with an explicit note below instead of just silently fewer
+              buttons, so the state reads as intentional, not broken. */}
+          {item.job_board !== 'linkedin' && <>
+            <button onClick={() => downloadResumeFile(item.id, item.file_name)} style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fff', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Download size={13} /> Download Resume File</button>
+            <button onClick={onEdit} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Edit3 size={13} /> Edit & Approve</button>
+            <button onClick={onApprove} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#059669', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><CheckCircle size={13} /> Quick Approve</button>
+            <button onClick={onReparse} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#f1f5f9', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><RotateCcw size={13} /> Re-parse</button>
+          </>}
           {item.candidate_id && onCheckDups && <button onClick={onCheckDups} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><Layers size={13} /> Check Dupes</button>}
           {/* Real gap fix (2026-09-08): Reject no longer fires immediately
               — opens the reason picker built above, same reasoning as the
               Pipeline board's own structured rejection system. */}
-          {item.parse_status !== 'rejected' && <button data-testid="resume-inbox-reject-btn" onClick={onRequestReject} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><XCircle size={13} /> Reject</button>}
+          {item.job_board !== 'linkedin' && item.parse_status !== 'rejected' && <button data-testid="resume-inbox-reject-btn" onClick={onRequestReject} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '10px', background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}><XCircle size={13} /> Reject</button>}
           {item.parse_status === 'rejected' && item.reject_reason && (
             <div style={{ gridColumn: '1/-1', fontSize: 11, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '8px 10px' }}>
               Rejected — <b>{REJECT_REASONS.find(r => r.key === item.reject_reason)?.label || item.reject_reason}</b>
               {item.reject_notes && <div style={{ marginTop: 2, color: '#991b1b' }}>{item.reject_notes}</div>}
+            </div>
+          )}
+          {item.job_board === 'linkedin' && (
+            <div style={{ gridColumn: '1/-1', fontSize: 11, color: '#64748b', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px' }}>
+              Imported from LinkedIn — no resume file, so there's nothing to download, re-parse, approve, or reject here.
             </div>
           )}
         </div>
@@ -1039,12 +1054,18 @@ function ResumeInboxPageInner() {
 
   const bulkAction = async (action: 'approve' | 'reject') => {
     if (!selectedIds.size) return;
+    // Real feature (2026-09-13): LinkedIn-sourced rows have no
+    // resume_files row at all — approve/reject 400 for these ids (no
+    // file-parsing-workflow equivalent). Skipped up front rather than
+    // firing a doomed request per row and relying on the catch below.
+    const targetIds = Array.from(selectedIds).filter(id => items.find(r => r.id === id)?.job_board !== 'linkedin');
+    const skippedLinkedin = selectedIds.size - targetIds.length;
     let done = 0;
     const doneIds: string[] = [];
-    for (const id of selectedIds) {
+    for (const id of targetIds) {
       try { await apiFetch(`/resume-intake/${id}/${action}`, { method: 'POST' }); done++; doneIds.push(id); } catch (e) {}
     }
-    showToast(`✓ ${action === 'approve' ? 'Approved' : 'Rejected'} ${done} resumes`);
+    showToast(`✓ ${action === 'approve' ? 'Approved' : 'Rejected'} ${done} resumes` + (skippedLinkedin ? ` (${skippedLinkedin} LinkedIn skipped — no file action applies)` : ''));
     setSelectedIds(new Set()); removeFromQueue(doneIds); reloadStats();
   };
 
@@ -1134,8 +1155,12 @@ function ResumeInboxPageInner() {
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
       if (e.key === 'ArrowRight') { e.preventDefault(); goNext(); }
       else if (e.key === 'ArrowLeft') { e.preventDefault(); goPrev(); }
-      else if (e.key === 'a' || e.key === 'A') { doAction(selected.id, 'approve'); }
-      else if (e.key === 'r' || e.key === 'R') { if (selected.parse_status !== 'rejected') setRejectModalOpen(true); }
+      // Real feature (2026-09-13): approve/reject are file-parsing-workflow
+      // actions with no LinkedIn equivalent (matches the hidden buttons in
+      // the drawer's own Actions section) — the backend 400s them anyway,
+      // but there's no reason to let the shortcut fire a doomed request.
+      else if ((e.key === 'a' || e.key === 'A') && selected.job_board !== 'linkedin') { doAction(selected.id, 'approve'); }
+      else if ((e.key === 'r' || e.key === 'R') && selected.job_board !== 'linkedin') { if (selected.parse_status !== 'rejected') setRejectModalOpen(true); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -1547,7 +1572,11 @@ function ResumeInboxPageInner() {
                         )}
                       </td>
                       <td style={{ padding: '10px 8px', maxWidth: 120 }} onClick={() => setSelected(r)}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#374151' }}><FileText size={12} color="#6366f1" style={{ flexShrink: 0 }} /><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 95 }}>{r.file_name || r.email_subject || '—'}</span></div>
+                        {/* Real feature (2026-09-13): a LinkedIn-sourced row
+                            has no file_name/email_subject at all (no file,
+                            no email) — falling through to a bare '—' read
+                            as broken/empty rather than intentional. */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#374151' }}><FileText size={12} color="#6366f1" style={{ flexShrink: 0 }} /><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 95 }}>{r.job_board === 'linkedin' ? 'LinkedIn profile' : (r.file_name || r.email_subject || '—')}</span></div>
                         {r.file_size > 0 && <div style={{ fontSize: 10, color: '#94a3b8' }}>{fsize(r.file_size)}</div>}
                       </td>
                       <td style={{ padding: '10px 8px', maxWidth: 125 }} onClick={() => setSelected(r)}>
@@ -1598,8 +1627,16 @@ function ResumeInboxPageInner() {
                       </td>
                       <td style={{ padding: '10px 8px' }}>
                         <div style={{ display: 'flex', gap: 4 }}>
-                          <button onClick={e => { e.stopPropagation(); setEditItem(r); }} title="Edit & Approve" style={{ padding: '4px 8px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Edit</button>
-                          <button onClick={e => { e.stopPropagation(); downloadResumeFile(r.id, r.file_name); }} title="Download resume file" style={{ padding: '4px 6px', background: 'none', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', color: '#374151', display: 'flex', alignItems: 'center' }}><Download size={11} /></button>
+                          {/* Real feature (2026-09-13): a LinkedIn-sourced
+                              row has no resume_files row at all — no file
+                              to download, no parsed_data to edit/approve.
+                              Both backend endpoints now 400 for these ids,
+                              so hide rather than offer a button that can
+                              only ever fail. */}
+                          {r.job_board !== 'linkedin' && <>
+                            <button onClick={e => { e.stopPropagation(); setEditItem(r); }} title="Edit & Approve" style={{ padding: '4px 8px', background: '#0891b2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Edit</button>
+                            <button onClick={e => { e.stopPropagation(); downloadResumeFile(r.id, r.file_name); }} title="Download resume file" style={{ padding: '4px 6px', background: 'none', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', color: '#374151', display: 'flex', alignItems: 'center' }}><Download size={11} /></button>
+                          </>}
                           {/* REAL BUG FIX (2026-09-09, reported live: "back
                               button is not working... it should go there
                               only"): this was the one candidate link on this

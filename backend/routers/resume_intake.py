@@ -12,6 +12,21 @@ OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://ollama:11434')
 OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'qwen2.5:1.5b-instruct-q4_K_M')
 
 
+async def _is_linkedin_candidate(conn, tenant_id: str, candidate_id: str) -> bool:
+    """Real feature (2026-09-13): LinkedIn-sourced candidates (browser-
+    extension import via gap_features.ext_capture_convert) are written
+    straight into `candidates` (source='linkedin') -- no resume_files row
+    is ever created for these, since there's no actual file. The file-
+    action endpoints below (download/reparse/approve/reject/update-and-
+    approve) all key off a resume_files.id -- when that lookup misses,
+    this tells a genuine 404 apart from "this id is real, it's just a
+    LinkedIn candidate with no file-based action to take."
+    """
+    return bool(await conn.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM candidates WHERE id=$1 AND tenant_id=$2 AND source='linkedin')",
+        candidate_id, tenant_id))
+
+
 # ─── Stats endpoint (Phase 6) ─────────────────────────────────────────────────
 @router.get('/stats')
 async def intake_stats(owned: str = Query(None), actor: Actor = Depends(get_actor)):
@@ -70,6 +85,42 @@ async def intake_stats(owned: str = Query(None), actor: Actor = Depends(get_acto
               AND (rf.candidate_id IS NULL OR c.is_active IS NOT FALSE){mine_cond}
             GROUP BY job_board_label, job_board ORDER BY total DESC""",
             actor.tenant_id, *mine_params)
+        # Real feature (2026-09-13): LinkedIn-sourced candidates (browser-
+        # extension import via gap_features.ext_capture_convert) are
+        # written straight into `candidates` with source='linkedin' -- no
+        # resume_files row is ever created for these (there's no file), so
+        # "LinkedIn" never appeared as a source chip here at all, and this
+        # tenant's real LinkedIn imports were invisible on this whole page.
+        # "mine" mirrors total_auto's own mine branch just below: there's
+        # no resume_files/imap_messages row for a LinkedIn import, so only
+        # the candidate_ownership half of the usual mine_cond can ever
+        # apply -- same degrade-correctly reasoning as unlinked's mine_cond
+        # reuse above.
+        li_mine_cond, li_mine_params = '', []
+        if owned == 'mine':
+            li_mine_cond = (
+                " AND EXISTS (SELECT 1 FROM candidate_ownership co2 WHERE co2.tenant_id=$1 AND co2.candidate_id=c.id "
+                "AND co2.status='active' AND co2.ownership_expires_at > now() AND co2.recruiter_id=$2)"
+            )
+            li_mine_params = [actor.user_id]
+        linkedin_total = await conn.fetchval(f"""
+            SELECT COUNT(*) FROM candidates c
+            WHERE c.tenant_id=$1 AND c.source='linkedin' AND c.is_active IS NOT FALSE
+              AND c.created_at > NOW() - INTERVAL '7 days'{li_mine_cond}""",
+            actor.tenant_id, *li_mine_params)
+        # Same shape as every other by_source row ({source, job_board,
+        # total, with_candidate, parsed}) -- with_candidate=total and
+        # parsed=total since a LinkedIn import IS already a candidate with
+        # no separate parse step. Only appended when non-zero, matching
+        # how every other source here already only appears via GROUP BY
+        # naturally excluding zero-count rows -- no empty chip clutter.
+        by_source_list = [dict(r) for r in by_source]
+        if linkedin_total:
+            by_source_list.append({
+                'source': 'LinkedIn', 'job_board': 'linkedin',
+                'total': linkedin_total, 'with_candidate': linkedin_total, 'parsed': linkedin_total,
+            })
+            by_source_list.sort(key=lambda r: r['total'], reverse=True)
         if owned == 'mine':
             total_auto = await conn.fetchval("""
                 SELECT COUNT(*) FROM candidates c
@@ -143,7 +194,7 @@ async def intake_stats(owned: str = Query(None), actor: Actor = Depends(get_acto
         'pending_emails': pending,
         'pending_review': pending_review,
         'unlinked': unlinked,
-        'by_source': [dict(r) for r in by_source],
+        'by_source': by_source_list,
     }
 
 
@@ -193,7 +244,7 @@ async def intake_queue(
             params.append(source); p += 1
         if req_id:
             conditions.append(f'(rf.requisition_id=${p}::uuid OR rf.candidate_id IN (SELECT id FROM candidates WHERE matched_requisition_id=${p}::uuid AND tenant_id=$1))')
-            params.append(req_id); p += 1
+            params.append(req_id); req_id_idx = p; p += 1
         if owned == 'mine':
             # Real feature (2026-08-30): "each recruiter should have their
             # own resume box, not everyone's" — reported live. A resume is
@@ -209,12 +260,12 @@ async def intake_queue(
                 f"OR EXISTS (SELECT 1 FROM candidate_ownership co2 WHERE co2.tenant_id=$1 AND co2.candidate_id=rf.candidate_id "
                 f"AND co2.status='active' AND co2.ownership_expires_at > now() AND co2.recruiter_id=${p}))"
             )
-            params.append(actor.user_id); p += 1
+            params.append(actor.user_id); mine_idx = p; p += 1
         if recruiter:
             conditions.append(
                 f"EXISTS (SELECT 1 FROM candidate_ownership co3 WHERE co3.tenant_id=$1 AND co3.candidate_id=rf.candidate_id "
                 f"AND (co3.recruiter_name ILIKE ${p} OR co3.recruiter_email ILIKE ${p}))")
-            params.append(f"%{recruiter}%"); p += 1
+            params.append(f"%{recruiter}%"); recruiter_idx = p; p += 1
         if sender_email:
             conditions.append(f'rf.source_email ILIKE ${p}')
             params.append(f"%{sender_email}%"); p += 1
@@ -226,74 +277,239 @@ async def intake_queue(
             params.append(f"%{kae}%"); p += 1
         if date_from:
             conditions.append(f'rf.created_at >= ${p}::date')
-            params.append(date_from); p += 1
+            params.append(date_from); date_from_idx = p; p += 1
         if date_to:
             conditions.append(f"rf.created_at < (${p}::date + interval '1 day')")
-            params.append(date_to); p += 1
+            params.append(date_to); date_to_idx = p; p += 1
         where = ' AND '.join(conditions)
 
-        rows = await conn.fetch(f"""
-            SELECT rf.id, rf.job_board, rf.job_board_label, rf.source_email,
-                   rf.file_name, rf.file_path, rf.mime_type, rf.file_size,
-                   rf.parse_status, rf.created_at, rf.parsed_data, rf.requisition_id,
-                   rf.error_msg, rf.parse_confidence, rf.reject_reason, rf.reject_notes,
-                   c.id as candidate_id, c.full_name, c.email, c.phone,
-                   c.skills, c.total_exp_mo, c.location, c.current_employer,
-                   c.current_designation, c.source_label, c.auto_created, c.jd_match_score,
-                   c.matched_requisition_id,
-                   im.subject as email_subject, im.received_at as email_received_at,
-                   im.imap_uid,
-                   r.title as requisition_title,
-                   mr.title as matched_jd_title,
-                   pl.stage as pipeline_stage, pl.pipeline_job,
-                   sc.readiness_index AS live_match_score,
-                   recv_u.full_name AS kae_name, recv_u.email AS kae_email,
-                   -- Kept for backward compat with any existing caller —
-                   -- received_by_name now means the same thing as kae_name.
-                   recv_u.full_name AS received_by_name,
-                   own.recruiter_name AS source_recruiter_name,
-                   own.recruiter_email AS source_recruiter_email,
-                   (own.recruiter_id IS NOT NULL) AS source_recruiter_registered,
-                   own.recruiter_name AS owner_recruiter_name
-            FROM resume_files rf
-            LEFT JOIN candidates c ON c.id=rf.candidate_id
-            LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
-            LEFT JOIN requisitions r ON r.id=rf.requisition_id AND r.is_active IS NOT FALSE
-            LEFT JOIN requisitions mr ON mr.id=c.matched_requisition_id AND mr.is_active IS NOT FALSE
-            LEFT JOIN user_email_accounts recv_ua ON recv_ua.id = im.account_id
-            LEFT JOIN users recv_u ON recv_u.id = recv_ua.user_id
-            LEFT JOIN LATERAL (
-                SELECT a.stage, ar.title AS pipeline_job
-                FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
-                WHERE a.candidate_id=c.id ORDER BY a.updated_at DESC LIMIT 1
-            ) pl ON c.id IS NOT NULL
-            LEFT JOIN LATERAL (
-                SELECT cs.readiness_index
-                FROM candidate_scores cs
-                WHERE cs.candidate_id=c.id
-                  AND (c.matched_requisition_id IS NULL OR cs.requisition_id=c.matched_requisition_id)
-                ORDER BY cs.scored_at DESC LIMIT 1
-            ) sc ON c.id IS NOT NULL
-            LEFT JOIN LATERAL (
-                -- Golden Rule (2026-09-07): the real, sender-resolved
-                -- current owner — LEFT JOIN + COALESCE so a Temporary
-                -- Sender Record (recruiter_id IS NULL, an unregistered
-                -- internal sender) still shows a real name, matching
-                -- candidate_ownership.py's own get_ownership() exactly.
-                SELECT co.recruiter_id, co.recruiter_email,
-                       COALESCE(u.full_name, co.recruiter_name) AS recruiter_name
-                FROM candidate_ownership co
-                LEFT JOIN users u ON u.id = co.recruiter_id
-                WHERE co.tenant_id=$1 AND co.candidate_id=c.id
-            ) own ON c.id IS NOT NULL
-            WHERE {where}
-            ORDER BY rf.created_at DESC
-            LIMIT ${p} OFFSET ${p+1}""",
-            *params, limit, offset)
+        # Real feature (2026-09-13): LinkedIn-sourced candidates (browser-
+        # extension import via gap_features.ext_capture_convert) live only
+        # in `candidates` (source='linkedin') -- no resume_files row is
+        # ever created for these, since there's no file. They were
+        # completely invisible on this page. Included here, merged with
+        # the resume_files-based rows above via UNION ALL and paginated
+        # together, whenever the "All" view (source not set) or the
+        # explicit source='linkedin' filter is active -- any OTHER real
+        # job_board filter (naukri, etc.) leaves this branch out entirely,
+        # so that path's query text/params/behavior stay byte-identical to
+        # before this feature existed (see include_linkedin below).
+        #
+        # `unlinked`/`sender_email`/`kae` are concepts that don't apply to
+        # a file-less LinkedIn row at all (every LinkedIn row already has a
+        # candidate; there's no source_email or KAE inbox involved) -- when
+        # any of those filters is active, LinkedIn rows are correctly
+        # excluded rather than force-fit into a condition that can never
+        # mean anything for them. `status` similarly can only ever be
+        # 'auto_accepted' for a LinkedIn row (there's no parse step), so
+        # any other explicit status filter naturally excludes them too.
+        #
+        # Every filter that DOES legitimately apply (req_id, owned=mine,
+        # recruiter, date_from/date_to) reuses the exact same parameter
+        # already appended to `params` above (req_id_idx/mine_idx/
+        # recruiter_idx/date_from_idx/date_to_idx) -- no new params, so the
+        # same `*params, limit, offset` call below works for both branches.
+        include_linkedin = (
+            (not source or source == 'linkedin')
+            and status in ('all', 'auto_accepted')
+            and not unlinked and not sender_email and not kae
+        )
+        li_conditions = ["c.tenant_id=$1", "c.source='linkedin'", "c.is_active IS NOT FALSE"]
+        if req_id:
+            li_conditions.append(f'c.matched_requisition_id=${req_id_idx}::uuid')
+        if owned == 'mine':
+            li_conditions.append(
+                f"EXISTS (SELECT 1 FROM candidate_ownership co2 WHERE co2.tenant_id=$1 AND co2.candidate_id=c.id "
+                f"AND co2.status='active' AND co2.ownership_expires_at > now() AND co2.recruiter_id=${mine_idx})")
+        if recruiter:
+            li_conditions.append(
+                f"EXISTS (SELECT 1 FROM candidate_ownership co3 WHERE co3.tenant_id=$1 AND co3.candidate_id=c.id "
+                f"AND (co3.recruiter_name ILIKE ${recruiter_idx} OR co3.recruiter_email ILIKE ${recruiter_idx}))")
+        if date_from:
+            li_conditions.append(f'c.created_at >= ${date_from_idx}::date')
+        if date_to:
+            li_conditions.append(f"c.created_at < (${date_to_idx}::date + interval '1 day')")
+        li_where = ' AND '.join(li_conditions)
 
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM resume_files rf LEFT JOIN candidates c ON c.id=rf.candidate_id WHERE {where}",
-            *params)
+        if include_linkedin:
+            # Real feature (2026-09-13): LinkedIn-sourced candidates
+            # (browser extension import via gap_features.ext_capture_
+            # convert) live only in `candidates` (source='linkedin') — no
+            # resume_files row is ever created for these, since there's no
+            # file. A genuine SQL UNION ALL, not a Python-side merge —
+            # pagination (this page's own auto-load-more, in PAGE_SIZE=100
+            # increments) has to walk one globally sorted, globally offset
+            # result set, which only Postgres can do correctly across two
+            # source tables. The LATERAL joins (pl/sc/own) and the
+            # requisition-title joins only ever need c.id/
+            # matched_requisition_id/requisition_id — identical for a
+            # resume_files row or a LinkedIn candidate row — so they're
+            # applied ONCE, on top of the unioned `combined` CTE, instead
+            # of duplicated per branch. kae_name/kae_email/received_by_name
+            # are the one real exception: they come from imap_messages,
+            # which only ever exists for the resume_files branch — NULL
+            # for LinkedIn is correct here, not a gap (no email inbox is
+            # involved in a LinkedIn import at all).
+            rows = await conn.fetch(f"""
+                WITH combined AS (
+                    SELECT rf.id, rf.job_board, rf.job_board_label, rf.source_email,
+                           rf.file_name, rf.file_path, rf.mime_type, rf.file_size,
+                           rf.parse_status, rf.created_at, rf.parsed_data, rf.requisition_id,
+                           rf.error_msg, rf.parse_confidence, rf.reject_reason, rf.reject_notes,
+                           c.id as candidate_id, c.full_name, c.email, c.phone,
+                           c.skills, c.total_exp_mo, c.location, c.current_employer,
+                           c.current_designation, c.source_label, c.auto_created, c.jd_match_score,
+                           c.matched_requisition_id,
+                           im.subject as email_subject, im.received_at as email_received_at,
+                           im.imap_uid,
+                           recv_u.full_name AS kae_name, recv_u.email AS kae_email
+                    FROM resume_files rf
+                    LEFT JOIN candidates c ON c.id=rf.candidate_id
+                    LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
+                    LEFT JOIN user_email_accounts recv_ua ON recv_ua.id = im.account_id
+                    LEFT JOIN users recv_u ON recv_u.id = recv_ua.user_id
+                    WHERE {where}
+
+                    UNION ALL
+
+                    -- LinkedIn-sourced candidates: `id` is the candidate's
+                    -- own UUID (matches candidate_id) — not a
+                    -- resume_files.id, since there is none; the frontend
+                    -- tells the two apart via job_board='linkedin', never
+                    -- by the id's value. parse_status is hardcoded to
+                    -- 'auto_accepted' — there's no parse step, and that's
+                    -- this codebase's existing "no further action needed"
+                    -- terminal state.
+                    SELECT c.id, 'linkedin'::varchar(60) AS job_board, 'LinkedIn'::varchar(80) AS job_board_label,
+                           NULL::varchar(300) AS source_email,
+                           NULL::varchar(500) AS file_name, NULL::varchar(1000) AS file_path,
+                           NULL::varchar(100) AS mime_type, NULL::int AS file_size,
+                           'auto_accepted'::varchar(20) AS parse_status, c.created_at,
+                           NULL::jsonb AS parsed_data, NULL::uuid AS requisition_id,
+                           NULL::text AS error_msg, NULL::numeric(4,3) AS parse_confidence,
+                           NULL::varchar(30) AS reject_reason, NULL::text AS reject_notes,
+                           c.id AS candidate_id, c.full_name, c.email, c.phone,
+                           c.skills, c.total_exp_mo, c.location, c.current_employer,
+                           c.current_designation, c.source_label, c.auto_created, c.jd_match_score,
+                           c.matched_requisition_id,
+                           NULL::text AS email_subject, NULL::timestamptz AS email_received_at,
+                           NULL::text AS imap_uid,
+                           NULL::text AS kae_name, NULL::text AS kae_email
+                    FROM candidates c
+                    WHERE {li_where}
+                )
+                SELECT combined.*,
+                       r.title as requisition_title,
+                       mr.title as matched_jd_title,
+                       pl.stage as pipeline_stage, pl.pipeline_job,
+                       sc.readiness_index AS live_match_score,
+                       -- combined.* above already carries kae_name/kae_email
+                       -- (resolved per-branch inside the CTE). Kept for
+                       -- backward compat with any existing caller —
+                       -- received_by_name now means the same thing as
+                       -- kae_name.
+                       combined.kae_name AS received_by_name,
+                       own.recruiter_name AS source_recruiter_name,
+                       own.recruiter_email AS source_recruiter_email,
+                       (own.recruiter_id IS NOT NULL) AS source_recruiter_registered,
+                       own.recruiter_name AS owner_recruiter_name
+                FROM combined
+                LEFT JOIN requisitions r ON r.id=combined.requisition_id AND r.is_active IS NOT FALSE
+                LEFT JOIN requisitions mr ON mr.id=combined.matched_requisition_id AND mr.is_active IS NOT FALSE
+                LEFT JOIN LATERAL (
+                    SELECT a.stage, ar.title AS pipeline_job
+                    FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
+                    WHERE a.candidate_id=combined.candidate_id ORDER BY a.updated_at DESC LIMIT 1
+                ) pl ON combined.candidate_id IS NOT NULL
+                LEFT JOIN LATERAL (
+                    SELECT cs.readiness_index
+                    FROM candidate_scores cs
+                    WHERE cs.candidate_id=combined.candidate_id
+                      AND (combined.matched_requisition_id IS NULL OR cs.requisition_id=combined.matched_requisition_id)
+                    ORDER BY cs.scored_at DESC LIMIT 1
+                ) sc ON combined.candidate_id IS NOT NULL
+                LEFT JOIN LATERAL (
+                    SELECT co.recruiter_id, co.recruiter_email,
+                           COALESCE(u.full_name, co.recruiter_name) AS recruiter_name
+                    FROM candidate_ownership co
+                    LEFT JOIN users u ON u.id = co.recruiter_id
+                    WHERE co.tenant_id=$1 AND co.candidate_id=combined.candidate_id
+                ) own ON combined.candidate_id IS NOT NULL
+                ORDER BY combined.created_at DESC
+                LIMIT ${p} OFFSET ${p+1}""",
+                *params, limit, offset)
+
+            total = await conn.fetchval(f"""
+                SELECT
+                  (SELECT COUNT(*) FROM resume_files rf LEFT JOIN candidates c ON c.id=rf.candidate_id WHERE {where})
+                  + (SELECT COUNT(*) FROM candidates c WHERE {li_where})""",
+                *params)
+        else:
+            # Unchanged — identical query text to before the LinkedIn
+            # feature above existed, for every existing source/filter
+            # combination (naukri, direct email, manual add, etc.).
+            rows = await conn.fetch(f"""
+                SELECT rf.id, rf.job_board, rf.job_board_label, rf.source_email,
+                       rf.file_name, rf.file_path, rf.mime_type, rf.file_size,
+                       rf.parse_status, rf.created_at, rf.parsed_data, rf.requisition_id,
+                       rf.error_msg, rf.parse_confidence, rf.reject_reason, rf.reject_notes,
+                       c.id as candidate_id, c.full_name, c.email, c.phone,
+                       c.skills, c.total_exp_mo, c.location, c.current_employer,
+                       c.current_designation, c.source_label, c.auto_created, c.jd_match_score,
+                       c.matched_requisition_id,
+                       im.subject as email_subject, im.received_at as email_received_at,
+                       im.imap_uid,
+                       r.title as requisition_title,
+                       mr.title as matched_jd_title,
+                       pl.stage as pipeline_stage, pl.pipeline_job,
+                       sc.readiness_index AS live_match_score,
+                       recv_u.full_name AS kae_name, recv_u.email AS kae_email,
+                       -- Kept for backward compat with any existing caller —
+                       -- received_by_name now means the same thing as kae_name.
+                       recv_u.full_name AS received_by_name,
+                       own.recruiter_name AS source_recruiter_name,
+                       own.recruiter_email AS source_recruiter_email,
+                       (own.recruiter_id IS NOT NULL) AS source_recruiter_registered,
+                       own.recruiter_name AS owner_recruiter_name
+                FROM resume_files rf
+                LEFT JOIN candidates c ON c.id=rf.candidate_id
+                LEFT JOIN imap_messages im ON im.id=rf.imap_msg_id
+                LEFT JOIN requisitions r ON r.id=rf.requisition_id AND r.is_active IS NOT FALSE
+                LEFT JOIN requisitions mr ON mr.id=c.matched_requisition_id AND mr.is_active IS NOT FALSE
+                LEFT JOIN user_email_accounts recv_ua ON recv_ua.id = im.account_id
+                LEFT JOIN users recv_u ON recv_u.id = recv_ua.user_id
+                LEFT JOIN LATERAL (
+                    SELECT a.stage, ar.title AS pipeline_job
+                    FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
+                    WHERE a.candidate_id=c.id ORDER BY a.updated_at DESC LIMIT 1
+                ) pl ON c.id IS NOT NULL
+                LEFT JOIN LATERAL (
+                    SELECT cs.readiness_index
+                    FROM candidate_scores cs
+                    WHERE cs.candidate_id=c.id
+                      AND (c.matched_requisition_id IS NULL OR cs.requisition_id=c.matched_requisition_id)
+                    ORDER BY cs.scored_at DESC LIMIT 1
+                ) sc ON c.id IS NOT NULL
+                LEFT JOIN LATERAL (
+                    -- Golden Rule (2026-09-07): the real, sender-resolved
+                    -- current owner — LEFT JOIN + COALESCE so a Temporary
+                    -- Sender Record (recruiter_id IS NULL, an unregistered
+                    -- internal sender) still shows a real name, matching
+                    -- candidate_ownership.py's own get_ownership() exactly.
+                    SELECT co.recruiter_id, co.recruiter_email,
+                           COALESCE(u.full_name, co.recruiter_name) AS recruiter_name
+                    FROM candidate_ownership co
+                    LEFT JOIN users u ON u.id = co.recruiter_id
+                    WHERE co.tenant_id=$1 AND co.candidate_id=c.id
+                ) own ON c.id IS NOT NULL
+                WHERE {where}
+                ORDER BY rf.created_at DESC
+                LIMIT ${p} OFFSET ${p+1}""",
+                *params, limit, offset)
+
+            total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM resume_files rf LEFT JOIN candidates c ON c.id=rf.candidate_id WHERE {where}",
+                *params)
 
     items = []
     for r in rows:
@@ -376,6 +592,71 @@ async def get_resume_file(resume_file_id: str, actor: Actor = Depends(get_actor)
             ) nda ON c.id IS NOT NULL
             WHERE rf.id=$1 AND rf.tenant_id=$2""",
             resume_file_id, actor.tenant_id)
+        if not row:
+            # Real feature (2026-09-13): resume_file_id may actually be a
+            # LinkedIn-sourced candidate's own id (browser-extension
+            # import via gap_features.ext_capture_convert — no
+            # resume_files row exists for these, since there's no file).
+            # Same overall shape as the resume_files-based row above,
+            # built straight from `candidates` instead, so the drawer's
+            # existing rendering (file_name-gated blocks, candidate-detail
+            # card, pipeline section, etc.) needs no special-casing beyond
+            # what job_board==='linkedin' already implies on the frontend.
+            row = await conn.fetchrow("""
+                SELECT c.id, c.id as candidate_id, 'linkedin'::varchar(60) as job_board,
+                       'LinkedIn'::varchar(80) as job_board_label,
+                       NULL::varchar(300) as source_email, NULL::varchar(500) as file_name,
+                       NULL::varchar(1000) as file_path, NULL::varchar(100) as mime_type,
+                       NULL::int as file_size, 'auto_accepted'::varchar(20) as parse_status,
+                       c.created_at, NULL::jsonb as parsed_data, NULL::uuid as requisition_id,
+                       NULL::text as error_msg, NULL::numeric(4,3) as parse_confidence,
+                       NULL::varchar(30) as reject_reason, NULL::text as reject_notes,
+                       c.full_name, c.email, c.phone, c.skills, c.total_exp_mo,
+                       c.location, c.current_employer, c.current_designation,
+                       c.resume_text,
+                       c.current_ctc, c.expected_ctc, c.notice_period_days,
+                       c.job_type, c.nda_received, c.truecaller_verified, c.monthly_contract_salary,
+                       c.tracking_sheet_status,
+                       r.title as requisition_title,
+                       pl.stage as pipeline_stage, pl.pipeline_job,
+                       sc.readiness_index AS live_match_score,
+                       NULL::timestamptz AS email_received_at,
+                       NULL::text AS kae_name, NULL::text AS kae_email,
+                       own.recruiter_id AS source_recruiter_id,
+                       own.recruiter_name AS source_recruiter_name,
+                       own.recruiter_email AS source_recruiter_email,
+                       (own.recruiter_id IS NOT NULL) AS source_recruiter_registered,
+                       nda.status AS nda_esign_status, nda.sent_at AS nda_esign_sent_at,
+                       nda.signed_at AS nda_esign_signed_at, nda.application_id AS nda_esign_application_id
+                FROM candidates c
+                LEFT JOIN requisitions r ON r.id=c.matched_requisition_id AND r.is_active IS NOT FALSE
+                LEFT JOIN LATERAL (
+                    SELECT a.stage, ar.title AS pipeline_job
+                    FROM applications a JOIN requisitions ar ON ar.id=a.requisition_id
+                    WHERE a.candidate_id=c.id ORDER BY a.updated_at DESC LIMIT 1
+                ) pl ON true
+                LEFT JOIN LATERAL (
+                    SELECT cs.readiness_index
+                    FROM candidate_scores cs
+                    WHERE cs.candidate_id=c.id
+                      AND (c.matched_requisition_id IS NULL OR cs.requisition_id=c.matched_requisition_id)
+                    ORDER BY cs.scored_at DESC LIMIT 1
+                ) sc ON true
+                LEFT JOIN LATERAL (
+                    SELECT co.recruiter_id, co.recruiter_email,
+                           COALESCE(u.full_name, co.recruiter_name) AS recruiter_name
+                    FROM candidate_ownership co
+                    LEFT JOIN users u ON u.id = co.recruiter_id
+                    WHERE co.tenant_id=$2 AND co.candidate_id=c.id
+                ) own ON true
+                LEFT JOIN LATERAL (
+                    SELECT nd.status, nd.sent_at, nd.signed_at, nd.application_id
+                    FROM nda_documents nd
+                    WHERE nd.tenant_id=$2 AND nd.candidate_id=c.id
+                    ORDER BY nd.created_at DESC LIMIT 1
+                ) nda ON true
+                WHERE c.id=$1 AND c.tenant_id=$2 AND c.source='linkedin' AND c.is_active IS NOT FALSE""",
+                resume_file_id, actor.tenant_id)
     if not row:
         raise HTTPException(404, 'Resume file not found')
     d = dict(row)
@@ -407,6 +688,8 @@ async def download_resume_file(resume_file_id: str, actor: Actor = Depends(get_a
             "SELECT file_name, file_path, mime_type FROM resume_files WHERE id=$1 AND tenant_id=$2",
             resume_file_id, actor.tenant_id
         )
+        if not row and await _is_linkedin_candidate(conn, actor.tenant_id, resume_file_id):
+            raise HTTPException(400, 'No resume file — this candidate was imported from LinkedIn, not a file upload')
     if not row:
         raise HTTPException(404, 'Resume file not found')
     fp = (row['file_path'] or '').lstrip('/')
@@ -454,6 +737,8 @@ async def reparse_resume(resume_file_id: str, actor: Actor = Depends(get_actor))
             "SELECT * FROM resume_files WHERE id=$1 AND tenant_id=$2",
             resume_file_id, actor.tenant_id)
         if not rf:
+            if await _is_linkedin_candidate(conn, actor.tenant_id, resume_file_id):
+                raise HTTPException(400, "This action doesn't apply to a LinkedIn-sourced candidate")
             raise HTTPException(404, 'Not found')
 
         abs_path = Path('/app') / rf['file_path'].lstrip('/')
@@ -514,9 +799,17 @@ async def reparse_resume(resume_file_id: str, actor: Actor = Depends(get_actor))
 @router.post('/{resume_file_id}/approve')
 async def approve_resume(resume_file_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:
-        await conn.execute(
+        result = await conn.execute(
             "UPDATE resume_files SET parse_status='approved' WHERE id=$1 AND tenant_id=$2",
             resume_file_id, actor.tenant_id)
+        # Real feature (2026-09-13): a resume_file_id that matched no row
+        # (0 rows updated) previously just silently no-op'd -- preserved
+        # as-is for a genuinely bogus id, but a LinkedIn-sourced candidate
+        # id (no resume_files row exists for these at all) now gets a
+        # clear 400 instead of a misleading "approved" response with
+        # nothing behind it.
+        if result == 'UPDATE 0' and await _is_linkedin_candidate(conn, actor.tenant_id, resume_file_id):
+            raise HTTPException(400, "This action doesn't apply to a LinkedIn-sourced candidate")
     return {'status': 'approved'}
 
 
@@ -538,10 +831,14 @@ async def reject_resume(resume_file_id: str, body: dict = None, actor: Actor = D
     if reason and reason not in _VALID_REJECT_REASONS:
         raise HTTPException(400, f"Unknown reject reason '{reason}'")
     async with db.tenant_conn(actor.tenant_id) as conn:
-        await conn.execute(
+        result = await conn.execute(
             """UPDATE resume_files SET parse_status='rejected', reject_reason=$3, reject_notes=$4,
                rejected_by=$5, rejected_at=now() WHERE id=$1 AND tenant_id=$2""",
             resume_file_id, actor.tenant_id, reason, notes, actor.user_id)
+        # Real feature (2026-09-13): same "id might be a LinkedIn candidate,
+        # not a resume_files row" guard as approve_resume above.
+        if result == 'UPDATE 0' and await _is_linkedin_candidate(conn, actor.tenant_id, resume_file_id):
+            raise HTTPException(400, "This action doesn't apply to a LinkedIn-sourced candidate")
     return {'status': 'rejected', 'reason': reason}
 
 
@@ -554,6 +851,8 @@ async def update_and_approve(resume_file_id: str, body: dict, actor: Actor = Dep
             'SELECT * FROM resume_files WHERE id=$1 AND tenant_id=$2',
             resume_file_id, actor.tenant_id)
         if not rf:
+            if await _is_linkedin_candidate(conn, actor.tenant_id, resume_file_id):
+                raise HTTPException(400, "This action doesn't apply to a LinkedIn-sourced candidate")
             raise HTTPException(404, 'Not found')
 
         # Parse form data
