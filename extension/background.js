@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 27;
+const BG_VERSION = 28;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -740,20 +740,23 @@ async function scrapeLinkedinProfile() {
       }
       await asyncSafe('ensure-sections-rendered', ensureSectionsRendered, null);
 
-      const aboutSection = safe('about-section', () => sectionTextByHeading('About', 800), null);
-      const skillsSection = safe('skills-section', () => sectionTextByHeading('Skills', 500), null);
-      // Real gap fix (reported live, side-by-side against the real
-      // LinkedIn Experience detail page): a senior candidate with 7 real
-      // roles (each with a long bullet list) only got the first 4 into
-      // resume_text_like -- the 2000-char cap here was silently cutting
-      // off a normal, real profile's tail end, not junk. Raised well
-      // past what a typical detailed multi-role profile needs; the
-      // truncation itself (see sectionTextByHeading above) now also
-      // stops at a whole line instead of slicing mid-bullet, so even a
-      // profile that still exceeds this loses only its oldest few full
-      // lines, never a half-cut one.
+      // Real gap fix (reported live, confirmed with an exact character
+      // count on the actual stored text: the About section came back at
+      // EXACTLY 807 characters, cutting off mid-word at "New dimensional
+      // co" -- this candidate wrote a full career-summary-length About
+      // section, not a short bio, and the old 800-char cap silently
+      // clipped it. The same class of bug already found and fixed for
+      // Experience (2000 was too small for a real multi-role profile);
+      // never checked whether About/Skills/Education could hit their own
+      // caps too until this exact evidence proved About could. Raised all
+      // four section caps well past what a normal, detailed profile
+      // needs -- the whole-line-preserving truncation (see
+      // sectionTextByHeading above) already protects against a mid-word
+      // cut for whatever still exceeds even this.
+      const aboutSection = safe('about-section', () => sectionTextByHeading('About', 3000), null);
+      const skillsSection = safe('skills-section', () => sectionTextByHeading('Skills', 1500), null);
       const experienceSection = safe('experience-section', () => sectionTextByHeading('Experience', 8000), null);
-      const educationSection = safe('education-section', () => sectionTextByHeading('Education', 800), null);
+      const educationSection = safe('education-section', () => sectionTextByHeading('Education', 3000), null);
 
       debug.push(
         `sections found: about=${!!aboutSection} skills=${!!skillsSection} experience=${!!experienceSection} education=${!!educationSection}`
