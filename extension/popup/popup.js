@@ -127,6 +127,39 @@ function buildResultStatusBox(result) {
 
 const RECENT_RESULT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes -- long enough to cover the sub-page fallback's own several-second detour, short enough that a much older result never resurfaces as if it just happened
 
+// Real gap fix (reported live, with a screenshot of the popup that
+// actually clicked "Import All Visible Profiles" showing only a static
+// "Importing…" button and no Stop option, and separately asking for "a
+// click view for individual view" of each profile as it finishes).
+// Two gaps in one: the Stop button was only ever wired into renderReady
+// (a REOPENED popup) -- the popup instance that's still sitting on its
+// own sendMessage() await for the whole multi-minute run never got one;
+// and there was no visibility into individual profiles at all until the
+// entire batch finished. Shared between renderReady's reopened-popup
+// path and onImportSearchResultsClick's own live-polling loop below, so
+// both render identically from background.js's bulkImportProgress
+// (current/total counts, and the LAST completed profile's own result --
+// reusing buildResultStatusBox as-is, so it gets the same "View in
+// ATS →" / "View candidate →" link a live single import would show).
+function renderBulkRunningUI(container, status) {
+  container.innerHTML = '';
+  if (!status || !status.running) return;
+  const p = status.progress;
+  if (status.cancelling) {
+    container.appendChild(statusBox('warn', 'Stopping bulk import — finishing the profile already in progress…'));
+  } else {
+    container.appendChild(statusBox('good', p ? `Bulk import running — profile ${p.current} of ${p.total}…` : 'Bulk import starting…'));
+  }
+  if (p && p.last) {
+    container.appendChild(el('div', { class: 'muted', text: 'Most recent:' }));
+    container.appendChild(buildResultStatusBox(p.last));
+  }
+  if (!status.cancelling) {
+    container.appendChild(el('button', { id: 'stop-btn', class: 'secondary', text: 'Stop Import', onclick: onStopBulkImportClick }));
+  }
+  container.appendChild(el('div', { class: 'muted', text: 'Safe to close this popup — progress picks back up here the next time you open it.' }));
+}
+
 async function renderReady(email) {
   root.innerHTML = '';
   root.appendChild(el('div', { class: 'user-row' }, [
@@ -154,14 +187,9 @@ async function renderReady(email) {
   // whatever profile the bulk run currently happens to be on.
   const bulkStatus = await sendMessage({ type: 'GET_BULK_IMPORT_STATUS' });
   if (bulkStatus && bulkStatus.running) {
-    root.appendChild(statusBox(bulkStatus.cancelling ? 'warn' : 'good',
-      bulkStatus.cancelling
-        ? 'Stopping bulk import — finishing the profile already in progress…'
-        : 'Bulk import running — visiting each profile in turn. This can take several minutes.'));
-    if (!bulkStatus.cancelling) {
-      root.appendChild(el('button', { id: 'stop-btn', class: 'secondary', text: 'Stop Import', onclick: onStopBulkImportClick }));
-    }
-    root.appendChild(el('div', { class: 'muted', text: 'Safe to close this popup — the result will show here the next time you open it.' }));
+    const bulkContainer = el('div');
+    root.appendChild(bulkContainer);
+    renderBulkRunningUI(bulkContainer, bulkStatus);
     return;
   }
 
@@ -244,27 +272,44 @@ async function onImportSearchResultsClick() {
   btn.disabled = true;
   btn.textContent = 'Importing…';
   resultDiv.innerHTML = '';
-  // Real gap fix (explicit user request: bulk import now visits each
-  // profile's own page for the full Experience/Education/Contact-info
-  // capture, not just the thin card data, with a human-like pause
-  // between each one -- several minutes for a full page of results, not
-  // a "little while"). The popup WILL close during this (same reason a
-  // single import's details-sub-page fallback closes it -- see
-  // buildResultStatusBox's comment) -- the result is picked up
-  // automatically next time this popup opens either way, so this is
-  // safe to walk away from.
-  resultDiv.appendChild(el('div', { class: 'muted', text: 'Visiting each profile for its full details — this can take several minutes. A LinkedIn tab will switch between profiles on its own; feel free to do something else — you’ll see the result here next time you open this popup.' }));
+  resultDiv.appendChild(el('div', { class: 'muted', text: 'Starting…' }));
+
+  // Real gap fix (reported live: this popup -- the one that actually
+  // clicked the button -- never showed a Stop option or any per-profile
+  // progress, only a static message for the whole multi-minute run,
+  // because the Stop button had only ever been wired into a REOPENED
+  // popup, not this one sitting on its own sendMessage() await).
+  // Polls every 2s and re-renders via the same renderBulkRunningUI a
+  // reopened popup uses, so this popup shows live progress AND a
+  // working Stop button too -- not just after being closed and
+  // reopened. Bails out harmlessly (via the getElementById check) if
+  // the popup UI has since moved on (e.g. the user clicked Stop, which
+  // re-renders the whole page through init()).
+  const pollHandle = setInterval(async () => {
+    const status = await sendMessage({ type: 'GET_BULK_IMPORT_STATUS' });
+    const liveResultDiv = document.getElementById('result');
+    if (!liveResultDiv) return;
+    renderBulkRunningUI(liveResultDiv, status);
+  }, 2000);
 
   const result = await sendMessage({ type: 'IMPORT_SEARCH_RESULTS' });
+  clearInterval(pollHandle);
 
-  btn.disabled = false;
-  btn.textContent = 'Import All Visible Profiles';
-  resultDiv.innerHTML = '';
+  // The popup may have re-rendered itself already (e.g. via Stop's own
+  // init() call) by the time this finally resolves -- nothing left to
+  // update in that case, same guard used elsewhere in this file.
+  const finalBtn = document.getElementById('action-btn');
+  const finalResultDiv = document.getElementById('result');
+  if (!finalBtn || !finalResultDiv) return;
+
+  finalBtn.disabled = false;
+  finalBtn.textContent = 'Import All Visible Profiles';
+  finalResultDiv.innerHTML = '';
 
   if (result.status === 'not_supported') {
-    resultDiv.appendChild(statusBox('warn', 'Open a LinkedIn people-search results page to bulk import.'));
+    finalResultDiv.appendChild(statusBox('warn', 'Open a LinkedIn people-search results page to bulk import.'));
   } else {
-    resultDiv.appendChild(buildResultStatusBox(result));
+    finalResultDiv.appendChild(buildResultStatusBox(result));
   }
 }
 

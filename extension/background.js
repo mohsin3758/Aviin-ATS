@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 40;
+const BG_VERSION = 41;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -1373,7 +1373,7 @@ async function isBulkImportCancelRequested() {
 
 async function importSearchResults(list, searchResultsTabId, originalUrl) {
   const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length, cancelled: false };
-  await chrome.storage.local.set({ bulkImportStatus: 'running', bulkImportCancelRequested: false });
+  await chrome.storage.local.set({ bulkImportStatus: 'running', bulkImportCancelRequested: false, bulkImportProgress: { current: 0, total: list.length, last: null } });
   for (let i = 0; i < list.length; i++) {
     if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
     const thin = list[i];
@@ -1386,6 +1386,23 @@ async function importSearchResults(list, searchResultsTabId, originalUrl) {
     else if (result.status === 'updated') summary.updated += 1;
     else if (result.status === 'no_change') summary.no_change += 1;
     else summary.error += 1;
+
+    // Real gap fix (reported live: "no option and click view for
+    // individual view, if succesfully upload all details" -- the popup
+    // only ever showed a static "Importing..." message for the whole
+    // multi-minute run, then one final summary at the end). Persists
+    // after EVERY profile (not just at the end) so a popup open at any
+    // point during the run -- the one that started it, or one reopened
+    // later -- can show live progress and a link straight to the
+    // profile that just finished, not just a running total.
+    try {
+      await chrome.storage.local.set({
+        bulkImportProgress: {
+          current: i + 1, total: list.length,
+          last: { name: result.name, candidateId: result.candidateId, status: result.status },
+        },
+      });
+    } catch (e) { /* non-critical -- the final summary still lands either way */ }
 
     if (i < list.length - 1) {
       // Checked in small steps rather than once per profile -- a single
@@ -1598,10 +1615,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'GET_BULK_IMPORT_STATUS': {
-          const stored = await new Promise((resolve) => chrome.storage.local.get(['bulkImportStatus', 'bulkImportCancelRequested'], resolve));
+          const stored = await new Promise((resolve) => chrome.storage.local.get(['bulkImportStatus', 'bulkImportCancelRequested', 'bulkImportProgress'], resolve));
           sendResponse({
             running: stored && stored.bulkImportStatus === 'running',
             cancelling: !!(stored && stored.bulkImportCancelRequested),
+            progress: (stored && stored.bulkImportProgress) || null,
           });
           break;
         }
