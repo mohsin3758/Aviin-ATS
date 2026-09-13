@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 21;
+const BG_VERSION = 22;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -620,6 +620,36 @@ async function scrapeLinkedinProfile() {
         return { email, phone };
       }
 
+      // Real gap fix (reported live, with side-by-side screenshots: the
+      // real profile page clearly shows 5 Experience entries and an
+      // Education entry, but the extracted resume_text_like came back
+      // with ONLY the About paragraph -- Experience/Education were
+      // missing entirely, not just truncated). sectionTextByHeading can
+      // only find a heading that already EXISTS in the DOM -- LinkedIn
+      // lazy-mounts everything below the initial viewport as the page is
+      // scrolled near it, so on a freshly-loaded profile the Experience/
+      // Education <h2> elements themselves may not be in the DOM yet at
+      // the moment this function runs (name/headline/location/company
+      // are unaffected since the top card is already in view on load).
+      // Steps the window down through the full page height first, giving
+      // LinkedIn's own lazy-render a chance to mount each section before
+      // any of them is read -- the same "wait for real content to
+      // appear" principle already used for the Contact Info panel, just
+      // driven by scroll position instead of a click.
+      async function ensureSectionsRendered() {
+        const scrollStep = Math.max(400, Math.floor(window.innerHeight * 0.8));
+        let lastHeight = 0;
+        for (let y = 0, guard = 0; y < document.body.scrollHeight && guard < 30; y += scrollStep, guard++) {
+          window.scrollTo(0, y);
+          await new Promise((resolve) => setTimeout(resolve, 220));
+          lastHeight = document.body.scrollHeight; // page can grow as more mounts in -- loop bound re-read via the condition each iteration
+        }
+        window.scrollTo(0, 0);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return lastHeight;
+      }
+      await asyncSafe('ensure-sections-rendered', ensureSectionsRendered, null);
+
       const aboutSection = safe('about-section', () => sectionTextByHeading('About', 800), null);
       const skillsSection = safe('skills-section', () => sectionTextByHeading('Skills', 500), null);
       const experienceSection = safe('experience-section', () => sectionTextByHeading('Experience', 2000), null);
@@ -628,6 +658,17 @@ async function scrapeLinkedinProfile() {
       debug.push(
         `sections found: about=${!!aboutSection} skills=${!!skillsSection} experience=${!!experienceSection} education=${!!educationSection}`
       );
+      // Real diagnostic gap: if a section is STILL missing after
+      // scrolling, this is the concrete next-round signal (what heading
+      // text actually exists on the page right now) instead of another
+      // guess at a selector or a heading-text variant.
+      if (!experienceSection || !educationSection) {
+        const allHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4'))
+          .map((h) => (h.textContent || '').trim().slice(0, 40))
+          .filter(Boolean)
+          .slice(0, 25);
+        debug.push(`experience/education still missing -- headings on page after scroll: ${JSON.stringify(allHeadings)}`);
+      }
 
       // Best-effort fallback: the line right after the job title in the
       // Experience block is almost always "Company · EmploymentType"
