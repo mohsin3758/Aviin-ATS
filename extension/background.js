@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 14;
+const BG_VERSION = 15;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -218,7 +218,18 @@ async function scrapeLinkedinProfile() {
       function normalizedUrl() {
         try {
           const u = new URL(window.location.href);
-          return u.origin + u.pathname.replace(/\/$/, '');
+          let path = u.pathname.replace(/\/$/, '');
+          // Real gap fix (reported live: stored linkedin_url ended in
+          // "/overlay/contact-info" -- LinkedIn appends a sub-path like
+          // this to the URL while a panel such as Contact Info is open).
+          // Keep only the real profile slug so linkedin_url is always
+          // the canonical profile URL a human would share, never an
+          // artifact of whatever overlay happened to be open at the
+          // moment of import -- this also matters for future dedup
+          // matching, which compares this exact string.
+          const profileMatch = path.match(/^(\/in\/[^/]+)/);
+          if (profileMatch) path = profileMatch[1];
+          return u.origin + path;
         } catch (e) {
           return window.location.href;
         }
@@ -234,6 +245,49 @@ async function scrapeLinkedinProfile() {
         `og:desc="${(metaContent('meta[property="og:description"]') || metaContent('meta[name="description"]') || '').slice(0, 120)}" ` +
         `h1Count=${document.querySelectorAll('h1').length} h2Count=${document.querySelectorAll('h2').length}`
       );
+
+      // Real gap fix (reported live: Navneet Kumar's import came back
+      // with a COLLEGE name in the headline slot and a company-ad-
+      // looking string ("...4,419 followers") in the employer slot,
+      // with email/phone BOTH empty despite being clearly visible
+      // on-screen). Root-caused via the stored linkedin_url itself,
+      // which ended in "/overlay/contact-info": the Contact Info panel
+      // was ALREADY open (the user had checked it manually) at the
+      // moment Import was clicked. Every extraction step below assumes
+      // a clean, un-obstructed page -- an already-open overlay sits on
+      // top of the real profile and throws off the structural (DOM-
+      // sibling-walk, first "/company/" link) heuristics into reading
+      // the overlay's own content, or an unrelated ad/suggestion
+      // widget, instead of the real profile. Detected and closed FIRST,
+      // before any other field is read -- and its email/phone read
+      // directly while it's open, since openContactInfoAndExtract()
+      // further below only knows how to CLICK OPEN a currently-closed
+      // panel, not read one that's already showing.
+      function extractFromOpenDialog(dialog) {
+        const mailLink = dialog.querySelector('a[href^="mailto:"]');
+        const email = mailLink
+          ? (mailLink.textContent.trim() || decodeURIComponent(mailLink.href.replace(/^mailto:/i, '')))
+          : null;
+        let phone = null;
+        const labels = Array.from(dialog.querySelectorAll('h3, h2, span, div'));
+        const phoneLabel = labels.find((el) => (el.textContent || '').trim().toLowerCase() === 'phone');
+        if (phoneLabel) {
+          const sib = phoneLabel.nextElementSibling || (phoneLabel.parentElement && phoneLabel.parentElement.nextElementSibling);
+          const text = sib && sib.textContent && sib.textContent.trim();
+          if (text) phone = text;
+        }
+        return { email, phone };
+      }
+      const preOpenDialog = safe('pre-open-dialog', () => document.querySelector('[role="dialog"]'), null);
+      let preOpenContact = null;
+      if (preOpenDialog) {
+        preOpenContact = safe('pre-open-dialog-extract', () => extractFromOpenDialog(preOpenDialog), null);
+        const dismissBtn = preOpenDialog.querySelector(
+          'button[aria-label="Dismiss"], button[aria-label*="Dismiss" i], button[aria-label*="close" i]');
+        if (dismissBtn) safe('pre-open-dialog-dismiss', () => dismissBtn.click(), null);
+        debug.push(`pre-existing dialog found and closed: email=${!!(preOpenContact && preOpenContact.email)} phone=${!!(preOpenContact && preOpenContact.phone)}`);
+        await new Promise((resolve) => setTimeout(resolve, 300)); // let the DOM settle after closing before reading anything else
+      }
 
       const ogParsed = safe('og-title', parseOgTitle, { name: null, headline: null });
       // Real gap fix (reported live: a candidate got saved with headline
@@ -282,6 +336,21 @@ async function scrapeLinkedinProfile() {
         return null;
       }
       const locationRow = safe('location-row', findLocationRow, null);
+      // Real gap fix (reported live: "JYOTI COLLEGE OF MANAGEMENT
+      // SCIENCE AND TECHNOLOGY, BAREILLY" -- an education badge -- got
+      // returned as the headline). The isBadge link-based skip below is
+      // the primary defense, but LinkedIn doesn't always wrap an
+      // education/company badge in a matching href (confirmed live: it
+      // still got through once), so this is a second, content-shape-
+      // based check -- a real personal headline is essentially never
+      // ALL CAPS, and institution names are a recognizable, narrow
+      // vocabulary a real headline is very unlikely to consist of.
+      function looksLikeInstitutionOrJunk(text) {
+        if (!text) return false;
+        if (/\b(college|university|institute|school|academy|polytechnic)\b/i.test(text)) return true;
+        const letters = text.replace(/[^A-Za-z]/g, '');
+        return letters.length > 8 && letters === letters.toUpperCase();
+      }
       // Caught by the offline mock test before shipping (not live): a
       // plain "take the immediately previous sibling" both undershoots
       // when the row it wants is further back, AND wrongly grabs a
@@ -298,16 +367,44 @@ async function scrapeLinkedinProfile() {
             || (sib.querySelector && sib.querySelector('a[href*="/company/"], a[href*="/school/"]'));
           if (isBadge) continue;
           const text = sib.textContent && sib.textContent.trim();
-          if (text && text.length > 4 && text !== name) return text;
+          if (text && text.length > 4 && text !== name && !looksLikeInstitutionOrJunk(text)) return text;
         }
         return null;
       }, null)
         || ogParsed.headline
         || safe('headline-dom', () => firstMatch(['.pv-text-details__left-panel .text-body-medium', '.text-body-medium.break-words']), null);
 
+      // Real gap fix (reported live: current_company came back as "HR
+      // proBusiness Consulting and Services4,419 followers" -- the text
+      // of a company-page AD/suggestion card, not the candidate's real
+      // employer). An unbounded "first /company/ link anywhere in the
+      // document" can't tell a sidebar ad/suggestion widget's company
+      // link apart from the real employer badge in the top card, and a
+      // sidebar widget can render EARLIER in DOM source order than the
+      // visually-later main content. Now bounded to links that appear
+      // before locationRow in document order -- the top card is
+      // everything above it, and every ad/suggestion widget or
+      // Experience-section entry observed so far renders after it.
       function currentCompanyFromLink() {
+        // Real gap fix (caught before shipping, via an offline mock test
+        // reproducing the live report): "before locationRow in document
+        // order" is NOT enough scoping -- a sidebar ad/suggestion widget
+        // can sit as an earlier SIBLING of the whole profile card, which
+        // still counts as "before" even though it's nowhere near the
+        // real top card. Scope to the closest ancestor that contains
+        // BOTH the name heading and locationRow -- the actual top card --
+        // so a widget living outside that shared container can never
+        // qualify no matter where it falls in raw document order.
+        const nameHeading = document.querySelector('h1');
+        let scopeRoot = null;
+        if (nameHeading && locationRow && locationRow.node) {
+          let anc = nameHeading;
+          while (anc && !anc.contains(locationRow.node)) anc = anc.parentElement;
+          scopeRoot = anc;
+        }
         const links = document.querySelectorAll('a[href*="/company/"]');
         for (const a of links) {
+          if (scopeRoot && !scopeRoot.contains(a)) continue;
           const text = (a.textContent || '').trim();
           if (text) return text;
         }
@@ -426,7 +523,13 @@ async function scrapeLinkedinProfile() {
         educationSection ? 'Education:\n' + educationSection.text : '',
       ].filter(Boolean).join('\n\n') || null;
 
-      const contact = await asyncSafe('contact-info', openContactInfoAndExtract, { email: null, phone: null });
+      // Prefer whatever the ALREADY-open dialog gave us at the very top
+      // of this function -- clicking "Contact info" again here would
+      // just open the same panel a second time for no benefit. Only
+      // click-and-open a fresh one if there wasn't already one showing.
+      const contact = (preOpenContact && (preOpenContact.email || preOpenContact.phone))
+        ? preOpenContact
+        : await asyncSafe('contact-info', openContactInfoAndExtract, { email: null, phone: null });
       debug.push(`contact-info: email=${!!contact.email} phone=${!!contact.phone}`);
 
       // Real gap fix ("deep check to get mobile number and email id"):
