@@ -104,6 +104,12 @@ function buildResultStatusBox(result) {
   if (result.status === 'not_supported') {
     return statusBox('warn', 'Open a LinkedIn profile page to import.');
   }
+  if (result.status === 'batch_done') {
+    const s = result.summary;
+    return statusBox('good',
+      `✓ Bulk import done: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).` +
+      `<br/><a href="https://ats.aviintech.com/captured-profiles" target="_blank">View Captured Profiles →</a>`);
+  }
   return statusBox('err', escapeHtml(result.message || 'Something went wrong.'));
 }
 
@@ -204,12 +210,16 @@ async function onImportSearchResultsClick() {
   btn.disabled = true;
   btn.textContent = 'Importing…';
   resultDiv.innerHTML = '';
-  // Note: this can take a while (one create/dedup-check request per
-  // visible profile, done sequentially on purpose -- see
-  // importSearchResults in background.js). A completion notification
-  // fires regardless of whether this popup is still open by the time
-  // it finishes.
-  resultDiv.appendChild(el('div', { class: 'muted', text: 'Importing each visible profile — this can take a little while…' }));
+  // Real gap fix (explicit user request: bulk import now visits each
+  // profile's own page for the full Experience/Education/Contact-info
+  // capture, not just the thin card data, with a human-like pause
+  // between each one -- several minutes for a full page of results, not
+  // a "little while"). The popup WILL close during this (same reason a
+  // single import's details-sub-page fallback closes it -- see
+  // buildResultStatusBox's comment) -- the result is picked up
+  // automatically next time this popup opens either way, so this is
+  // safe to walk away from.
+  resultDiv.appendChild(el('div', { class: 'muted', text: 'Visiting each profile for its full details — this can take several minutes. A LinkedIn tab will switch between profiles on its own; feel free to do something else — you’ll see the result here next time you open this popup.' }));
 
   const result = await sendMessage({ type: 'IMPORT_SEARCH_RESULTS' });
 
@@ -217,15 +227,10 @@ async function onImportSearchResultsClick() {
   btn.textContent = 'Import All Visible Profiles';
   resultDiv.innerHTML = '';
 
-  if (result.status === 'batch_done') {
-    const s = result.summary;
-    resultDiv.appendChild(statusBox('good',
-      `✓ Done: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).` +
-      `<br/><a href="https://ats.aviintech.com/captured-profiles" target="_blank">View Captured Profiles →</a>`));
-  } else if (result.status === 'not_supported') {
+  if (result.status === 'not_supported') {
     resultDiv.appendChild(statusBox('warn', 'Open a LinkedIn people-search results page to bulk import.'));
   } else {
-    resultDiv.appendChild(statusBox('err', escapeHtml(result.message || 'Something went wrong.')));
+    resultDiv.appendChild(buildResultStatusBox(result));
   }
 }
 

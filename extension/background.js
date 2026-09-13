@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 35;
+const BG_VERSION = 36;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -1235,20 +1235,72 @@ async function scrapeActiveTabSearchResults() {
   if (!data || !data.results || !data.results.length) {
     return { ok: false, error: 'No profiles found on this page — scroll so some results are visible, then try again.' };
   }
-  return { ok: true, list: data.results };
+  return { ok: true, list: data.results, tabId: tab.id, tabUrl: tab.url };
 }
 
-async function importSearchResults(list) {
+function randomDelayMs(minMs, maxMs) {
+  return minMs + Math.floor(Math.random() * (maxMs - minMs));
+}
+
+// Real gap fix (explicit user request, after confirming the single-
+// profile pipeline's fixes all work: "apply same to all... at a time
+// [many] profiles... in one click"). Visits each profile in the SAME
+// tab that was already showing the search results -- exactly like a
+// human clicking through one result at a time and going back, never
+// many tabs/requests at once -- and runs the FULL per-profile scraper
+// (including the Contact Info click-and-wait and the details-sub-page
+// fallback), instead of only ever saving the thin card data (name/
+// headline/location) bulk import used to save deliberately. A true
+// "hundreds/thousands in one click" version was explicitly ruled out
+// (real risk of LinkedIn rate-limiting or restricting the account that
+// runs it) in favor of this: full depth per profile, capped to one
+// page's worth per click (~25, same cap scrapeSearchResultsList
+// already enforced), with a randomized few-second pause between
+// profiles so the pattern reads as a person browsing, not a script.
+async function enrichProfileFullyByUrl(url, tabId) {
+  try {
+    await chrome.tabs.update(tabId, { url });
+    await waitForTabComplete(tabId, 10000);
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: scrapeLinkedinProfile });
+    const frameResult = results && results[0];
+    if (frameResult && frameResult.error) {
+      console.log(`[AVIIN Import] bulk: full scrape error for ${url}:`, frameResult.error.message || frameResult.error);
+      return null;
+    }
+    const scraped = frameResult && frameResult.result;
+    if (!scraped || !scraped.name) return null;
+    if (!scraped.experience_text || !scraped.education_text) {
+      await enrichWithDetailsPages(scraped, tabId);
+    }
+    return scraped;
+  } catch (e) {
+    console.log(`[AVIIN Import] bulk: full scrape failed for ${url}:`, e?.message || e);
+    return null;
+  }
+}
+
+async function importSearchResults(list, searchResultsTabId, originalUrl) {
   const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length };
-  for (const scraped of list) {
+  for (let i = 0; i < list.length; i++) {
+    const thin = list[i];
     // Sequential, not parallel -- a batch of concurrent requests against
     // a recruiter's own account looks a lot more like automation than a
     // human clicking through a handful of imports one at a time.
-    const result = await importProfile(scraped);
+    const full = await enrichProfileFullyByUrl(thin.linkedin_url, searchResultsTabId);
+    const result = await importProfile(full || thin);
     if (result.status === 'created') summary.created += 1;
     else if (result.status === 'updated') summary.updated += 1;
     else if (result.status === 'no_change') summary.no_change += 1;
     else summary.error += 1;
+
+    if (i < list.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, randomDelayMs(2500, 5500)));
+    }
+  }
+  // Leaves the recruiter back where they started, like a human who
+  // browsed through several profiles and returned to the results list.
+  if (originalUrl) {
+    try { await chrome.tabs.update(searchResultsTabId, { url: originalUrl }); } catch (e) { /* tab may be gone */ }
   }
   return summary;
 }
@@ -1401,7 +1453,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse(failResult);
             break;
           }
-          const summary = await importSearchResults(listResult.list);
+          const summary = await importSearchResults(listResult.list, listResult.tabId, listResult.tabUrl);
+          const batchResult = { status: 'batch_done', summary };
+          // Real gap fix (same class already found and fixed for the
+          // single-profile flow): now that bulk import visits each
+          // profile's own page in turn, the popup closes the same way a
+          // single import's details-sub-page fallback closes it --
+          // persisted here so the summary is still there the next time
+          // the popup opens, not just via the system notification.
+          try {
+            chrome.storage.local.set({ lastImportResult: { result: batchResult, ts: Date.now() } });
+          } catch (e) { /* storage full/unavailable -- notification below still tries */ }
           chrome.notifications.create({
             type: 'basic', iconUrl: 'icons/icon128.png', title: 'AVIIN ATS Import',
             message: `Bulk import done: ${summary.created} created, ${summary.updated} updated, ${summary.no_change} already up to date, ${summary.error} failed (of ${summary.total}).`,
@@ -1410,7 +1472,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               console.log('[AVIIN Import] batch notification failed to show:', chrome.runtime.lastError.message);
             }
           });
-          sendResponse({ status: 'batch_done', summary });
+          sendResponse(batchResult);
           break;
         }
         case 'CHECK_TAB_DUPLICATE': {
