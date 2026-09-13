@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 15;
+const BG_VERSION = 16;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -386,26 +386,30 @@ async function scrapeLinkedinProfile() {
       // everything above it, and every ad/suggestion widget or
       // Experience-section entry observed so far renders after it.
       function currentCompanyFromLink() {
-        // Real gap fix (caught before shipping, via an offline mock test
-        // reproducing the live report): "before locationRow in document
-        // order" is NOT enough scoping -- a sidebar ad/suggestion widget
-        // can sit as an earlier SIBLING of the whole profile card, which
-        // still counts as "before" even though it's nowhere near the
-        // real top card. Scope to the closest ancestor that contains
-        // BOTH the name heading and locationRow -- the actual top card --
-        // so a widget living outside that shared container can never
-        // qualify no matter where it falls in raw document order.
-        const nameHeading = document.querySelector('h1');
-        let scopeRoot = null;
-        if (nameHeading && locationRow && locationRow.node) {
-          let anc = nameHeading;
-          while (anc && !anc.contains(locationRow.node)) anc = anc.parentElement;
-          scopeRoot = anc;
-        }
-        const links = document.querySelectorAll('a[href*="/company/"]');
-        for (const a of links) {
-          if (scopeRoot && !scopeRoot.contains(a)) continue;
-          const text = (a.textContent || '').trim();
+        // Real gap fix (reported live TWICE now: an unbounded "/company/"
+        // search, and then a "shared ancestor with locationRow" scoping
+        // attempt, both still returned a sidebar ad/suggestion widget's
+        // own text -- confirmed live, the ad sits close enough in the
+        // DOM tree to share an ancestor with the real top card on a real
+        // page, unlike the offline mock this was first verified against).
+        // Switched to the SAME backward-sibling-walk-from-locationRow
+        // pattern already proven reliable for headline extraction just
+        // above (its badge-skip logic already demonstrates company/
+        // school badges genuinely are top-card siblings on a real page).
+        // Deliberately has NO wider fallback search left: if nothing
+        // turns up in that bounded walk (e.g. this profile's top card
+        // simply has no distinct company badge), returning null is the
+        // honest outcome -- degrading to an unscoped document-wide
+        // search is exactly what picked up the ad both previous times.
+        if (!locationRow || !locationRow.node) return null;
+        let sib = locationRow.node.previousElementSibling;
+        for (let hops = 0; sib && hops < 6; hops++, sib = sib.previousElementSibling) {
+          if (/^H[1-4]$/.test(sib.tagName)) break; // reached the name heading -- stop, nothing found
+          const companyLink = (sib.matches && sib.matches('a[href*="/company/"]'))
+            ? sib
+            : (sib.querySelector && sib.querySelector('a[href*="/company/"]'));
+          if (!companyLink) continue;
+          const text = (companyLink.textContent || '').trim();
           if (text) return text;
         }
         return null;
