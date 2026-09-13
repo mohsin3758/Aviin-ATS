@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 36;
+const BG_VERSION = 37;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -1044,6 +1044,20 @@ async function enrichWithDetailsPages(scraped, originalTabId) {
     const text = await scrapeDetailsSubpage(scraped.linkedin_url, 'education', originalTabId);
     if (text) scraped.education_text = text;
   }
+  // Real gap fix (explicit user request, prioritized after a review
+  // found Skills was the one section never confirmed against real
+  // data): LinkedIn's main profile page only shows a short inline
+  // preview of Skills (commonly capped around 5) with a "Show all N
+  // skills" link to its own /details/skills/ sub-page for the full
+  // list -- the exact same pattern already confirmed and fixed for
+  // Experience/Education. A profile with no Skills section at all
+  // simply returns nothing here (same graceful "genuinely not there"
+  // outcome as any other missing field), so this never invents data --
+  // it only recovers a real, truncated list the main page under-shows.
+  if (!scraped.skills_text) {
+    const text = await scrapeDetailsSubpage(scraped.linkedin_url, 'skills', originalTabId);
+    if (text) scraped.skills_text = text;
+  }
   scraped.resume_text_like = [
     scraped.about_text ? 'About:\n' + scraped.about_text : '',
     scraped.skills_text ? 'Skills:\n' + scraped.skills_text : '',
@@ -1121,9 +1135,9 @@ async function scrapeActiveTab() {
   }
   // Real gap fix (see the comment on scrapeLinkedinProfile's return, and
   // scrapeDetailsPageText above): only pays the extra-tab cost when the
-  // main page actually came up short on Experience/Education -- most
-  // profiles don't need this at all, so a normal import stays fast.
-  if (adapter === ADAPTERS.linkedin && (!scraped.experience_text || !scraped.education_text)) {
+  // main page actually came up short on Experience/Education/Skills --
+  // most profiles don't need this at all, so a normal import stays fast.
+  if (adapter === ADAPTERS.linkedin && (!scraped.experience_text || !scraped.education_text || !scraped.skills_text)) {
     await enrichWithDetailsPages(scraped, tab.id);
   }
   return { ok: true, scraped };
@@ -1269,7 +1283,7 @@ async function enrichProfileFullyByUrl(url, tabId) {
     }
     const scraped = frameResult && frameResult.result;
     if (!scraped || !scraped.name) return null;
-    if (!scraped.experience_text || !scraped.education_text) {
+    if (!scraped.experience_text || !scraped.education_text || !scraped.skills_text) {
       await enrichWithDetailsPages(scraped, tabId);
     }
     return scraped;
