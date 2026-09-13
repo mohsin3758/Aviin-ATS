@@ -12,8 +12,50 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 42;
+const BG_VERSION = 43;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
+
+// Real gap fix (reported live: the popup got permanently stuck on
+// "Stopping bulk import..." for several minutes -- confirmed via the
+// extension's own Errors page: "An unknown error occurred when fetching
+// the script", Chrome's generic message for its OWN background service
+// worker getting killed mid-task, a real MV3 limitation (see
+// importSearchResults' own heartbeat fix for the full explanation).
+// Even with that heartbeat reducing how OFTEN this happens, there's no
+// guarantee it never does -- a killed worker abandons bulkImportStatus
+// stuck at 'running' forever, with nothing left to ever set it back,
+// leaving every future popup open stuck showing the same frozen
+// "running"/"stopping" state. This runs once whenever a fresh service
+// worker instance starts (which happens automatically on the very next
+// extension event -- including just opening the popup) and checks
+// whether a "running" flag has gone stale (no heartbeat in over 2
+// minutes, well past the 15s heartbeat cadence a healthy run keeps up)
+// -- if so, treats it as a crashed run: resets the status flags and
+// turns whatever bulkImportRunningSummary WAS captured (real partial
+// results, not a guess) into a normal persisted result, so the next
+// popup open shows "X of Y processed before this was interrupted" with
+// real per-candidate links for whatever DID complete, instead of a
+// permanently frozen message.
+(async () => {
+  try {
+    const stored = await new Promise((resolve) => chrome.storage.local.get(['bulkImportStatus', 'bulkImportLastHeartbeat', 'bulkImportRunningSummary'], resolve));
+    if (!stored || stored.bulkImportStatus !== 'running') return;
+    const staleMs = Date.now() - (stored.bulkImportLastHeartbeat || 0);
+    if (staleMs < 2 * 60 * 1000) return; // still plausibly alive -- a genuinely running loop would have heartbeat-updated within the last 15s
+    const summary = stored.bulkImportRunningSummary || { created: 0, updated: 0, no_change: 0, error: 0, total: 0, results: [] };
+    await chrome.storage.local.set({
+      bulkImportStatus: 'idle',
+      bulkImportCancelRequested: false,
+      lastImportResult: {
+        result: { status: 'batch_done', summary: { ...summary, cancelled: true, interrupted: true } },
+        ts: Date.now(),
+      },
+    });
+    console.log(`[AVIIN Import] recovered from a stale/crashed bulk import (${summary.results.length} of ${summary.total} had completed)`);
+  } catch (e) {
+    console.log('[AVIIN Import] stale bulk-import recovery check failed:', e?.message || e);
+  }
+})();
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
 // window.location.href — kept identical so a URL checked here and a URL
@@ -1381,50 +1423,77 @@ async function importSearchResults(list, searchResultsTabId, originalUrl) {
   // own View link instead of only aggregate counts plus one generic
   // link to the whole Captured Profiles list.
   const summary = { created: 0, updated: 0, no_change: 0, error: 0, total: list.length, cancelled: false, results: [] };
-  await chrome.storage.local.set({ bulkImportStatus: 'running', bulkImportCancelRequested: false, bulkImportProgress: { current: 0, total: list.length, last: null } });
-  for (let i = 0; i < list.length; i++) {
-    if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
-    const thin = list[i];
-    // Sequential, not parallel -- a batch of concurrent requests against
-    // a recruiter's own account looks a lot more like automation than a
-    // human clicking through a handful of imports one at a time.
-    const full = await enrichProfileFullyByUrl(thin.linkedin_url, searchResultsTabId);
-    const result = await importProfile(full || thin);
-    if (result.status === 'created') summary.created += 1;
-    else if (result.status === 'updated') summary.updated += 1;
-    else if (result.status === 'no_change') summary.no_change += 1;
-    else summary.error += 1;
-    summary.results.push({ name: result.name, candidateId: result.candidateId, status: result.status, updatedFields: result.updatedFields, message: result.message });
+  // Real gap fix (reported live: the popup got permanently stuck on
+  // "Stopping bulk import..." for several minutes -- confirmed via the
+  // extension's own Errors page: "An unknown error occurred when
+  // fetching the script", the generic message Chrome shows when its
+  // OWN background service worker gets killed mid-task. This is a real
+  // MV3 limitation, not a bug in this loop's own logic: Chrome can
+  // terminate a service worker after roughly 30 seconds without it
+  // handling a recognized extension event -- even while this async
+  // function is still logically running -- silently abandoning
+  // everything in its closure, including the ability to ever resolve
+  // the popup's still-pending IMPORT_SEARCH_RESULTS call or write
+  // bulkImportStatus back to 'idle'. The pacing delay between profiles
+  // already calls a real API (isBulkImportCancelRequested's storage
+  // read) every 500ms, which likely helps there, but a single profile's
+  // OWN scrape (main page + up to 3 details-sub-page detours) can run
+  // 45-60+ seconds with long stretches that don't touch any extension
+  // API at all. A dedicated heartbeat -- a real chrome.storage write
+  // every 15s for the FULL duration of this function, not just between
+  // profiles -- gives Chrome frequent, genuine signs of life throughout
+  // every phase, not only the gaps this loop already happened to cover.
+  const heartbeatHandle = setInterval(() => {
+    chrome.storage.local.set({ bulkImportLastHeartbeat: Date.now() });
+  }, 15000);
+  try {
+    await chrome.storage.local.set({
+      bulkImportStatus: 'running', bulkImportCancelRequested: false,
+      bulkImportLastHeartbeat: Date.now(), bulkImportRunningSummary: summary,
+    });
+    for (let i = 0; i < list.length; i++) {
+      if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
+      const thin = list[i];
+      // Sequential, not parallel -- a batch of concurrent requests
+      // against a recruiter's own account looks a lot more like
+      // automation than a human clicking through imports one at a time.
+      const full = await enrichProfileFullyByUrl(thin.linkedin_url, searchResultsTabId);
+      const result = await importProfile(full || thin);
+      if (result.status === 'created') summary.created += 1;
+      else if (result.status === 'updated') summary.updated += 1;
+      else if (result.status === 'no_change') summary.no_change += 1;
+      else summary.error += 1;
+      summary.results.push({ name: result.name, candidateId: result.candidateId, status: result.status, updatedFields: result.updatedFields, message: result.message });
 
-    // Real gap fix (reported live: "no option and click view for
-    // individual view, if succesfully upload all details" -- the popup
-    // only ever showed a static "Importing..." message for the whole
-    // multi-minute run, then one final summary at the end). Persists
-    // after EVERY profile (not just at the end) so a popup open at any
-    // point during the run -- the one that started it, or one reopened
-    // later -- can show live progress and a link straight to the
-    // profile that just finished, not just a running total.
-    try {
-      await chrome.storage.local.set({
-        bulkImportProgress: {
-          current: i + 1, total: list.length,
-          last: { name: result.name, candidateId: result.candidateId, status: result.status },
-        },
-      });
-    } catch (e) { /* non-critical -- the final summary still lands either way */ }
+      // Real gap fix (reported live: "no option and click view for
+      // individual view, if succesfully upload all details" -- the
+      // popup only ever showed a static "Importing..." message for the
+      // whole multi-minute run, then one final summary at the end).
+      // Persists the WHOLE running summary (not just a thin progress
+      // marker) after every profile -- doubles as this run's own crash-
+      // recovery checkpoint (see the stale-run recovery near this
+      // file's top): if the worker does get killed anyway, whatever
+      // was captured here is real, usable partial data, not just a
+      // count.
+      try {
+        await chrome.storage.local.set({ bulkImportRunningSummary: summary, bulkImportLastHeartbeat: Date.now() });
+      } catch (e) { /* non-critical -- the final summary still lands either way */ }
 
-    if (i < list.length - 1) {
-      // Checked in small steps rather than once per profile -- a single
-      // profile can itself take 10-30+ seconds, so only ever honoring
-      // Stop between whole profiles would feel unresponsive.
-      const delayMs = randomDelayMs(2500, 5500);
-      const stepMs = 500;
-      for (let waited = 0; waited < delayMs; waited += stepMs) {
-        if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
-        await new Promise((resolve) => setTimeout(resolve, Math.min(stepMs, delayMs - waited)));
+      if (i < list.length - 1) {
+        // Checked in small steps rather than once per profile -- a
+        // single profile can itself take 10-30+ seconds, so only ever
+        // honoring Stop between whole profiles would feel unresponsive.
+        const delayMs = randomDelayMs(2500, 5500);
+        const stepMs = 500;
+        for (let waited = 0; waited < delayMs; waited += stepMs) {
+          if (await isBulkImportCancelRequested()) { summary.cancelled = true; break; }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(stepMs, delayMs - waited)));
+        }
+        if (summary.cancelled) break;
       }
-      if (summary.cancelled) break;
     }
+  } finally {
+    clearInterval(heartbeatHandle);
   }
   await chrome.storage.local.set({ bulkImportStatus: 'idle', bulkImportCancelRequested: false });
   // Leaves the recruiter back where they started, like a human who
@@ -1624,11 +1693,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'GET_BULK_IMPORT_STATUS': {
-          const stored = await new Promise((resolve) => chrome.storage.local.get(['bulkImportStatus', 'bulkImportCancelRequested', 'bulkImportProgress'], resolve));
+          const stored = await new Promise((resolve) => chrome.storage.local.get(['bulkImportStatus', 'bulkImportCancelRequested', 'bulkImportRunningSummary'], resolve));
+          const runningSummary = stored && stored.bulkImportRunningSummary;
           sendResponse({
             running: stored && stored.bulkImportStatus === 'running',
             cancelling: !!(stored && stored.bulkImportCancelRequested),
-            progress: (stored && stored.bulkImportProgress) || null,
+            progress: runningSummary
+              ? { current: runningSummary.results.length, total: runningSummary.total, last: runningSummary.results[runningSummary.results.length - 1] || null }
+              : null,
           });
           break;
         }

@@ -126,10 +126,19 @@ function buildResultStatusBox(result) {
     // same wording/link a recruiter already knows from a single import,
     // just repeated once per profile in this batch.
     const s = result.summary;
-    const label = s.cancelled ? '✓ Bulk import stopped' : '✓ Bulk import done';
+    // Real gap fix (reported live: the popup got stuck on "Stopping…"
+    // forever when Chrome's own background service worker was killed
+    // mid-run, a real MV3 limitation -- see importSearchResults' own
+    // heartbeat/recovery fix). That crash-recovery path marks its
+    // result "interrupted", distinct from cancelled -- an honest
+    // "this was cut off unexpectedly" instead of implying Stop was
+    // clicked and worked cleanly, since a crash can't guarantee the
+    // profile in progress at the time actually finished.
+    const label = s.interrupted ? '⚠ Bulk import was interrupted' : s.cancelled ? '✓ Bulk import stopped' : '✓ Bulk import done';
     const wrapper = el('div');
-    wrapper.appendChild(statusBox('good',
-      `${label}: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible).`));
+    wrapper.appendChild(statusBox(s.interrupted ? 'warn' : 'good',
+      `${label}: ${s.created} created, ${s.updated} updated, ${s.no_change} already up to date${s.error ? `, ${s.error} failed` : ''} (of ${s.total} visible)` +
+      `${s.interrupted ? ' — the browser or extension likely restarted mid-run; you can start it again for the rest' : ''}.`));
     for (const item of s.results || []) {
       wrapper.appendChild(buildResultStatusBox(item));
     }
