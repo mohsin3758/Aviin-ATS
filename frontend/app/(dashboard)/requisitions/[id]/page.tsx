@@ -1183,11 +1183,16 @@ function AssignedRecruiterCard({ reqId }: { reqId: string }) {
 
   const role = getTokenPayload()?.role || '';
   // Manual assignment (create a brand-new one) is reachable by KAE,
-  // Manager, or Admin per request — reassigning an ALREADY-active
-  // assignment stays a HARD RULE #10 HITL-gated, admin/manager-only
-  // action (unchanged backend gate on POST /assignments/{id}/reassign).
+  // Manager, or Admin per request. Reassigning an ALREADY-active
+  // assignment stays a HARD RULE #10 HITL-gated action -- explicit
+  // request (2026-09-13) widened this from admin/manager-only to also
+  // include kae/kam, matching the backend's own widened require_role()
+  // on POST /assignments/{id}/reassign. Still logged the same way
+  // (assignment_event + audit_log, real actor/reason) regardless of
+  // which of these roles performs it -- HITL means a specific, logged
+  // human decision, not that only admin/manager qualify as that human.
   const canAssignInitial = ['admin', 'super_admin', 'manager', 'kae'].includes(role);
-  const canReassignOnly = ['admin', 'super_admin', 'manager'].includes(role);
+  const canReassignOnly = ['admin', 'super_admin', 'manager', 'kae', 'kam'].includes(role);
   const userMap = Object.fromEntries((users || []).map((u: any) => [u.id, u]));
   // REAL FEATURE ADD (2026-08-31): "not able to assign both recruiter to
   // same job requisition... 2 to more recruiter" - reported live. This

@@ -1,9 +1,17 @@
 """Requisition <-> recruiter assignments.
 
-HARD RULE #10: reassignment is a high-stakes, HITL-gated action
-(admin/manager only) — writes assignment_event 'reassigned' +
-audit_log, marks the old assignment 'reassigned' and creates a new
-'active' assignment for the new recruiter.
+HARD RULE #10: reassignment is a high-stakes, HITL-gated action —
+writes assignment_event 'reassigned' + audit_log, marks the old
+assignment 'reassigned' and creates a new 'active' assignment for the
+new recruiter. "HITL-gated" means a specific, logged human decision,
+not full automation — it does not mean admin/manager exclusively.
+Explicit request (2026-09-13): widened from admin/manager-only to
+also include kae/kam, who work the client/requisition relationship
+directly and are the ones assigning a recruiter to a requisition in
+the first place (see /assignments' own POST endpoint, already
+kae-permitted) — the same HITL logging (audit_log + assignment_event,
+who/when/why) applies unchanged regardless of which of these roles
+performs it.
 """
 
 from decimal import Decimal
@@ -161,7 +169,8 @@ async def create_assignment(
 
 @router.post("/{assignment_id}/reassign")
 async def reassign(
-    assignment_id: str, body: ReassignRequest, actor: Actor = Depends(require_role("admin", "manager"))
+    assignment_id: str, body: ReassignRequest,
+    actor: Actor = Depends(require_role("admin", "manager", "super_admin", "kae", "kam")),
 ):
     """Reassign to a specific recruiter, or auto-pick the next-best
     alternative via match_recruiters() when new_recruiter_id is omitted.
