@@ -12,7 +12,7 @@ const API_BASE = 'https://ats.aviintech.com/api';
 // FIRST when debugging anything: if the number here doesn't match the
 // latest fix, Chrome is still running old code and nothing else in this
 // file matters yet — reload the extension again before looking further.
-const BG_VERSION = 32;
+const BG_VERSION = 33;
 console.log(`[AVIIN Import] background.js loaded, version ${BG_VERSION}`);
 
 // Same normalization ADAPTERS.linkedin.scrapeFn applies to
@@ -903,8 +903,15 @@ function scrapeDetailsPageText() {
   function isDegreeLine(line) {
     return /^[·•]?\s*(1st|2nd|3rd|\d+(st|nd|rd|th))\+?\s*$/i.test(line.trim());
   }
+  // Real gap fix (reported live: a clean, correct Education capture
+  // still had a stray "More profiles for you" tacked onto the very end
+  // -- a sidebar widget heading with no degree-marker card following it
+  // this time, so the degree-line cutoff below never triggered). Same
+  // "widget heading means everything after it is boundary content"
+  // reasoning as the degree-marker cutoff, just keyed on this specific
+  // recurring LinkedIn widget title instead of its cards' shape.
   function isFooterLine(line) {
-    return /linkedin corporation|visit our help center|select language|recommendation transparency/i.test(line);
+    return /linkedin corporation|visit our help center|select language|recommendation transparency|^more profiles for you$|^people also viewed$|^people you may know$/i.test(line.trim());
   }
   try {
     const main = document.querySelector('main') || document.body;
