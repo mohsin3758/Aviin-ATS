@@ -210,10 +210,9 @@ async def _handle_screening_resume(media: dict, tenant_id: str, session: dict, w
 
         full_session = await conn.fetchrow(
             "SELECT * FROM screening_sessions WHERE id=$1", session["id"])
-        await score_and_advance(conn, tenant_id, full_session)
+        verification = await score_and_advance(conn, tenant_id, full_session)
 
-    from services.screening_i18n import t
-    return t("resume_thanks", full_session["language"] or "en")
+    return verification["followup_message"]
 
 async def _handle_question_answer(conn, tenant_id: str, cand, session) -> str:
     """WhatsApp Screening Blueprint, Milestone 2 (Phase 3-4). session's
@@ -233,6 +232,25 @@ async def _handle_question_answer(conn, tenant_id: str, cand, session) -> str:
         # mid-conversation) -- hand off rather than guess.
         return t("out_of_sync", lang, name=name)
 
+    # WhatsApp automation research (2026-09-15), gap #10: a candidate going
+    # off-script to ask a real question (e.g. "what's the salary range?")
+    # instead of answering current_q gets a grounded local-Qwen answer,
+    # then current_q is re-sent unchanged -- never recorded as an answer,
+    # never advances the sequence.
+    from services.screening_faq import looks_like_question, answer_question
+    import json as _json
+    raw = session["raw_answer"]
+    if looks_like_question(raw):
+        answer = await answer_question(conn, tenant_id, str(session["requisition_id"]), raw, lang)
+        await conn.execute(
+            """INSERT INTO screening_answers
+                 (tenant_id, screening_session_id, question_key, question_text, raw_answer,
+                  extracted_value, extraction_method)
+               VALUES ($1,$2,$3,$4,$5,$6,'faq')""",
+            tenant_id, session["id"], f"faq::{session['current_question_key']}:{session['id']}",
+            raw, raw, _json.dumps({"answer": answer}))
+        return f"{answer}\n\n{current_q['text']}"
+
     await record_answer(conn, tenant_id, session, current_q, session["raw_answer"])
 
     answered = await conn.fetch(
@@ -248,6 +266,77 @@ async def _handle_question_answer(conn, tenant_id: str, cand, session) -> str:
         "UPDATE screening_sessions SET status='awaiting_resume', current_question_key=NULL, updated_at=now() WHERE id=$1",
         session["id"])
     return t("resume_request", lang)
+
+
+async def _handle_followup_reply(conn, tenant_id: str, cand, session, cmd: str, text: str) -> str:
+    """WhatsApp automation research (2026-09-15), gaps #2/#3/#6: the
+    referral -> CSAT close-out (and, for a 'reject' outcome, one
+    cross-requisition offer first) that runs after screening_sessions.
+    status already reached 'completed' -- see _start_followups in
+    services/screening_scoring.py for why status itself is never
+    reopened."""
+    import re
+    from services.screening_i18n import t
+
+    stage = session["followup_stage"]
+    lang = session.get("language") or "en"
+    name = cand["full_name"].split()[0]
+
+    if stage == "cross_match_offered":
+        if cmd == "YES":
+            from routers.screening import _default_add_stage
+            from services.screening_scoring import score_and_advance
+            new_req_id = session["cross_match_requisition_id"]
+            default_stage = await _default_add_stage(conn, tenant_id)
+            existing_app = await conn.fetchrow(
+                "SELECT id FROM applications WHERE tenant_id=$1 AND requisition_id=$2 AND candidate_id=$3",
+                tenant_id, new_req_id, cand["id"])
+            new_app_id = existing_app["id"] if existing_app else await conn.fetchval(
+                """INSERT INTO applications (tenant_id, requisition_id, candidate_id, stage)
+                   VALUES ($1,$2,$3,$4) RETURNING id""",
+                tenant_id, new_req_id, cand["id"], default_stage)
+            await conn.execute(
+                """UPDATE screening_sessions SET requisition_id=$1, application_id=$2,
+                     followup_stage=NULL, cross_match_requisition_id=NULL, updated_at=now()
+                   WHERE id=$3""",
+                new_req_id, new_app_id, session["id"])
+            full_session = await conn.fetchrow("SELECT * FROM screening_sessions WHERE id=$1", session["id"])
+            verification = await score_and_advance(conn, tenant_id, full_session)
+            return verification["followup_message"]
+        # Anything other than an explicit YES moves straight to the
+        # referral ask rather than waiting on a second, unnecessary NO.
+        await conn.execute(
+            """UPDATE screening_sessions SET followup_stage='referral_asked',
+                 cross_match_requisition_id=NULL, updated_at=now() WHERE id=$1""",
+            session["id"])
+        return t("referral_ask", lang)
+
+    if stage == "referral_asked":
+        if cmd != "SKIP":
+            phone_m = re.search(r"(\+?\d[\d\-\s]{7,14}\d)", text)
+            referred_phone = phone_m.group(1).strip() if phone_m else None
+            referred_name = (text.replace(referred_phone, "").strip(" ,-–")
+                              if referred_phone else text.strip())
+            await conn.execute(
+                """INSERT INTO screening_referrals
+                     (tenant_id, screening_session_id, referring_candidate_id, raw_text,
+                      referred_name, referred_phone)
+                   VALUES ($1,$2,$3,$4,$5,$6)""",
+                tenant_id, session["id"], cand["id"], text[:500], referred_name[:200] or None, referred_phone)
+        await conn.execute(
+            "UPDATE screening_sessions SET followup_stage='csat_asked', updated_at=now() WHERE id=$1",
+            session["id"])
+        return f"{t('referral_ack', lang)} {t('csat_ask', lang)}"
+
+    if stage == "csat_asked":
+        m = re.search(r"[1-5]", text)
+        rating = int(m.group(0)) if m else None
+        await conn.execute(
+            "UPDATE screening_sessions SET followup_stage='done', csat_rating=$1, updated_at=now() WHERE id=$2",
+            rating, session["id"])
+        return t("csat_thanks", lang)
+
+    return t("out_of_sync", lang, name=name)
 
 
 async def _handle_screening_reply(conn, tenant_id: str, cand, session, cmd: str, text: str) -> str:
@@ -273,7 +362,8 @@ async def _handle_screening_reply(conn, tenant_id: str, cand, session, cmd: str,
                VALUES ($1,$2,'screening_communication','whatsapp',FALSE,$3)""",
             tenant_id, cand["id"], f"{cand['full_name']} replied STOP to WhatsApp screening.")
         await conn.execute(
-            "UPDATE screening_sessions SET status='opted_out', updated_at=now() WHERE id=$1", session_id)
+            "UPDATE screening_sessions SET status='opted_out', followup_stage=NULL, updated_at=now() WHERE id=$1",
+            session_id)
         return t("stopped_ack", lang)
 
     if cmd in ("AGENT", "HELP"):
@@ -289,6 +379,15 @@ async def _handle_screening_reply(conn, tenant_id: str, cand, session, cmd: str,
         """, tenant_id, sess_full["requisition_id"], sess_full["application_id"], cand["full_name"],
              sess_full["title"], f"{cand['full_name']} asked for a human during WhatsApp screening")
         return t("agent_ack", lang, name=name)
+
+    # WhatsApp automation research (2026-09-15): status stays 'completed'
+    # throughout the referral/cross-match/CSAT close-out (score_and_advance
+    # already fired the real recruiter notification/stage-advance before
+    # any of this) -- followup_stage is what actually routes an in-flight
+    # closing reply, checked before the status-based chain below since
+    # 'completed' matches none of those branches.
+    if session.get("followup_stage") in ("cross_match_offered", "referral_asked", "csat_asked"):
+        return await _handle_followup_reply(conn, tenant_id, cand, session, cmd, text)
 
     if status in ("pending_optin", "sent"):
         if cmd == "YES":
@@ -328,6 +427,35 @@ async def _handle_screening_reply(conn, tenant_id: str, cand, session, cmd: str,
     return t("out_of_sync", lang, name=name)
 
 
+async def _handle_joining_reply(conn, tenant_id: str, cand, offer, cmd: str, text: str) -> str:
+    """WhatsApp automation research (2026-09-15), gap #7: a staffing
+    agency's placement fee triggers on the candidate actually JOINING, not
+    on the interview -- offer.status='accepted' + joining_date already
+    exist (sql/01); this is the day-of confirmation half of the sequence
+    (services/offer_joining.py sends the reminder/ask, this captures the
+    reply). Not tied to any screening_sessions row -- an offer can exist
+    for a candidate sourced entirely outside WhatsApp screening."""
+    from services.screening_i18n import t
+    lang = await conn.fetchval(
+        """SELECT language FROM screening_sessions
+           WHERE candidate_id=$1 AND tenant_id=$2 ORDER BY created_at DESC LIMIT 1""",
+        cand["id"], tenant_id) or "en"
+    name = cand["full_name"].split()[0]
+    confirmed = cmd == "YES"
+    await conn.execute(
+        "UPDATE offers SET joining_confirmed_at=now(), joining_confirmation_response=$1 WHERE id=$2",
+        text[:500], offer["id"])
+    if not confirmed:
+        await conn.execute(
+            """INSERT INTO recruiter_tasks
+                 (tenant_id, requisition_id, application_id, candidate_name, req_title,
+                  task_type, title, priority)
+               VALUES ($1,$2,$3,$4,$5,'callback_request',$6,'high')""",
+            tenant_id, offer["requisition_id"], offer["application_id"], cand["full_name"], offer["title"],
+            f"{cand['full_name']} reported a joining delay/issue via WhatsApp: \"{text[:200]}\"")
+    return t("joining_ack", lang, name=name)
+
+
 async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id: str = None) -> str:
     cmd = text.strip().upper().split()[0] if text.strip() else "HELP"
     async with db.tenant_conn(tenant_id) as conn:
@@ -345,14 +473,29 @@ async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id:
             VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
         """, tenant_id, cand["id"], text[:2000], whatsapp_account_id)
         active_screening = await conn.fetchrow(
-            """SELECT id, status, requisition_id, candidate_id, current_question_key, language
+            """SELECT id, status, requisition_id, candidate_id, current_question_key, language,
+                      followup_stage, cross_match_requisition_id
                FROM screening_sessions
                WHERE candidate_id=$1 AND tenant_id=$2
-                 AND status IN ('pending_optin','sent','in_progress','awaiting_resume')
+                 AND (status IN ('pending_optin','sent','in_progress','awaiting_resume')
+                      OR followup_stage IN ('cross_match_offered','referral_asked','csat_asked'))
                ORDER BY created_at DESC LIMIT 1""",
             cand["id"], tenant_id)
         if active_screening:
             return await _handle_screening_reply(conn, tenant_id, cand, active_screening, cmd, text)
+        joining_offer = await conn.fetchrow(
+            """SELECT o.id, o.application_id, a.requisition_id, r.title
+               FROM offers o
+               JOIN applications a ON a.id = o.application_id
+               JOIN requisitions r ON r.id = a.requisition_id
+               WHERE a.candidate_id=$1 AND o.tenant_id=$2
+                 AND o.joining_confirmation_sent_at IS NOT NULL
+                 AND o.joining_confirmed_at IS NULL
+                 AND o.joining_confirmation_sent_at > now() - interval '3 days'
+               ORDER BY o.joining_confirmation_sent_at DESC LIMIT 1""",
+            cand["id"], tenant_id)
+        if joining_offer:
+            return await _handle_joining_reply(conn, tenant_id, cand, joining_offer, cmd, text)
         if cmd == "STATUS":
             apps = await conn.fetch(
                 "SELECT a.stage, r.title FROM applications a "
@@ -494,6 +637,15 @@ async def webhook(request: Request):
         from_  = msg.get("from", "")
         phone  = await _resolve_phone(from_)
         has_media = bool(msg.get("hasMedia"))
+        # WhatsApp automation research (2026-09-15), gap #1: a native
+        # "share location" message is its own distinct payload type, not
+        # text or media -- built against WAHA/whatsapp-web.js's documented
+        # Location object shape (payload.location = {latitude, longitude}),
+        # NOT yet verified against a real live location message the way
+        # every other WAHA quirk in this file has been (same honesty
+        # convention as the blueprint's own "unverified" flags elsewhere).
+        location = msg.get("location") or {}
+        has_location = bool(location) and (location.get("latitude") is not None or location.get("lat") is not None)
         # Media messages often have an empty/caption-only body — check media
         # BEFORE the text-emptiness bail below, or a resume with no caption
         # would be silently dropped.
@@ -505,7 +657,7 @@ async def webhook(request: Request):
         # to normalize) were created from other people's Status photos,
         # processed as if they were resume submissions. Excluded the same
         # way group messages (@g.us) already are.
-        if (not text and not has_media) or msg.get("fromMe") or "@g.us" in from_ or "broadcast" in from_:
+        if (not text and not has_media and not has_location) or msg.get("fromMe") or "@g.us" in from_ or "broadcast" in from_:
             return {"ok": True}
         # Real bug fix (2026-08-10 audit): no ORDER BY meant this returned
         # whatever row Postgres physically stored first, which flips
@@ -555,6 +707,32 @@ async def webhook(request: Request):
                              (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
                            VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)""",
                         tenant_id, cand["id"], body, wa_account_id)
+            return {"ok": True}
+
+        if has_location:
+            async with db.tenant_conn(tenant_id) as _lconn:
+                _cand = await _lconn.fetchrow(
+                    "SELECT id, full_name FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
+                    phone[-10:], tenant_id)
+                _session = await _lconn.fetchrow(
+                    """SELECT id, candidate_id, requisition_id, status, current_question_key, language
+                       FROM screening_sessions
+                       WHERE candidate_id=$1 AND tenant_id=$2 AND status='in_progress'
+                         AND current_question_key='generic_location'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    _cand["id"], tenant_id) if _cand else None
+                if _cand and _session:
+                    lat = location.get("latitude", location.get("lat"))
+                    lng = location.get("longitude", location.get("lng"))
+                    session_with_answer = dict(_session)
+                    session_with_answer["raw_answer"] = f"@{lat},{lng}"
+                    reply = await _handle_question_answer(_lconn, tenant_id, dict(_cand), session_with_answer)
+                    await _lconn.execute("""
+                        INSERT INTO candidate_messages
+                          (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
+                        VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
+                    """, tenant_id, _cand["id"], f"[Location shared: {lat},{lng}]", wa_account_id)
+                    await send_wa(phone, reply, session_name)
             return {"ok": True}
 
         if has_media:

@@ -213,24 +213,41 @@ async def summary(mine: bool = True, actor: Actor = Depends(require_permission("
         # text warning -- a 'red' number is also auto-paused from sending
         # by dispatch_pending_screening_messages, not only reported here.
         health_rows = await conn.fetch(
-            """SELECT phone_number, recent_reply_rate, recent_optout_rate, quality_rating
-               FROM user_whatsapp_accounts
-               WHERE tenant_id=$1 AND user_id=$2 AND quality_rating_updated_at IS NOT NULL""",
+            """SELECT ua.id, ua.phone_number, ua.recent_reply_rate, ua.recent_optout_rate, ua.quality_rating,
+                      (SELECT COUNT(*) FROM screening_sessions s
+                       WHERE s.whatsapp_account_id = ua.id AND s.status = 'pending_optin') AS pending_count
+               FROM user_whatsapp_accounts ua
+               WHERE ua.tenant_id=$1 AND ua.user_id=$2 AND ua.quality_rating_updated_at IS NOT NULL""",
             actor.tenant_id, actor.user_id)
+    # WhatsApp automation research (2026-09-15), gap #8: a 'red' number is
+    # already excluded from dispatch_pending_screening_messages entirely
+    # (auto-pause) -- the real remaining gap this surfaces is that nothing
+    # ever told a recruiter HOW MANY candidates are now silently stuck
+    # waiting behind it, or gave them a way to move those (never-yet-
+    # contacted, so switching numbers is invisible to the candidate) to a
+    # healthy number instead. True mid-conversation "failover" isn't
+    # meaningful here -- we use one number PER RECRUITER, not a shared
+    # pool behind one business number the way an official-API BSP does,
+    # so a candidate already mid-conversation can't be silently moved to
+    # a different number they've never texted.
     number_health = [
         {
+            "id": str(r["id"]),
             "phone_number": r["phone_number"] or "unnamed",
             "quality_rating": r["quality_rating"],
             "reply_rate": r["recent_reply_rate"],
             "optout_rate": r["recent_optout_rate"],
             "paused": r["quality_rating"] == "red",
+            "pending_count": r["pending_count"],
         }
         for r in health_rows
     ]
     warnings = [
         (f"Your WhatsApp number ({h['phone_number']}) is RED-rated and has been automatically "
          f"paused from sending new opt-ins — reply rate {round((h['reply_rate'] or 0) * 100)}%, "
-         f"opt-out rate {round((h['optout_rate'] or 0) * 100)}%. Review before manually resuming.")
+         f"opt-out rate {round((h['optout_rate'] or 0) * 100)}%. "
+         + (f"{h['pending_count']} candidate(s) are waiting to be contacted — reassign them to a "
+            f"healthy number below." if h["pending_count"] else "Review before manually resuming."))
         if h["quality_rating"] == "red" else
         (f"Your WhatsApp number ({h['phone_number']}) is YELLOW-rated (reply rate "
          f"{round((h['reply_rate'] or 0) * 100)}%) — still sending, but worth watching.")
@@ -284,7 +301,46 @@ async def session_detail(session_id: str, actor: Actor = Depends(require_permiss
             """SELECT question_key, question_text, raw_answer, extracted_value, extraction_method, created_at
                FROM screening_answers WHERE screening_session_id=$1 ORDER BY created_at""",
             session_id)
-    return {"session": dict(session), "answers": [dict(a) for a in answers]}
+        # Gaps #2/#3: surfaced here rather than a separate endpoint --
+        # this is where a recruiter is already looking at one candidate's
+        # full conversation.
+        referrals = await conn.fetch(
+            """SELECT raw_text, referred_name, referred_phone, created_at
+               FROM screening_referrals WHERE screening_session_id=$1 ORDER BY created_at""",
+            session_id)
+    return {"session": dict(session), "answers": [dict(a) for a in answers],
+            "referrals": [dict(r) for r in referrals]}
+
+
+class ReassignPendingRequest(BaseModel):
+    from_whatsapp_account_id: str
+    to_whatsapp_account_id: str
+
+
+@router.post("/reassign-pending")
+async def reassign_pending(body: ReassignPendingRequest,
+                            actor: Actor = Depends(require_permission("screening", "write"))):
+    """WhatsApp automation research (2026-09-15), gap #8: the only sessions
+    this can safely move are 'pending_optin' ones -- the candidate has
+    received NOTHING yet, so switching which of the tenant's numbers sends
+    the opt-in is invisible to them. A session already mid-conversation
+    can't be moved this way (see the number_health comment in /summary
+    for why "failover" doesn't map cleanly onto one-number-per-recruiter)."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        target = await conn.fetchrow(
+            """SELECT id FROM user_whatsapp_accounts
+               WHERE id=$1 AND tenant_id=$2 AND status='working' AND is_active=TRUE""",
+            body.to_whatsapp_account_id, actor.tenant_id)
+        if not target:
+            raise HTTPException(400, "Target WhatsApp number isn't connected/working")
+        moved = await conn.fetchval(
+            """WITH moved AS (
+                 UPDATE screening_sessions SET whatsapp_account_id=$1, updated_at=now()
+                 WHERE tenant_id=$2 AND whatsapp_account_id=$3 AND status='pending_optin'
+                 RETURNING id)
+               SELECT COUNT(*) FROM moved""",
+            body.to_whatsapp_account_id, actor.tenant_id, body.from_whatsapp_account_id)
+    return {"moved": moved}
 
 
 @router.get("/questions-preview")

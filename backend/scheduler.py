@@ -2265,6 +2265,8 @@ def start_scheduler():
     # WhatsApp Screening Blueprint, Milestone 1 (Phases 0-2).
     scheduler.add_job(process_screening_dispatch, "interval", minutes=2, id="screening_dispatch", replace_existing=True)
     scheduler.add_job(check_screening_reminders, "interval", minutes=10, id="screening_reminders", replace_existing=True)
+    scheduler.add_job(process_screening_reengagement, "interval", hours=24, id="screening_reengagement", replace_existing=True)
+    scheduler.add_job(process_offer_joining_sequence, "interval", minutes=60, id="offer_joining_sequence", replace_existing=True)
     # Every 30 min — approved items 04+05: fire SLA-breach/stale-requisition
     # alerts automatically instead of waiting for a human to open the panel,
     # and auto-reassign after a grace period if still unresolved.
@@ -2615,6 +2617,47 @@ async def check_screening_reminders():
                 logger.error(f"screening_reminders failed for tenant {tid}: {ex}")
     except Exception as ex:
         logger.error(f"screening_reminders job failed: {ex}")
+
+
+async def process_screening_reengagement():
+    """Daily: WhatsApp automation research (2026-09-15), gap #4. A modest
+    per-tenant batch (default limit=20) -- this creates brand-new opt-in
+    sends, so it goes through the exact same throttled dispatcher as any
+    other enrollment on the next process_screening_dispatch tick, not a
+    separate send path."""
+    from services.screening_dispatch import create_reengagement_sessions
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await create_reengagement_sessions(conn, tid)
+            except Exception as ex:
+                logger.error(f"screening_reengagement failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"screening_reengagement job failed: {ex}")
+
+
+async def process_offer_joining_sequence():
+    """Every 60 min (gated to business hours inside): WhatsApp automation
+    research (2026-09-15), gap #7. A staffing agency's placement fee
+    triggers on the candidate actually joining, not the interview -- see
+    services/offer_joining.py."""
+    from services.offer_joining import process_offer_joining_sequence as _process
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await _process(conn, tid)
+            except Exception as ex:
+                logger.error(f"offer_joining_sequence failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"offer_joining_sequence job failed: {ex}")
 
 
 async def process_nurture_dispatch():

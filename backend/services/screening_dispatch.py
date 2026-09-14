@@ -189,6 +189,46 @@ async def compute_number_health(conn, tenant_id: str) -> None:
             round(reply_rate, 3), round(optout_rate, 3), rating, acct["id"])
 
 
+async def create_reengagement_sessions(conn, tenant_id: str, cooldown_days: int = 30, limit: int = 20) -> int:
+    """WhatsApp automation research (2026-09-15), gap #4: a candidate who
+    went cold (declined or never replied) previously just sat there
+    forever -- no consent is assumed to carry over here (DPDP), this
+    creates a genuinely FRESH screening_sessions row (a brand-new opt-in
+    solicitation, same as any other enrollment) only when a real, new open
+    requisition now matches skills this candidate has already told us
+    about. 'opted_out' (explicit STOP) and 'bad_number' are deliberately
+    excluded -- both mean "do not contact again", not "went quiet"."""
+    from routers.screening import enroll_candidate_for_screening, _default_add_stage
+    from services.screening_matching import find_open_requisition_match
+
+    stale = await conn.fetch(
+        """SELECT DISTINCT ON (candidate_id) candidate_id, whatsapp_account_id, created_by, language
+           FROM screening_sessions
+           WHERE tenant_id=$1 AND status IN ('declined','no_response')
+             AND updated_at < now() - make_interval(days => $2)
+           ORDER BY candidate_id, created_at DESC
+           LIMIT $3""",
+        tenant_id, cooldown_days, limit)
+
+    default_stage = await _default_add_stage(conn, tenant_id)
+    created = 0
+    for row in stale:
+        match = await find_open_requisition_match(conn, tenant_id, str(row["candidate_id"]))
+        if not match:
+            continue
+        try:
+            async with conn.transaction():
+                result = await enroll_candidate_for_screening(
+                    conn, tenant_id, str(row["candidate_id"]), str(match["id"]), "re_engagement",
+                    default_stage, str(row["whatsapp_account_id"]) if row["whatsapp_account_id"] else None,
+                    row["created_by"], row["language"] or "en")
+        except Exception:
+            continue
+        if result.get("status") == "enrolled":
+            created += 1
+    return created
+
+
 async def check_screening_reminders(conn, tenant_id: str) -> int:
     """Every 30 min, capped at 3 (90 min total) -- decision #4. Runs on a
     10-minute scheduler tick (see scheduler.py), well under the 30-minute

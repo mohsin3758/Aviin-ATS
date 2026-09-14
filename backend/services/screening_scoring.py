@@ -20,6 +20,39 @@ review, never auto-actioned.
 from deps import Actor
 
 
+async def _start_followups(conn, tenant_id: str, session, recommendation: str) -> str:
+    """WhatsApp automation research (2026-09-15), gaps #6 and #2/#3:
+    a 'reject' outcome gets one shot at a genuine cross-requisition offer
+    first (only relevant for a staffing agency running many concurrent
+    client reqs against one shared candidate pool); everyone who finishes
+    screening -- qualified or not -- gets the referral ask afterward,
+    then a closing CSAT question. followup_stage drives this as its own
+    small state machine layered on top of status='completed', which
+    score_and_advance already set above and does NOT reopen -- the
+    dashboard/funnel keep seeing a clean 'completed', and the real
+    business action (recruiter notification, stage advance) already fired
+    before any of this, not gated behind a candidate answering these
+    courtesy follow-ups."""
+    from services.screening_i18n import t
+    from services.screening_matching import find_open_requisition_match
+
+    lang = session.get("language") or "en"
+    if recommendation == "reject":
+        match = await find_open_requisition_match(conn, tenant_id, str(session["candidate_id"]))
+        if match:
+            await conn.execute(
+                "UPDATE screening_sessions SET followup_stage='cross_match_offered', "
+                "cross_match_requisition_id=$1, updated_at=now() WHERE id=$2",
+                match["id"], session["id"])
+            return t("cross_match_offer", lang, role=match["title"] or "this role",
+                      client=match["client_name"] or "our client")
+
+    await conn.execute(
+        "UPDATE screening_sessions SET followup_stage='referral_asked', updated_at=now() WHERE id=$1",
+        session["id"])
+    return t("referral_ask", lang)
+
+
 async def _advance_stage(conn, tenant_id: str, application_id, current_stage: str) -> str | None:
     """Never hardcode a pipeline stage key -- read the tenant's real,
     customizable pipeline_stage_config ordering (same caution this
@@ -75,4 +108,5 @@ async def score_and_advance(conn, tenant_id: str, session) -> dict:
                     tenant_id, session["requisition_id"], app_row["id"], verification["candidate_name"],
                     recipient, f"{verification['candidate_name']} qualified via WhatsApp screening — send interview invite")
 
+    verification["followup_message"] = await _start_followups(conn, tenant_id, session, recommendation)
     return verification

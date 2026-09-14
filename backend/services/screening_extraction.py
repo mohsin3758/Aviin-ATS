@@ -54,6 +54,19 @@ def _parse_location(raw: str) -> dict:
     text when there's no comma (a recruiter can always correct via the
     existing candidate edit form, same as any other free-text field)."""
     raw = (raw or "").strip()
+    # WhatsApp automation research (2026-09-15), gap #1: a native WhatsApp
+    # "share location" message is a distinct payload type, not free text --
+    # routed here as a synthetic "@lat,lng" marker by the webhook (see
+    # routers/whatsapp_bot.py's has_location branch) specifically so it
+    # never goes through the comma-split heuristic below, which is built
+    # for a typed sentence like "Bangalore, open to relocating" and would
+    # otherwise mangle two floating-point numbers the same way the original
+    # whole-raw-answer bug did (fixed 2026-09-14, see 541570a).
+    if raw.startswith("@") and "," in raw:
+        lat, _, lng = raw[1:].partition(",")
+        if lat.strip().replace("-", "").replace(".", "").isdigit() and \
+           lng.strip().replace("-", "").replace(".", "").isdigit():
+            return {"location": f"Shared GPS location ({lat.strip()}, {lng.strip()})", "relocation_note": None}
     if "," in raw:
         city_part, rest = raw.split(",", 1)
     else:
