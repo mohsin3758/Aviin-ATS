@@ -78,9 +78,10 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
     today = datetime.now(IST).date()
     accounts = await conn.fetch(
         """SELECT id, waha_session_name, next_eligible_send_at,
-                  warm_up_started_at, messages_sent_today, messages_sent_date
+                  warm_up_started_at, messages_sent_today, messages_sent_date, quality_rating
            FROM user_whatsapp_accounts
-           WHERE tenant_id=$1 AND status='working' AND is_active=TRUE""",
+           WHERE tenant_id=$1 AND status='working' AND is_active=TRUE
+             AND quality_rating != 'red'""",
         tenant_id)
 
     sent = 0
@@ -141,12 +142,29 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
     return sent
 
 
+def _classify_quality(reply_rate: float, optout_rate: float) -> str:
+    """Shadow quality rating (WhatsApp automation research, 2026-09-14):
+    mirrors Meta's own official Green/Yellow/Red quality-tier concept,
+    computed from signals available without a real delivery-ack webhook
+    (WAHA/WEBJS has none -- see module docstring). Opt-outs are weighted
+    more heavily than silence: an explicit STOP is a much stronger
+    negative signal than someone simply not replying."""
+    if optout_rate > 0.20 or reply_rate < 0.10:
+        return "red"
+    if optout_rate > 0.10 or reply_rate < 0.25:
+        return "yellow"
+    return "green"
+
+
 async def compute_number_health(conn, tenant_id: str) -> None:
     """Decision #24: a declining reply-rate trend on a number is a real
     early-warning signal worth surfacing proactively, not just reacted to
-    after it's already disconnected. Uses reply rate only, not true
-    delivery-ack rate -- see this module's docstring for why no real
-    delivery-ack signal exists in this codebase to compute that from."""
+    after it's already disconnected. Uses reply/opt-out rate only, not
+    true delivery-ack rate -- see this module's docstring for why no real
+    delivery-ack signal exists in this codebase to compute that from.
+    Also sets quality_rating -- dispatch_pending_screening_messages skips
+    a 'red' account entirely, auto-pausing it before a real ban rather
+    than only ever warning after the fact."""
     accounts = await conn.fetch(
         "SELECT id FROM user_whatsapp_accounts WHERE tenant_id=$1 AND status='working'", tenant_id)
     for acct in accounts:
@@ -159,9 +177,16 @@ async def compute_number_health(conn, tenant_id: str) -> None:
         if total < 5:
             continue
         replied = sum(1 for r in recent if r["status"] not in ("sent", "no_response"))
+        opted_out = sum(1 for r in recent if r["status"] == "opted_out")
+        reply_rate = replied / total
+        optout_rate = opted_out / total
+        rating = _classify_quality(reply_rate, optout_rate)
         await conn.execute(
-            "UPDATE user_whatsapp_accounts SET recent_reply_rate=$1 WHERE id=$2",
-            round(replied / total, 3), acct["id"])
+            """UPDATE user_whatsapp_accounts
+               SET recent_reply_rate=$1, recent_optout_rate=$2, quality_rating=$3,
+                   quality_rating_updated_at=now()
+               WHERE id=$4""",
+            round(reply_rate, 3), round(optout_rate, 3), rating, acct["id"])
 
 
 async def check_screening_reminders(conn, tenant_id: str) -> int:

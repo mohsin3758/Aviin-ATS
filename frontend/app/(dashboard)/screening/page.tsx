@@ -45,7 +45,8 @@ export default function ScreeningPage() {
 
   const { data: summary, refetch: refetchSummary } = useFetch<any>(mounted ? '/screening/summary?mine=true' : null);
   const funnel = summary?.funnel || {};
-  const numberHealthWarnings: string[] = summary?.number_health_warnings || [];
+  const numberHealth: any[] = summary?.number_health || [];
+  const numberHealthAlerts = numberHealth.filter((h: any) => h.quality_rating !== 'green');
   const { data: sessionsData, refetch: refetchSessions } = useFetch<any>(mounted ? '/screening/sessions?mine=true' : null);
   const sessions = sessionsData?.sessions || [];
   const [invitingId, setInvitingId] = useState<string | null>(null);
@@ -128,11 +129,23 @@ export default function ScreeningPage() {
         <div style={{ fontSize: 18, fontWeight: 800, color: '#0F172A' }}>WhatsApp Screening</div>
       </div>
 
-      {numberHealthWarnings.map((w, i) => (
-        <div key={i} style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>
-          ⚠ {w}
-        </div>
-      ))}
+      {numberHealthAlerts.map((h: any, i: number) => {
+        const isRed = h.quality_rating === 'red';
+        const style = isRed
+          ? { background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#991B1B' }
+          : { background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E' };
+        return (
+          <div key={i} style={{ ...style, borderRadius: 8, padding: '8px 12px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontWeight: 800, textTransform: 'uppercase', fontSize: 10, letterSpacing: '.03em', padding: '2px 8px', borderRadius: 999, background: isRed ? '#DC2626' : '#D97706', color: '#fff' }}>
+              {h.quality_rating}
+            </span>
+            <span>
+              {h.phone_number} — reply rate {Math.round((h.reply_rate || 0) * 100)}%, opt-out rate {Math.round((h.optout_rate || 0) * 100)}%.
+              {isRed ? ' Automatically paused from sending new opt-ins until reviewed.' : ' Still sending, worth watching.'}
+            </span>
+          </div>
+        );
+      })}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
         {Object.keys(FUNNEL_LABELS).map(key => (

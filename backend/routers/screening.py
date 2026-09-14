@@ -208,19 +208,39 @@ async def summary(mine: bool = True, actor: Actor = Depends(require_permission("
         rows = await conn.fetch(
             f"SELECT status, COUNT(*) AS n FROM screening_sessions WHERE {' AND '.join(conditions)} GROUP BY status",
             *params)
-        # Decision #24: surface a declining-reply-rate number as an early
-        # warning rather than only reacting after it's already banned.
+        # WhatsApp automation research (2026-09-14), decision #24: a real
+        # green/yellow/red shadow quality rating, not just a reply-rate
+        # text warning -- a 'red' number is also auto-paused from sending
+        # by dispatch_pending_screening_messages, not only reported here.
         health_rows = await conn.fetch(
-            """SELECT phone_number, recent_reply_rate FROM user_whatsapp_accounts
-               WHERE tenant_id=$1 AND user_id=$2 AND recent_reply_rate IS NOT NULL""",
+            """SELECT phone_number, recent_reply_rate, recent_optout_rate, quality_rating
+               FROM user_whatsapp_accounts
+               WHERE tenant_id=$1 AND user_id=$2 AND quality_rating_updated_at IS NOT NULL""",
             actor.tenant_id, actor.user_id)
-    warnings = [
-        f"Your WhatsApp number ({r['phone_number'] or 'unnamed'}) has a low reply rate "
-        f"({round(r['recent_reply_rate'] * 100)}%) over its last 20 screening sends — "
-        "worth checking it hasn't been silently restricted."
-        for r in health_rows if r["recent_reply_rate"] is not None and r["recent_reply_rate"] < 0.15
+    number_health = [
+        {
+            "phone_number": r["phone_number"] or "unnamed",
+            "quality_rating": r["quality_rating"],
+            "reply_rate": r["recent_reply_rate"],
+            "optout_rate": r["recent_optout_rate"],
+            "paused": r["quality_rating"] == "red",
+        }
+        for r in health_rows
     ]
-    return {"funnel": {r["status"]: r["n"] for r in rows}, "number_health_warnings": warnings}
+    warnings = [
+        (f"Your WhatsApp number ({h['phone_number']}) is RED-rated and has been automatically "
+         f"paused from sending new opt-ins — reply rate {round((h['reply_rate'] or 0) * 100)}%, "
+         f"opt-out rate {round((h['optout_rate'] or 0) * 100)}%. Review before manually resuming.")
+        if h["quality_rating"] == "red" else
+        (f"Your WhatsApp number ({h['phone_number']}) is YELLOW-rated (reply rate "
+         f"{round((h['reply_rate'] or 0) * 100)}%) — still sending, but worth watching.")
+        for h in number_health if h["quality_rating"] in ("red", "yellow")
+    ]
+    return {
+        "funnel": {r["status"]: r["n"] for r in rows},
+        "number_health": number_health,
+        "number_health_warnings": warnings,
+    }
 
 
 @router.get("/sessions")
