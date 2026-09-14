@@ -18,6 +18,10 @@ fit numbers, neither implements this rule-by-rule logic):
      codebase's own established convention for a fuzzy signal —
      dedup_service.py's POSSIBLE_MATCH tier — is to flag, never auto-
      decide).
+  5. CTC & notice period within the role's band (WhatsApp Screening
+     Blueprint, decision/table entry "Rule 5") — a hard gate like 1-3,
+     but skipped entirely (not a failure) when the caller has no
+     budget_max/notice_period_max to compare against.
 
 Zero API cost, pure rule evaluation over data the caller has already
 computed (mandatory coverage, section-aware counts, relevant experience,
@@ -46,6 +50,7 @@ def evaluate_shortlist(
     relevant_experience: dict,
     role_relevance: dict,
     mandatory_skill_min_years: dict,
+    ctc_notice_fit: Optional[dict] = None,
 ) -> dict:
     """verification: the full /skill-verification response dict
     (mandatory_coverage + skills[] with is_mandatory/count/sections).
@@ -54,10 +59,14 @@ def evaluate_shortlist(
     "matched_tokens": [...]} from ner.py's compute_role_relevance().
     mandatory_skill_min_years: the requisition's own {skill: min_years}
     map (sparse — a mandatory skill with no entry has no threshold).
+    ctc_notice_fit: optional {expected_ctc, budget_max, notice_period_days,
+    notice_period_max} — raw values only, this function does the actual
+    comparison (Rule 5). None/omitted for a caller with nothing to compare
+    against — existing callers that predate Rule 5 are unaffected.
 
     Returns {"recommendation": "shortlist"|"reject", "reasons": [...]}
-    — reasons are written in the order the 4 rules were actually
-    checked, matching how a recruiter would explain the same decision."""
+    — reasons are written in the order the rules were actually checked,
+    matching how a recruiter would explain the same decision."""
     reasons: list[str] = []
     coverage = verification["mandatory_coverage"]
 
@@ -103,5 +112,24 @@ def evaluate_shortlist(
         reasons.append(f"Role-relevant background (matches: {', '.join(role_relevance['matched_tokens'])})")
     else:
         reasons.append("Role/domain relevance not clearly established from the resume text — worth a manual look")
+
+    # Rule 5 — CTC & notice period within the role's band. Skipped
+    # entirely (not a failure) when there's no budget/notice ceiling to
+    # compare against.
+    if ctc_notice_fit:
+        band_fails = []
+        expected_ctc = ctc_notice_fit.get("expected_ctc")
+        budget_max = ctc_notice_fit.get("budget_max")
+        if expected_ctc is not None and budget_max is not None and expected_ctc > budget_max:
+            band_fails.append(f"expected CTC {expected_ctc} exceeds the role's budget of {budget_max}")
+        notice_days = ctc_notice_fit.get("notice_period_days")
+        notice_max = ctc_notice_fit.get("notice_period_max")
+        if notice_days is not None and notice_max is not None and notice_days > notice_max:
+            band_fails.append(f"notice period {notice_days} days exceeds the role's {notice_max}-day limit")
+        if band_fails:
+            reasons.append(f"Outside CTC/notice fit: {'; '.join(band_fails)}")
+            return {"recommendation": "reject", "reasons": reasons}
+        if budget_max is not None or notice_max is not None:
+            reasons.append("Within the role's CTC/notice band")
 
     return {"recommendation": "shortlist", "reasons": reasons}

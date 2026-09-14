@@ -1177,6 +1177,13 @@ function ResumeInboxPageInner() {
   const [bulkMoveReqId, setBulkMoveReqId] = useState('');
   const [bulkMoveStage, setBulkMoveStage] = useState('');
   const [bulkMoveBusy, setBulkMoveBusy] = useState(false);
+  // WhatsApp Screening Blueprint decision #27 — bulk-select from
+  // already-sourced candidates is one of the 3 real entry points into
+  // screening, feeding the same POST /screening/enroll every other entry
+  // point uses. Same modal pattern as Move to Pipeline above.
+  const [screeningOpen, setScreeningOpen] = useState(false);
+  const [screeningReqId, setScreeningReqId] = useState('');
+  const [screeningBusy, setScreeningBusy] = useState(false);
   const { data: bulkMoveStages } = useFetch<any[]>(bulkMoveOpen ? '/settings/pipeline-stages' : null);
   const bulkMoveStageOptions = (bulkMoveStages || [])
     .filter((s: any) => s.is_visible && s.stage_key !== 'rejected')
@@ -1195,6 +1202,29 @@ function ResumeInboxPageInner() {
       setBulkMoveOpen(false); setBulkMoveReqId(''); setBulkMoveStage(''); setSelectedIds(new Set());
     } catch (e: any) { showToast('Error: ' + e.message, false); }
     finally { setBulkMoveBusy(false); }
+  };
+
+  const runScreeningEnroll = async () => {
+    if (!screeningReqId) return;
+    const candidateIds = Array.from(selectedIds)
+      .map(id => items.find(r => r.id === id)?.candidate_id)
+      .filter((cid): cid is string => !!cid);
+    const skippedNoCandidateCount = selectedIds.size - candidateIds.length;
+    if (!candidateIds.length) { showToast('None of the selected resumes have a linked candidate yet', false); return; }
+    setScreeningBusy(true);
+    try {
+      const r = await apiFetch('/screening/enroll', {
+        method: 'POST',
+        body: JSON.stringify({
+          requisition_id: screeningReqId,
+          enrolled_via: 'bulk_select',
+          rows: candidateIds.map(cid => ({ candidate_id: cid })),
+        }),
+      });
+      showToast(`✓ Enrolled ${r.enrolled} into WhatsApp screening` + (r.skipped ? ` (${r.skipped} already in an active session)` : '') + (skippedNoCandidateCount ? ` — ${skippedNoCandidateCount} skipped (no candidate yet)` : ''));
+      setScreeningOpen(false); setScreeningReqId(''); setSelectedIds(new Set());
+    } catch (e: any) { showToast('Error: ' + e.message, false); }
+    finally { setScreeningBusy(false); }
   };
 
   // ── Real gap fix (2026-09-08): CSV export ────────────────────────────────
@@ -1358,6 +1388,7 @@ function ResumeInboxPageInner() {
               Reject only. Reuses the same POST /candidates/bulk-assign the
               Pipeline board's Add Candidate modal already calls. */}
           <button data-testid="resume-inbox-bulk-move" onClick={() => setBulkMoveOpen(true)} style={{ padding: '6px 14px', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>→ Move to Pipeline</button>
+          <button data-testid="resume-inbox-bulk-screening" onClick={() => setScreeningOpen(true)} style={{ padding: '6px 14px', background: '#0d9488', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>📱 Add to Screening</button>
           <button onClick={exportCsv} style={{ padding: '6px 14px', background: 'rgba(255,255,255,0.15)', color: '#fff', border: '1px solid rgba(255,255,255,0.3)', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Export Selected</button>
           <button onClick={() => setSelectedIds(new Set())} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 12 }}>Clear</button>
         </div>
@@ -1388,6 +1419,33 @@ function ResumeInboxPageInner() {
               <button data-testid="resume-inbox-bulk-move-confirm" onClick={runBulkMove} disabled={bulkMoveBusy || !bulkMoveReqId || !bulkMoveStage}
                 style={{ flex: 2, padding: '10px', background: (bulkMoveBusy || !bulkMoveReqId || !bulkMoveStage) ? '#94a3b8' : '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: (bulkMoveBusy || !bulkMoveReqId || !bulkMoveStage) ? 'not-allowed' : 'pointer' }}>
                 {bulkMoveBusy ? 'Moving…' : `Move ${selectedIds.size}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screeningOpen && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 2500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={() => !screeningBusy && setScreeningOpen(false)}>
+          <div style={{ background: '#fff', borderRadius: 14, width: '100%', maxWidth: 420, padding: 22 }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#1e293b' }}>Add {selectedIds.size} to WhatsApp Screening</h2>
+              <button onClick={() => setScreeningOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: 20 }}>✕</button>
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 14 }}>
+              Only resumes already linked to a candidate can be enrolled — any without one yet will be skipped.
+              Requires your own WhatsApp number connected under Settings → WhatsApp.
+            </div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#64748b', display: 'block', marginBottom: 4 }}>Role</label>
+            <select value={screeningReqId} onChange={e => setScreeningReqId(e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, marginBottom: 18, boxSizing: 'border-box' }}>
+              <option value="">Select role…</option>
+              {reqList.map((r: any) => <option key={r.id} value={r.id}>{r.title}</option>)}
+            </select>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setScreeningOpen(false)} disabled={screeningBusy} style={{ flex: 1, padding: '10px', background: '#f1f5f9', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+              <button onClick={runScreeningEnroll} disabled={screeningBusy || !screeningReqId}
+                style={{ flex: 2, padding: '10px', background: (screeningBusy || !screeningReqId) ? '#94a3b8' : '#0d9488', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: (screeningBusy || !screeningReqId) ? 'not-allowed' : 'pointer' }}>
+                {screeningBusy ? 'Enrolling…' : `Enroll ${selectedIds.size}`}
               </button>
             </div>
           </div>

@@ -10,6 +10,38 @@ from services import source_attribution
 
 import_router = APIRouter(prefix="/import", tags=["import"])
 
+
+async def _enroll_screening_if_requested(conn, actor: Actor, candidate_id, requisition_id: Optional[str], enrolled_via: str):
+    """WhatsApp Screening Blueprint decision #27: CSV/Excel bulk import is
+    one of the 3 entry points feeding the shared enrollment step. The
+    source file's own column is read as a real requisition_id (not a
+    fuzzy-matched role title — an incorrect title match could silently
+    misfile a candidate into the wrong job, so this stays strict; a
+    friendlier "type the role name" resolver is a fast-follow, not this
+    milestone). Best-effort: a bad/missing requisition_id or no connected
+    WhatsApp number should not fail the whole import row, since the
+    candidate record itself was already saved successfully by this point."""
+    if not requisition_id or not candidate_id:
+        return
+    from routers.screening import enroll_candidate_for_screening, _default_add_stage
+    try:
+        req_ok = await conn.fetchval(
+            "SELECT is_active FROM requisitions WHERE id=$1 AND tenant_id=$2", requisition_id, actor.tenant_id)
+        if req_ok is None or req_ok is False:
+            return
+        whatsapp_account_id = await conn.fetchval(
+            """SELECT id FROM user_whatsapp_accounts
+               WHERE tenant_id=$1 AND user_id=$2 AND status='working' AND is_active=TRUE""",
+            actor.tenant_id, actor.user_id)
+        if not whatsapp_account_id:
+            return
+        default_stage = await _default_add_stage(conn, actor.tenant_id)
+        await enroll_candidate_for_screening(
+            conn, actor.tenant_id, str(candidate_id), requisition_id, enrolled_via, default_stage,
+            str(whatsapp_account_id), actor.user_id)
+    except Exception:
+        pass
+
 @import_router.post("/candidates")
 async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get_actor)):
     from routers.intelligence import auto_score_candidate_bg
@@ -23,6 +55,7 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
             try:
                 name = (row.get("full_name") or row.get("name") or "").strip()
                 email = (row.get("email") or "").strip().lower()
+                requisition_id = (row.get("requisition_id") or row.get("role") or "").strip() or None
                 if not name:
                     errors += 1
                     error_list.append({"row": i, "error": "Missing full_name"})
@@ -58,6 +91,7 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                             "WHERE id=$3",
                             name, exp_mo, existing["id"])
                         updated += 1
+                        await _enroll_screening_if_requested(conn, actor, existing["id"], requisition_id, "csv_import")
                     else:
                         skipped_owned += 1
                 else:
@@ -99,6 +133,7 @@ async def import_candidates(file: UploadFile=File(...), actor: Actor=Depends(get
                             conn, actor.tenant_id, str(actor.user_id), activity_events.SOURCED, candidate_id=str(new_id),
                         )
                     created += 1
+                    await _enroll_screening_if_requested(conn, actor, new_id, requisition_id, "csv_import")
             except Exception as e:
                 errors += 1
                 error_list.append({"row": i, "error": str(e)[:100]})
@@ -140,6 +175,7 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                 if not name:
                     errors += 1; errs.append({"row":i,"error":"Missing name"}); continue
                 exp_mo = int(float(str(d.get("total_exp_years") or 0).replace("yr","").strip() or 0) * 12)
+                requisition_id = str(d.get("requisition_id") or d.get("role") or "").strip() or None
                 skills = [s.strip() for s in str(d.get("skills","")).replace(";",",").split(",") if s.strip()]
                 existing = await conn.fetchrow(
                     "SELECT id FROM candidates WHERE email=$1 AND tenant_id=$2", email, actor.tenant_id
@@ -160,6 +196,7 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                             "WHERE id=$3",
                             name, exp_mo, existing["id"])
                         updated += 1
+                        await _enroll_screening_if_requested(conn, actor, existing["id"], requisition_id, "csv_import")
                     else:
                         skipped_owned += 1
                 else:
@@ -193,6 +230,7 @@ async def import_excel(file: UploadFile = File(...), actor: Actor = Depends(get_
                             conn, actor.tenant_id, str(actor.user_id), activity_events.SOURCED, candidate_id=str(new_id),
                         )
                     created += 1
+                    await _enroll_screening_if_requested(conn, actor, new_id, requisition_id, "csv_import")
             except Exception as e:
                 errors += 1; errs.append({"row":i,"error":str(e)[:80]})
     return {"created":created,"updated":updated,"skipped_owned":skipped_owned,"errors":errors,"error_details":errs[:20]}

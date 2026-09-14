@@ -258,6 +258,8 @@ from routers import pipeline_stages
 app.include_router(pipeline_stages.router)
 from routers import whatsapp_settings
 app.include_router(whatsapp_settings.router)
+from routers import screening
+app.include_router(screening.router)
 app.include_router(users.roles_router)
 app.include_router(users.tenant_router)
 app.include_router(p23_p27.skills_router)

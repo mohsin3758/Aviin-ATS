@@ -60,6 +60,7 @@ const NAV_GROUPS = [
   ]},
   { id:'recruitment', label:'RECRUITMENT', defaultOpen:true, items:[
     { icon:Inbox,           href:'/resume-inbox',  label:'Resume Inbox', feature:'resume_inbox' },
+    { icon:MessageCircle,   href:'/screening',     label:'WhatsApp Screening', feature:'screening' },
     { icon:Calendar,        href:'/interviews',   label:'Interviews', feature:'interviews' },
     { icon:CalendarDays,    href:'/calendar',      label:'Calendar', feature:'calendar' },
     { icon:Video,           href:'/video-screening', label:'Video Screening', feature:'video_screening' },

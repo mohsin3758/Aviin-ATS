@@ -2246,6 +2246,9 @@ def start_scheduler():
                       id="resume_backlog", replace_existing=True)
     scheduler.add_job(process_nurture_sequences, "interval", hours=4, id="nurture_sequences", replace_existing=True)
     scheduler.add_job(process_nurture_dispatch, "interval", minutes=15, id="nurture_dispatch", replace_existing=True)
+    # WhatsApp Screening Blueprint, Milestone 1 (Phases 0-2).
+    scheduler.add_job(process_screening_dispatch, "interval", minutes=2, id="screening_dispatch", replace_existing=True)
+    scheduler.add_job(check_screening_reminders, "interval", minutes=10, id="screening_reminders", replace_existing=True)
     # Every 30 min — approved items 04+05: fire SLA-breach/stale-requisition
     # alerts automatically instead of waiting for a human to open the panel,
     # and auto-reassign after a grace period if still unresolved.
@@ -2543,6 +2546,49 @@ def _render_nurture_template(template: str, ctx: dict) -> str:
     def _sub(m):
         return str(ctx.get(m.group(1), '')) if m.group(1) in ctx else ''
     return _re.sub(r'\{(\w+)\}', _sub, template)
+
+
+async def process_screening_dispatch():
+    """Every 2 min: WhatsApp Screening Blueprint, Milestone 1 Phase 1. Sends
+    at most one opt-in message per eligible recruiter WhatsApp account per
+    tenant per tick — real pacing comes from next_eligible_send_at (jitter),
+    business hours, and the per-day warm-up cap inside
+    services.screening_dispatch, not from looping here."""
+    from services.screening_dispatch import dispatch_pending_screening_messages
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch(
+                "SELECT DISTINCT tenant_id FROM screening_sessions WHERE status='pending_optin'")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await dispatch_pending_screening_messages(conn, tid)
+            except Exception as ex:
+                logger.error(f"screening_dispatch failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"screening_dispatch job failed: {ex}")
+
+
+async def check_screening_reminders():
+    """Every 10 min: WhatsApp Screening Blueprint, Milestone 1 Phase 2. Sends
+    the "every 30 min, capped at 3" reminder (decision #4) and flips a
+    3rd-miss session to no_response — see services.screening_dispatch for
+    the actual cadence check."""
+    from services.screening_dispatch import check_screening_reminders as _check
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch(
+                "SELECT DISTINCT tenant_id FROM screening_sessions WHERE status='sent'")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await _check(conn, tid)
+            except Exception as ex:
+                logger.error(f"screening_reminders failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"screening_reminders job failed: {ex}")
 
 
 async def process_nurture_dispatch():

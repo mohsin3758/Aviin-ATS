@@ -1419,13 +1419,14 @@ async def verify_candidate_skills(
     from services.shortlist_rules import evaluate_shortlist
     async with db.tenant_conn(actor.tenant_id) as conn:
         cand = await conn.fetchrow(
-            "SELECT id, full_name, skills, resume_text FROM candidates"
+            "SELECT id, full_name, skills, resume_text, expected_ctc, notice_period_days FROM candidates"
             " WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
             candidate_id, actor.tenant_id)
         if not cand:
             raise HTTPException(404, "Candidate not found")
         req = await conn.fetchrow(
-            "SELECT id, title, skills_required, mandatory_skills, mandatory_skill_min_years"
+            "SELECT id, title, skills_required, mandatory_skills, mandatory_skill_min_years,"
+            " budget_max, notice_period_max"
             " FROM requisitions WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
             requisition_id, actor.tenant_id)
         if not req:
@@ -1487,8 +1488,12 @@ async def verify_candidate_skills(
             for s in all_skills
         ],
     }
+    ctc_notice_fit = {
+        "expected_ctc": cand["expected_ctc"], "budget_max": req["budget_max"],
+        "notice_period_days": cand["notice_period_days"], "notice_period_max": req["notice_period_max"],
+    }
     verification["shortlist"] = evaluate_shortlist(
-        verification, relevant_experience, role_relevance, mandatory_skill_min_years)
+        verification, relevant_experience, role_relevance, mandatory_skill_min_years, ctc_notice_fit)
     return verification
 
 

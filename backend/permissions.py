@@ -80,6 +80,7 @@ FEATURE_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
         ("jd_templates", "JD Templates"),
         ("email_templates", "Email Templates"),
         ("question_bank", "Question Bank"),
+        ("screening", "WhatsApp Screening"),
         ("reference_checks", "Reference Checks"),
         ("submittals", "Submittals"),
         ("job_board", "Job Board"),

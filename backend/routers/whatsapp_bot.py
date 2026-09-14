@@ -157,6 +157,171 @@ async def _handle_inbound_resume(phone: str, media: dict, tenant_id: str, whatsa
     greeting = f"Thanks {first_name}!" if first_name else "Thanks!"
     return f"{greeting} We've received your resume and added it to our system. Our recruitment team will review it and reach out if there's a matching opportunity."
 
+
+async def _handle_screening_resume(media: dict, tenant_id: str, session: dict, whatsapp_account_id: str = None) -> str:
+    """WhatsApp Screening Blueprint, Milestone 3 (Phase 5). The one real
+    difference from _handle_inbound_resume above: identity is already
+    certain (mid-conversation with a known candidate_id) so this attaches
+    directly instead of running the cold-inbound dedup pipeline built for
+    a stranger's resume arriving with no context. Writes a SECOND, separate
+    consent_records row (data_category='resume_processing', decision #20)
+    distinct from the opt-in's screening_communication consent."""
+    from services.resume_intake_service import extract_text_from_attachment, save_resume_file
+    from services.document_classifier import classify_document
+    from services.screening_scoring import score_and_advance
+    import json as _json
+
+    candidate_id = str(session["candidate_id"])
+    mimetype = (media.get("mimetype") or "").lower()
+    filename = media.get("filename") or "attachment"
+    if not any(h in mimetype for h in _RESUME_MIME_HINTS) and not filename.lower().endswith((".pdf", ".doc", ".docx")):
+        return "We can only accept resumes as PDF or Word documents right now — could you resend as one of those?"
+
+    data = await _download_waha_media(media)
+    if not data:
+        return "We couldn't download your file — please try sending it again."
+
+    text = extract_text_from_attachment(data, mimetype, filename)
+    if not text or len(text.strip()) < 50:
+        return "We received your file but couldn't read its contents — please send a PDF or Word resume."
+
+    doc_result = classify_document(text, filename)
+    if not doc_result.is_resume and doc_result.decision == "REJECT":
+        return "Thanks for sharing, but this doesn't look like a resume — please send your CV as a PDF or Word file."
+
+    file_path = save_resume_file(data, tenant_id, filename)
+    async with db.tenant_conn(tenant_id) as conn:
+        await conn.execute("UPDATE candidates SET resume_text=$1 WHERE id=$2", text, candidate_id)
+        await conn.execute(
+            """INSERT INTO resume_files
+                 (tenant_id, candidate_id, job_board, job_board_label, source_email,
+                  file_name, file_path, mime_type, file_size, parse_status, routing_decision)
+               VALUES ($1,$2,'whatsapp','WhatsApp Screening',$3,$4,$5,$6,$7,'auto_accepted','auto_accepted')""",
+            tenant_id, candidate_id, f"screening_session:{session['id']}", filename, file_path, mimetype, len(data))
+        await conn.execute(
+            """INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text)
+               VALUES ($1,$2,'resume_processing','whatsapp',TRUE,$3)""",
+            tenant_id, candidate_id, "Resume shared via WhatsApp screening.")
+        await conn.execute("""
+            INSERT INTO candidate_messages
+              (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
+            VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
+        """, tenant_id, candidate_id, f"[Resume attachment: {filename}]", whatsapp_account_id)
+
+        full_session = await conn.fetchrow(
+            "SELECT * FROM screening_sessions WHERE id=$1", session["id"])
+        await score_and_advance(conn, tenant_id, full_session)
+
+    return "Thanks! We've received your resume — our team will review everything and reach out if there's a match."
+
+async def _handle_question_answer(conn, tenant_id: str, cand, session) -> str:
+    """WhatsApp Screening Blueprint, Milestone 2 (Phase 3-4). session's
+    raw_answer is the reply to whatever current_question_key was last
+    sent -- extract+store it, then send the next question or, once the
+    sequence is exhausted, move to Phase 5 (resume request)."""
+    from services.screening_extraction import record_answer
+    from services.screening_questions import build_question_sequence, next_question
+
+    name = cand["full_name"].split()[0]
+    sequence = await build_question_sequence(conn, tenant_id, str(session["requisition_id"]))
+    current_q = next((q for q in sequence if q["key"] == session["current_question_key"]), None)
+    if not current_q:
+        # Out of sync (e.g. the requisition's mandatory_skills changed
+        # mid-conversation) -- hand off rather than guess.
+        return f"Hi {name}! A recruiter will follow up to continue from here."
+
+    await record_answer(conn, tenant_id, session, current_q, session["raw_answer"])
+
+    answered = await conn.fetch(
+        "SELECT question_key FROM screening_answers WHERE screening_session_id=$1", session["id"])
+    nq = next_question(sequence, {r["question_key"] for r in answered})
+    if nq:
+        await conn.execute(
+            "UPDATE screening_sessions SET current_question_key=$1, updated_at=now() WHERE id=$2",
+            nq["key"], session["id"])
+        return nq["text"]
+
+    await conn.execute(
+        "UPDATE screening_sessions SET status='awaiting_resume', current_question_key=NULL, updated_at=now() WHERE id=$1",
+        session["id"])
+    return f"Thanks {name}! Last thing — please share your updated resume as PDF or Word."
+
+
+async def _handle_screening_reply(conn, tenant_id: str, cand, session, cmd: str, text: str) -> str:
+    """WhatsApp Screening Blueprint, Milestones 1-2 (Phases 2-4: opt-in &
+    consent, then the skill/generic question loop). A candidate with an
+    active screening_sessions row has every reply captured here instead
+    of the STATUS/INTERVIEW/etc command chain below — one focused
+    conversation at a time, per decision #6 (one active session per
+    candidate)."""
+    session_id = session["id"]
+    status = session["status"]
+    name = cand["full_name"].split()[0]
+    text_upper = text.strip().upper()
+
+    if cmd == "STOP":
+        # DPDP 2023 requires this be easy, at any phase — no withdrawal
+        # path existed anywhere in this codebase before this (decision #12).
+        await conn.execute(
+            """INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text)
+               VALUES ($1,$2,'screening_communication','whatsapp',FALSE,$3)""",
+            tenant_id, cand["id"], f"{cand['full_name']} replied STOP to WhatsApp screening.")
+        await conn.execute(
+            "UPDATE screening_sessions SET status='opted_out', updated_at=now() WHERE id=$1", session_id)
+        return "You've been opted out and won't receive further messages from us."
+
+    if cmd in ("AGENT", "HELP"):
+        sess_full = await conn.fetchrow(
+            """SELECT s.requisition_id, s.application_id, r.title
+               FROM screening_sessions s JOIN requisitions r ON r.id = s.requisition_id
+               WHERE s.id=$1""", session_id)
+        await conn.execute("""
+            INSERT INTO recruiter_tasks
+              (tenant_id, requisition_id, application_id, candidate_name, req_title,
+               task_type, title, priority)
+            VALUES ($1,$2,$3,$4,$5,'callback_request',$6,'high')
+        """, tenant_id, sess_full["requisition_id"], sess_full["application_id"], cand["full_name"],
+             sess_full["title"], f"{cand['full_name']} asked for a human during WhatsApp screening")
+        return f"Hi {name}! A recruiter will reach out to help. You're welcome to continue replying here in the meantime."
+
+    if status in ("pending_optin", "sent"):
+        if cmd == "YES":
+            consent_id = await conn.fetchval(
+                """INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text)
+                   VALUES ($1,$2,'screening_communication','whatsapp',TRUE,$3) RETURNING id""",
+                tenant_id, cand["id"], f"{cand['full_name']} replied YES to WhatsApp screening opt-in.")
+            from services.screening_questions import build_question_sequence
+            sequence = await build_question_sequence(conn, tenant_id, str(session["requisition_id"]))
+            if not sequence:
+                await conn.execute(
+                    """UPDATE screening_sessions SET status='awaiting_resume', consent_id=$1, updated_at=now()
+                       WHERE id=$2""", consent_id, session_id)
+                return f"Thanks {name}! Last thing — please share your updated resume as PDF or Word."
+            q1 = sequence[0]
+            await conn.execute(
+                """UPDATE screening_sessions SET status='in_progress', consent_id=$1, current_question_key=$2,
+                   updated_at=now() WHERE id=$3""", consent_id, q1["key"], session_id)
+            return f"Thanks {name}! {q1['text']}"
+
+        if cmd == "NO" or "NOT INTERESTED" in text_upper:
+            # No consent row written — they said no, nothing further is processed.
+            await conn.execute(
+                "UPDATE screening_sessions SET status='declined', updated_at=now() WHERE id=$1", session_id)
+            return f"No problem, {name} — thanks for letting us know. All the best!"
+
+        return f"Hi {name}! Reply YES if you'd like a few quick screening questions, or STOP to opt out."
+
+    if status == "in_progress":
+        session_with_answer = dict(session)
+        session_with_answer["raw_answer"] = text
+        return await _handle_question_answer(conn, tenant_id, cand, session_with_answer)
+
+    if status == "awaiting_resume":
+        return f"Hi {name}! Please share your updated resume as a PDF or Word file to finish up."
+
+    return f"Hi {name}! Thanks for your reply — a recruiter will follow up shortly."
+
+
 async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id: str = None) -> str:
     cmd = text.strip().upper().split()[0] if text.strip() else "HELP"
     async with db.tenant_conn(tenant_id) as conn:
@@ -173,6 +338,15 @@ async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id:
               (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
             VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
         """, tenant_id, cand["id"], text[:2000], whatsapp_account_id)
+        active_screening = await conn.fetchrow(
+            """SELECT id, status, requisition_id, candidate_id, current_question_key
+               FROM screening_sessions
+               WHERE candidate_id=$1 AND tenant_id=$2
+                 AND status IN ('pending_optin','sent','in_progress','awaiting_resume')
+               ORDER BY created_at DESC LIMIT 1""",
+            cand["id"], tenant_id)
+        if active_screening:
+            return await _handle_screening_reply(conn, tenant_id, cand, active_screening, cmd, text)
         if cmd == "STATUS":
             apps = await conn.fetch(
                 "SELECT a.stage, r.title FROM applications a "
@@ -378,7 +552,24 @@ async def webhook(request: Request):
             return {"ok": True}
 
         if has_media:
-            reply = await _handle_inbound_resume(phone, msg.get("media") or {}, tenant_id, wa_account_id)
+            # WhatsApp Screening Blueprint, Milestone 3 (Phase 5): a
+            # candidate awaiting their resume request is already a known
+            # identity — route to the direct-attach path instead of the
+            # cold-inbound dedup pipeline below, which is built for a
+            # stranger's resume arriving with no context.
+            async with db.tenant_conn(tenant_id) as _rconn:
+                _cand = await _rconn.fetchrow(
+                    "SELECT id FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
+                    phone[-10:], tenant_id)
+                _session = await _rconn.fetchrow(
+                    """SELECT id, candidate_id FROM screening_sessions
+                       WHERE candidate_id=$1 AND tenant_id=$2 AND status='awaiting_resume'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    _cand["id"], tenant_id) if _cand else None
+            if _session:
+                reply = await _handle_screening_resume(msg.get("media") or {}, tenant_id, dict(_session), wa_account_id)
+            else:
+                reply = await _handle_inbound_resume(phone, msg.get("media") or {}, tenant_id, wa_account_id)
             await send_wa(phone, reply, session_name)
             return {"ok": True}
         response = await handle_cmd(phone, text, tenant_id, wa_account_id)
