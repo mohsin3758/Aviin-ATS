@@ -310,15 +310,21 @@ async def test_send(body: TestSendRequest, actor: Actor = Depends(require_permis
             actor.tenant_id, actor.user_id)
         if not own or not own["phone_number"]:
             raise HTTPException(400, "Connect your own WhatsApp number first (Settings > WhatsApp)")
+        recruiter_name = await conn.fetchval("SELECT full_name FROM users WHERE id=$1", actor.user_id)
         sequence = await build_question_sequence(conn, actor.tenant_id, body.requisition_id, body.language)
 
     from routers.whatsapp_bot import send_wa
     opt_in = t(
-        "opt_in", body.language, name="there", brand="Aviin Tech", role=req["title"] or "this role",
-        client=req["client_name"] or "our client")
-    lines = ["[TEST PREVIEW] This is what a real candidate would see.", "", "1) Opt-in message:", opt_in, ""]
+        "opt_in", body.language, name="there", recruiter=recruiter_name or "our recruiting team",
+        role=req["title"] or "this role", client=req["client_name"] or "our client")
+    lines = [
+        "[TEST PREVIEW] This is what a real candidate would see -- shown here all at once for you to review the",
+        "wording. In the real conversation, question 2 onward is sent only after the candidate answers the one",
+        "before it, never all together.", "",
+        "1) Opt-in message:", opt_in, "",
+    ]
     if sequence:
-        lines.append("2) Questions that follow after YES:")
+        lines.append("2) Questions that follow, one at a time, after YES:")
         lines.extend(f"{i}. {q['text']}" for i, q in enumerate(sequence, 1))
     else:
         lines.append("2) No mandatory skills set on this role yet -- it would go straight to the resume request.")

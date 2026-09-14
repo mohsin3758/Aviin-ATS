@@ -79,11 +79,14 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
             continue
 
         session = await conn.fetchrow(
-            """SELECT s.id, s.language, c.full_name, c.phone, r.title, cl.name AS client_name
+            """SELECT s.id, s.language, c.full_name, c.phone, r.title, cl.name AS client_name,
+                      u.full_name AS recruiter_name
                FROM screening_sessions s
                JOIN candidates c ON c.id = s.candidate_id
                JOIN requisitions r ON r.id = s.requisition_id
                LEFT JOIN clients cl ON cl.id = r.client_id
+               JOIN user_whatsapp_accounts ua2 ON ua2.id = s.whatsapp_account_id
+               JOIN users u ON u.id = ua2.user_id
                WHERE s.tenant_id=$1 AND s.whatsapp_account_id=$2 AND s.status='pending_optin'
                ORDER BY s.created_at ASC LIMIT 1""",
             tenant_id, acct["id"])
@@ -93,7 +96,7 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
         text = t(
             "opt_in", session["language"] or "en",
             name=(session["full_name"] or "").split()[0] or "there",
-            brand="Aviin Tech",
+            recruiter=session["recruiter_name"] or "our recruiting team",
             role=session["title"] or "this role",
             client=session["client_name"] or "our client",
         )
