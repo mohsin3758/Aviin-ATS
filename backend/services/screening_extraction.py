@@ -45,13 +45,25 @@ def _parse_ctc_notice(raw: str) -> dict:
 
 
 def _parse_location(raw: str) -> dict:
+    """Confirmed live (2026-09-14): dumping the whole raw reply into both
+    `location` AND `relocation_note` produced a messy, duplicated result
+    ("Bangalore, open to relocating" as the location; the relocation note
+    repeating the same full sentence again). The natural reply pattern is
+    "<city>, <relocation answer>" -- split on the first comma so
+    `location` holds just the place name. Falls back to the whole raw
+    text when there's no comma (a recruiter can always correct via the
+    existing candidate edit form, same as any other free-text field)."""
     raw = (raw or "").strip()
+    if "," in raw:
+        city_part, rest = raw.split(",", 1)
+    else:
+        city_part, rest = raw, raw
     relocation_note = None
-    if re.search(r"\b(yes|open|willing)\b", raw, re.I):
-        relocation_note = f"Open to relocation: yes — {raw}"
-    elif re.search(r"\b(no|not)\b", raw, re.I):
-        relocation_note = f"Open to relocation: no — {raw}"
-    return {"location": raw[:200] or None, "relocation_note": relocation_note}
+    if re.search(r"\b(yes|open|willing)\b", rest, re.I):
+        relocation_note = "Open to relocation"
+    elif re.search(r"\b(no|not)\b", rest, re.I):
+        relocation_note = "Not open to relocation"
+    return {"location": city_part.strip()[:200] or None, "relocation_note": relocation_note}
 
 
 async def _extract_role_modules(conn, tenant_id: str, raw_answer: str) -> dict:
