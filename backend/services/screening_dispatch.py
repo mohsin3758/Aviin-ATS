@@ -39,6 +39,22 @@ STEADY_DAILY_CAP = 150
 OPT_IN_TEMPLATE = t("opt_in", "en")
 
 
+def normalize_phone_for_whatsapp(phone: str) -> str:
+    """Confirmed live (2026-09-14): a real send to a candidate entered as
+    a bare 10-digit number ("9738333493") returned delivered=False --
+    WAHA's chatId needs a full number with country code
+    (backend/routers/whatsapp.py's own SendRequest docstring: "E.164
+    format, e.g. +919876543210"), and schemas.py's _validate_phone only
+    checks digit COUNT (10-12), accepting a country-code-less number
+    outright. The quick-add grid's "10-digit mobile" field invites
+    exactly that. India-first product (CLAUDE.md) -- default a bare
+    10-digit number to a +91 number rather than fail silently."""
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if len(digits) == 10:
+        return "91" + digits
+    return digits
+
+
 def is_business_hours(now: datetime | None = None) -> bool:
     now = now or datetime.now(IST)
     return now.weekday() in BUSINESS_DAYS and BUSINESS_START_HOUR <= now.hour < BUSINESS_END_HOUR
@@ -100,7 +116,7 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
             role=session["title"] or "this role",
             client=session["client_name"] or "our client",
         )
-        delivered = await send_wa(session["phone"], text, session=acct["waha_session_name"])
+        delivered = await send_wa(normalize_phone_for_whatsapp(session["phone"]), text, session=acct["waha_session_name"])
         if not delivered:
             # Left as pending_optin -- retried next tick. See module
             # docstring for why this doesn't guess at bad_number.
@@ -175,7 +191,7 @@ async def check_screening_reminders(conn, tenant_id: str) -> int:
             continue
         name = (row["full_name"] or "").split()[0] or "there"
         await send_wa(
-            row["phone"],
+            normalize_phone_for_whatsapp(row["phone"]),
             t("reminder", row["language"] or "en", name=name),
             session=row["waha_session_name"],
         )
