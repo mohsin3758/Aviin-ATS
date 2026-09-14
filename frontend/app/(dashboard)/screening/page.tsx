@@ -13,6 +13,13 @@ const btnGhost: React.CSSProperties = { ...btn, background: '#fff', color: '#374
 type Row = { full_name: string; phone: string; email: string };
 const emptyRow = (): Row => ({ full_name: '', phone: '', email: '' });
 
+const LANGUAGES: Record<string, string> = {
+  en: 'English', hi: 'हिन्दी (Hindi)', ta: 'தமிழ் (Tamil)', te: 'తెలుగు (Telugu)',
+  kn: 'ಕನ್ನಡ (Kannada)', ml: 'മലയാളം (Malayalam)', mr: 'मराठी (Marathi)', gu: 'ગુજરાતી (Gujarati)',
+  pa: 'ਪੰਜਾਬੀ (Punjabi)', bn: 'বাংলা (Bengali)', or: 'ଓଡ଼ିଆ (Odia)', as: 'অসমীয়া (Assamese)',
+  ur: 'اردو (Urdu)', kok: 'कोंकणी (Konkani)',
+};
+
 const FUNNEL_LABELS: Record<string, string> = {
   pending_optin: 'Pending opt-in', sent: 'Sent, awaiting reply', awaiting_screening: 'Consented',
   declined: 'Declined', opted_out: 'Opted out', no_response: 'No response', bad_number: 'Bad number',
@@ -24,13 +31,21 @@ export default function ScreeningPage() {
 
   const { data: reqs } = useFetch<any[]>(mounted ? '/requisitions?status=open' : null);
   const [requisitionId, setRequisitionId] = useState('');
+  const [language, setLanguage] = useState('en');
   const [rows, setRows] = useState<Row[]>([emptyRow(), emptyRow(), emptyRow()]);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [testSending, setTestSending] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const { data: preview } = useFetch<any>(requisitionId ? `/screening/questions-preview?requisition_id=${requisitionId}&language=${language}` : null);
+  const previewQuestions: string[] = preview?.questions || [];
+
+  const { data: drillIn } = useFetch<any>(expandedId ? `/screening/sessions/${expandedId}` : null);
 
   const { data: summary, refetch: refetchSummary } = useFetch<any>(mounted ? '/screening/summary?mine=true' : null);
   const funnel = summary?.funnel || {};
+  const numberHealthWarnings: string[] = summary?.number_health_warnings || [];
   const { data: sessionsData, refetch: refetchSessions } = useFetch<any>(mounted ? '/screening/sessions?mine=true' : null);
   const sessions = sessionsData?.sessions || [];
   const [invitingId, setInvitingId] = useState<string | null>(null);
@@ -73,6 +88,7 @@ export default function ScreeningPage() {
         body: JSON.stringify({
           requisition_id: requisitionId,
           enrolled_via: 'quick_add',
+          language,
           rows: validRows.map(r => ({ full_name: r.full_name, phone: r.phone, email: r.email || null })),
         }),
       });
@@ -91,12 +107,15 @@ export default function ScreeningPage() {
     if (!requisitionId) { alert('Pick a role first'); return; }
     setTestSending(true);
     try {
-      // Test-send needs a real session row to pull role/client wording
-      // from — enroll the recruiter's own first valid row (if any) as a
-      // one-off preview, or just explain the requirement if the grid is
-      // empty. Simpler v1: ask them to enroll one real row first, then
-      // use that row's own "Send test to myself" from the results list.
-      alert('Enroll at least one candidate first, then use "Send test to myself" next to that row in the results below.');
+      const res = await apiFetch('/screening/test-send', {
+        method: 'POST',
+        body: JSON.stringify({ requisition_id: requisitionId, language }),
+      });
+      alert(res.sent
+        ? `Sent to your own WhatsApp number — the opt-in message plus all ${res.question_count} question(s).`
+        : 'Could not deliver — check your WhatsApp connection under Settings.');
+    } catch (e: any) {
+      alert(e.message || 'Test send failed');
     } finally {
       setTestSending(false);
     }
@@ -109,6 +128,12 @@ export default function ScreeningPage() {
         <div style={{ fontSize: 18, fontWeight: 800, color: '#0F172A' }}>WhatsApp Screening</div>
       </div>
 
+      {numberHealthWarnings.map((w, i) => (
+        <div key={i} style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>
+          ⚠ {w}
+        </div>
+      ))}
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
         {Object.keys(FUNNEL_LABELS).map(key => (
           <div key={key} style={card}>
@@ -119,13 +144,36 @@ export default function ScreeningPage() {
       </div>
 
       <div style={card}>
-        <label style={label}>Role</label>
-        <select style={{ ...inputSm, marginBottom: 12 }} value={requisitionId} onChange={e => setRequisitionId(e.target.value)}>
-          <option value="">Select an open role...</option>
-          {(reqs || []).map((r: any) => (
-            <option key={r.id} value={r.id}>{r.title}{r.client_name ? ` — ${r.client_name}` : ''}</option>
-          ))}
-        </select>
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginBottom: 12 }}>
+          <div>
+            <label style={label}>Role</label>
+            <select style={inputSm} value={requisitionId} onChange={e => setRequisitionId(e.target.value)}>
+              <option value="">Select an open role...</option>
+              {(reqs || []).map((r: any) => (
+                <option key={r.id} value={r.id}>{r.title}{r.client_name ? ` — ${r.client_name}` : ''}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={label}>Question language</label>
+            <select style={inputSm} value={language} onChange={e => setLanguage(e.target.value)}>
+              {Object.entries(LANGUAGES).map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {requisitionId && (
+          <div style={{ fontSize: 11, color: '#64748B', marginBottom: 12, background: '#F8FAFC', borderRadius: 8, padding: '8px 10px' }}>
+            {previewQuestions.length ? (
+              <>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>Questions this role will ask (after YES):</div>
+                <ol style={{ margin: 0, paddingLeft: 18 }}>
+                  {previewQuestions.map((q, i) => <li key={i}>{q}</li>)}
+                </ol>
+              </>
+            ) : 'No mandatory skills set on this role yet — screening would go straight to the resume request.'}
+          </div>
+        )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1.5fr auto', gap: 8, marginBottom: 6 }}>
           <label style={label}>Name</label>
@@ -177,12 +225,13 @@ export default function ScreeningPage() {
             </thead>
             <tbody>
               {sessions.map((row: any) => (
-                <tr key={row.id} style={{ borderTop: '1px solid #F1F5F9' }}>
+                <>
+                <tr key={row.id} style={{ borderTop: '1px solid #F1F5F9', cursor: 'pointer' }} onClick={() => setExpandedId(expandedId === row.id ? null : row.id)}>
                   <td style={{ padding: '6px 8px' }}>{row.full_name}<div style={{ color: '#94A3B8' }}>{row.phone}</div></td>
                   <td style={{ padding: '6px 8px' }}>{row.requisition_title}</td>
                   <td style={{ padding: '6px 8px' }}>{FUNNEL_LABELS[row.status] || row.status}{row.recommendation && ` — ${row.recommendation}`}</td>
                   <td style={{ padding: '6px 8px', color: '#94A3B8' }}>{new Date(row.updated_at).toLocaleString()}</td>
-                  <td style={{ padding: '6px 8px' }}>
+                  <td style={{ padding: '6px 8px' }} onClick={e => e.stopPropagation()}>
                     {row.status === 'completed' && row.recommendation === 'shortlist' && (
                       <button style={{ ...btn, padding: '4px 10px', fontSize: 11 }} disabled={invitingId === row.id} onClick={() => sendInterviewInvite(row)}>
                         {invitingId === row.id ? 'Sending...' : 'Send interview invite'}
@@ -190,6 +239,29 @@ export default function ScreeningPage() {
                     )}
                   </td>
                 </tr>
+                {expandedId === row.id && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: '10px 8px', background: '#F8FAFC' }}>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                        Current question: {drillIn?.session?.current_question_key || '—'}
+                      </div>
+                      {(drillIn?.answers || []).length ? (
+                        <table style={{ width: '100%', fontSize: 11 }}>
+                          <tbody>
+                            {drillIn.answers.map((a: any, i: number) => (
+                              <tr key={i}>
+                                <td style={{ padding: '3px 6px', color: '#64748B', width: '40%' }}>{a.question_text}</td>
+                                <td style={{ padding: '3px 6px' }}>{a.raw_answer}</td>
+                                <td style={{ padding: '3px 6px', color: '#94A3B8' }}>{a.extraction_method}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : <div style={{ color: '#94A3B8' }}>No answers captured yet.</div>}
+                    </td>
+                  </tr>
+                )}
+                </>
               ))}
               {!sessions.length && (
                 <tr><td colSpan={5} style={{ padding: 16, textAlign: 'center', color: '#94A3B8' }}>No screening activity yet.</td></tr>

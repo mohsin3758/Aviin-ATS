@@ -11,27 +11,28 @@ during Milestone 1 planning.
 """
 import json
 
+from services.screening_i18n import t
 
-def _skill_questions(skill: str) -> list[dict]:
+
+def _skill_questions(skill: str, lang: str) -> list[dict]:
     return [
         {"key": f"skill_years::{skill}", "type": "skill_years", "skill": skill,
-         "text": f"How many years of experience do you have in {skill}?"},
+         "text": t("skill_years", lang, skill=skill)},
         {"key": f"skill_projects::{skill}", "type": "skill_projects", "skill": skill,
-         "text": f"How many {skill} projects have you completed?"},
+         "text": t("skill_projects", lang, skill=skill)},
         {"key": f"skill_role::{skill}", "type": "skill_role", "skill": skill,
-         "text": "What was your role in those projects, and which modules/tools did you use?"},
+         "text": t("skill_role", lang)},
     ]
 
 
-GENERIC_QUESTIONS = [
-    {"key": "generic_ctc_notice", "type": "generic_ctc_notice",
-     "text": "What's your current and expected CTC, and notice period?"},
-    {"key": "generic_location", "type": "generic_location",
-     "text": "What's your current location, and are you open to relocating?"},
-]
+def _generic_questions(lang: str) -> list[dict]:
+    return [
+        {"key": "generic_ctc_notice", "type": "generic_ctc_notice", "text": t("generic_ctc_notice", lang)},
+        {"key": "generic_location", "type": "generic_location", "text": t("generic_location", lang)},
+    ]
 
 
-async def build_question_sequence(conn, tenant_id: str, requisition_id: str) -> list[dict]:
+async def build_question_sequence(conn, tenant_id: str, requisition_id: str, lang: str = "en") -> list[dict]:
     req = await conn.fetchrow(
         "SELECT mandatory_skills, screening_questions_config FROM requisitions WHERE id=$1 AND tenant_id=$2",
         requisition_id, tenant_id)
@@ -43,8 +44,8 @@ async def build_question_sequence(conn, tenant_id: str, requisition_id: str) -> 
 
     questions: list[dict] = []
     for skill in skills:
-        questions.extend(_skill_questions(skill))
-    questions.extend(GENERIC_QUESTIONS)
+        questions.extend(_skill_questions(skill, lang))
+    questions.extend(_generic_questions(lang))
 
     for extra in config.get("extra_questions", []):
         if extra.get("key") and extra.get("text"):

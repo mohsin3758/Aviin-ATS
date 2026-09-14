@@ -41,6 +41,7 @@ class ScreeningEnrollRequest(BaseModel):
     requisition_id: str
     enrolled_via: Literal["quick_add", "csv_import", "bulk_select"]
     rows: list[ScreeningEnrollRow]
+    language: str = "en"
 
 
 async def _default_add_stage(conn, tenant_id: str) -> str:
@@ -51,7 +52,8 @@ async def _default_add_stage(conn, tenant_id: str) -> str:
 
 async def enroll_candidate_for_screening(conn, tenant_id: str, candidate_id: str, requisition_id: str,
                                           enrolled_via: str, default_stage: str,
-                                          whatsapp_account_id: Optional[str], created_by: Optional[str]) -> dict:
+                                          whatsapp_account_id: Optional[str], created_by: Optional[str],
+                                          language: str = "en") -> dict:
     """The shared tail end of enrollment (create the applications row +
     screening_sessions row) once a candidate_id is already known — the one
     place all 3 entry points (quick-add, CSV/Excel import, bulk-select)
@@ -76,10 +78,10 @@ async def enroll_candidate_for_screening(conn, tenant_id: str, candidate_id: str
     session_id = await conn.fetchval(
         """INSERT INTO screening_sessions
              (tenant_id, candidate_id, requisition_id, application_id, whatsapp_account_id,
-              enrolled_via, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id""",
+              enrolled_via, created_by, language)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id""",
         tenant_id, candidate_id, requisition_id, application_id, whatsapp_account_id,
-        enrolled_via, created_by)
+        enrolled_via, created_by, language)
 
     await events.write_outbox(
         conn, tenant_id, "screening.enrolled",
@@ -90,7 +92,8 @@ async def enroll_candidate_for_screening(conn, tenant_id: str, candidate_id: str
 
 
 async def _enroll_row(conn, actor: Actor, row: ScreeningEnrollRow, requisition_id: str,
-                       enrolled_via: str, default_stage: str, whatsapp_account_id: Optional[str]) -> dict:
+                       enrolled_via: str, default_stage: str, whatsapp_account_id: Optional[str],
+                       language: str = "en") -> dict:
     if not row.candidate_id and not (row.full_name and row.phone):
         return {"status": "error", "detail": "Name and phone are required", "row": row.model_dump()}
 
@@ -127,7 +130,7 @@ async def _enroll_row(conn, actor: Actor, row: ScreeningEnrollRow, requisition_i
 
     return await enroll_candidate_for_screening(
         conn, actor.tenant_id, candidate_id, requisition_id, enrolled_via, default_stage,
-        whatsapp_account_id, actor.user_id)
+        whatsapp_account_id, actor.user_id, language)
 
 
 @router.post("/enroll")
@@ -162,7 +165,7 @@ async def enroll(body: ScreeningEnrollRequest, actor: Actor = Depends(require_pe
                 try:
                     result = await _enroll_row(
                         conn, actor, row, body.requisition_id, body.enrolled_via,
-                        default_stage, str(whatsapp_account_id))
+                        default_stage, str(whatsapp_account_id), body.language)
                 except Exception as exc:
                     result = {"status": "error", "detail": str(exc)}
             results.append(result)
@@ -187,7 +190,19 @@ async def summary(mine: bool = True, actor: Actor = Depends(require_permission("
         rows = await conn.fetch(
             f"SELECT status, COUNT(*) AS n FROM screening_sessions WHERE {' AND '.join(conditions)} GROUP BY status",
             *params)
-    return {"funnel": {r["status"]: r["n"] for r in rows}}
+        # Decision #24: surface a declining-reply-rate number as an early
+        # warning rather than only reacting after it's already banned.
+        health_rows = await conn.fetch(
+            """SELECT phone_number, recent_reply_rate FROM user_whatsapp_accounts
+               WHERE tenant_id=$1 AND user_id=$2 AND recent_reply_rate IS NOT NULL""",
+            actor.tenant_id, actor.user_id)
+    warnings = [
+        f"Your WhatsApp number ({r['phone_number'] or 'unnamed'}) has a low reply rate "
+        f"({round(r['recent_reply_rate'] * 100)}%) over its last 20 screening sends — "
+        "worth checking it hasn't been silently restricted."
+        for r in health_rows if r["recent_reply_rate"] is not None and r["recent_reply_rate"] < 0.15
+    ]
+    return {"funnel": {r["status"]: r["n"] for r in rows}, "number_health_warnings": warnings}
 
 
 @router.get("/sessions")
@@ -234,36 +249,60 @@ async def session_detail(session_id: str, actor: Actor = Depends(require_permiss
     return {"session": dict(session), "answers": [dict(a) for a in answers]}
 
 
-@router.post("/sessions/{session_id}/test-send")
-async def test_send(session_id: str, actor: Actor = Depends(require_permission("screening", "write"))):
-    """Sends the exact opt-in wording to the REQUESTING RECRUITER'S OWN
-    number, not the candidate's -- decision #14, a sanity check for a
-    brand-new role's auto-generated wording before it reaches real
-    candidates. Does not change screening_sessions state."""
-    from services.screening_dispatch import OPT_IN_TEMPLATE
+@router.get("/questions-preview")
+async def questions_preview(requisition_id: str, language: str = "en",
+                             actor: Actor = Depends(require_permission("screening", "read"))):
+    """Phase 0: "Picking a Role... shows a live preview of the questions
+    that will be sent" -- generated from build_question_sequence, the same
+    function the real conversation uses, so the preview can never drift
+    from what actually gets asked."""
+    from services.screening_questions import build_question_sequence
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        sequence = await build_question_sequence(conn, actor.tenant_id, requisition_id, language)
+    return {"questions": [q["text"] for q in sequence]}
+
+
+class TestSendRequest(BaseModel):
+    requisition_id: str
+    language: str = "en"
+
+
+@router.post("/test-send")
+async def test_send(body: TestSendRequest, actor: Actor = Depends(require_permission("screening", "write"))):
+    """Sends the opt-in wording AND the full question sequence to the
+    REQUESTING RECRUITER'S OWN number -- decision #14, a sanity check for
+    a brand-new role's auto-generated wording before it reaches real
+    candidates. Deliberately doesn't require an existing screening_session
+    (a v1 gap fixed here: this needs to work BEFORE anyone is enrolled,
+    which is the whole point of a pre-bulk-send preview)."""
+    from services.screening_i18n import t
+    from services.screening_questions import build_question_sequence
 
     async with db.tenant_conn(actor.tenant_id) as conn:
-        session = await conn.fetchrow(
-            """SELECT c.full_name, r.title, cl.name AS client_name
-               FROM screening_sessions s
-               JOIN candidates c ON c.id = s.candidate_id
-               JOIN requisitions r ON r.id = s.requisition_id
+        req = await conn.fetchrow(
+            """SELECT r.title, cl.name AS client_name FROM requisitions r
                LEFT JOIN clients cl ON cl.id = r.client_id
-               WHERE s.id=$1 AND s.tenant_id=$2""",
-            session_id, actor.tenant_id)
-        if not session:
-            raise HTTPException(404, "Session not found")
+               WHERE r.id=$1 AND r.tenant_id=$2""",
+            body.requisition_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
         own = await conn.fetchrow(
             """SELECT waha_session_name, phone_number FROM user_whatsapp_accounts
                WHERE tenant_id=$1 AND user_id=$2 AND status='working'""",
             actor.tenant_id, actor.user_id)
         if not own or not own["phone_number"]:
             raise HTTPException(400, "Connect your own WhatsApp number first (Settings > WhatsApp)")
+        sequence = await build_question_sequence(conn, actor.tenant_id, body.requisition_id, body.language)
 
     from routers.whatsapp_bot import send_wa
-    text = OPT_IN_TEMPLATE.format(
-        name=(session["full_name"] or "").split()[0] or "there",
-        brand="Aviin Tech", role=session["title"] or "this role",
-        client=session["client_name"] or "our client")
-    delivered = await send_wa(own["phone_number"], f"[TEST SEND]\n{text}", session=own["waha_session_name"])
-    return {"sent": delivered}
+    opt_in = t(
+        "opt_in", body.language, name="there", brand="Aviin Tech", role=req["title"] or "this role",
+        client=req["client_name"] or "our client")
+    lines = ["[TEST PREVIEW] This is what a real candidate would see.", "", "1) Opt-in message:", opt_in, ""]
+    if sequence:
+        lines.append("2) Questions that follow after YES:")
+        lines.extend(f"{i}. {q['text']}" for i, q in enumerate(sequence, 1))
+    else:
+        lines.append("2) No mandatory skills set on this role yet -- it would go straight to the resume request.")
+    delivered = await send_wa(own["phone_number"], "\n".join(lines), session=own["waha_session_name"])
+    return {"sent": delivered, "question_count": len(sequence)}

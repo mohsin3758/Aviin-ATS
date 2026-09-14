@@ -2169,6 +2169,22 @@ async def _send_one_scheduled_email_report(period_label: str):
                     f"({period_start} to {period_end})\n\n"
                     f"Emails sent: {sent}\nOpen rate: {open_rate}%\nReply rate: {reply_rate}%\n"
                 )
+                # WhatsApp Screening Blueprint, Phase 7: "the existing weekly
+                # report job is the natural place to fold in a screening
+                # funnel line" -- only for the weekly run, matching what the
+                # blueprint actually asked for (not daily/monthly).
+                if period_label == "weekly":
+                    funnel_rows = await conn.fetch(
+                        """SELECT status, COUNT(*) AS n FROM screening_sessions
+                           WHERE tenant_id=$1 AND created_at::date BETWEEN $2 AND $3
+                           GROUP BY status""",
+                        tid, period_start, period_end)
+                    funnel = {r["status"]: r["n"] for r in funnel_rows}
+                    if funnel:
+                        snapshot["screening_funnel"] = funnel
+                        body += "\nWhatsApp Screening this week:\n" + "\n".join(
+                            f"  {status}: {n}" for status, n in sorted(funnel.items()))
+                        body += "\n"
                 delivered = []
                 for addr in cfg["recipient_emails"]:
                     try:
@@ -2575,16 +2591,17 @@ async def check_screening_reminders():
     the "every 30 min, capped at 3" reminder (decision #4) and flips a
     3rd-miss session to no_response — see services.screening_dispatch for
     the actual cadence check."""
-    from services.screening_dispatch import check_screening_reminders as _check
+    from services.screening_dispatch import check_screening_reminders as _check, compute_number_health
     try:
         async with db.system_conn() as conn:
             tenants = await conn.fetch(
-                "SELECT DISTINCT tenant_id FROM screening_sessions WHERE status='sent'")
+                "SELECT DISTINCT tenant_id FROM screening_sessions WHERE status IN ('sent','pending_optin')")
         for t in tenants:
             tid = str(t["tenant_id"])
             try:
                 async with db.tenant_conn(tid) as conn:
                     await _check(conn, tid)
+                    await compute_number_health(conn, tid)
             except Exception as ex:
                 logger.error(f"screening_reminders failed for tenant {tid}: {ex}")
     except Exception as ex:

@@ -23,6 +23,7 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 from routers.whatsapp_bot import send_wa
+from services.screening_i18n import t
 
 IST = ZoneInfo("Asia/Kolkata")
 BUSINESS_DAYS = {0, 1, 2, 3, 4, 5}  # Monday=0 .. Saturday=5; Sunday excluded
@@ -33,11 +34,9 @@ WARM_UP_DAYS = 5
 WARM_UP_DAILY_CAP = 20
 STEADY_DAILY_CAP = 150
 
-OPT_IN_TEMPLATE = (
-    "Hi {name}, this is {brand}. We're screening candidates for {role} at "
-    "{client}. Reply YES if you'd like a few quick questions (reply STOP "
-    "anytime to opt out)."
-)
+# Kept as the English fallback/reference string (e.g. for a language-less
+# caller) -- real sends go through services.screening_i18n.t("opt_in", lang, ...).
+OPT_IN_TEMPLATE = t("opt_in", "en")
 
 
 def is_business_hours(now: datetime | None = None) -> bool:
@@ -80,7 +79,7 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
             continue
 
         session = await conn.fetchrow(
-            """SELECT s.id, c.full_name, c.phone, r.title, cl.name AS client_name
+            """SELECT s.id, s.language, c.full_name, c.phone, r.title, cl.name AS client_name
                FROM screening_sessions s
                JOIN candidates c ON c.id = s.candidate_id
                JOIN requisitions r ON r.id = s.requisition_id
@@ -91,7 +90,8 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
         if not session or not session["phone"]:
             continue
 
-        text = OPT_IN_TEMPLATE.format(
+        text = t(
+            "opt_in", session["language"] or "en",
             name=(session["full_name"] or "").split()[0] or "there",
             brand="Aviin Tech",
             role=session["title"] or "this role",
@@ -122,6 +122,29 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
     return sent
 
 
+async def compute_number_health(conn, tenant_id: str) -> None:
+    """Decision #24: a declining reply-rate trend on a number is a real
+    early-warning signal worth surfacing proactively, not just reacted to
+    after it's already disconnected. Uses reply rate only, not true
+    delivery-ack rate -- see this module's docstring for why no real
+    delivery-ack signal exists in this codebase to compute that from."""
+    accounts = await conn.fetch(
+        "SELECT id FROM user_whatsapp_accounts WHERE tenant_id=$1 AND status='working'", tenant_id)
+    for acct in accounts:
+        recent = await conn.fetch(
+            """SELECT status FROM screening_sessions
+               WHERE whatsapp_account_id=$1 AND status != 'pending_optin'
+               ORDER BY created_at DESC LIMIT 20""",
+            acct["id"])
+        total = len(recent)
+        if total < 5:
+            continue
+        replied = sum(1 for r in recent if r["status"] not in ("sent", "no_response"))
+        await conn.execute(
+            "UPDATE user_whatsapp_accounts SET recent_reply_rate=$1 WHERE id=$2",
+            round(replied / total, 3), acct["id"])
+
+
 async def check_screening_reminders(conn, tenant_id: str) -> int:
     """Every 30 min, capped at 3 (90 min total) -- decision #4. Runs on a
     10-minute scheduler tick (see scheduler.py), well under the 30-minute
@@ -131,7 +154,7 @@ async def check_screening_reminders(conn, tenant_id: str) -> int:
         return 0
 
     due = await conn.fetch(
-        """SELECT s.id, s.reminder_count, c.full_name, c.phone, ua.waha_session_name
+        """SELECT s.id, s.reminder_count, s.language, c.full_name, c.phone, ua.waha_session_name
            FROM screening_sessions s
            JOIN candidates c ON c.id = s.candidate_id
            JOIN user_whatsapp_accounts ua ON ua.id = s.whatsapp_account_id
@@ -150,7 +173,7 @@ async def check_screening_reminders(conn, tenant_id: str) -> int:
         name = (row["full_name"] or "").split()[0] or "there"
         await send_wa(
             row["phone"],
-            f"Hi {name}, just checking back — reply YES if you'd like a few quick screening questions (reply STOP to opt out).",
+            t("reminder", row["language"] or "en", name=name),
             session=row["waha_session_name"],
         )
         await conn.execute(
