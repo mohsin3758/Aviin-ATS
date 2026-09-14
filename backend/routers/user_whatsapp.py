@@ -107,8 +107,26 @@ async def get_my_account(actor: Actor = Depends(get_actor)):
     # Live status, not just the cached DB column - the cache can lag a real
     # disconnect (e.g. the user logged out of WhatsApp on their phone).
     live = await _waha_status(out["waha_session_name"])
-    out["status"] = _map_waha_status(live.get("status"))
-    out["phone_number"] = (live.get("me") or {}).get("id", out.get("phone_number")) or out.get("phone_number")
+    live_status = _map_waha_status(live.get("status"))
+    live_phone = (live.get("me") or {}).get("id", out.get("phone_number")) or out.get("phone_number")
+    # Real gap fix (found 2026-09-14, WhatsApp Screening verification):
+    # this endpoint always computed the correct live status/phone_number
+    # for its OWN response, but never persisted it -- any other code
+    # reading this table directly (e.g. screening's "is this recruiter's
+    # number connected" check) saw a permanently stale 'starting'/NULL
+    # row even for a genuinely working, connected session, confirmed live
+    # via direct SQL (6 real accounts, all stopped/starting, none
+    # 'working', despite one being visibly CONNECTED in this same UI).
+    if live_status != out["status"] or live_phone != out.get("phone_number"):
+        async with db.tenant_conn(actor.tenant_id) as conn2:
+            await conn2.execute(
+                """UPDATE user_whatsapp_accounts
+                   SET status=$1, phone_number=$2, last_status_check_at=now(),
+                       connected_at = CASE WHEN $1='working' AND status <> 'working' THEN now() ELSE connected_at END
+                   WHERE id=$3""",
+                live_status, live_phone, row["id"])
+    out["status"] = live_status
+    out["phone_number"] = live_phone
     return out
 
 
