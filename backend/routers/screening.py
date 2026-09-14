@@ -68,12 +68,25 @@ async def enroll_candidate_for_screening(conn, tenant_id: str, candidate_id: str
         return {"status": "skipped", "detail": "Already has an active screening session",
                 "candidate_id": str(candidate_id), "session_id": str(active_session)}
 
-    application_id = await conn.fetchval(
-        """INSERT INTO applications (tenant_id, requisition_id, candidate_id, stage)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (tenant_id, requisition_id, candidate_id) DO UPDATE SET updated_at = now()
-           RETURNING id""",
-        tenant_id, requisition_id, candidate_id, default_stage)
+    # Confirmed live (2026-09-14): despite sql/01_phase1_schema.sql
+    # declaring UNIQUE(tenant_id, requisition_id, candidate_id), no such
+    # constraint actually exists on the production applications table --
+    # only FKs, the PK, and the stage CHECK do (pg_constraint checked
+    # directly). ON CONFLICT against it fails outright. Matching the same
+    # explicit check-then-insert pattern candidates.py's bulk-assign
+    # endpoint already uses for this identical situation, rather than
+    # adding a new constraint sight-unseen against unknown existing data.
+    existing_app = await conn.fetchrow(
+        "SELECT id FROM applications WHERE tenant_id=$1 AND requisition_id=$2 AND candidate_id=$3",
+        tenant_id, requisition_id, candidate_id)
+    if existing_app:
+        application_id = existing_app["id"]
+        await conn.execute("UPDATE applications SET updated_at=now() WHERE id=$1", application_id)
+    else:
+        application_id = await conn.fetchval(
+            """INSERT INTO applications (tenant_id, requisition_id, candidate_id, stage)
+               VALUES ($1,$2,$3,$4) RETURNING id""",
+            tenant_id, requisition_id, candidate_id, default_stage)
 
     session_id = await conn.fetchval(
         """INSERT INTO screening_sessions
