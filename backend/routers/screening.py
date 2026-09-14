@@ -160,14 +160,19 @@ async def enroll(body: ScreeningEnrollRequest, actor: Actor = Depends(require_pe
         results = []
         for row in body.rows:
             # Each row is independent -- one bad row must not poison the
-            # others sharing this transaction-per-connection.
-            async with conn.transaction():
-                try:
+            # others sharing this transaction-per-connection. The try/except
+            # MUST wrap the `async with conn.transaction()`, not sit inside
+            # it -- swallowing the exception before the transaction's own
+            # __aexit__ sees it meant it tried to COMMIT an already-aborted
+            # transaction, masking the real error behind a confusing
+            # InFailedSQLTransactionError (confirmed live 2026-09-14).
+            try:
+                async with conn.transaction():
                     result = await _enroll_row(
                         conn, actor, row, body.requisition_id, body.enrolled_via,
                         default_stage, str(whatsapp_account_id), body.language)
-                except Exception as exc:
-                    result = {"status": "error", "detail": str(exc)}
+            except Exception as exc:
+                result = {"status": "error", "detail": str(exc)}
             results.append(result)
 
     return {

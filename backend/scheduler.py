@@ -2572,9 +2572,16 @@ async def process_screening_dispatch():
     services.screening_dispatch, not from looping here."""
     from services.screening_dispatch import dispatch_pending_screening_messages
     try:
+        # Real bug fix (found 2026-09-14, live verification): screening_
+        # sessions is FORCE RLS, and system_conn() runs with app.tenant_id
+        # set to '' -- casting that to ::uuid for the RLS check throws
+        # "invalid input syntax for type uuid" before any row is even
+        # scanned. Enumerate tenants from the unprotected `tenants` table
+        # instead (same established pattern as
+        # _send_one_scheduled_email_report), then use a real per-tenant
+        # connection for everything else.
         async with db.system_conn() as conn:
-            tenants = await conn.fetch(
-                "SELECT DISTINCT tenant_id FROM screening_sessions WHERE status='pending_optin'")
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
         for t in tenants:
             tid = str(t["tenant_id"])
             try:
@@ -2593,9 +2600,11 @@ async def check_screening_reminders():
     the actual cadence check."""
     from services.screening_dispatch import check_screening_reminders as _check, compute_number_health
     try:
+        # Same fix as process_screening_dispatch above -- enumerate from
+        # the unprotected `tenants` table, not an RLS-protected one under
+        # system_conn()'s empty tenant context.
         async with db.system_conn() as conn:
-            tenants = await conn.fetch(
-                "SELECT DISTINCT tenant_id FROM screening_sessions WHERE status IN ('sent','pending_optin')")
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
         for t in tenants:
             tid = str(t["tenant_id"])
             try:
