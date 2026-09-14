@@ -657,7 +657,11 @@ async def waha_start(actor: Actor = Depends(require_role("admin", "manager"))):
         # Falls back to PUT on any non-2xx create response.
         BACKEND_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8080")
         webhook_url = f"{BACKEND_URL}/whatsapp-bot/webhook"
-        webhook_cfg = {"config": {"webhooks": [{"url": webhook_url, "events": ["message", "session.status"]}]}}
+        # "message.ack" added (2026-09-15) -- see the matching comment in
+        # routers/user_whatsapp.py for why this needs no official Cloud
+        # API or new infra, just a subscription + handler.
+        webhook_cfg = {"config": {"webhooks": [
+            {"url": webhook_url, "events": ["message", "session.status", "message.ack"]}]}}
         async with httpx.AsyncClient(timeout=10.0) as cli:
             # Ensure session exists with correct webhook
             create_res = await cli.post(f"{WAHA_BASE}/api/sessions",

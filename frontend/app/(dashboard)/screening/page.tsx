@@ -22,6 +22,7 @@ const LANGUAGES: Record<string, string> = {
 
 const FUNNEL_LABELS: Record<string, string> = {
   pending_optin: 'Pending opt-in', sent: 'Sent, awaiting reply', awaiting_screening: 'Consented',
+  in_progress: 'Answering questions', awaiting_resume: 'Awaiting resume', completed: 'Completed',
   declined: 'Declined', opted_out: 'Opted out', no_response: 'No response', bad_number: 'Bad number',
 };
 
@@ -50,6 +51,37 @@ export default function ScreeningPage() {
   const { data: sessionsData, refetch: refetchSessions } = useFetch<any>(mounted ? '/screening/sessions?mine=true' : null);
   const sessions = sessionsData?.sessions || [];
   const [invitingId, setInvitingId] = useState<string | null>(null);
+
+  // Gap #8 (red-number failover): reassigning STUCK (pending_optin, never-
+  // yet-contacted) candidates to a healthy number is only meaningful with
+  // visibility into OTHER recruiters' numbers, which /user-whatsapp/team-
+  // overview deliberately restricts to admin/manager/super_admin -- a
+  // plain recruiter's own account is usually their only one anyway.
+  const role = mounted ? getTokenPayload()?.role : null;
+  const canReassign = ['admin', 'super_admin', 'manager'].includes(role || '');
+  const hasStuckRed = numberHealthAlerts.some((h: any) => h.quality_rating === 'red' && h.pending_count > 0);
+  const { data: teamAccounts } = useFetch<any>(canReassign && hasStuckRed ? '/user-whatsapp/team-overview' : null);
+  const reassignTargets: any[] = (teamAccounts?.accounts || []).filter((a: any) => a.status === 'working');
+  const [reassignPick, setReassignPick] = useState<Record<string, string>>({});
+  const [reassigning, setReassigning] = useState<string | null>(null);
+
+  async function reassignPending(fromId: string) {
+    const toId = reassignPick[fromId];
+    if (!toId) { alert('Pick a number to move these candidates to first'); return; }
+    setReassigning(fromId);
+    try {
+      const res = await apiFetch('/screening/reassign-pending', {
+        method: 'POST',
+        body: JSON.stringify({ from_whatsapp_account_id: fromId, to_whatsapp_account_id: toId }),
+      });
+      alert(`Moved ${res.moved} candidate(s) — they'll be opted in from the new number on the next dispatch cycle.`);
+      refetchSummary();
+    } catch (e: any) {
+      alert(e.message || 'Reassign failed');
+    } finally {
+      setReassigning(null);
+    }
+  }
 
   async function sendInterviewInvite(row: any) {
     const date = window.prompt(`Interview date/time for ${row.full_name} (e.g. "Mon 15 Sep, 3 PM"):`);
@@ -135,14 +167,36 @@ export default function ScreeningPage() {
           ? { background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#991B1B' }
           : { background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E' };
         return (
-          <div key={i} style={{ ...style, borderRadius: 8, padding: '8px 12px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div key={i} style={{ ...style, borderRadius: 8, padding: '8px 12px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span style={{ fontWeight: 800, textTransform: 'uppercase', fontSize: 10, letterSpacing: '.03em', padding: '2px 8px', borderRadius: 999, background: isRed ? '#DC2626' : '#D97706', color: '#fff' }}>
               {h.quality_rating}
             </span>
-            <span>
+            <span style={{ flex: 1 }}>
               {h.phone_number} — reply rate {Math.round((h.reply_rate || 0) * 100)}%, opt-out rate {Math.round((h.optout_rate || 0) * 100)}%.
               {isRed ? ' Automatically paused from sending new opt-ins until reviewed.' : ' Still sending, worth watching.'}
+              {isRed && h.pending_count > 0 && ` ${h.pending_count} candidate(s) waiting to be contacted.`}
             </span>
+            {isRed && h.pending_count > 0 && canReassign && (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <select
+                  style={{ ...inputSm, width: 160, fontSize: 11 }}
+                  value={reassignPick[h.id] || ''}
+                  onChange={e => setReassignPick(prev => ({ ...prev, [h.id]: e.target.value }))}
+                >
+                  <option value="">Move to number...</option>
+                  {reassignTargets.filter((a: any) => a.id !== h.id).map((a: any) => (
+                    <option key={a.id} value={a.id}>{a.full_name} ({a.phone_number || 'unconnected'})</option>
+                  ))}
+                </select>
+                <button
+                  style={{ ...btn, padding: '4px 10px', fontSize: 11 }}
+                  disabled={reassigning === h.id}
+                  onClick={() => reassignPending(h.id)}
+                >
+                  {reassigning === h.id ? 'Moving...' : 'Reassign'}
+                </button>
+              </div>
+            )}
           </div>
         );
       })}
@@ -255,8 +309,20 @@ export default function ScreeningPage() {
                 {expandedId === row.id && (
                   <tr>
                     <td colSpan={5} style={{ padding: '10px 8px', background: '#F8FAFC' }}>
-                      <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                        Current question: {drillIn?.session?.current_question_key || '—'}
+                      <div style={{ display: 'flex', gap: 16, marginBottom: 6, flexWrap: 'wrap' }}>
+                        <div style={{ fontWeight: 700 }}>
+                          Current question: {drillIn?.session?.current_question_key || '—'}
+                        </div>
+                        {drillIn?.session?.csat_rating != null && (
+                          <div style={{ color: '#0F172A' }}>
+                            CSAT: <strong>{drillIn.session.csat_rating}/5</strong>
+                          </div>
+                        )}
+                        {drillIn?.session?.followup_stage && drillIn.session.followup_stage !== 'done' && (
+                          <div style={{ color: '#B45309' }}>
+                            Follow-up in progress: {drillIn.session.followup_stage.replace('_', ' ')}
+                          </div>
+                        )}
                       </div>
                       {(drillIn?.answers || []).length ? (
                         <table style={{ width: '100%', fontSize: 11 }}>
@@ -271,6 +337,23 @@ export default function ScreeningPage() {
                           </tbody>
                         </table>
                       ) : <div style={{ color: '#94A3B8' }}>No answers captured yet.</div>}
+                      {(drillIn?.referrals || []).length > 0 && (
+                        <div style={{ marginTop: 10 }}>
+                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Referrals mentioned:</div>
+                          <table style={{ width: '100%', fontSize: 11 }}>
+                            <tbody>
+                              {drillIn.referrals.map((r: any, i: number) => (
+                                <tr key={i}>
+                                  <td style={{ padding: '3px 6px', color: '#64748B', width: '30%' }}>
+                                    {r.referred_name || '—'}{r.referred_phone ? ` (${r.referred_phone})` : ''}
+                                  </td>
+                                  <td style={{ padding: '3px 6px', color: '#94A3B8' }}>{r.raw_text}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )}

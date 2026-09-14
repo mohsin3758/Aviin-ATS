@@ -228,8 +228,17 @@ async def start_my_session(actor: Actor = Depends(get_actor)):
     # trusting this.
     backend_url = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8080")
     webhook_url = f"{backend_url}/whatsapp-bot/webhook"
+    # "message.ack" added (2026-09-15, WhatsApp automation research gap):
+    # a real WAHA delivery-status event (whatsapp-web.js's own Message.ack
+    # -- ERROR/PENDING/SERVER/DEVICE/READ/PLAYED) exists and needs no
+    # official Cloud API or new infra to receive, just this subscription
+    # plus a handler (see routers/whatsapp_bot.py's webhook `event ==
+    # "message.ack"` branch) -- this codebase had simply never registered
+    # for it. Payload field names (ackName vs ack, id shape) are per
+    # WAHA's documented contract, NOT yet verified against a real live ack
+    # event the same way the location-pin handling is flagged elsewhere.
     webhook_cfg = {"config": {"webhooks": [
-        {"url": webhook_url, "events": ["message", "session.status"]}
+        {"url": webhook_url, "events": ["message", "session.status", "message.ack"]}
     ]}}
     async with httpx.AsyncClient(timeout=15) as client:
         create_res = await client.post(f"{WAHA_BASE}/api/sessions", headers=_waha_headers(),

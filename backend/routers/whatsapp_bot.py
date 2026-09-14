@@ -38,6 +38,43 @@ async def send_wa(phone: str, message: str, session: str = SESSION) -> bool:
         return False
 
 
+async def send_wa_get_id(phone: str, message: str, session: str = SESSION) -> tuple[bool, Optional[str]]:
+    """Same send as send_wa, but also returns WAHA's own message id so a
+    later message.ack webhook event for THIS specific send can be matched
+    back to it (see the webhook's `event == "message.ack"` branch and
+    services/screening_dispatch.py's dispatcher). Only used where that
+    matching actually matters (the screening opt-in dispatcher) --
+    send_wa's plain bool-return callers elsewhere are untouched.
+
+    WAHA's sendText response id field/shape is per its documented
+    contract, NOT yet verified against a real live response the same way
+    other WAHA quirks in this file are flagged -- extracted defensively
+    from every plausible key path, falling back to None (ack-matching
+    simply can't happen for that message, the send itself is unaffected)
+    rather than raising."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{WAHA_URL}/api/sendText",
+                headers={"X-Api-Key": WAHA_KEY, "Content-Type": "application/json"},
+                json={"session": session, "chatId": f"{phone}@c.us", "text": message}
+            )
+            if r.status_code >= 400:
+                return False, None
+            try:
+                data = r.json()
+            except Exception:
+                return True, None
+            msg_id = (
+                data.get("id")
+                or (data.get("_data") or {}).get("id", {}).get("id")
+                or (data.get("_data") or {}).get("id")
+            )
+            return True, (str(msg_id) if msg_id else None)
+    except Exception:
+        return False, None
+
+
 # ─── Inbound resume via WhatsApp ──────────────────────────────────────────────
 # Built against WAHA's documented webhook contract for media messages
 # (payload.hasMedia + payload.media.{url,mimetype,filename}) — verified
@@ -237,7 +274,7 @@ async def _handle_question_answer(conn, tenant_id: str, cand, session) -> str:
     # instead of answering current_q gets a grounded local-Qwen answer,
     # then current_q is re-sent unchanged -- never recorded as an answer,
     # never advances the sequence.
-    from services.screening_faq import looks_like_question, answer_question
+    from services.screening_faq import looks_like_question, answer_question, looks_like_correction
     import json as _json
     raw = session["raw_answer"]
     if looks_like_question(raw):
@@ -250,6 +287,33 @@ async def _handle_question_answer(conn, tenant_id: str, cand, session) -> str:
             tenant_id, session["id"], f"faq::{session['current_question_key']}:{session['id']}",
             raw, raw, _json.dumps({"answer": answer}))
         return f"{answer}\n\n{current_q['text']}"
+
+    if looks_like_correction(raw):
+        # Deliberately not auto-applied -- see screening_faq.looks_like_
+        # correction's docstring. Logged for visibility on the drill-in
+        # (same convention as an FAQ exchange) and flagged to a human
+        # rather than guessed at, then the current question is re-asked
+        # since this text wasn't actually an answer to it.
+        sess_full = await conn.fetchrow(
+            """SELECT s.requisition_id, s.application_id, r.title
+               FROM screening_sessions s JOIN requisitions r ON r.id = s.requisition_id
+               WHERE s.id=$1""", session["id"])
+        await conn.execute(
+            """INSERT INTO screening_answers
+                 (tenant_id, screening_session_id, question_key, question_text, raw_answer,
+                  extracted_value, extraction_method)
+               VALUES ($1,$2,$3,$4,$5,$6,'correction_flagged')""",
+            tenant_id, session["id"], f"correction::{session['current_question_key']}:{session['id']}",
+            raw, raw, _json.dumps({}))
+        await conn.execute("""
+            INSERT INTO recruiter_tasks
+              (tenant_id, requisition_id, application_id, candidate_name, req_title,
+               task_type, title, priority)
+            VALUES ($1,$2,$3,$4,$5,'callback_request',$6,'medium')
+        """, tenant_id, sess_full["requisition_id"], sess_full["application_id"], cand["full_name"],
+             sess_full["title"], f"{cand['full_name']} may be correcting an earlier WhatsApp screening "
+             f"answer -- please review: \"{raw[:200]}\"")
+        return f"{t('correction_ack', lang)} {current_q['text']}"
 
     await record_answer(conn, tenant_id, session, current_q, session["raw_answer"])
 
@@ -628,10 +692,43 @@ async def _resolve_phone(from_: str) -> str:
     return from_.replace("@lid", "")  # last resort — not a real phone number
 
 
+async def _handle_message_ack(payload: dict) -> None:
+    """WhatsApp automation research (2026-09-15): a real WAHA delivery-
+    status event (whatsapp-web.js's Message.ack) -- routed here instead
+    of the generic inbound-message handling below, which assumes a
+    {body, from, ...} shape this payload doesn't have. Matches back to
+    the screening_sessions row that sent it via last_sent_waha_msg_id
+    (sql/138) and tags a genuine ERROR ack as bad_number immediately --
+    decision #13 -- rather than letting it enter the 30/60/90-min
+    reminder loop for a number that was never actually reachable.
+    ackName field name/values per WAHA's documented contract, not yet
+    verified against a real live ack (same honesty flag as send_wa_get_id
+    and the location-pin handling)."""
+    msg_id = str(payload.get("id") or "")
+    ack_name = (payload.get("ackName") or "").upper()
+    if not msg_id or ack_name != "ERROR":
+        return
+    async with db.system_conn() as conn:
+        tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
+    for t in tenants:
+        tid = str(t["tenant_id"])
+        async with db.tenant_conn(tid) as conn:
+            updated = await conn.fetchval(
+                """UPDATE screening_sessions SET status='bad_number', updated_at=now()
+                   WHERE tenant_id=$1 AND last_sent_waha_msg_id=$2 AND status='sent'
+                   RETURNING id""",
+                tid, msg_id)
+        if updated:
+            return
+
+
 @router.post("/webhook")
 async def webhook(request: Request):
     try:
         data = await request.json()
+        if data.get("event") == "message.ack":
+            await _handle_message_ack(data.get("payload") or {})
+            return {"ok": True}
         msg  = data.get("payload", {})
         text = (msg.get("body") or "").strip()
         from_  = msg.get("from", "")
@@ -755,13 +852,38 @@ async def webhook(request: Request):
                 reply = await _handle_screening_resume(msg.get("media") or {}, tenant_id, dict(_session), wa_account_id)
             elif _session:
                 # Known limitation, stated honestly in the blueprint itself:
-                # no speech-to-text in this stack. A media message arriving
-                # mid-screening (voice note, photo, ...) before the resume
-                # step still needs a defined response, not a silent fall-
-                # through to the cold-inbound resume pipeline built for a
-                # stranger with no context.
+                # no speech-to-text in this stack, so a voice note (or any
+                # other non-resume media) arriving mid-screening still
+                # can't be automatically read. WhatsApp automation
+                # research (2026-09-15) gap: it USED to just dead-end
+                # there with nothing captured at all -- now at least
+                # downloaded and saved so a recruiter can listen/view it
+                # themselves, with a task flagging that it's waiting on a
+                # human, rather than the content being silently lost.
                 from services.screening_i18n import t
                 reply = t("media_not_supported", _session["language"] or "en")
+                media = msg.get("media") or {}
+                media_bytes = await _download_waha_media(media)
+                if media_bytes:
+                    from services.resume_intake_service import save_resume_file
+                    file_path = save_resume_file(
+                        media_bytes, tenant_id, media.get("filename") or "voice_note.ogg")
+                    async with db.tenant_conn(tenant_id) as _mconn:
+                        sess_full = await _mconn.fetchrow(
+                            """SELECT s.requisition_id, s.application_id, c.full_name, r.title
+                               FROM screening_sessions s
+                               JOIN candidates c ON c.id = s.candidate_id
+                               JOIN requisitions r ON r.id = s.requisition_id
+                               WHERE s.id=$1""", _session["id"])
+                        await _mconn.execute("""
+                            INSERT INTO recruiter_tasks
+                              (tenant_id, requisition_id, application_id, candidate_name, req_title,
+                               task_type, title, priority)
+                            VALUES ($1,$2,$3,$4,$5,'callback_request',$6,'medium')
+                        """, tenant_id, sess_full["requisition_id"], sess_full["application_id"],
+                             sess_full["full_name"], sess_full["title"],
+                             f"{sess_full['full_name']} sent a voice note/media reply mid-screening we can't "
+                             f"auto-read -- saved at {file_path}, please review")
             else:
                 reply = await _handle_inbound_resume(phone, msg.get("media") or {}, tenant_id, wa_account_id)
             await send_wa(phone, reply, session_name)

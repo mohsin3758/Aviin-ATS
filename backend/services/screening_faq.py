@@ -18,6 +18,22 @@ import ai_router
 from services.screening_i18n import t
 
 _SALARY_WORDS = re.compile(r"\b(salary|ctc|pay|package|compensation|budget|stipend)\b", re.I)
+_CORRECTION_WORDS = re.compile(
+    r"\b(actually|sorry|correction|i meant|my mistake|typo|wrong|not \d)\b", re.I)
+
+
+def looks_like_correction(text: str) -> bool:
+    """Blueprint's own v1 scope note: 'a candidate's self-correction is
+    fixed manually via the existing candidate_skill_experience edit form'
+    -- but that was never paired with a DEFINED bot response to the
+    correction attempt itself; it just silently got treated as a literal
+    answer to whatever question was current, alongside the earlier good
+    answer neither the bot nor the recruiter would know to look twice at.
+    Deliberately does NOT try to guess which earlier answer to overwrite
+    or with what value -- an ambiguous regex guess risks corrupting a
+    correct answer with a wrong one, the same class of harm as guess-
+    correcting a candidate's identity fields. Routes to a human instead."""
+    return bool(_CORRECTION_WORDS.search(text or ""))
 
 
 def looks_like_question(text: str) -> bool:

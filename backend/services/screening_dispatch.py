@@ -22,7 +22,7 @@ import random
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
-from routers.whatsapp_bot import send_wa
+from routers.whatsapp_bot import send_wa, send_wa_get_id
 from services.screening_i18n import t
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -117,17 +117,20 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
             role=session["title"] or "this role",
             client=session["client_name"] or "our client",
         )
-        delivered = await send_wa(normalize_phone_for_whatsapp(session["phone"]), text, session=acct["waha_session_name"])
+        delivered, waha_msg_id = await send_wa_get_id(
+            normalize_phone_for_whatsapp(session["phone"]), text, session=acct["waha_session_name"])
         if not delivered:
             # Left as pending_optin -- retried next tick. See module
-            # docstring for why this doesn't guess at bad_number.
+            # docstring for why this doesn't guess at bad_number from a
+            # failed send call itself (as opposed to a real message.ack
+            # ERROR event afterward, now handled in routers/whatsapp_bot.py).
             continue
 
         await conn.execute(
             """UPDATE screening_sessions
-               SET status='sent', last_message_at=now(), updated_at=now()
-               WHERE id=$1""",
-            session["id"])
+               SET status='sent', last_message_at=now(), last_sent_waha_msg_id=$1, updated_at=now()
+               WHERE id=$2""",
+            waha_msg_id, session["id"])
 
         jitter_minutes = random.randint(1, 3)
         await conn.execute(

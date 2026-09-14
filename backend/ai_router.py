@@ -12,6 +12,7 @@ assign_with_explanation — sql/04_phase3_ai_engine.sql) is pure
 Postgres/pgvector and does not go through this module.
 """
 
+import asyncio
 import os
 
 import asyncpg
@@ -23,6 +24,21 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
 
 EMBED_DIMS = 384
 CACHE_SIMILARITY_THRESHOLD = 0.95
+
+# Blueprint's own "Known limitations" (decision #21): every AI feature in
+# the app -- resume parsing, shortlist scoring, and now WhatsApp screening's
+# FAQ answering -- shares this one local Qwen2.5-1.5B instance with no
+# concurrency ceiling. A burst of simultaneous generate() calls (e.g. a
+# batch resume-intake run overlapping several candidates mid-screening
+# asking off-script questions at once) queues on Ollama's own single-
+# request-at-a-time serving loop regardless, but without a cap here every
+# queued caller holds its own open HTTP connection + asyncio task for the
+# full wait, and a big enough burst can pile up. A semaphore just makes
+# that queuing explicit and bounded instead of implicit and unbounded.
+# Tunable via env since the right number depends on the VPS's real CPU
+# headroom, not something to guess once and hardcode.
+_MAX_CONCURRENT_OLLAMA = int(os.environ.get("AI_ROUTER_MAX_CONCURRENT_OLLAMA", "3"))
+_ollama_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_OLLAMA)
 
 
 def _vector_literal(vec: list[float]) -> str:
@@ -86,14 +102,15 @@ async def cache_store(
 
 async def call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
     """HARD RULE #1: local Qwen2.5 via Ollama, never an external LLM API."""
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
-            timeout=120.0,
-        )
-        resp.raise_for_status()
-    return resp.json()["response"].strip()
+    async with _ollama_semaphore:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": model, "prompt": prompt, "stream": False},
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+        return resp.json()["response"].strip()
 
 
 async def generate(

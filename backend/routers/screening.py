@@ -25,7 +25,7 @@ router = APIRouter(prefix="/screening", tags=["screening"])
 
 _BROAD_VISIBILITY_ROLES = ("admin", "super_admin", "manager", "kae", "kam")
 
-TERMINAL_STATUSES = ("declined", "opted_out", "no_response", "bad_number")
+TERMINAL_STATUSES = ("declined", "opted_out", "no_response", "bad_number", "completed")
 
 
 class ScreeningEnrollRow(BaseModel):
