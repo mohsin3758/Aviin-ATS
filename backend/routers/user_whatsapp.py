@@ -108,7 +108,13 @@ async def get_my_account(actor: Actor = Depends(get_actor)):
     # disconnect (e.g. the user logged out of WhatsApp on their phone).
     live = await _waha_status(out["waha_session_name"])
     live_status = _map_waha_status(live.get("status"))
-    live_phone = (live.get("me") or {}).get("id", out.get("phone_number")) or out.get("phone_number")
+    live_phone_raw = (live.get("me") or {}).get("id", out.get("phone_number")) or out.get("phone_number")
+    # WAHA's "me.id" is a full JID ("918884449990@c.us"), not a plain
+    # phone number -- strip it the same way _resolve_phone() already does
+    # elsewhere in this codebase, so anything downstream that builds its
+    # own "{phone}@c.us" chatId (e.g. WhatsApp Screening's send_wa calls)
+    # doesn't end up double-suffixed ("...@c.us@c.us").
+    live_phone = live_phone_raw.split("@")[0] if live_phone_raw else live_phone_raw
     # Real gap fix (found 2026-09-14, WhatsApp Screening verification):
     # this endpoint always computed the correct live status/phone_number
     # for its OWN response, but never persisted it -- any other code
