@@ -343,6 +343,37 @@ async def reassign_pending(body: ReassignPendingRequest,
     return {"moved": moved}
 
 
+@router.get("/segment-preview")
+async def segment_preview(requisition_id: str, actor: Actor = Depends(require_permission("screening", "read"))):
+    """WhatsApp automation research (2026-09-15), gap: tag/segment-based
+    broadcast (Wati/AiSensy pattern) for "a fresh JD just opened, who in
+    our existing pool already fits it?" -- reuses candidates.skills
+    (already real data from every intake path, not a new tag system)
+    against the target role's mandatory_skills. Preview only; enrolling
+    the ones a recruiter actually picks reuses the existing bulk-select
+    entry point (POST /screening/enroll with enrolled_via='bulk_select'),
+    not a new send path."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        req = await conn.fetchrow(
+            "SELECT mandatory_skills FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            requisition_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+        if not req["mandatory_skills"]:
+            return {"candidates": []}
+        rows = await conn.fetch(
+            """SELECT c.id, c.full_name, c.phone, c.skills, c.location
+               FROM candidates c
+               WHERE c.tenant_id=$1 AND c.is_active IS NOT FALSE AND c.phone IS NOT NULL
+                 AND c.skills && $2::text[]
+                 AND NOT EXISTS (
+                   SELECT 1 FROM applications a WHERE a.tenant_id=$1 AND a.candidate_id=c.id
+                     AND a.requisition_id=$3)
+               ORDER BY c.updated_at DESC LIMIT 200""",
+            actor.tenant_id, req["mandatory_skills"], requisition_id)
+    return {"candidates": [dict(r) for r in rows]}
+
+
 @router.get("/questions-preview")
 async def questions_preview(requisition_id: str, language: str = "en",
                              actor: Actor = Depends(require_permission("screening", "read"))):

@@ -70,6 +70,37 @@ async def _advance_stage(conn, tenant_id: str, application_id, current_stage: st
     return next_stage
 
 
+async def _summarize_transcript(conn, tenant_id: str, session_id: str) -> str | None:
+    """WhatsApp automation research (2026-09-15), gap: a recruiter opening
+    a completed screening today only sees the raw Q&A list -- reading all
+    of it before a callback is the real friction Humanly.io's auto-
+    generated notes solve. One local-Qwen call, once, at completion --
+    never recomputed per dashboard page view. Best-effort: a summarization
+    failure must never break the real scoring/notification path above it."""
+    import ai_router
+
+    answers = await conn.fetch(
+        """SELECT question_text, raw_answer FROM screening_answers
+           WHERE screening_session_id=$1 AND extraction_method NOT IN ('faq','correction_flagged')
+           ORDER BY created_at""",
+        session_id)
+    if not answers:
+        return None
+    transcript = "\n".join(f"Q: {a['question_text']}\nA: {a['raw_answer']}" for a in answers if a["raw_answer"])
+    if not transcript.strip():
+        return None
+    prompt = (
+        "Summarize this WhatsApp candidate screening Q&A in 2-3 short sentences for a recruiter who hasn't "
+        "read the transcript yet -- experience, key skills/tools mentioned, and CTC/notice period if given. "
+        "Plain prose, no bullet points, no preamble.\n\n" + transcript[:4000]
+    )
+    try:
+        result = await ai_router.generate(conn, tenant_id, f"screening_summary:{session_id}", prompt)
+        return (result.get("text") or "").strip()[:800] or None
+    except Exception:
+        return None
+
+
 async def score_and_advance(conn, tenant_id: str, session) -> dict:
     from routers.candidates import verify_candidate_skills
 
@@ -78,9 +109,10 @@ async def score_and_advance(conn, tenant_id: str, session) -> dict:
         candidate_id=str(session["candidate_id"]), requisition_id=str(session["requisition_id"]), actor=actor)
     recommendation = verification.get("shortlist", {}).get("recommendation", "reject")
 
+    summary = await _summarize_transcript(conn, tenant_id, str(session["id"]))
     await conn.execute(
-        "UPDATE screening_sessions SET recommendation=$1, status='completed', updated_at=now() WHERE id=$2",
-        recommendation, session["id"])
+        "UPDATE screening_sessions SET recommendation=$1, status='completed', transcript_summary=$2, updated_at=now() WHERE id=$3",
+        recommendation, summary, session["id"])
 
     if recommendation == "shortlist":
         app_row = await conn.fetchrow(

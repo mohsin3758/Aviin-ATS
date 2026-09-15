@@ -2267,6 +2267,8 @@ def start_scheduler():
     scheduler.add_job(check_screening_reminders, "interval", minutes=10, id="screening_reminders", replace_existing=True)
     scheduler.add_job(process_screening_reengagement, "interval", hours=24, id="screening_reengagement", replace_existing=True)
     scheduler.add_job(process_offer_joining_sequence, "interval", minutes=60, id="offer_joining_sequence", replace_existing=True)
+    scheduler.add_job(process_esign_whatsapp_notify, "interval", minutes=30, id="esign_whatsapp_notify", replace_existing=True)
+    scheduler.add_job(process_bgv_notify, "interval", minutes=30, id="bgv_notify", replace_existing=True)
     # Every 30 min — approved items 04+05: fire SLA-breach/stale-requisition
     # alerts automatically instead of waiting for a human to open the panel,
     # and auto-reassign after a grace period if still unresolved.
@@ -2658,6 +2660,44 @@ async def process_offer_joining_sequence():
                 logger.error(f"offer_joining_sequence failed for tenant {tid}: {ex}")
     except Exception as ex:
         logger.error(f"offer_joining_sequence job failed: {ex}")
+
+
+async def process_esign_whatsapp_notify():
+    """Every 30 min: WhatsApp automation research (2026-09-15). Sends a
+    WhatsApp e-sign link the moment an NDA or offer letter is ready to
+    sign -- see services/esign_notify.py."""
+    from services.esign_notify import process_esign_whatsapp_notify as _process
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await _process(conn, tid)
+            except Exception as ex:
+                logger.error(f"esign_whatsapp_notify failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"esign_whatsapp_notify job failed: {ex}")
+
+
+async def process_bgv_notify():
+    """Every 30 min: WhatsApp automation research (2026-09-15). Pings a
+    candidate once their background verification completes or fails --
+    see services/bgv_notify.py."""
+    from services.bgv_notify import process_bgv_notify as _process
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await _process(conn, tid)
+            except Exception as ex:
+                logger.error(f"bgv_notify failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"bgv_notify job failed: {ex}")
 
 
 async def process_nurture_dispatch():

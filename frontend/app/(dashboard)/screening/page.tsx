@@ -44,6 +44,44 @@ export default function ScreeningPage() {
 
   const { data: drillIn } = useFetch<any>(expandedId ? `/screening/sessions/${expandedId}` : null);
 
+  // Gap: segment/broadcast matching -- given a role, find EXISTING
+  // candidates (not just already-screened ones) whose skills already
+  // overlap it, so a fresh JD can be matched against the whole pool
+  // instead of starting from zero.
+  const { data: segment, refetch: refetchSegment } = useFetch<any>(requisitionId ? `/screening/segment-preview?requisition_id=${requisitionId}` : null);
+  const segmentCandidates: any[] = segment?.candidates || [];
+  const [segmentPicked, setSegmentPicked] = useState<Set<string>>(new Set());
+  const [segmentEnrolling, setSegmentEnrolling] = useState(false);
+  function toggleSegmentPick(id: string) {
+    setSegmentPicked(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+  async function enrollSegment() {
+    if (!requisitionId || !segmentPicked.size) return;
+    setSegmentEnrolling(true);
+    try {
+      const res = await apiFetch('/screening/enroll', {
+        method: 'POST',
+        body: JSON.stringify({
+          requisition_id: requisitionId, enrolled_via: 'bulk_select', language,
+          rows: Array.from(segmentPicked).map(id => ({ candidate_id: id })),
+        }),
+      });
+      alert(`${res.enrolled} enrolled, ${res.skipped} already active, ${res.errors} error(s).`);
+      setSegmentPicked(new Set());
+      refetchSegment();
+      refetchSummary();
+      refetchSessions();
+    } catch (e: any) {
+      alert(e.message || 'Enroll failed');
+    } finally {
+      setSegmentEnrolling(false);
+    }
+  }
+
   const { data: summary, refetch: refetchSummary } = useFetch<any>(mounted ? '/screening/summary?mine=true' : null);
   const funnel = summary?.funnel || {};
   const numberHealth: any[] = summary?.number_health || [];
@@ -242,6 +280,26 @@ export default function ScreeningPage() {
           </div>
         )}
 
+        {requisitionId && segmentCandidates.length > 0 && (
+          <div style={{ fontSize: 11, marginBottom: 12, background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, padding: '10px 12px' }}>
+            <div style={{ fontWeight: 700, marginBottom: 6, color: '#1E3A8A' }}>
+              {segmentCandidates.length} existing candidate(s) already have skills matching this role
+            </div>
+            <div style={{ maxHeight: 140, overflowY: 'auto', marginBottom: 8 }}>
+              {segmentCandidates.map((c: any) => (
+                <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={segmentPicked.has(c.id)} onChange={() => toggleSegmentPick(c.id)} />
+                  <span>{c.full_name}</span>
+                  <span style={{ color: '#64748B' }}>{c.phone} · {(c.skills || []).slice(0, 3).join(', ')}{c.location ? ` · ${c.location}` : ''}</span>
+                </label>
+              ))}
+            </div>
+            <button style={{ ...btn, padding: '5px 12px', fontSize: 11 }} disabled={!segmentPicked.size || segmentEnrolling} onClick={enrollSegment}>
+              {segmentEnrolling ? 'Enrolling...' : `Start screening for ${segmentPicked.size || 0} selected`}
+            </button>
+          </div>
+        )}
+
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1.5fr auto', gap: 8, marginBottom: 6 }}>
           <label style={label}>Name</label>
           <label style={label}>Mobile</label>
@@ -309,6 +367,11 @@ export default function ScreeningPage() {
                 {expandedId === row.id && (
                   <tr>
                     <td colSpan={5} style={{ padding: '10px 8px', background: '#F8FAFC' }}>
+                      {drillIn?.session?.transcript_summary && (
+                        <div style={{ marginBottom: 10, padding: '8px 10px', background: '#F8FAFC', borderRadius: 8, fontStyle: 'italic', color: '#334155' }}>
+                          {drillIn.session.transcript_summary}
+                        </div>
+                      )}
                       <div style={{ display: 'flex', gap: 16, marginBottom: 6, flexWrap: 'wrap' }}>
                         <div style={{ fontWeight: 700 }}>
                           Current question: {drillIn?.session?.current_question_key || '—'}

@@ -18,6 +18,7 @@ HELP_LINES = [
     "Commands:",
     "STATUS — Check application status",
     "INTERVIEW — View upcoming interview",
+    "RESCHEDULE — Request a new interview time",
     "OFFER — Check offer details",
     "CALLBACK — Request recruiter callback",
     "ACCEPT — Accept your offer",
@@ -211,12 +212,52 @@ async def _handle_screening_resume(media: dict, tenant_id: str, session: dict, w
     candidate_id = str(session["candidate_id"])
     mimetype = (media.get("mimetype") or "").lower()
     filename = media.get("filename") or "attachment"
-    if not any(h in mimetype for h in _RESUME_MIME_HINTS) and not filename.lower().endswith((".pdf", ".doc", ".docx")):
-        return "We can only accept resumes as PDF or Word documents right now — could you resend as one of those?"
+    is_video_or_photo = mimetype.startswith(("video/", "image/"))
+    if not any(h in mimetype for h in _RESUME_MIME_HINTS) and not filename.lower().endswith((".pdf", ".doc", ".docx")) \
+            and not is_video_or_photo:
+        return "We can only accept resumes as PDF, Word, a photo, or a short video right now — could you resend as one of those?"
 
     data = await _download_waha_media(media)
     if not data:
         return "We couldn't download your file — please try sending it again."
+
+    if is_video_or_photo:
+        # WhatsApp automation research (2026-09-15) gap: a video/selfie
+        # resume (Vahan/Apna's blue-collar hiring pattern) has no text to
+        # extract -- scoring below still works fine without it since Rule
+        # 1-4 checks candidate_skill_experience from the Q&A already
+        # answered, not the resume file itself; this file is supplementary
+        # evidence for a recruiter to review, same spirit as the voice-
+        # note capture in the webhook's media branch.
+        file_path = save_resume_file(data, tenant_id, filename)
+        async with db.tenant_conn(tenant_id) as conn:
+            await conn.execute(
+                """INSERT INTO resume_files
+                     (tenant_id, candidate_id, job_board, job_board_label, source_email,
+                      file_name, file_path, mime_type, file_size, parse_status, routing_decision)
+                   VALUES ($1,$2,'whatsapp','WhatsApp Screening (video/photo)',$3,$4,$5,$6,$7,
+                           'needs_manual_review','needs_manual_review')""",
+                tenant_id, candidate_id, f"screening_session:{session['id']}", filename, file_path,
+                mimetype, len(data))
+            await conn.execute(
+                """INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text)
+                   VALUES ($1,$2,'resume_processing','whatsapp',TRUE,$3)""",
+                tenant_id, candidate_id, "Video/photo resume shared via WhatsApp screening.")
+            full_session = await conn.fetchrow(
+                """SELECT s.*, c.full_name, r.title FROM screening_sessions s
+                   JOIN candidates c ON c.id = s.candidate_id
+                   JOIN requisitions r ON r.id = s.requisition_id
+                   WHERE s.id=$1""", session["id"])
+            await conn.execute("""
+                INSERT INTO recruiter_tasks
+                  (tenant_id, requisition_id, application_id, candidate_name, req_title,
+                   task_type, title, priority)
+                VALUES ($1,$2,$3,$4,$5,'callback_request',$6,'medium')
+            """, tenant_id, full_session["requisition_id"], full_session["application_id"],
+                 full_session["full_name"], full_session["title"],
+                 f"{full_session['full_name']} sent a video/photo resume via WhatsApp -- no text to auto-parse, please review")
+            verification = await score_and_advance(conn, tenant_id, full_session)
+        return verification["followup_message"]
 
     text = extract_text_from_attachment(data, mimetype, filename)
     if not text or len(text.strip()) < 50:
@@ -398,7 +439,21 @@ async def _handle_followup_reply(conn, tenant_id: str, cand, session, cmd: str, 
         await conn.execute(
             "UPDATE screening_sessions SET followup_stage='done', csat_rating=$1, updated_at=now() WHERE id=$2",
             rating, session["id"])
-        return t("csat_thanks", lang)
+        # WhatsApp automation research (2026-09-15), gap: a forwardable
+        # referral prompt (Apna's "visiting card" pattern) folded into the
+        # existing closing message rather than a new conversational turn --
+        # the referral ASK already happened a step earlier; this just gives
+        # them something concrete to literally forward to a friend.
+        info = await conn.fetchrow(
+            """SELECT r.title, cl.name AS client_name, ua.phone_number AS recruiter_phone
+               FROM screening_sessions s
+               JOIN requisitions r ON r.id = s.requisition_id
+               LEFT JOIN clients cl ON cl.id = r.client_id
+               LEFT JOIN user_whatsapp_accounts ua ON ua.id = s.whatsapp_account_id
+               WHERE s.id=$1""", session["id"])
+        return t("csat_thanks_share", lang, role=info["title"] or "this",
+                  client=info["client_name"] or "our client",
+                  recruiter_phone=info["recruiter_phone"] or "your recruiter")
 
     return t("out_of_sync", lang, name=name)
 
@@ -590,8 +645,40 @@ async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id:
                 f"Role: {iv['title'] or 'TBD'}",
                 f"Type: {iv['interview_type']} ({iv['mode']})",
                 f"Link: {iv['meeting_link'] or 'Will be shared separately'}",
+                "Need a different time? Reply RESCHEDULE.",
             ]
             return "\n".join(lines)
+        elif cmd == "RESCHEDULE":
+            # WhatsApp automation research (2026-09-15), gap: self-service
+            # reschedule (Paradox.ai pattern) -- there's no real calendar-
+            # booking integration in this app, so this closes the "how do
+            # they even tell us" half, not automated re-slotting. A human
+            # still picks and confirms the actual new time (same HITL
+            # posture as ACCEPT/DECLINE on an offer).
+            iv = await conn.fetchrow(
+                "SELECT i.id, i.requisition_id, i.application_id, i.interviewer_id, r.title "
+                "FROM interview_schedules i LEFT JOIN requisitions r ON r.id=i.requisition_id "
+                "JOIN candidates c ON c.id=i.candidate_id "
+                "WHERE c.phone LIKE '%'||$1||'%' AND i.status='scheduled' "
+                "AND i.scheduled_at > now() AND i.tenant_id=$2 ORDER BY i.scheduled_at LIMIT 1",
+                phone[-10:], tenant_id)
+            if not iv:
+                return f"Hi {name}! No upcoming interview found to reschedule. Contact your recruiter."
+            parts = text.strip().split(None, 1)
+            note = parts[1].strip(" :,-") if len(parts) > 1 else None
+            await conn.execute(
+                "UPDATE interview_schedules SET reschedule_requested_at=now(), reschedule_note=$1 WHERE id=$2",
+                note, iv["id"])
+            await conn.execute("""
+                INSERT INTO recruiter_tasks
+                  (tenant_id, requisition_id, application_id, candidate_name, req_title,
+                   recruiter_id, task_type, title, priority)
+                VALUES ($1,$2,$3,$4,$5,$6,'callback_request',$7,'high')
+            """, tenant_id, iv["requisition_id"], iv["application_id"], cand["full_name"], iv["title"],
+                 iv["interviewer_id"],
+                 f"{cand['full_name']} needs to reschedule their interview" + (f" -- \"{note}\"" if note else ""))
+            from services.screening_i18n import t
+            return t("reschedule_ack", "en", name=name)
         elif cmd == "OFFER":
             # Real fix (2026-08-10 audit): OFFER was advertised in HELP_LINES
             # and the frontend's COMMANDS list but had no branch here at all -
@@ -935,7 +1022,7 @@ async def bot_status(actor: Actor = Depends(get_actor)):
         waha_ok = False
     return {
         "waha_connected": waha_ok,
-        "commands": ["HELP","STATUS","INTERVIEW","CALLBACK","ACCEPT","DECLINE"],
+        "commands": ["HELP","STATUS","INTERVIEW","RESCHEDULE","CALLBACK","ACCEPT","DECLINE"],
         "is_personal_number": is_personal,
         "session_label": "your own WhatsApp number" if is_personal else "the shared company number",
     }
