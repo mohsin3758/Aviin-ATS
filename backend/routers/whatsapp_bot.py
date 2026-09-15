@@ -270,6 +270,16 @@ async def _handle_screening_resume(media: dict, tenant_id: str, session: dict, w
     file_path = save_resume_file(data, tenant_id, filename)
     async with db.tenant_conn(tenant_id) as conn:
         await conn.execute("UPDATE candidates SET resume_text=$1 WHERE id=$2", text, candidate_id)
+        # Backfills the real name for an inbound-keyword self-signup
+        # (round 3 gap) -- 'New Applicant' is the one honest placeholder
+        # this codebase writes anywhere for a name, so it's a safe marker
+        # to replace, unlike guessing over a recruiter-entered name.
+        cur_name = await conn.fetchval("SELECT full_name FROM candidates WHERE id=$1", candidate_id)
+        if cur_name == "New Applicant":
+            from services.improved_parser import parse_resume_v2 as _parse_name_only
+            parsed_name = (_parse_name_only(text, "", "", filename) or {}).get("name")
+            if parsed_name:
+                await conn.execute("UPDATE candidates SET full_name=$1 WHERE id=$2", parsed_name, candidate_id)
         await conn.execute(
             """INSERT INTO resume_files
                  (tenant_id, candidate_id, job_board, job_board_label, source_email,
@@ -582,6 +592,31 @@ async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id:
             "SELECT * FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
             phone[-10:], tenant_id)
         if not cand:
+            # WhatsApp automation research round 3 (2026-09-15): inbound
+            # keyword self-signup (Phenom's "text DRIVER to apply"
+            # pattern) -- the candidate opens the conversation themselves,
+            # so this lands inside a genuinely candidate-initiated
+            # exchange rather than an agency-initiated outbound one.
+            # full_name is a real, honest limitation here: we only have a
+            # phone number until they say YES and reach the resume step
+            # (parse_resume_v2 backfills it there if it's still this
+            # placeholder -- see _handle_screening_resume).
+            req = await conn.fetchrow(
+                "SELECT id, title, created_by FROM requisitions WHERE tenant_id=$1 AND is_active IS NOT FALSE "
+                "AND upper(inbound_keyword)=$2", tenant_id, cmd)
+            if req and whatsapp_account_id:
+                from routers.screening import enroll_candidate_for_screening, _default_add_stage
+                new_candidate_id = await conn.fetchval(
+                    """INSERT INTO candidates (tenant_id, full_name, phone, source)
+                       VALUES ($1,'New Applicant',$2,'whatsapp_inbound_keyword') RETURNING id""",
+                    tenant_id, phone)
+                default_stage = await _default_add_stage(conn, tenant_id)
+                async with conn.transaction():
+                    await enroll_candidate_for_screening(
+                        conn, tenant_id, str(new_candidate_id), str(req["id"]), "quick_add",
+                        default_stage, whatsapp_account_id, req["created_by"], "en")
+                return (f"Thanks for your interest in {req['title']}! We've noted your number and will "
+                        f"follow up shortly with a few quick questions.")
             return "Hi! We don't have your number on file. Contact your recruiter."
         name = cand["full_name"].split()[0]
         # Real fix (2026-08-10 audit): see the matching note in

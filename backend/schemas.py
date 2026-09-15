@@ -222,6 +222,7 @@ class RequisitionUpdate(BaseModel):
     shift_type: Optional[str] = None
     shift_timing_ids: Optional[list[str]] = None
     notice_period_max: Optional[int] = None
+    inbound_keyword: Optional[str] = None
     industry: Optional[str] = None
     client_name: Optional[str] = None
     submission_limit_per_recruiter: Optional[int] = None

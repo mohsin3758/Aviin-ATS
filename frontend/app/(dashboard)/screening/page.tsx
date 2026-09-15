@@ -174,6 +174,26 @@ export default function ScreeningPage() {
     }
   }
 
+  const selectedReq = (reqs || []).find((r: any) => r.id === requisitionId);
+  const [keywordInput, setKeywordInput] = useState('');
+  const [keywordSaving, setKeywordSaving] = useState(false);
+  useEffect(() => { setKeywordInput(selectedReq?.inbound_keyword || ''); }, [requisitionId]);
+  async function saveKeyword() {
+    if (!requisitionId) return;
+    setKeywordSaving(true);
+    try {
+      await apiFetch(`/requisitions/${requisitionId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ inbound_keyword: keywordInput.trim().toUpperCase() || null }),
+      });
+      alert(keywordInput.trim() ? `Candidates can now text "${keywordInput.trim().toUpperCase()}" to self-apply.` : 'Keyword removed.');
+    } catch (e: any) {
+      alert(e.message || 'Could not save keyword');
+    } finally {
+      setKeywordSaving(false);
+    }
+  }
+
   async function sendTestToSelf() {
     if (!requisitionId) { alert('Pick a role first'); return; }
     setTestSending(true);
@@ -296,6 +316,23 @@ export default function ScreeningPage() {
             </div>
             <button style={{ ...btn, padding: '5px 12px', fontSize: 11 }} disabled={!segmentPicked.size || segmentEnrolling} onClick={enrollSegment}>
               {segmentEnrolling ? 'Enrolling...' : `Start screening for ${segmentPicked.size || 0} selected`}
+            </button>
+          </div>
+        )}
+
+        {requisitionId && (
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}>
+              <label style={label}>Self-apply keyword (optional)</label>
+              <input
+                style={inputSm}
+                value={keywordInput}
+                onChange={e => setKeywordInput(e.target.value)}
+                placeholder="e.g. DRIVER — candidates text this word to self-enroll"
+              />
+            </div>
+            <button style={{ ...btnGhost, padding: '7px 14px' }} disabled={keywordSaving} onClick={saveKeyword}>
+              {keywordSaving ? 'Saving...' : 'Save'}
             </button>
           </div>
         )}

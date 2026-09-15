@@ -2269,6 +2269,8 @@ def start_scheduler():
     scheduler.add_job(process_offer_joining_sequence, "interval", minutes=60, id="offer_joining_sequence", replace_existing=True)
     scheduler.add_job(process_esign_whatsapp_notify, "interval", minutes=30, id="esign_whatsapp_notify", replace_existing=True)
     scheduler.add_job(process_bgv_notify, "interval", minutes=30, id="bgv_notify", replace_existing=True)
+    scheduler.add_job(process_timesheet_reminders, "interval", hours=6, id="timesheet_reminders", replace_existing=True)
+    scheduler.add_job(process_dpdp_retention_review, "interval", hours=24, id="dpdp_retention_review", replace_existing=True)
     # Every 30 min — approved items 04+05: fire SLA-breach/stale-requisition
     # alerts automatically instead of waiting for a human to open the panel,
     # and auto-reassign after a grace period if still unresolved.
@@ -2698,6 +2700,46 @@ async def process_bgv_notify():
                 logger.error(f"bgv_notify failed for tenant {tid}: {ex}")
     except Exception as ex:
         logger.error(f"bgv_notify job failed: {ex}")
+
+
+async def process_timesheet_reminders():
+    """Every 6 hours: WhatsApp automation research round 3 (2026-09-15).
+    A placed contractor with no submitted timesheet for the week that
+    just ended gets a WhatsApp nudge, escalating to a back-office task
+    after 3 days -- see services/timesheet_reminders.py."""
+    from services.timesheet_reminders import process_timesheet_reminders as _process
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await _process(conn, tid)
+            except Exception as ex:
+                logger.error(f"timesheet_reminders failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"timesheet_reminders job failed: {ex}")
+
+
+async def process_dpdp_retention_review():
+    """Daily: WhatsApp automation research round 3 (2026-09-15), DPDP
+    Rules 2025's retention/erasure duty. Flags stale, dead-end WhatsApp
+    screening candidates for a human to review -- never erases or
+    contacts anyone itself. See services/dpdp_retention_review.py for why."""
+    from services.dpdp_retention_review import flag_stale_screening_candidates
+    try:
+        async with db.system_conn() as conn:
+            tenants = await conn.fetch("SELECT id AS tenant_id FROM tenants")
+        for t in tenants:
+            tid = str(t["tenant_id"])
+            try:
+                async with db.tenant_conn(tid) as conn:
+                    await flag_stale_screening_candidates(conn, tid)
+            except Exception as ex:
+                logger.error(f"dpdp_retention_review failed for tenant {tid}: {ex}")
+    except Exception as ex:
+        logger.error(f"dpdp_retention_review job failed: {ex}")
 
 
 async def process_nurture_dispatch():
