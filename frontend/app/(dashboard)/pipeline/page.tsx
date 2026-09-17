@@ -2168,6 +2168,20 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // (imap_messages), a different id namespace entirely. message_id_header
   // is the one value both tables share for the same physical email.
   const [lastSentMessageIdHeader, setLastSentMessageIdHeader] = useState<string | null>(null);
+  // REAL BUG FIX (2026-09-17, reported live: "Application error: a
+  // client-side exception has occurred" — a genuine React hooks-order
+  // violation, not a data bug). These two were originally declared AFTER
+  // this component's `if (!preview) return <Loading>` / `if
+  // (!preview.contacts?.length) return ...` early returns below — meaning
+  // the very first render (while preview is still loading) never called
+  // these hooks at all, then a later render that gets past those guards
+  // suddenly calls two MORE hooks than the previous render did. React
+  // requires the exact same hooks, in the exact same order, on every
+  // single render of a component, with zero exceptions for "but they're
+  // after a return" — moved up here with every other useState in this
+  // component, none of which sit after a conditional return.
+  const [emailPreview, setEmailPreview] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [manualDraft, setManualDraft] = useState<Record<string, string> | null>(null);
   const [manualLoading, setManualLoading] = useState(false);
@@ -2346,8 +2360,6 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
     };
   };
 
-  const [emailPreview, setEmailPreview] = useState<any>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
   const openEmailPreview = async () => {
     if (resumeStyle === 'manual' && !manualDraft) {
       showToast('Finish the manual resume summary first, or pick a different resume format', false);
