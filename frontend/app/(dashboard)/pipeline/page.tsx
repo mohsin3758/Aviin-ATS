@@ -2842,7 +2842,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       </button>
       {emailPreview && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={() => setEmailPreview(null)}>
-          <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 720, maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: '#fff', borderRadius: 12, width: '96vw', maxWidth: 1400, height: '90vh', maxHeight: 900, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '12px 16px', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ fontSize: 13, fontWeight: 800, color: '#0F172A' }}>Not yet sent — preview only</div>
               <button onClick={() => setEmailPreview(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B', fontSize: 18, lineHeight: 1 }}>×</button>
@@ -2860,7 +2860,15 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                 </div>
               )}
             </div>
-            <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1 }}
+            {/* REAL BUG FIX (2026-09-17, reported live: "not able to full
+                view") — the tracking sheet table this embeds is a real,
+                wide table built for an email client to render (often
+                1000px+ across, many columns) — a narrow, vertical-scroll-
+                only modal clipped it on the right with no way to see the
+                rest. Both a much wider modal AND its own horizontal
+                scroll here, since even a wide modal can still be
+                narrower than a table with many columns. */}
+            <div style={{ padding: '16px 20px', overflow: 'auto', flex: 1 }}
               dangerouslySetInnerHTML={{ __html: emailPreview.html_body }} />
             <div style={{ padding: '10px 16px', borderTop: '1px solid #E2E8F0', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => setEmailPreview(null)} style={{ padding: '7px 14px', background: '#fff', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Keep editing</button>
