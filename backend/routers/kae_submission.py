@@ -2349,9 +2349,21 @@ async def _do_client_submission(
     # Send to Client actually sends. Stops before the one real side effect
     # that matters (the actual SMTP send + every DB write below) ever runs.
     if preview_only:
+        # REAL FIX (2026-09-17, reported live: "its should be editable in
+        # preview also") -- tracking_html/signature_html returned as their
+        # OWN fields, separately from the combined html_body, specifically
+        # so the frontend can render the message text as a genuinely
+        # editable field (the same emailSubject/emailBody state the rest
+        # of this page already edits) instead of a frozen HTML blob, while
+        # still rendering the real tracking-sheet table and the tenant's
+        # real configured signature exactly as they'll actually be sent.
+        # html_body is kept too (unused by the current frontend, harmless
+        # to leave for any other consumer of this endpoint).
         return {
             "subject": subject,
             "html_body": _assemble_email_html_body(body_text, body_html_extra, signature_html),
+            "tracking_html": body_html_extra,
+            "signature_html": signature_html,
             "to_emails": to_recipients,
             "cc_emails": cc_recipients,
             "resume_filename": resume_filename,

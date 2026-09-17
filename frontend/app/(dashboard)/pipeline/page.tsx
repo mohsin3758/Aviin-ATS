@@ -2842,47 +2842,57 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
       </button>
       {emailPreview && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={() => setEmailPreview(null)}>
-          <div style={{ background: '#fff', borderRadius: 12, width: '96vw', maxWidth: 1400, height: '90vh', maxHeight: 900, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: '#fff', borderRadius: 12, width: '94vw', maxWidth: 920, height: '88vh', maxHeight: 820, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '12px 16px', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: '#0F172A' }}>Not yet sent — preview only</div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#0F172A' }}>Not yet sent — preview &amp; edit</div>
               <button onClick={() => setEmailPreview(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B', fontSize: 18, lineHeight: 1 }}>×</button>
             </div>
-            <div style={{ padding: '12px 16px', borderBottom: '1px solid #E2E8F0', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #E2E8F0', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>
               <div><span style={{ color: '#94A3B8', display: 'inline-block', width: 46 }}>From</span>{emailPreview.sender_email || '—'}</div>
               <div><span style={{ color: '#94A3B8', display: 'inline-block', width: 46 }}>To</span>{(emailPreview.to_emails || []).join(', ') || '—'}</div>
               {emailPreview.cc_emails?.length > 0 && (
                 <div><span style={{ color: '#94A3B8', display: 'inline-block', width: 46 }}>Cc</span>{emailPreview.cc_emails.join(', ')}</div>
               )}
-              <div style={{ fontWeight: 700, marginTop: 2 }}>{emailPreview.subject}</div>
               {emailPreview.resume_filename && (
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#F1F5F9', border: '1px solid #E2E8F0', borderRadius: 8, padding: '5px 10px', fontSize: 11, width: 'fit-content', marginTop: 2 }}>
                   📎 {emailPreview.resume_filename}
                 </div>
               )}
             </div>
-            {/* REAL BUG FIX (2026-09-17, reported live: "not able to full
-                view") — the tracking sheet table this embeds is a real,
-                wide table built for an email client to render (often
-                1000px+ across, many columns) — a narrow, vertical-scroll-
-                only modal clipped it on the right with no way to see the
-                rest. A much wider modal fixed that, but then stretched
-                the WHOLE email body (message text + the configured
-                signature, its divider line included) to that same
-                width — real email clients never do that; a message
-                renders at a normal, fixed reading width regardless of
-                the viewer's window size, and only a genuinely wide table
-                gets its own horizontal scrollbar (reported live again:
-                "why blue line? to length" — the signature's own divider
-                is a real, correctly-configured width:100% element that
-                only looked wrong because IT was the one stretched to
-                1400px, not the table). The inner wrapper below caps
-                message/signature content at a realistic width; the
-                table inside it still has its own real min-width and
-                simply overflows into the horizontal scroll this outer
-                container already provides — same as a real inbox. */}
-            <div style={{ padding: '16px 20px', overflow: 'auto', flex: 1 }}>
-              <div style={{ maxWidth: 760, margin: '0 auto' }}
-                dangerouslySetInnerHTML={{ __html: emailPreview.html_body }} />
+            {/* REAL FIX (2026-09-17, reported live twice: "not able to full
+                view" / "why blue line? to length" then "its should be
+                editable in preview also"). Splitting this into three
+                pieces solved both: (1) the modal is back to a normal,
+                realistic reading width instead of stretched wide to fit
+                the table — no more oversized signature divider or a big
+                empty gap either. (2) Subject/Message are genuine <input>/
+                <textarea> bound to the SAME emailSubject/emailBody state
+                the rest of this page already uses — typing here really
+                edits what Approve & Send to Client will send, no separate
+                sync needed. (3) The tracking-sheet table and the tenant's
+                real configured signature render read-only below (nothing
+                about editing those was asked for, and the table's own
+                real min-width still needs its own horizontal scroll,
+                contained to just that box now instead of the whole
+                modal). */}
+            <div style={{ padding: '14px 16px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div>
+                <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', display: 'block', marginBottom: 3 }}>SUBJECT</label>
+                <input value={emailSubject} onChange={e => setEmailSubject(e.target.value)}
+                  style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontWeight: 600 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', display: 'block', marginBottom: 3 }}>MESSAGE</label>
+                <textarea rows={6} value={emailBody} onChange={e => setEmailBody(e.target.value)}
+                  style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontFamily: 'inherit', resize: 'vertical' }} />
+              </div>
+              {emailPreview.tracking_html && (
+                <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8 }}
+                  dangerouslySetInnerHTML={{ __html: emailPreview.tracking_html }} />
+              )}
+              {emailPreview.signature_html && (
+                <div dangerouslySetInnerHTML={{ __html: emailPreview.signature_html }} />
+              )}
             </div>
             <div style={{ padding: '10px 16px', borderTop: '1px solid #E2E8F0', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => setEmailPreview(null)} style={{ padding: '7px 14px', background: '#fff', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Keep editing</button>
