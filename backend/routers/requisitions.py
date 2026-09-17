@@ -500,6 +500,58 @@ async def requisition_pipeline(requisition_id: str, actor: Actor = Depends(requi
 
 
 
+@router.get("/{requisition_id}/skill-matrix")
+async def skill_matrix(requisition_id: str, actor: Actor = Depends(require_permission("requisitions", "read"))):
+    """Skill Matrix (2026-09-19, reported live against a real manual
+    Google Sheet screenshot -- one column per mandatory skill, showing
+    years of experience per candidate, fillable manually or picked up
+    automatically once a WhatsApp screening reply comes in). One row per
+    candidate already linked to this role (via applications, same
+    is_active-filtering convention as /pipeline above), one
+    years_experience number per mandatory_skill -- most-recently-created
+    candidate_skill_experience row for that (candidate, skill) pair,
+    matching upsert_skill_years' own "most recent wins" rule so this view
+    and that endpoint never disagree about which row is current."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        req = await conn.fetchrow(
+            "SELECT id, title, mandatory_skills FROM requisitions WHERE id=$1 AND tenant_id=$2",
+            requisition_id, actor.tenant_id)
+        if not req:
+            raise HTTPException(404, "Requisition not found")
+        skills = req["mandatory_skills"] or []
+
+        candidate_rows = await conn.fetch(
+            """SELECT DISTINCT ON (c.id) c.id, c.full_name, c.phone, c.email, c.total_exp_mo,
+                      c.current_ctc, c.expected_ctc, c.sourcing_status, c.remarks
+               FROM applications a
+               JOIN candidates c ON c.id = a.candidate_id
+               WHERE a.requisition_id = $1 AND a.tenant_id = $2
+                 AND c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE
+               ORDER BY c.id, a.updated_at DESC""",
+            requisition_id, actor.tenant_id)
+        candidate_ids = [r["id"] for r in candidate_rows]
+
+        years_by_candidate: dict = {}
+        if candidate_ids and skills:
+            skill_rows = await conn.fetch(
+                """SELECT DISTINCT ON (candidate_id, skill_name) candidate_id, skill_name, years_experience
+                   FROM candidate_skill_experience
+                   WHERE candidate_id = ANY($1::uuid[]) AND tenant_id = $2 AND skill_name = ANY($3::text[])
+                   ORDER BY candidate_id, skill_name, created_at DESC""",
+                candidate_ids, actor.tenant_id, skills)
+            for r in skill_rows:
+                years_by_candidate.setdefault(str(r["candidate_id"]), {})[r["skill_name"]] = (
+                    float(r["years_experience"]) if r["years_experience"] is not None else None)
+
+    candidates = []
+    for r in candidate_rows:
+        d = dict(r)
+        d["skill_years"] = years_by_candidate.get(str(r["id"]), {})
+        candidates.append(d)
+
+    return {"requisition_id": str(req["id"]), "requisition_title": req["title"], "skills": skills, "candidates": candidates}
+
+
 @router.get("/{requisition_id}/pipeline-stats")
 async def pipeline_stats(requisition_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:

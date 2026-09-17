@@ -1,0 +1,12 @@
+-- Skill Matrix (2026-09-19, reported live against a real manual Google
+-- Sheet screenshot: one column per mandatory skill, showing years of
+-- experience, fillable manually or picked up automatically once a
+-- candidate answers the matching WhatsApp screening question).
+--
+-- candidate_skill_experience.relevant_experience is a free-text summary
+-- ("6 yrs, 3 project(s) -- SAP FICO Implementation") written by
+-- screening_extraction.py's skill_role handler -- correct for its own
+-- purpose (a human-readable project history line) but not a clean
+-- number a spreadsheet cell can display/sort/edit. This adds a proper
+-- numeric column alongside it; relevant_experience is untouched.
+ALTER TABLE candidate_skill_experience ADD COLUMN IF NOT EXISTS years_experience NUMERIC;

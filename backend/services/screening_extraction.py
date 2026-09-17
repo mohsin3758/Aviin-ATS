@@ -178,11 +178,15 @@ async def record_answer(conn, tenant_id: str, session, question: dict, raw_answe
         years = _val(years_row, "years")
         projects = _val(proj_row, "projects")
         summary = f"{years if years is not None else '?'} yrs, {projects if projects is not None else '?'} project(s) — {extracted.get('role', '')}".strip(" —")
+        # Skill Matrix (2026-09-19): years_experience is the same raw
+        # number already extracted for skill_years above, just also
+        # written as a clean numeric column -- relevant_experience stays
+        # the human-readable summary line, unchanged.
         await conn.execute(
             """INSERT INTO candidate_skill_experience
-                 (tenant_id, candidate_id, skill_name, project_name, relevant_experience, role_types)
-               VALUES ($1,$2,$3,'Self-reported via WhatsApp screening',$4,$5)""",
-            tenant_id, session["candidate_id"], skill, summary, extracted.get("modules") or [])
+                 (tenant_id, candidate_id, skill_name, project_name, relevant_experience, role_types, years_experience)
+               VALUES ($1,$2,$3,'Self-reported via WhatsApp screening',$4,$5,$6)""",
+            tenant_id, session["candidate_id"], skill, summary, extracted.get("modules") or [], years)
     elif qtype == "generic_ctc_notice":
         await conn.execute(
             """UPDATE candidates SET

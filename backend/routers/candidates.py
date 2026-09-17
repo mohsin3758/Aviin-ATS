@@ -1164,6 +1164,16 @@ class SkillExperienceRow(BaseModel):
     role_types: list[str] = Field(default_factory=list)
     relevant_experience: Optional[str] = None
     last_used: Optional[str] = None
+    # Skill Matrix (2026-09-19) -- read-only here on purpose. This full
+    # PUT/append pair does a hard delete+reinsert of every row (see
+    # replace_skill_experience's own docstring), and the shared edit
+    # modal these two endpoints back has no years input field yet -- if
+    # years_experience were included in their INSERTs, saving a project
+    # via that modal would silently null out any years a recruiter or
+    # WhatsApp had already set for skills untouched in that save. Editing
+    # years_experience goes through the dedicated upsert endpoint below
+    # instead, which never touches the other columns.
+    years_experience: Optional[float] = None
 
 
 @router.get("/{candidate_id}/skill-experience")
@@ -1171,10 +1181,53 @@ async def list_skill_experience(candidate_id: str, actor: Actor = Depends(get_ac
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT id, skill_name, project_name, duration_from, duration_to, role_types,"
-            " relevant_experience, last_used FROM candidate_skill_experience"
+            " relevant_experience, last_used, years_experience FROM candidate_skill_experience"
             " WHERE candidate_id=$1 AND tenant_id=$2 ORDER BY sort_order, created_at",
             candidate_id, actor.tenant_id)
     return {"rows": [dict(r) for r in rows]}
+
+
+class SkillYearsIn(BaseModel):
+    skill_name: str
+    years_experience: Optional[float] = None
+
+
+@router.patch("/{candidate_id}/skill-years")
+async def upsert_skill_years(
+    candidate_id: str, body: SkillYearsIn,
+    actor: Actor = Depends(require_permission("candidates", "update")),
+):
+    """Skill Matrix (2026-09-19): the one clean, isolated way to set a
+    single skill's years number -- manually from the matrix grid, or
+    (separately) by screening_extraction.py's skill_role handler when a
+    WhatsApp reply comes in. Never touches project_name/duration/
+    role_types/relevant_experience, so it can't collide with the full
+    Project Details editor's delete+reinsert -- whichever of the two
+    wrote a given row most recently just gets updated in place here, not
+    replaced. No unique constraint exists on (candidate_id, skill_name)
+    (candidate_skill_experience is a real project-history log, one row
+    per project), so this targets whichever row is most recent for that
+    skill, matching how a candidate's own record is read elsewhere in
+    this codebase, and only creates a new bare row if none exists yet."""
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        cand = await conn.fetchrow(
+            "SELECT id FROM candidates WHERE id=$1 AND is_active IS NOT FALSE", candidate_id)
+        if not cand:
+            raise HTTPException(404, "Candidate not found")
+        existing_id = await conn.fetchval(
+            "SELECT id FROM candidate_skill_experience WHERE candidate_id=$1 AND tenant_id=$2 AND skill_name=$3"
+            " ORDER BY created_at DESC LIMIT 1",
+            candidate_id, actor.tenant_id, body.skill_name)
+        if existing_id:
+            await conn.execute(
+                "UPDATE candidate_skill_experience SET years_experience=$1 WHERE id=$2",
+                body.years_experience, existing_id)
+        else:
+            await conn.execute(
+                "INSERT INTO candidate_skill_experience (tenant_id, candidate_id, skill_name, years_experience)"
+                " VALUES ($1,$2,$3,$4)",
+                actor.tenant_id, candidate_id, body.skill_name, body.years_experience)
+    return {"ok": True}
 
 
 @router.put("/{candidate_id}/skill-experience")

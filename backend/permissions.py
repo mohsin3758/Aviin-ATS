@@ -82,6 +82,7 @@ FEATURE_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
         ("question_bank", "Question Bank"),
         ("screening", "WhatsApp Screening"),
         ("sourcing_tracker", "Sourcing Tracker"),
+        ("skill_matrix", "Skill Matrix"),
         ("reference_checks", "Reference Checks"),
         ("submittals", "Submittals"),
         ("job_board", "Job Board"),
