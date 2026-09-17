@@ -140,6 +140,8 @@ class CandidateUpdate(BaseModel):
     tracking_sheet_status: Optional[str] = None
     sourcing_status: Optional[str] = None
     remarks: Optional[str] = None
+    willing_to_relocate: Optional[bool] = None
+    available_for_interview: Optional[bool] = None
 
 
 class RequisitionCreate(BaseModel):

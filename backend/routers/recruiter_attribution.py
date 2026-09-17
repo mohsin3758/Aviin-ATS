@@ -24,6 +24,7 @@ mutable, expiring row" discipline.
 """
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
+from datetime import date, timedelta
 
 import db
 from deps import Actor
@@ -188,6 +189,64 @@ async def sender_tracking(
     async with db.tenant_conn(actor.tenant_id) as conn:
         rows = await _sender_tracking_rows(conn, actor.tenant_id, date_from, date_to)
     return {"senders": rows}
+
+
+def _bucket_bounds(period: str, count: int) -> list[tuple[str, str]]:
+    """N most-recent whole periods ending today, oldest first. Reuses
+    plain Python date arithmetic rather than a SQL generate_series — this
+    only ever needs a handful of buckets (gap-analysis Part 10: "pick the
+    canonical source, extend to full funnel + day/week/month" -- not a
+    from-scratch reporting engine)."""
+    today = date.today()
+    bounds = []
+    if period == "day":
+        for i in range(count):
+            d = today - timedelta(days=i)
+            bounds.append((d.isoformat(), d.isoformat()))
+    elif period == "week":
+        # Monday-start week, matching this codebase's existing
+        # date_trunc('week', ...) convention elsewhere (e.g.
+        # sql/104_jobs_created_metric_and_leaderboard_view.sql).
+        start_of_this_week = today - timedelta(days=today.weekday())
+        for i in range(count):
+            start = start_of_this_week - timedelta(weeks=i)
+            end = start + timedelta(days=6)
+            bounds.append((start.isoformat(), end.isoformat()))
+    else:  # month
+        y, m = today.year, today.month
+        for i in range(count):
+            mm = m - i
+            yy = y + (mm - 1) // 12
+            mm = ((mm - 1) % 12) + 1
+            start = date(yy, mm, 1)
+            end_month = mm % 12 + 1
+            end_year = yy + (1 if mm == 12 else 0)
+            end = date(end_year, end_month, 1) - timedelta(days=1)
+            bounds.append((start.isoformat(), end.isoformat()))
+    bounds.reverse()
+    return bounds
+
+
+@router.get("/sender-tracking/trend")
+async def sender_tracking_trend(
+    period: str = Query("week", pattern="^(day|week|month)$"),
+    buckets: int = Query(8, ge=1, le=52),
+    actor: Actor = Depends(require_permission("sender_tracking", "read")),
+):
+    """Gap-analysis follow-up (Part 10): the existing sender-tracking
+    snapshot above is a single date-range filter, not a real trend — this
+    reuses the exact same _sender_tracking_rows() core, unchanged, once
+    per period bucket, rather than a second, divergent reporting query.
+    Real recruiter productivity across day/week/month, still attributed
+    by real sender-of-record (never assigned_recruiter_id), same as the
+    tab this extends."""
+    bounds = _bucket_bounds(period, buckets)
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        results = []
+        for start, end in bounds:
+            rows = await _sender_tracking_rows(conn, actor.tenant_id, start, end)
+            results.append({"period_start": start, "period_end": end, "senders": rows})
+    return {"period": period, "buckets": results}
 
 
 @router.get("/sender-tracking/export")

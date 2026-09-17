@@ -352,10 +352,28 @@ async def list_duplicates(status: Optional[str]='pending', actor: Actor=Depends(
     # query never filtered by is_active — a pair detected while both
     # candidates were active stayed in "Pending" forever even after one
     # or both got soft-deleted, with nothing left to actually merge.
+    # Gap-analysis follow-up (2026-09-18): a detected duplicate previously
+    # showed only two names/emails/phones -- no way to tell which side (if
+    # either) is already owned, already linked to a client/role, or when
+    # it was last touched, which is the actual point of checking before
+    # merging two records. Same owner/active-application JSON-subquery
+    # pattern candidates.py's list_candidates already uses, applied once
+    # per side of the pair.
+    owner_sub_tpl = ("(SELECT json_build_object('recruiter_name',COALESCE(u.full_name,co.recruiter_name),"
+                      "'expires_at',co.ownership_expires_at,'status',co.status)"
+                      " FROM candidate_ownership co LEFT JOIN users u ON u.id=co.recruiter_id AND u.is_active IS NOT FALSE"
+                      " WHERE co.candidate_id={cid}) AS owner{n}_json")
+    active_app_sub_tpl = ("(SELECT json_build_object('client_name', cl.name, 'requisition_title', r.title, 'stage', a.stage)"
+                           " FROM applications a JOIN requisitions r ON r.id = a.requisition_id"
+                           " LEFT JOIN clients cl ON cl.id = r.client_id"
+                           " WHERE a.candidate_id = {cid} AND a.is_active IS NOT FALSE"
+                           " ORDER BY a.updated_at DESC LIMIT 1) AS active_app{n}_json")
     async with db.tenant_conn(actor.tenant_id) as conn:
-        rows = await conn.fetch("""
-            SELECT dc.*, c1.full_name AS name1, c1.email AS email1, c1.phone AS phone1,
-                   c2.full_name AS name2, c2.email AS email2, c2.phone AS phone2
+        rows = await conn.fetch(f"""
+            SELECT dc.*, c1.full_name AS name1, c1.email AS email1, c1.phone AS phone1, c1.updated_at AS updated_at1,
+                   c2.full_name AS name2, c2.email AS email2, c2.phone AS phone2, c2.updated_at AS updated_at2,
+                   {owner_sub_tpl.format(cid='c1.id', n=1)}, {owner_sub_tpl.format(cid='c2.id', n=2)},
+                   {active_app_sub_tpl.format(cid='c1.id', n=1)}, {active_app_sub_tpl.format(cid='c2.id', n=2)}
             FROM duplicate_candidates dc
             JOIN candidates c1 ON c1.id=dc.candidate_id_1
             JOIN candidates c2 ON c2.id=dc.candidate_id_2
@@ -363,7 +381,16 @@ async def list_duplicates(status: Optional[str]='pending', actor: Actor=Depends(
               AND c1.is_active IS NOT FALSE AND c2.is_active IS NOT FALSE
             ORDER BY dc.detected_at DESC
         """, actor.tenant_id, status)
-    return [dict(r) for r in rows]
+    results = []
+    for r in rows:
+        d = dict(r)
+        for n in (1, 2):
+            oj = d.pop(f"owner{n}_json", None)
+            d[f"owner{n}"] = json.loads(oj) if oj else None
+            aj = d.pop(f"active_app{n}_json", None)
+            d[f"active_application{n}"] = json.loads(aj) if aj else None
+        results.append(d)
+    return results
 
 @dup_router.patch("/{dup_id}/dismiss")
 async def dismiss_duplicate(dup_id: str, actor: Actor=Depends(get_actor)):

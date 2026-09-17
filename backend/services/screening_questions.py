@@ -29,6 +29,13 @@ def _generic_questions(lang: str) -> list[dict]:
     return [
         {"key": "generic_ctc_notice", "type": "generic_ctc_notice", "text": t("generic_ctc_notice", lang)},
         {"key": "generic_location", "type": "generic_location", "text": t("generic_location", lang)},
+        # Added 2026-09-18 (gap-analysis follow-up) -- total experience was
+        # never actually asked over WhatsApp despite candidates.total_exp_mo
+        # already existing as a field (populated by resume parsing/manual
+        # entry only, until now); interview availability wasn't captured
+        # anywhere at all.
+        {"key": "generic_total_experience", "type": "generic_total_experience", "text": t("generic_total_experience", lang)},
+        {"key": "generic_interview_availability", "type": "generic_interview_availability", "text": t("generic_interview_availability", lang)},
     ]
 
 

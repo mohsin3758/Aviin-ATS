@@ -1,8 +1,53 @@
 ﻿'use client';
 import { useState } from 'react';
-import { Building2, Download, FileText, Users, ChevronRight, RefreshCw } from 'lucide-react';
+import { Building2, Download, FileText, Users, ChevronRight, RefreshCw, Plus, Pencil, Trash2 } from 'lucide-react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { Spinner } from '@/components/ui/Spinner';
+import { Modal, FormField, FormActions } from '@/components/ui/Modal';
+
+// Client CRUD UI (2026-09-18 gap-analysis follow-up): the backend has
+// always had full create/update/delete for /clients -- this page only
+// ever exposed view + tier-change. Wires the existing endpoints
+// (POST/PUT/DELETE /clients) up to a real form, same Modal/FormField/
+// FormActions convention already used elsewhere in this app.
+function ClientFormModal({ client, onClose, onSaved }: { client: any | null; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(client?.name || '');
+  const [industry, setIndustry] = useState(client?.industry || '');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!name.trim()) { setErr('Client name is required'); return; }
+    setSaving(true); setErr('');
+    try {
+      if (client) {
+        await apiFetch(`/clients/${client.id}`, { method: 'PUT', body: JSON.stringify({ name: name.trim(), industry: industry.trim() || null }) });
+      } else {
+        await apiFetch('/clients', { method: 'POST', body: JSON.stringify({ name: name.trim(), industry: industry.trim() || null }) });
+      }
+      onSaved();
+    } catch (e: any) {
+      setErr(e?.message || 'Could not save client');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title={client ? 'Edit Client' : 'Add Client'} size="sm">
+      <FormField label="Client Name" required>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Acme Corp"
+          style={{ width: '100%', border: '1px solid #e2e8f0', borderRadius: 8, padding: '9px 12px', fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+      </FormField>
+      <FormField label="Industry">
+        <input value={industry} onChange={e => setIndustry(e.target.value)} placeholder="e.g. IT Services"
+          style={{ width: '100%', border: '1px solid #e2e8f0', borderRadius: 8, padding: '9px 12px', fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+      </FormField>
+      {err && <div style={{ fontSize: 12, color: '#ef4444', marginBottom: 10 }}>{err}</div>}
+      <FormActions onClose={onClose} onSubmit={save} loading={saving} submitLabel={client ? 'Save Changes' : 'Add Client'} />
+    </Modal>
+  );
+}
 
 function SubmissionPackModal({ client, onClose }: any) {
   const { data: pack, loading } = useFetch<any>(`/clients/${client.id}/submission-pack`);
@@ -144,10 +189,28 @@ function SubmissionPackModal({ client, onClose }: any) {
 export default function ClientsPage() {
   const { data: clients, loading, refetch } = useFetch<any[]>('/clients');
   const [selected, setSelected] = useState<any>(null);
+  const [formClient, setFormClient] = useState<any | null | undefined>(undefined); // undefined = closed, null = add, object = edit
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  const deactivate = async (c: any) => {
+    if (!window.confirm(`Deactivate ${c.name}? This hides it from lists but keeps its history intact.`)) return;
+    setDeleting(c.id);
+    try {
+      await apiFetch(`/clients/${c.id}`, { method: 'DELETE' });
+      refetch();
+    } catch (e: any) {
+      alert(e?.message || 'Could not deactivate client');
+    } finally {
+      setDeleting(null);
+    }
+  };
 
   return (
     <div className="anim-fade-up" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {selected && <SubmissionPackModal client={selected} onClose={() => setSelected(null)} />}
+      {formClient !== undefined && (
+        <ClientFormModal client={formClient} onClose={() => setFormClient(undefined)} onSaved={() => { setFormClient(undefined); refetch(); }} />
+      )}
 
       <div className="page-hero" style={{ background: 'linear-gradient(135deg,#0f172a,#1e3a5f,#2563eb)' }}>
         <div className="relative z-10 flex items-start justify-between">
@@ -155,9 +218,14 @@ export default function ClientsPage() {
             <h1 className="text-white text-2xl font-bold mb-1">Clients & Submission Packs</h1>
             <p style={{ color: '#93c5fd', fontSize: '13px' }}>Download per-client candidate submission reports as PDF</p>
           </div>
-          <button onClick={() => refetch()} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: '8px', padding: '8px 14px', cursor: 'pointer', color: 'white', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: '600' }}>
-            <RefreshCw size={12} /> Refresh
-          </button>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button onClick={() => setFormClient(null)} style={{ background: 'rgba(255,255,255,0.9)', border: 'none', borderRadius: '8px', padding: '8px 14px', cursor: 'pointer', color: '#1e3a5f', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: '700' }}>
+              <Plus size={13} /> Add Client
+            </button>
+            <button onClick={() => refetch()} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: '8px', padding: '8px 14px', cursor: 'pointer', color: 'white', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: '600' }}>
+              <RefreshCw size={12} /> Refresh
+            </button>
+          </div>
         </div>
       </div>
 
@@ -180,6 +248,16 @@ export default function ClientsPage() {
                     <div style={{ fontWeight: '700', fontSize: '14px', color: '#0f172a' }}>{c.name}</div>
                     <div style={{ fontSize: '11px', color: '#94a3b8' }}>{c.industry || 'No industry set'}</div>
                   </div>
+                </div>
+                <div style={{ display: 'flex', gap: '4px' }}>
+                  <button onClick={e => { e.stopPropagation(); setFormClient(c); }} title="Edit"
+                    style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', cursor: 'pointer', color: '#64748b' }}>
+                    <Pencil size={12} />
+                  </button>
+                  <button onClick={e => { e.stopPropagation(); deactivate(c); }} disabled={deleting === c.id} title="Deactivate"
+                    style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid #fecaca', borderRadius: 6, background: '#fff', cursor: deleting === c.id ? 'default' : 'pointer', color: '#dc2626' }}>
+                    <Trash2 size={12} />
+                  </button>
                 </div>
               </div>
               <div style={{ marginBottom: '12px' }}>

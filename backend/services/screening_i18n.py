@@ -559,6 +559,19 @@ SCREENING_TEMPLATES: dict[str, dict[str, str]] = {
         "ur": "ہیلو {name}! {week_start} ہفتے کی آپ کی ٹائم شیٹ ابھی تک زیر التوا ہے — تنخواہ میں تاخیر سے بچنے کے لیے براہ کرم جمع کروائیں۔",
         "kok": "नमस्कार {name}! {week_start} हफ्त्याचो तुमचो टायमशीट अजून बाकी आसा — पगारांत उशीर जावचो न्हय म्हणून उपकार करून सादर करात.",
     },
+    # Added 2026-09-18 (gap-analysis follow-up: "total experience,"
+    # "available for interview" were missing as their own structured
+    # screening questions). English only for now -- t()'s existing
+    # templates.get(lang) or templates.get("en","") fallback already
+    # handles every other language gracefully, same as it would for any
+    # key genuinely missing a translation; add the other 13 languages
+    # later the same way the rest of this file was built up.
+    "generic_total_experience": {
+        "en": "What's your total work experience, in years?",
+    },
+    "generic_interview_availability": {
+        "en": "Are you available for an interview this week?",
+    },
 }
 
 SUPPORTED_LANGUAGES = list(SCREENING_TEMPLATES["opt_in"].keys())

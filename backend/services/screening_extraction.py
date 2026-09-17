@@ -72,11 +72,39 @@ def _parse_location(raw: str) -> dict:
     else:
         city_part, rest = raw, raw
     relocation_note = None
+    willing_to_relocate = None
     if re.search(r"\b(yes|open|willing)\b", rest, re.I):
         relocation_note = "Open to relocation"
+        willing_to_relocate = True
     elif re.search(r"\b(no|not)\b", rest, re.I):
         relocation_note = "Not open to relocation"
-    return {"location": city_part.strip()[:200] or None, "relocation_note": relocation_note}
+        willing_to_relocate = False
+    return {"location": city_part.strip()[:200] or None, "relocation_note": relocation_note,
+            "willing_to_relocate": willing_to_relocate}
+
+
+def _parse_total_experience(raw: str) -> dict:
+    """Total experience was never actually asked over WhatsApp before this
+    (2026-09-18 gap-analysis follow-up) even though candidates.total_exp_mo
+    already existed, populated only by resume parsing/manual entry. Same
+    unit heuristic already used by _parse_ctc_notice's notice-period
+    number: a bare number means years (the natural way someone answers
+    "how many years of experience"), "months" in the reply means the
+    number is already in months."""
+    years_or_months = _first_number(raw)
+    if years_or_months is None:
+        return {"total_exp_mo": None}
+    if re.search(r"month", raw or "", re.I):
+        return {"total_exp_mo": int(round(years_or_months))}
+    return {"total_exp_mo": int(round(years_or_months * 12))}
+
+
+def _parse_yes_no(raw: str) -> dict:
+    if re.search(r"\b(yes|available|sure|anytime|ok|okay)\b", raw or "", re.I):
+        return {"available": True}
+    if re.search(r"\b(no|not|unavailable|busy)\b", raw or "", re.I):
+        return {"available": False}
+    return {"available": None}
 
 
 async def _extract_role_modules(conn, tenant_id: str, raw_answer: str) -> dict:
@@ -112,6 +140,10 @@ async def _extract(conn, tenant_id: str, question: dict, raw_answer: str) -> tup
         return _parse_ctc_notice(raw_answer), "regex"
     if qtype == "generic_location":
         return _parse_location(raw_answer), "regex"
+    if qtype == "generic_total_experience":
+        return _parse_total_experience(raw_answer), "regex"
+    if qtype == "generic_interview_availability":
+        return _parse_yes_no(raw_answer), "regex"
     return {"raw": raw_answer}, "none"
 
 
@@ -171,5 +203,19 @@ async def record_answer(conn, tenant_id: str, session, question: dict, raw_answe
             await conn.execute(
                 "UPDATE candidates SET desired_location = COALESCE(desired_location, $1) WHERE id=$2",
                 extracted["relocation_note"], session["candidate_id"])
+        if extracted.get("willing_to_relocate") is not None:
+            await conn.execute(
+                "UPDATE candidates SET willing_to_relocate = COALESCE(willing_to_relocate, $1) WHERE id=$2",
+                extracted["willing_to_relocate"], session["candidate_id"])
+    elif qtype == "generic_total_experience":
+        if extracted.get("total_exp_mo") is not None:
+            await conn.execute(
+                "UPDATE candidates SET total_exp_mo = COALESCE(total_exp_mo, $1) WHERE id=$2",
+                extracted["total_exp_mo"], session["candidate_id"])
+    elif qtype == "generic_interview_availability":
+        if extracted.get("available") is not None:
+            await conn.execute(
+                "UPDATE candidates SET available_for_interview = $1 WHERE id=$2",
+                extracted["available"], session["candidate_id"])
 
     return extracted

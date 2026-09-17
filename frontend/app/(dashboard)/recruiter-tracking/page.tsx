@@ -16,6 +16,15 @@ import { useFetch } from '@/lib/useFetch';
 import { API, authHeaders } from '@/lib/auth';
 import { UserCheck, Download, AlertTriangle } from 'lucide-react';
 
+// Gap-analysis follow-up (Part 10, 2026-09-18): the snapshot table below
+// is a single date-range filter, not a real day/week/month trend. Rather
+// than building a 4th, separate recruiter-productivity reporting system
+// (the gap analysis explicitly recommended against that), this adds a
+// "Trend" view on top of the same GET /recruiter-attribution/sender-
+// tracking/trend endpoint, which itself reuses the exact snapshot query
+// above once per period bucket -- one real data source, two views of it.
+interface TrendBucket { period_start: string; period_end: string; senders: SenderRow[]; }
+
 interface StageCount { key: string; label: string; count: number; }
 interface SenderRow {
   recruiter_id: string | null;
@@ -41,9 +50,15 @@ interface UnregisteredSender {
 const fdt = (s: string) => { if (!s) return '—'; return new Date(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); };
 
 export default function RecruiterTrackingPage() {
+  const [view, setView] = useState<'snapshot' | 'trend'>('snapshot');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const qs = (dateFrom ? `?date_from=${dateFrom}` : '') + (dateTo ? `${dateFrom ? '&' : '?'}date_to=${dateTo}` : '');
+
+  const [trendPeriod, setTrendPeriod] = useState<'day' | 'week' | 'month'>('week');
+  const { data: trendData, loading: trendLoading } = useFetch<{ period: string; buckets: TrendBucket[] }>(
+    view === 'trend' ? `/recruiter-attribution/sender-tracking/trend?period=${trendPeriod}&buckets=8` : null
+  );
 
   const { data: trackingData, loading } = useFetch<{ senders: SenderRow[] }>(`/recruiter-attribution/sender-tracking${qs}`);
   const { data: unregistered } = useFetch<UnregisteredSender[]>('/recruiter-attribution/unregistered-senders');
@@ -74,6 +89,60 @@ export default function RecruiterTrackingPage() {
           <Download size={14} /> Export Recruiter Submission Report
         </button>
       </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+        <button onClick={() => setView('snapshot')} style={{ padding: '6px 14px', borderRadius: 999, border: '1px solid #e2e8f0', background: view === 'snapshot' ? '#1e40af' : '#fff', color: view === 'snapshot' ? '#fff' : '#374151', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Snapshot</button>
+        <button onClick={() => setView('trend')} style={{ padding: '6px 14px', borderRadius: 999, border: '1px solid #e2e8f0', background: view === 'trend' ? '#1e40af' : '#fff', color: view === 'trend' ? '#fff' : '#374151', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Trend (Day / Week / Month)</button>
+      </div>
+
+      {view === 'trend' && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+            {(['day', 'week', 'month'] as const).map(p => (
+              <button key={p} onClick={() => setTrendPeriod(p)} style={{ padding: '5px 12px', borderRadius: 8, border: '1px solid #e2e8f0', background: trendPeriod === p ? '#eff6ff' : '#fff', color: trendPeriod === p ? '#1e40af' : '#64748b', fontSize: 11, fontWeight: 700, cursor: 'pointer', textTransform: 'capitalize' }}>{p}ly</button>
+            ))}
+          </div>
+          <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 12, background: '#fff' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 700 }}>
+              <thead>
+                <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
+                  <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: 700, color: '#64748b' }}>Period</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#64748b' }}>Total Sourced</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#64748b' }}>Offers</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#64748b' }}>Offers Accepted</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#059669' }}>Joinees</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#64748b' }}>Active Recruiters/Senders</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trendLoading && <tr><td colSpan={6} style={{ padding: 24, textAlign: 'center', color: '#94a3b8' }}>Loading…</td></tr>}
+                {!trendLoading && (trendData?.buckets || []).slice().reverse().map(b => {
+                  const totalSourced = b.senders.reduce((s, r) => s + r.total_candidates, 0);
+                  const offers = b.senders.reduce((s, r) => s + r.offers, 0);
+                  const accepted = b.senders.reduce((s, r) => s + r.offers_accepted, 0);
+                  const joinees = b.senders.reduce((s, r) => s + r.joinees, 0);
+                  return (
+                    <tr key={b.period_start} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '10px 12px', fontWeight: 600 }}>{fdt(b.period_start)}{b.period_end !== b.period_start ? ` – ${fdt(b.period_end)}` : ''}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700 }}>{totalSourced}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right' }}>{offers}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right' }}>{accepted}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#059669' }}>{joinees}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#64748b' }}>{b.senders.length}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ fontSize: 11, color: '#94a3b8', marginTop: 8 }}>
+            Each period counts every candidate whose ownership was first claimed in that window — the same real, all-time attribution the Snapshot tab uses, just bucketed by time.
+          </p>
+        </div>
+      )}
+
+      {view === 'snapshot' && (
+      <>
       <p style={{ color: '#64748b', fontSize: 13, marginTop: 4, marginBottom: 16 }}>
         Every recruiter/sender's real submission funnel — attributed to the actual sender email address (the Golden Rule), never to
         whoever&apos;s mailbox happened to receive the resume.
@@ -165,6 +234,8 @@ export default function RecruiterTrackingPage() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
     </div>
   );
 }

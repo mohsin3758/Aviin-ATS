@@ -27,7 +27,7 @@ FIELDS = (
     # GET /candidates/{id} silently omitted them from every response.
     "interested_role, expert_skills, intermediate_skills, "
     "ai_match_score, color_indicator, last_activity, created_at, updated_at, "
-    "sourcing_status, remarks"
+    "sourcing_status, remarks, willing_to_relocate, available_for_interview"
 )
 
 # Real, confirmed performance fix (2026-09-08): list_candidates() reused

@@ -15,6 +15,28 @@ const MATCH_BADGE: Record<string, { bg: string; color: string; icon: any }> = {
   name:  { bg: '#fef3c7', color: '#92400e', icon: UserCheck },
 };
 
+// Gap-analysis follow-up (2026-09-18): a duplicate match previously showed
+// only the two names/emails/phones -- nothing about whether either side is
+// already owned, already linked to a client/role, or when it was last
+// touched, which is the actual point of checking before an irreversible
+// merge. Backed by GET /duplicates' new owner1/2 + active_application1/2 +
+// updated_at1/2 fields.
+function CandidateContext({ owner, activeApp, updatedAt }: { owner: any; activeApp: any; updatedAt: string }) {
+  return (
+    <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <div style={{ fontSize: 10, color: owner ? '#1e40af' : '#cbd5e1' }}>
+        {owner ? `Owned by ${owner.recruiter_name}` : 'Unowned'}
+      </div>
+      <div style={{ fontSize: 10, color: activeApp ? '#166534' : '#cbd5e1' }}>
+        {activeApp ? `${activeApp.client_name || 'Client'} — ${activeApp.requisition_title} (${activeApp.stage})` : 'No client/role assigned'}
+      </div>
+      <div style={{ fontSize: 10, color: '#94a3b8' }}>
+        Last updated: {updatedAt ? new Date(updatedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
+      </div>
+    </div>
+  );
+}
+
 const TABS = [
   { key: 'pending',   label: 'Pending' },
   { key: 'merged',    label: 'Merged' },
@@ -116,11 +138,13 @@ export default function DuplicatesPage() {
                         all — a recruiter had no way to sanity-check what
                         actually matched before an irreversible merge. */}
                     {r.phone1 && <div style={{ fontSize: '11px', color: r.match_field === 'phone' ? '#166534' : '#94a3b8', fontWeight: r.match_field === 'phone' ? 700 : 400 }}>{r.phone1}</div>}
+                    <CandidateContext owner={r.owner1} activeApp={r.active_application1} updatedAt={r.updated_at1} />
                   </td>
                   <td style={{ padding: '12px 14px' }}>
                     <div style={{ fontSize: '13px', fontWeight: '700', color: '#0f172a' }}>{r.name2}</div>
                     <div style={{ fontSize: '11px', color: '#64748b' }}>{r.email2 || 'no email'}</div>
                     {r.phone2 && <div style={{ fontSize: '11px', color: r.match_field === 'phone' ? '#166534' : '#94a3b8', fontWeight: r.match_field === 'phone' ? 700 : 400 }}>{r.phone2}</div>}
+                    <CandidateContext owner={r.owner2} activeApp={r.active_application2} updatedAt={r.updated_at2} />
                   </td>
                   <td style={{ padding: '12px 14px' }}>
                     {(() => {
