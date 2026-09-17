@@ -2865,11 +2865,25 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                 wide table built for an email client to render (often
                 1000px+ across, many columns) — a narrow, vertical-scroll-
                 only modal clipped it on the right with no way to see the
-                rest. Both a much wider modal AND its own horizontal
-                scroll here, since even a wide modal can still be
-                narrower than a table with many columns. */}
-            <div style={{ padding: '16px 20px', overflow: 'auto', flex: 1 }}
-              dangerouslySetInnerHTML={{ __html: emailPreview.html_body }} />
+                rest. A much wider modal fixed that, but then stretched
+                the WHOLE email body (message text + the configured
+                signature, its divider line included) to that same
+                width — real email clients never do that; a message
+                renders at a normal, fixed reading width regardless of
+                the viewer's window size, and only a genuinely wide table
+                gets its own horizontal scrollbar (reported live again:
+                "why blue line? to length" — the signature's own divider
+                is a real, correctly-configured width:100% element that
+                only looked wrong because IT was the one stretched to
+                1400px, not the table). The inner wrapper below caps
+                message/signature content at a realistic width; the
+                table inside it still has its own real min-width and
+                simply overflows into the horizontal scroll this outer
+                container already provides — same as a real inbox. */}
+            <div style={{ padding: '16px 20px', overflow: 'auto', flex: 1 }}>
+              <div style={{ maxWidth: 760, margin: '0 auto' }}
+                dangerouslySetInnerHTML={{ __html: emailPreview.html_body }} />
+            </div>
             <div style={{ padding: '10px 16px', borderTop: '1px solid #E2E8F0', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => setEmailPreview(null)} style={{ padding: '7px 14px', background: '#fff', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Keep editing</button>
               <button onClick={() => { setEmailPreview(null); send(); }} disabled={sending}
