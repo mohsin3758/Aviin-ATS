@@ -2,10 +2,11 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
+import { authHeaders, API } from '@/lib/auth';
 import { EditableCell } from '@/components/sourcing-tracker/EditableCell';
 import { ProjectDetailsCell } from '@/components/sourcing-tracker/ProjectDetailsCell';
 import { Modal } from '@/components/ui/Modal';
-import { Plus } from 'lucide-react';
+import { Plus, Download } from 'lucide-react';
 
 // Sourcing Tracker — ATS-internal, spreadsheet-styled grid for the
 // sourcing-through-role-assignment workflow (5 recruiters, ~60+ profiles
@@ -14,6 +15,13 @@ import { Plus } from 'lucide-react';
 // columns (sourcing_status, remarks) — no external API, no new grid
 // library, no Google Sheets integration. See
 // docs/recruitment-workflow-gap-analysis.md for the audit this came from.
+//
+// Phase 1 follow-ups added 2026-09-18 (reported live: "build the all gaps
+// and complete it"): multi-select + bulk client/role assignment, bulk
+// sourcing-status set, column sorting (reuses the same sort_by allow-list
+// GET /candidates already enforces), CSV export (same client-side pattern
+// resume-inbox/page.tsx already uses), a real Project Details count, and
+// an optional resume upload on Quick Add.
 
 const SOURCING_STATUSES = [
   { value: 'sourced', label: 'Sourced' },
@@ -26,11 +34,24 @@ const SOURCING_STATUSES = [
   { value: 'qualified', label: 'Qualified' },
 ];
 const STATUS_LABEL = Object.fromEntries(SOURCING_STATUSES.map(s => [s.value, s.label]));
+const SORTABLE = new Set(['full_name', 'total_exp_mo', 'expected_ctc']); // matches candidates.py's ALLOWED sort_by set
 
 const th: React.CSSProperties = { padding: '8px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', fontWeight: 700, fontSize: 11, whiteSpace: 'nowrap', position: 'sticky', top: 0 };
 const td: React.CSSProperties = { padding: '4px 8px', borderBottom: '1px solid #f1f5f9', verticalAlign: 'top', fontSize: 12 };
 const selSm: React.CSSProperties = { padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, background: '#fff' };
 const inputSm: React.CSSProperties = { padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, background: '#fff' };
+const esc = (v: any) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+
+// Multipart upload, same shape as candidates/page.tsx's uploadCandidateDocument
+// — apiFetch hardcodes JSON content-type so can't carry FormData.
+async function uploadResume(candidateId: string, file: File) {
+  const fd = new FormData();
+  fd.append('document_type', 'resume');
+  fd.append('file', file);
+  const resp = await fetch(`${API}/candidates/${candidateId}/upload-document`, { method: 'POST', headers: authHeaders(), body: fd });
+  if (!resp.ok) { const t = await resp.json().catch(() => ({})); throw new Error(t?.detail || 'Resume upload failed: ' + resp.status); }
+  return resp.json();
+}
 
 export default function SourcingTrackerPage() {
   const [mounted, setMounted] = useState(false);
@@ -43,9 +64,16 @@ export default function SourcingTrackerPage() {
   const [filterReqId, setFilterReqId] = useState('');
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [sort, setSort] = useState<{ by: string; dir: 'asc' | 'desc' }>({ by: 'created_at', dir: 'desc' });
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkClientId, setBulkClientId] = useState('');
+  const [bulkReqId, setBulkReqId] = useState('');
+  const [bulkStatus, setBulkStatus] = useState('');
 
   const { data: clients } = useFetch<any[]>(mounted ? '/clients' : null);
   const { data: filterReqs } = useFetch<any[]>(mounted && filterClientId ? `/requisitions?client_id=${filterClientId}&status=open` : null);
+  const { data: bulkReqs } = useFetch<any[]>(mounted && bulkClientId ? `/requisitions?client_id=${bulkClientId}&status=open` : null);
   const { data: stageConfig } = useFetch<any[]>(mounted ? '/settings/pipeline-stages' : null);
   const liveStages = (stageConfig || [])
     .filter((s: any) => s.is_visible)
@@ -58,10 +86,10 @@ export default function SourcingTrackerPage() {
     if (statusFilter) p.set('sourcing_status', statusFilter);
     if (filterReqId) p.set('requisition_id', filterReqId);
     p.set('limit', '200');
-    p.set('sort_by', 'created_at');
-    p.set('sort_dir', 'desc');
+    p.set('sort_by', sort.by);
+    p.set('sort_dir', sort.dir);
     return p.toString();
-  }, [search, ownedFilter, statusFilter, filterReqId]);
+  }, [search, ownedFilter, statusFilter, filterReqId, sort]);
 
   const { data, loading, refetch } = useFetch<any>(mounted ? `/candidates?${qs}` : null);
   const items: any[] = data?.items || [];
@@ -76,6 +104,69 @@ export default function SourcingTrackerPage() {
     refetch();
   }
 
+  function handleSort(col: string) {
+    if (!SORTABLE.has(col)) return;
+    setSort(s => (s.by === col ? { by: col, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { by: col, dir: 'desc' }));
+  }
+
+  const allSelected = items.length > 0 && items.every(i => selected.has(i.id));
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(items.map(i => i.id)));
+  const toggleSel = (id: string) => setSelected(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+
+  async function bulkAssignRole() {
+    if (!bulkReqId || !selected.size) return;
+    setBulkBusy(true);
+    const ids = Array.from(selected);
+    // No bulk endpoint exists for (many candidates, one requisition) — each
+    // is its own POST /applications, same pattern already used by
+    // assignments/page.tsx's QuickAssignForm, so one already-linked
+    // candidate (409) doesn't block the rest.
+    const outcomes = await Promise.allSettled(
+      ids.map(id => apiFetch('/applications', { method: 'POST', body: JSON.stringify({ candidate_id: id, requisition_id: bulkReqId }) }))
+    );
+    const ok = outcomes.filter(o => o.status === 'fulfilled').length;
+    const failed = outcomes.length - ok;
+    showToast(`Assigned ${ok} candidate${ok === 1 ? '' : 's'} to the role` + (failed ? ` (${failed} already linked or failed)` : ''), failed === 0);
+    setBulkBusy(false); setSelected(new Set()); setBulkClientId(''); setBulkReqId('');
+    refetch();
+  }
+
+  async function bulkSetStatus() {
+    if (!bulkStatus || !selected.size) return;
+    setBulkBusy(true);
+    const ids = Array.from(selected);
+    const outcomes = await Promise.allSettled(
+      ids.map(id => apiFetch(`/candidates/${id}`, { method: 'PATCH', body: JSON.stringify({ sourcing_status: bulkStatus }) }))
+    );
+    const ok = outcomes.filter(o => o.status === 'fulfilled').length;
+    showToast(`Updated status on ${ok} candidate${ok === 1 ? '' : 's'}`, true);
+    setBulkBusy(false); setSelected(new Set()); setBulkStatus('');
+    refetch();
+  }
+
+  function exportCsv() {
+    const rows = selected.size ? items.filter(r => selected.has(r.id)) : items;
+    if (!rows.length) { showToast('Nothing to export', false); return; }
+    const cols = ['Name', 'Mobile', 'Email', 'Location', 'Total Exp (mo)', 'Current CTC', 'Expected CTC', 'Notice (days)', 'Skills', 'Client', 'Role', 'Stage / Sourcing Status', 'Remarks', 'Owner'];
+    const lines = [cols.map(esc).join(',')];
+    for (const r of rows) {
+      const app = r.active_application;
+      lines.push([
+        r.full_name || '', r.phone || '', r.email || '', r.location || '', r.total_exp_mo ?? '',
+        r.current_ctc ?? '', r.expected_ctc ?? '', r.notice_period_days ?? '', (r.skills || []).join('; '),
+        app?.client_name || '', app?.requisition_title || '',
+        app ? app.stage : (STATUS_LABEL[r.sourcing_status] || r.sourcing_status),
+        r.remarks || '', r.owner?.recruiter_name || '',
+      ].map(esc).join(','));
+    }
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `sourcing-tracker-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
   return (
     <div style={{ padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
@@ -85,10 +176,16 @@ export default function SourcingTrackerPage() {
             Spreadsheet-style tracking for sourced candidates — click any cell to edit directly.
           </p>
         </div>
-        <button onClick={() => setQuickAddOpen(true)}
-          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-          <Plus size={14} /> Quick Add Candidate
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={exportCsv}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', background: '#fff', color: '#374151', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+            <Download size={13} /> Export CSV
+          </button>
+          <button onClick={() => setQuickAddOpen(true)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+            <Plus size={14} /> Quick Add Candidate
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -112,12 +209,51 @@ export default function SourcingTrackerPage() {
         </select>
       </div>
 
+      {selected.size > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: 12 }}>
+          <b>{selected.size} selected</b>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <select value={bulkClientId} onChange={e => { setBulkClientId(e.target.value); setBulkReqId(''); }} style={{ ...selSm, fontSize: 11, padding: '5px 8px' }}>
+              <option value="">Client…</option>
+              {(clients || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <select value={bulkReqId} onChange={e => setBulkReqId(e.target.value)} disabled={!bulkClientId} style={{ ...selSm, fontSize: 11, padding: '5px 8px' }}>
+              <option value="">Role…</option>
+              {(bulkReqs || []).map((r: any) => <option key={r.id} value={r.id}>{r.title}</option>)}
+            </select>
+            <button onClick={bulkAssignRole} disabled={!bulkReqId || bulkBusy}
+              style={{ padding: '6px 12px', borderRadius: 7, border: 'none', background: bulkReqId ? '#1e40af' : '#94a3b8', color: '#fff', fontSize: 11, fontWeight: 700, cursor: bulkReqId && !bulkBusy ? 'pointer' : 'not-allowed' }}>
+              Assign to Role
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <select value={bulkStatus} onChange={e => setBulkStatus(e.target.value)} style={{ ...selSm, fontSize: 11, padding: '5px 8px' }}>
+              <option value="">Set Sourcing Status…</option>
+              {SOURCING_STATUSES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+            </select>
+            <button onClick={bulkSetStatus} disabled={!bulkStatus || bulkBusy}
+              style={{ padding: '6px 12px', borderRadius: 7, border: 'none', background: bulkStatus ? '#16a34a' : '#94a3b8', color: '#fff', fontSize: 11, fontWeight: 700, cursor: bulkStatus && !bulkBusy ? 'pointer' : 'not-allowed' }}>
+              Apply
+            </button>
+          </div>
+          <button onClick={() => setSelected(new Set())} style={{ marginLeft: 'auto', border: 'none', background: 'none', color: '#64748b', fontSize: 11, cursor: 'pointer', fontWeight: 600 }}>Clear selection</button>
+        </div>
+      )}
+
       <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 10 }}>
-        <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 1400 }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 1440 }}>
           <thead>
             <tr>
-              {['Name', 'Mobile', 'Email', 'Location', 'Total Exp (mo)', 'Current CTC', 'Expected CTC', 'Notice (days)', 'Skills', 'Client / Role / Status', 'Remarks', 'Project Details', 'Owner'].map(h => (
-                <th key={h} style={th}>{h}</th>
+              <th style={{ ...th, width: 30 }}><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
+              {[
+                ['Name', 'full_name'], ['Mobile', null], ['Email', null], ['Location', null],
+                ['Total Exp (mo)', 'total_exp_mo'], ['Current CTC', null], ['Expected CTC', 'expected_ctc'],
+                ['Notice (days)', null], ['Skills', null], ['Client / Role / Status', null],
+                ['Remarks', null], ['Project Details', null], ['Owner', null],
+              ].map(([label, col]) => (
+                <th key={label as string} style={{ ...th, cursor: col ? 'pointer' : 'default' }} onClick={() => col && handleSort(col as string)}>
+                  {label}{col && sort.by === col ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                </th>
               ))}
             </tr>
           </thead>
@@ -128,6 +264,8 @@ export default function SourcingTrackerPage() {
                 row={row}
                 clients={clients || []}
                 liveStages={liveStages}
+                selected={selected.has(row.id)}
+                onToggleSel={() => toggleSel(row.id)}
                 onPatch={(field, value) => patchField(row.id, field, value)}
                 onChanged={refetch}
                 showToast={showToast}
@@ -145,6 +283,7 @@ export default function SourcingTrackerPage() {
         <QuickAddModal
           onClose={() => setQuickAddOpen(false)}
           onAdded={() => { setQuickAddOpen(false); refetch(); showToast('Candidate added'); }}
+          showToast={showToast}
         />
       )}
 
@@ -157,9 +296,10 @@ export default function SourcingTrackerPage() {
   );
 }
 
-function TrackerRow({ row, clients, liveStages, onPatch, onChanged, showToast }: { row: any; clients: any[]; liveStages: any[]; onPatch: (field: string, value: any) => Promise<void>; onChanged: () => void; showToast: (msg: string, ok?: boolean) => void }) {
+function TrackerRow({ row, clients, liveStages, selected, onToggleSel, onPatch, onChanged, showToast }: { row: any; clients: any[]; liveStages: any[]; selected: boolean; onToggleSel: () => void; onPatch: (field: string, value: any) => Promise<void>; onChanged: () => void; showToast: (msg: string, ok?: boolean) => void }) {
   return (
-    <tr>
+    <tr style={{ background: selected ? '#f8fafc' : undefined }}>
+      <td style={td}><input type="checkbox" checked={selected} onChange={onToggleSel} /></td>
       <td style={{ ...td, fontWeight: 700 }}>{row.full_name}</td>
       <td style={td}>{row.phone || '—'}</td>
       <td style={td}>{row.email || '—'}</td>
@@ -179,7 +319,7 @@ function TrackerRow({ row, clients, liveStages, onPatch, onChanged, showToast }:
         <ClientRoleStatusCell row={row} clients={clients} liveStages={liveStages} onPatch={onPatch} onChanged={onChanged} showToast={showToast} />
       </td>
       <td style={{ ...td, minWidth: 160 }}><EditableCell value={row.remarks || ''} onSave={v => onPatch('remarks', v)} placeholder="Add a remark" /></td>
-      <td style={td}><ProjectDetailsCell candidateId={row.id} candidateName={row.full_name} /></td>
+      <td style={td}><ProjectDetailsCell candidateId={row.id} candidateName={row.full_name} projectCount={row.project_count} /></td>
       <td style={{ ...td, color: '#64748b' }}>{row.owner?.recruiter_name || '—'}</td>
     </tr>
   );
@@ -267,12 +407,13 @@ function ClientRoleStatusCell({ row, clients, liveStages, onPatch, onChanged, sh
   );
 }
 
-function QuickAddModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+function QuickAddModal({ onClose, onAdded, showToast }: { onClose: () => void; onAdded: () => void; showToast: (msg: string, ok?: boolean) => void }) {
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [skills, setSkills] = useState('');
   const [source, setSource] = useState('linkedin');
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [dup, setDup] = useState<any>(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -296,7 +437,7 @@ function QuickAddModal({ onClose, onAdded }: { onClose: () => void; onAdded: () 
     if (!fullName.trim()) { setErr('Full name is required'); return; }
     setSaving(true); setErr('');
     try {
-      await apiFetch('/candidates', {
+      const created = await apiFetch('/candidates', {
         method: 'POST',
         body: JSON.stringify({
           full_name: fullName.trim(),
@@ -306,6 +447,10 @@ function QuickAddModal({ onClose, onAdded }: { onClose: () => void; onAdded: () 
           source,
         }),
       });
+      if (resumeFile) {
+        try { await uploadResume(created.id, resumeFile); }
+        catch (upErr: any) { showToast('Candidate added, but resume upload failed: ' + (upErr?.message || 'unknown error'), false); }
+      }
       onAdded();
     } catch (e: any) {
       setErr(e?.message || 'Could not add candidate');
@@ -330,6 +475,11 @@ function QuickAddModal({ onClose, onAdded }: { onClose: () => void; onAdded: () 
           <option value="database">Internal Database</option>
           <option value="job_board">Job Board</option>
         </select>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: '#64748b', display: 'block', marginBottom: 4 }}>Resume (optional)</label>
+          <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={e => setResumeFile(e.target.files?.[0] || null)} style={{ fontSize: 12 }} />
+          {resumeFile && <div style={{ fontSize: 11, color: '#166534', marginTop: 4 }}>✓ {resumeFile.name}</div>}
+        </div>
         {dup?.has_duplicate && (
           <div style={{ fontSize: 12, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '8px 10px' }}>
             Possible duplicate — a candidate with this email/phone may already exist. Saving will still work if this is genuinely a different person.

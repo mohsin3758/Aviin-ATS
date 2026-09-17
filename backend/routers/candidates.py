@@ -235,11 +235,15 @@ async def list_candidates(
                        " LEFT JOIN clients cl3 ON cl3.id = r3.client_id"
                        " WHERE a3.candidate_id = c.id AND a3.is_active IS NOT FALSE"
                        " ORDER BY a3.updated_at DESC LIMIT 1) AS active_app_json")
+    # Sourcing Tracker: cheap count so the grid's "Project Details" cell can
+    # show a real number instead of always reading "Add projects."
+    project_count_sub = ("(SELECT COUNT(*) FROM candidate_skill_experience cse"
+                          " WHERE cse.candidate_id = c.id) AS project_count")
     flds = ", ".join("c." + f.strip() for f in LIST_FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
         rows  = await conn.fetch(
-            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub}, {top_match_sub}, {active_app_sub} FROM candidates c {where} ORDER BY {order_col} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
+            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub}, {top_match_sub}, {active_app_sub}, {project_count_sub} FROM candidates c {where} ORDER BY {order_col} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
             *params, limit, offset)
     items = []
     for r in rows:
