@@ -2155,6 +2155,15 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // this requisition/project.
   const [defaultScope, setDefaultScope] = useState<'client' | 'contact' | 'requisition'>('client');
   const [sending, setSending] = useState(false);
+  // REAL BUG FIX (2026-09-17, reported live: "View in Sent Mailbox...
+  // problem is not showing the details, its only compose not the
+  // complete email details") — the link below used to be a bare,
+  // param-less `/conversations` href that always opened the default
+  // Inbox with nothing selected, before OR after a send. Now tracks the
+  // real candidate_messages.id the backend just created (added to the
+  // submit-to-client/batch response) so the link can deep-link straight
+  // to that exact sent email once it exists.
+  const [lastSentMessageId, setLastSentMessageId] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
   const [manualDraft, setManualDraft] = useState<Record<string, string> | null>(null);
   const [manualLoading, setManualLoading] = useState(false);
@@ -2340,12 +2349,14 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         showToast(ok === total ? `Sent all ${total} ✓` : `Sent ${ok}/${total} — check individual results`, ok > 0);
         const anchorResult = (r.results || []).find((x: any) => x.application_id === appId);
         stageBumped = !!anchorResult?.stage_bumped_to_submitted;
+        if (anchorResult?.message_id) setLastSentMessageId(anchorResult.message_id);
         fetchAdditionalHistory(additionalCandidates);
         setAdditionalCandidates([]);
       } else {
         const r = await apiFetch(`/applications/${appId}/submit-to-client`, { method: 'POST', body: JSON.stringify(body) });
         showToast(r.email_sent ? `Sent to ${r.recipient_name} ✓` : `Logged, but email failed: ${r.email_error || 'SMTP error'}`, !!r.email_sent);
         stageBumped = !!r.stage_bumped_to_submitted;
+        if (r.message_id) setLastSentMessageId(r.message_id);
       }
       setInitialized(false);
       setHiddenKeys([]);
@@ -2777,9 +2788,26 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
           (every email this app sends is logged to candidate_messages,
           see routers/communications.py's _log()) is always here, so
           there's always a real way to go double-check a send, not just
-          right after clicking it. */}
-      <a href="/conversations" target="_blank" rel="noreferrer" style={{ fontSize: 10, fontWeight: 700, color: '#2563EB', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-        <ExternalLink size={11} /> View in Sent Mailbox (Email / Conversations) →
+          right after clicking it.
+          REAL BUG FIX (2026-09-17, reported live: "problem is not
+          showing the details, its only compose not the complete email
+          details") — this used to be a bare href="/conversations" with
+          no params at all, so it always opened the default empty Inbox,
+          never the actual sent email, before OR after clicking Send.
+          Before a send in this session it now at least opens straight to
+          the Sent folder (not Inbox); after a successful send it deep-
+          links to that exact message via ?open_id, using the real
+          candidate_messages.id the backend now returns (see
+          kae_submission.py's submit-to-client response). The COMPOSE
+          EMAIL / TRACKING SHEET PREVIEW sections above this button are
+          the actual pre-send review — nothing is sent until Approve &
+          Send to Client is clicked. */}
+      <a
+        href={lastSentMessageId ? `/conversations?folder=sent&open_id=${lastSentMessageId}` : '/conversations?folder=sent'}
+        target="_blank" rel="noreferrer"
+        style={{ fontSize: 10, fontWeight: 700, color: '#2563EB', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+      >
+        <ExternalLink size={11} /> {lastSentMessageId ? 'View this email in Sent Mailbox →' : 'View Sent Mailbox (Email / Conversations) →'}
       </a>
 
       {(history.length > 0 || Object.values(additionalHistory).some(h => h.length > 0)) && (

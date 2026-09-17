@@ -928,6 +928,24 @@ export default function MailboxPage() {
     })();
     window.history.replaceState(null, '', window.location.pathname);
   }, []);
+
+  // REAL BUG FIX (2026-09-17, reported live: pipeline's "View in Sent
+  // Mailbox" link always opened here empty, on Inbox, with nothing
+  // selected — before OR after a real client-facing send). Reads
+  // ?folder=<name> to open directly on that folder (e.g. Sent, instead
+  // of always defaulting to Inbox), and ?open_id=<candidate_messages.id>
+  // to select the exact message once the caller actually has one (see
+  // pipeline/page.tsx's SubmitClientTab, which only has an id to pass
+  // after a send succeeds — before that it only sets ?folder=sent).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const folderParam = params.get('folder');
+    const openId = params.get('open_id');
+    if (!folderParam && !openId) return;
+    if (folderParam) setFolder(folderParam as Folder);
+    if (openId) setSelectedId(openId);
+    window.history.replaceState(null, '', window.location.pathname);
+  }, []);
   const [search, setSearch] = useState('');
   const [showSearchFilters, setShowSearchFilters] = useState(false);
   const [searchFrom, setSearchFrom] = useState('');
