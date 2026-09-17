@@ -11,6 +11,7 @@ from schemas import ApplicationCreate, StageUpdate
 from permissions import require_permission
 from routers.pipeline_stages import is_valid_stage, resolve_default_add_stage, recruiter_can_move_to_stage
 from routers.p30_p35 import fire_webhook
+from routers.screening import maybe_auto_enroll_for_new_application
 from services import candidate_ownership as ownership
 from services import activity_events
 
@@ -261,6 +262,16 @@ async def create_application(body: ApplicationCreate, background_tasks: Backgrou
         "requisition_id": body.requisition_id,
         "candidate_id": body.candidate_id,
     }, actor.tenant_id)
+
+    # WhatsApp auto-trigger point (2026-09-18, opt-in per requisition via
+    # requisitions.auto_screening_enabled) -- same reasoning as the
+    # fire_webhook call above: this is the one function every real
+    # application-creation path (Sourcing Tracker, Resume Inbox's manual
+    # client/role picker, bulk assign, etc.) already funnels through, so
+    # hooking in here covers all of them without touching each caller.
+    # Best-effort background task; never blocks or can fail this response.
+    background_tasks.add_task(
+        maybe_auto_enroll_for_new_application, actor.tenant_id, body.candidate_id, body.requisition_id, actor.user_id)
 
     return dict(row)
 

@@ -104,6 +104,47 @@ async def enroll_candidate_for_screening(conn, tenant_id: str, candidate_id: str
     return {"status": "enrolled", "candidate_id": str(candidate_id), "session_id": str(session_id)}
 
 
+async def maybe_auto_enroll_for_new_application(tenant_id: str, candidate_id: str, requisition_id: str,
+                                                 actor_user_id: Optional[str]) -> None:
+    """WhatsApp auto-trigger point (2026-09-18, explicit user decision:
+    opt-in per requisition, not blanket-on for every role). Fired as a
+    FastAPI BackgroundTask from POST /applications right after a new
+    candidate-to-requisition link is created (applications.py) -- runs
+    AFTER the response is already sent, on its own fresh connection, and
+    must never raise: this is a best-effort side effect of assigning a
+    role, never something that should be able to fail/block the actual
+    assignment. Skips silently (not an error) when: the requisition
+    hasn't opted in, the assigning recruiter has no working WhatsApp
+    account connected (same hard requirement /screening/enroll itself
+    enforces -- auto-enrolling from someone else's number would be
+    wrong), or enroll_candidate_for_screening's own check finds the
+    candidate already has an active session.
+    """
+    try:
+        async with db.tenant_conn(tenant_id) as conn:
+            enabled = await conn.fetchval(
+                "SELECT auto_screening_enabled FROM requisitions WHERE id=$1 AND tenant_id=$2",
+                requisition_id, tenant_id)
+            if not enabled or not actor_user_id:
+                return
+            whatsapp_account_id = await conn.fetchval(
+                """SELECT id FROM user_whatsapp_accounts
+                   WHERE tenant_id=$1 AND user_id=$2 AND status='working' AND is_active=TRUE""",
+                tenant_id, actor_user_id)
+            if not whatsapp_account_id:
+                return
+            default_stage = await _default_add_stage(conn, tenant_id)
+            async with conn.transaction():
+                await enroll_candidate_for_screening(
+                    conn, tenant_id, candidate_id, requisition_id, "auto_role_assignment",
+                    default_stage, str(whatsapp_account_id), actor_user_id)
+    except Exception:
+        # Best-effort background side effect -- never let a screening/
+        # WhatsApp failure surface against the (already-completed)
+        # application-creation request.
+        pass
+
+
 async def _enroll_row(conn, actor: Actor, row: ScreeningEnrollRow, requisition_id: str,
                        enrolled_via: str, default_stage: str, whatsapp_account_id: Optional[str],
                        language: str = "en") -> dict:

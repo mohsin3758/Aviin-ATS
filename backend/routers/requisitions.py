@@ -31,7 +31,8 @@ FIELDS = """id, tenant_id, client_id, title, description, skills_required,
             education_required, shift_type, notice_period_max,
             industry, client_name, approval_status,
             submission_limit_per_recruiter, is_active,
-            employment_types, work_modes, shift_timing_ids, inbound_keyword"""
+            employment_types, work_modes, shift_timing_ids, inbound_keyword,
+            auto_screening_enabled"""
 
 
 def _parse_req_jsonb(d: dict) -> dict:

@@ -63,6 +63,7 @@ const EMPTY_FORM = {
   // only for skills the recruiter has explicitly set a minimum on.
   mandatory_skill_min_years: {} as Record<string, number>,
   description: '',
+  auto_screening_enabled: false,
 };
 
 const TYPE_BADGE: Record<string, string> = {
@@ -1499,6 +1500,7 @@ function RequisitionsPageInner() {
       mandatory_skills: req.mandatory_skills || [],
       mandatory_skill_min_years: req.mandatory_skill_min_years || {},
       description: req.description || '',
+      auto_screening_enabled: req.auto_screening_enabled || false,
     });
     setEditId(req.id); setError(''); setShowModal(true);
   };
@@ -1954,6 +1956,16 @@ function RequisitionsPageInner() {
           <FormField label="Submission Limit / Recruiter" hint="Max candidates one recruiter can submit for this role — blank = unlimited">
             <input type="number" style={inputStyle} min={1} placeholder="Unlimited"
               value={form.submission_limit_per_recruiter} onChange={fNum('submission_limit_per_recruiter')} />
+          </FormField>
+        </FormRow>
+
+        <FormRow cols={1}>
+          <FormField label="WhatsApp Screening" hint="When on, a candidate newly assigned to this role is automatically sent the WhatsApp screening opt-in — no manual enroll step. Uses the assigning recruiter's own connected WhatsApp number; skipped (not blocked) if they haven't connected one.">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#374151', cursor: 'pointer' }}>
+              <input type="checkbox" checked={form.auto_screening_enabled}
+                onChange={e => setForm(prev => ({ ...prev, auto_screening_enabled: e.target.checked }))} />
+              Auto-invite new candidates to WhatsApp screening
+            </label>
           </FormField>
         </FormRow>
 

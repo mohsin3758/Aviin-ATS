@@ -228,6 +228,7 @@ class RequisitionUpdate(BaseModel):
     notice_period_max: Optional[int] = None
     inbound_keyword: Optional[str] = None
     industry: Optional[str] = None
+    auto_screening_enabled: Optional[bool] = None
     client_name: Optional[str] = None
     submission_limit_per_recruiter: Optional[int] = None
     is_active: Optional[bool] = None
