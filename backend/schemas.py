@@ -138,6 +138,8 @@ class CandidateUpdate(BaseModel):
     truecaller_verified: Optional[bool] = None
     monthly_contract_salary: Optional[float] = None
     tracking_sheet_status: Optional[str] = None
+    sourcing_status: Optional[str] = None
+    remarks: Optional[str] = None
 
 
 class RequisitionCreate(BaseModel):

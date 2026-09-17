@@ -26,7 +26,8 @@ FIELDS = (
     # public-form field additions the same day) but never selected here, so
     # GET /candidates/{id} silently omitted them from every response.
     "interested_role, expert_skills, intermediate_skills, "
-    "ai_match_score, color_indicator, last_activity, created_at, updated_at"
+    "ai_match_score, color_indicator, last_activity, created_at, updated_at, "
+    "sourcing_status, remarks"
 )
 
 # Real, confirmed performance fix (2026-09-08): list_candidates() reused
@@ -53,6 +54,8 @@ async def list_candidates(
     max_exp:  Optional[int] = Query(None),
     tag_id:   Optional[str] = Query(None),
     owned:    Optional[str] = Query(None),  # 'unowned' | 'active' — 2026-08-11 ownership filter
+    requisition_id:   Optional[str] = Query(None),  # Sourcing Tracker: scope to one role's cohort
+    sourcing_status:  Optional[str] = Query(None),  # Sourcing Tracker: pre-application status filter
     limit:    int = Query(100, le=500),
     offset:   int = Query(0, ge=0),
     sort_by:  str = Query('created_at'),
@@ -87,6 +90,14 @@ async def list_candidates(
         conditions.append(
             f"EXISTS (SELECT 1 FROM candidate_tag_map ctm WHERE ctm.candidate_id=c.id AND ctm.tag_id=${len(params)})"
         )
+    if requisition_id:
+        params.append(requisition_id)
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM applications a4 WHERE a4.candidate_id=c.id "
+            f"AND a4.requisition_id=${len(params)} AND a4.is_active IS NOT FALSE)"
+        )
+    if sourcing_status:
+        params.append(sourcing_status); conditions.append(f"c.sourcing_status = ${len(params)}")
     _owned_exists = ("EXISTS (SELECT 1 FROM candidate_ownership co WHERE co.candidate_id=c.id "
                       "AND co.status='active' AND co.ownership_expires_at > now())")
     if owned == "unowned":
@@ -209,11 +220,26 @@ async def list_candidates(
                       "'readiness_grade',cs.readiness_grade,'requisition_title',r.title)"
                       " FROM candidate_scores cs LEFT JOIN requisitions r ON r.id=cs.requisition_id"
                       " WHERE cs.candidate_id=c.id AND r.is_active IS NOT FALSE ORDER BY cs.readiness_index DESC NULLS LAST LIMIT 1) AS top_match_json")
+    # Sourcing Tracker (2026-09-18): the one real, currently-active
+    # client/role a candidate is linked to, if any — same
+    # most-recently-updated-wins rule pl_sub above already uses for
+    # pipeline_stage, so this doesn't introduce a second, competing
+    # definition of "current application." Deliberately separate from
+    # pl_sub (which stays untouched) rather than folded into it, so
+    # existing pl_sub/pipeline_stage consumers see zero behavior change.
+    active_app_sub = ("(SELECT json_build_object("
+                       "'application_id', a3.id, 'requisition_id', a3.requisition_id,"
+                       "'requisition_title', r3.title, 'client_id', r3.client_id,"
+                       "'client_name', cl3.name, 'stage', a3.stage)"
+                       " FROM applications a3 JOIN requisitions r3 ON r3.id = a3.requisition_id"
+                       " LEFT JOIN clients cl3 ON cl3.id = r3.client_id"
+                       " WHERE a3.candidate_id = c.id AND a3.is_active IS NOT FALSE"
+                       " ORDER BY a3.updated_at DESC LIMIT 1) AS active_app_json")
     flds = ", ".join("c." + f.strip() for f in LIST_FIELDS.split(","))
     async with db.tenant_conn(actor.tenant_id) as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM candidates c {where}", *params)
         rows  = await conn.fetch(
-            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub}, {top_match_sub} FROM candidates c {where} ORDER BY {order_col} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
+            f"SELECT {flds}, {pl_sub}, {tags_sub}, {owner_sub}, {top_match_sub}, {active_app_sub} FROM candidates c {where} ORDER BY {order_col} {sort_dir} LIMIT ${p_limit} OFFSET ${p_offset}",
             *params, limit, offset)
     items = []
     for r in rows:
@@ -232,6 +258,8 @@ async def list_candidates(
         d["owner"] = json.loads(oj) if oj else None
         tm = d.pop("top_match_json", None)
         d["top_match"] = json.loads(tm) if tm else None
+        aa = d.pop("active_app_json", None)
+        d["active_application"] = json.loads(aa) if aa else None
         items.append(d)
     return {"items": items, "total": int(total), "limit": limit, "offset": offset}
 
@@ -1544,7 +1572,12 @@ async def update_candidate(candidate_id: str, body: CandidateUpdate, actor: Acto
     params.append(candidate_id)
     sql = f"UPDATE candidates SET {chr(44).join(clauses)}, updated_at=now() WHERE id=${len(params)} RETURNING {FIELDS}"
     async with db.tenant_conn(actor.tenant_id) as conn:
-        row = await conn.fetchrow(sql, *params)
+        try:
+            row = await conn.fetchrow(sql, *params)
+        except Exception as exc:
+            if "candidates_sourcing_status_check" in str(exc):
+                raise HTTPException(400, "Invalid sourcing_status value") from exc
+            raise
     if not row:
         raise HTTPException(404, "Candidate not found")
     return dict(row)
