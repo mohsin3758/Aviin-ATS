@@ -3,32 +3,25 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { authHeaders, API } from '@/lib/auth';
+import { EditableCell } from '@/components/sourcing-tracker/EditableCell';
 import { ProjectDetailsCell } from '@/components/sourcing-tracker/ProjectDetailsCell';
 import { Modal } from '@/components/ui/Modal';
 import { Plus, Download } from 'lucide-react';
-import { DataGrid, SelectColumn, textEditor, type Column, type SortColumn, type RenderCellProps, type RowsChangeData, type FillEvent } from 'react-data-grid';
-import 'react-data-grid/lib/styles.css';
 
 // Sourcing Tracker — ATS-internal, spreadsheet-styled grid for the
 // sourcing-through-role-assignment workflow (5 recruiters, ~60+ profiles
 // per role). Built entirely on existing tables/endpoints
 // (candidates/applications/requisitions/clients) plus two new candidate
-// columns (sourcing_status, remarks) -- no external API, no Google Sheets
-// integration. See docs/recruitment-workflow-gap-analysis.md for the
-// audit this came from.
+// columns (sourcing_status, remarks) — no external API, no new grid
+// library, no Google Sheets integration. See
+// docs/recruitment-workflow-gap-analysis.md for the audit this came from.
 //
-// Phase 1 follow-ups (2026-09-18, "build the all gaps and complete it"):
-// multi-select + bulk client/role assignment, bulk sourcing-status set,
-// column sorting, CSV export, project counts, resume upload on Quick Add.
-//
-// react-data-grid adoption (2026-09-18, same request, continued): real
-// keyboard navigation between cells, a drag-to-fill-down handle within a
-// column, and column resizing -- NOT real multi-cell range copy/paste.
-// Verified directly against react-data-grid's own type definitions before
-// building this: onCopy/onPaste/onFill are all single-cell/single-column
-// operations, never a 2D range. True Google-Sheets-style range copy/paste
-// is an AG Grid Enterprise (paid) feature in every mainstream React grid
-// library -- not something this migration claims to deliver.
+// Phase 1 follow-ups added 2026-09-18 (reported live: "build the all gaps
+// and complete it"): multi-select + bulk client/role assignment, bulk
+// sourcing-status set, column sorting (reuses the same sort_by allow-list
+// GET /candidates already enforces), CSV export (same client-side pattern
+// resume-inbox/page.tsx already uses), a real Project Details count, and
+// an optional resume upload on Quick Add.
 
 const SOURCING_STATUSES = [
   { value: 'sourced', label: 'Sourced' },
@@ -43,12 +36,14 @@ const SOURCING_STATUSES = [
 const STATUS_LABEL = Object.fromEntries(SOURCING_STATUSES.map(s => [s.value, s.label]));
 const SORTABLE = new Set(['full_name', 'total_exp_mo', 'expected_ctc']); // matches candidates.py's ALLOWED sort_by set
 
+const th: React.CSSProperties = { padding: '8px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', fontWeight: 700, fontSize: 11, whiteSpace: 'nowrap', position: 'sticky', top: 0 };
+const td: React.CSSProperties = { padding: '4px 8px', borderBottom: '1px solid #f1f5f9', verticalAlign: 'top', fontSize: 12 };
 const selSm: React.CSSProperties = { padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, background: '#fff' };
 const inputSm: React.CSSProperties = { padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, background: '#fff' };
 const esc = (v: any) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
 
 // Multipart upload, same shape as candidates/page.tsx's uploadCandidateDocument
-// -- apiFetch hardcodes JSON content-type so can't carry FormData.
+// — apiFetch hardcodes JSON content-type so can't carry FormData.
 async function uploadResume(candidateId: string, file: File) {
   const fd = new FormData();
   fd.append('document_type', 'resume');
@@ -57,28 +52,6 @@ async function uploadResume(candidateId: string, file: File) {
   if (!resp.ok) { const t = await resp.json().catch(() => ({})); throw new Error(t?.detail || 'Resume upload failed: ' + resp.status); }
   return resp.json();
 }
-
-// Row shape the grid actually holds locally -- the raw candidate fields
-// plus two display-only derived strings (skills_display, owner_display)
-// so react-data-grid's default text editor/renderer can bind to a plain
-// string column instead of needing a custom editor for the array/object
-// fields.
-function toGridRow(item: any) {
-  return { ...item, skills_display: (item.skills || []).join(', '), owner_display: item.owner?.recruiter_name || '' };
-}
-
-// Maps a grid column key back to the real PATCH /candidates/{id} field
-// name + value transform. Columns not listed here (client_role_status,
-// project_details, name/mobile/email/owner) are never grid-editable.
-const FIELD_MAP: Record<string, { field: string; toApi: (v: string) => any }> = {
-  location: { field: 'location', toApi: v => v || null },
-  total_exp_mo: { field: 'total_exp_mo', toApi: v => (v === '' || v == null ? null : Number(v)) },
-  current_ctc: { field: 'current_ctc', toApi: v => (v === '' || v == null ? null : Number(v)) },
-  expected_ctc: { field: 'expected_ctc', toApi: v => (v === '' || v == null ? null : Number(v)) },
-  notice_period_days: { field: 'notice_period_days', toApi: v => (v === '' || v == null ? null : Number(v)) },
-  remarks: { field: 'remarks', toApi: v => v || null },
-  skills_display: { field: 'skills', toApi: v => String(v).split(',').map(s => s.trim()).filter(Boolean) },
-};
 
 export default function SourcingTrackerPage() {
   const [mounted, setMounted] = useState(false);
@@ -91,13 +64,12 @@ export default function SourcingTrackerPage() {
   const [filterReqId, setFilterReqId] = useState('');
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
-  const [sortColumns, setSortColumns] = useState<readonly SortColumn[]>([{ columnKey: 'created_at', direction: 'DESC' }]);
-  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [sort, setSort] = useState<{ by: string; dir: 'asc' | 'desc' }>({ by: 'created_at', dir: 'desc' });
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkClientId, setBulkClientId] = useState('');
   const [bulkReqId, setBulkReqId] = useState('');
   const [bulkStatus, setBulkStatus] = useState('');
-  const [rows, setRows] = useState<any[]>([]);
 
   const { data: clients } = useFetch<any[]>(mounted ? '/clients' : null);
   const { data: filterReqs } = useFetch<any[]>(mounted && filterClientId ? `/requisitions?client_id=${filterClientId}&status=open` : null);
@@ -107,7 +79,6 @@ export default function SourcingTrackerPage() {
     .filter((s: any) => s.is_visible)
     .sort((a: any, b: any) => a.display_order - b.display_order);
 
-  const sort = sortColumns[0] || { columnKey: 'created_at', direction: 'DESC' };
   const qs = useMemo(() => {
     const p = new URLSearchParams();
     if (search.trim()) p.set('search', search.trim());
@@ -115,18 +86,13 @@ export default function SourcingTrackerPage() {
     if (statusFilter) p.set('sourcing_status', statusFilter);
     if (filterReqId) p.set('requisition_id', filterReqId);
     p.set('limit', '200');
-    p.set('sort_by', SORTABLE.has(sort.columnKey) ? sort.columnKey : 'created_at');
-    p.set('sort_dir', sort.direction === 'ASC' ? 'asc' : 'desc');
+    p.set('sort_by', sort.by);
+    p.set('sort_dir', sort.dir);
     return p.toString();
-  }, [search, ownedFilter, statusFilter, filterReqId, sort.columnKey, sort.direction]);
+  }, [search, ownedFilter, statusFilter, filterReqId, sort]);
 
   const { data, loading, refetch } = useFetch<any>(mounted ? `/candidates?${qs}` : null);
   const items: any[] = data?.items || [];
-
-  // Server data is the source of truth; re-derive the grid's local editable
-  // row copies whenever a fresh fetch lands (filter change, sort change, or
-  // an explicit refetch() after a client/role/project-details action).
-  useEffect(() => { setRows(items.map(toGridRow)); }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function showToast(msg: string, ok = true) {
     setToast({ msg, ok });
@@ -134,42 +100,25 @@ export default function SourcingTrackerPage() {
   }
 
   async function patchField(candidateId: string, field: string, value: any) {
-    try {
-      await apiFetch(`/candidates/${candidateId}`, { method: 'PATCH', body: JSON.stringify({ [field]: value }) });
-    } catch (e: any) {
-      showToast(e?.message || `Could not save ${field}`, false);
-    }
+    await apiFetch(`/candidates/${candidateId}`, { method: 'PATCH', body: JSON.stringify({ [field]: value }) });
+    refetch();
   }
 
-  function handleRowsChange(updatedRows: any[], { indexes, column }: RowsChangeData<any>) {
-    setRows(updatedRows); // optimistic -- react-data-grid already committed the local edit
-    const mapping = FIELD_MAP[column.key];
-    if (!mapping) return;
-    for (const idx of indexes) {
-      const row = updatedRows[idx];
-      patchField(row.id, mapping.field, mapping.toApi(row[column.key]));
-    }
+  function handleSort(col: string) {
+    if (!SORTABLE.has(col)) return;
+    setSort(s => (s.by === col ? { by: col, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { by: col, dir: 'desc' }));
   }
 
-  // Drag-to-fill-down within one column (grab a cell's corner handle, drag
-  // over several rows below) -- the one genuinely spreadsheet-like bulk-
-  // edit gesture this library actually supports for free. Returns the
-  // updated target row; react-data-grid applies it and then calls
-  // handleRowsChange above for every row the drag covered, so persistence
-  // is already handled there -- nothing extra needed here.
-  function handleFill(event: FillEvent<any>): any {
-    return { ...event.targetRow, [event.columnKey]: event.sourceRow[event.columnKey] };
-  }
-
-  const allSelected = rows.length > 0 && rows.every(i => selected.has(i.id));
-  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map(i => i.id)));
+  const allSelected = items.length > 0 && items.every(i => selected.has(i.id));
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(items.map(i => i.id)));
+  const toggleSel = (id: string) => setSelected(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
 
   async function bulkAssignRole() {
     if (!bulkReqId || !selected.size) return;
     setBulkBusy(true);
     const ids = Array.from(selected);
-    // No bulk endpoint exists for (many candidates, one requisition) --
-    // each is its own POST /applications, same pattern already used by
+    // No bulk endpoint exists for (many candidates, one requisition) — each
+    // is its own POST /applications, same pattern already used by
     // assignments/page.tsx's QuickAssignForm, so one already-linked
     // candidate (409) doesn't block the rest.
     const outcomes = await Promise.allSettled(
@@ -196,11 +145,11 @@ export default function SourcingTrackerPage() {
   }
 
   function exportCsv() {
-    const exportRows = selected.size ? rows.filter(r => selected.has(r.id)) : rows;
-    if (!exportRows.length) { showToast('Nothing to export', false); return; }
+    const rows = selected.size ? items.filter(r => selected.has(r.id)) : items;
+    if (!rows.length) { showToast('Nothing to export', false); return; }
     const cols = ['Name', 'Mobile', 'Email', 'Location', 'Total Exp (mo)', 'Current CTC', 'Expected CTC', 'Notice (days)', 'Skills', 'Client', 'Role', 'Stage / Sourcing Status', 'Remarks', 'Owner'];
     const lines = [cols.map(esc).join(',')];
-    for (const r of exportRows) {
+    for (const r of rows) {
       const app = r.active_application;
       lines.push([
         r.full_name || '', r.phone || '', r.email || '', r.location || '', r.total_exp_mo ?? '',
@@ -218,41 +167,13 @@ export default function SourcingTrackerPage() {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
-  const columns: readonly Column<any>[] = [
-    SelectColumn,
-    { key: 'full_name', name: 'Name', width: 160, resizable: true, sortable: true, frozen: true },
-    { key: 'phone', name: 'Mobile', width: 120, resizable: true },
-    { key: 'email', name: 'Email', width: 190, resizable: true },
-    { key: 'location', name: 'Location', width: 130, resizable: true, editable: true, renderEditCell: textEditor },
-    { key: 'total_exp_mo', name: 'Total Exp (mo)', width: 110, resizable: true, sortable: true, editable: true, renderEditCell: textEditor },
-    { key: 'current_ctc', name: 'Current CTC', width: 110, resizable: true, editable: true, renderEditCell: textEditor },
-    { key: 'expected_ctc', name: 'Expected CTC', width: 110, resizable: true, sortable: true, editable: true, renderEditCell: textEditor },
-    { key: 'notice_period_days', name: 'Notice (days)', width: 100, resizable: true, editable: true, renderEditCell: textEditor },
-    { key: 'skills_display', name: 'Skills', width: 220, resizable: true, editable: true, renderEditCell: textEditor },
-    {
-      key: 'client_role_status', name: 'Client / Role / Status', width: 260, resizable: true,
-      renderCell: (props: RenderCellProps<any>) => (
-        <ClientRoleStatusCell row={props.row} clients={clients || []} liveStages={liveStages}
-          onPatch={(field, value) => patchField(props.row.id, field, value)} onChanged={refetch} showToast={showToast} />
-      ),
-    },
-    { key: 'remarks', name: 'Remarks', width: 180, resizable: true, editable: true, renderEditCell: textEditor },
-    {
-      key: 'project_details', name: 'Project Details', width: 130, resizable: true,
-      renderCell: (props: RenderCellProps<any>) => (
-        <ProjectDetailsCell candidateId={props.row.id} candidateName={props.row.full_name} projectCount={props.row.project_count} />
-      ),
-    },
-    { key: 'owner_display', name: 'Owner', width: 140, resizable: true },
-  ];
-
   return (
     <div style={{ padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
         <div>
           <h1 style={{ fontSize: 18, fontWeight: 800, color: '#0f172a', margin: 0 }}>Sourcing Tracker</h1>
           <p style={{ fontSize: 12, color: '#64748b', margin: '2px 0 0' }}>
-            Spreadsheet-style tracking for sourced candidates — click any cell to edit, drag a cell's corner handle down to fill.
+            Spreadsheet-style tracking for sourced candidates — click any cell to edit directly.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -319,31 +240,41 @@ export default function SourcingTrackerPage() {
         </div>
       )}
 
-      <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' }}>
-        {/* react-data-grid touches browser-only APIs during its own first
-            render -- crashes Next.js's build-time static prerendering pass
-            if mounted unconditionally. Gated behind the same `mounted`
-            flag already used everywhere else in this app for client-only
-            state, so it only ever mounts after real client-side hydration. */}
-        {mounted && (
-          <DataGrid
-            columns={columns}
-            rows={rows}
-            rowKeyGetter={(row: any) => row.id}
-            onRowsChange={handleRowsChange}
-            onFill={handleFill}
-            selectedRows={selected}
-            onSelectedRowsChange={setSelected}
-            sortColumns={sortColumns}
-            onSortColumnsChange={setSortColumns}
-            className="rdg-light"
-            style={{ height: 'min(75vh, 760px)', fontSize: 12 }}
-            rowHeight={98}
-            headerRowHeight={34}
-          />
-        )}
+      <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 10 }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 1440 }}>
+          <thead>
+            <tr>
+              <th style={{ ...th, width: 30 }}><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
+              {[
+                ['Name', 'full_name'], ['Mobile', null], ['Email', null], ['Location', null],
+                ['Total Exp (mo)', 'total_exp_mo'], ['Current CTC', null], ['Expected CTC', 'expected_ctc'],
+                ['Notice (days)', null], ['Skills', null], ['Client / Role / Status', null],
+                ['Remarks', null], ['Project Details', null], ['Owner', null],
+              ].map(([label, col]) => (
+                <th key={label as string} style={{ ...th, cursor: col ? 'pointer' : 'default' }} onClick={() => col && handleSort(col as string)}>
+                  {label}{col && sort.by === col ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(row => (
+              <TrackerRow
+                key={row.id}
+                row={row}
+                clients={clients || []}
+                liveStages={liveStages}
+                selected={selected.has(row.id)}
+                onToggleSel={() => toggleSel(row.id)}
+                onPatch={(field, value) => patchField(row.id, field, value)}
+                onChanged={refetch}
+                showToast={showToast}
+              />
+            ))}
+          </tbody>
+        </table>
         {loading && <div style={{ padding: 16, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>Loading…</div>}
-        {!loading && rows.length === 0 && (
+        {!loading && items.length === 0 && (
           <div style={{ padding: 16, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>No candidates match these filters yet.</div>
         )}
       </div>
@@ -365,6 +296,35 @@ export default function SourcingTrackerPage() {
   );
 }
 
+function TrackerRow({ row, clients, liveStages, selected, onToggleSel, onPatch, onChanged, showToast }: { row: any; clients: any[]; liveStages: any[]; selected: boolean; onToggleSel: () => void; onPatch: (field: string, value: any) => Promise<void>; onChanged: () => void; showToast: (msg: string, ok?: boolean) => void }) {
+  return (
+    <tr style={{ background: selected ? '#f8fafc' : undefined }}>
+      <td style={td}><input type="checkbox" checked={selected} onChange={onToggleSel} /></td>
+      <td style={{ ...td, fontWeight: 700 }}>{row.full_name}</td>
+      <td style={td}>{row.phone || '—'}</td>
+      <td style={td}>{row.email || '—'}</td>
+      <td style={td}><EditableCell value={row.location || ''} onSave={v => onPatch('location', v)} placeholder="Location" /></td>
+      <td style={td}><EditableCell value={String(row.total_exp_mo ?? '')} variant="number" onSave={v => onPatch('total_exp_mo', v === '' ? null : Number(v))} placeholder="0" /></td>
+      <td style={td}><EditableCell value={row.current_ctc != null ? String(row.current_ctc) : ''} variant="number" onSave={v => onPatch('current_ctc', v === '' ? null : Number(v))} placeholder="—" /></td>
+      <td style={td}><EditableCell value={row.expected_ctc != null ? String(row.expected_ctc) : ''} variant="number" onSave={v => onPatch('expected_ctc', v === '' ? null : Number(v))} placeholder="—" /></td>
+      <td style={td}><EditableCell value={row.notice_period_days != null ? String(row.notice_period_days) : ''} variant="number" onSave={v => onPatch('notice_period_days', v === '' ? null : Number(v))} placeholder="—" /></td>
+      <td style={{ ...td, minWidth: 180 }}>
+        <EditableCell
+          value={(row.skills || []).join(', ')}
+          onSave={v => onPatch('skills', v.split(',').map((s: string) => s.trim()).filter(Boolean))}
+          placeholder="comma, separated, skills"
+        />
+      </td>
+      <td style={{ ...td, minWidth: 240 }}>
+        <ClientRoleStatusCell row={row} clients={clients} liveStages={liveStages} onPatch={onPatch} onChanged={onChanged} showToast={showToast} />
+      </td>
+      <td style={{ ...td, minWidth: 160 }}><EditableCell value={row.remarks || ''} onSave={v => onPatch('remarks', v)} placeholder="Add a remark" /></td>
+      <td style={td}><ProjectDetailsCell candidateId={row.id} candidateName={row.full_name} projectCount={row.project_count} /></td>
+      <td style={{ ...td, color: '#64748b' }}>{row.owner?.recruiter_name || '—'}</td>
+    </tr>
+  );
+}
+
 function ClientRoleStatusCell({ row, clients, liveStages, onPatch, onChanged, showToast }: { row: any; clients: any[]; liveStages: any[]; onPatch: (field: string, value: any) => Promise<void>; onChanged: () => void; showToast: (msg: string, ok?: boolean) => void }) {
   const app = row.active_application;
   const [clientId, setClientId] = useState('');
@@ -378,7 +338,7 @@ function ClientRoleStatusCell({ row, clients, liveStages, onPatch, onChanged, sh
   // at once" design.
   if (app) {
     return (
-      <div style={{ padding: '4px 0' }}>
+      <div>
         <div style={{ fontWeight: 700, fontSize: 12 }}>{app.client_name || '—'}</div>
         <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>{app.requisition_title}</div>
         <select
@@ -403,7 +363,7 @@ function ClientRoleStatusCell({ row, clients, liveStages, onPatch, onChanged, sh
   }
 
   return (
-    <div style={{ padding: '4px 0' }}>
+    <div>
       <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
         <select value={clientId} onChange={e => setClientId(e.target.value)} style={{ ...selSm, fontSize: 11, padding: '4px 6px', flex: 1 }}>
           <option value="">Client…</option>
@@ -436,13 +396,13 @@ function ClientRoleStatusCell({ row, clients, liveStages, onPatch, onChanged, sh
           {(reqs || []).map((r: any) => <option key={r.id} value={r.id}>{r.title}</option>)}
         </select>
       </div>
-      <select
+      <EditableCell
         value={row.sourcing_status || 'sourced'}
-        onChange={e => onPatch('sourcing_status', e.target.value)}
-        style={{ ...selSm, fontSize: 11, padding: '4px 6px', width: '100%' }}
-      >
-        {SOURCING_STATUSES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
-      </select>
+        variant="select"
+        options={SOURCING_STATUSES}
+        onSave={v => onPatch('sourcing_status', v)}
+        display={STATUS_LABEL[row.sourcing_status] || row.sourcing_status}
+      />
     </div>
   );
 }
