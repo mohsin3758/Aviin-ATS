@@ -2378,6 +2378,66 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
     }
   };
 
+  // Extracted (2026-09-17, reported live: "tracking should be editable") so
+  // the exact same editable table — bound to the real fields/setFields state,
+  // not a static HTML string — can render both in its original spot on the
+  // page and inside the "Preview Email Before Sending" modal. Editing a cell
+  // in either place updates the same `fields` state, so the modal and the
+  // page never disagree about what will actually be sent.
+  const renderTrackingTable = () => (
+    trackingPreview?.columns?.length ? (
+      <div data-testid="tracking-sheet-editable-table" style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, opacity: trackingLoading ? 0.6 : 1 }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 11 }}>
+          <thead>
+            <tr>
+              {trackingPreview.columns.map((c: any) => (
+                <th key={c.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'normal', minWidth: TRACKING_COL_MIN_WIDTH[c.key] || 90 }}>{c.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(trackingPreview.rows || []).map((r: any, i: number) => {
+              const isAnchor = i === 0;
+              return (
+                <tr key={i} style={{ background: isAnchor ? '#EFF6FF' : (i % 2 ? '#F8FAFC' : '#fff') }}>
+                  {trackingPreview.columns!.map((c: any) => {
+                    const editable = isAnchor && c.key !== 'sl_no';
+                    const isMultiline = c.key === 'skill_summary';
+                    const minW = TRACKING_COL_MIN_WIDTH[c.key] || 90;
+                    return (
+                      <td key={c.key} style={{ padding: editable ? 2 : '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top', minWidth: minW }}>
+                        {editable ? (
+                          isMultiline ? (
+                            <textarea data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                              rows={4} style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit', resize: 'vertical' }} />
+                          ) : (
+                            <input data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
+                              style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit' }} />
+                          )
+                        ) : (
+                          <span style={{ whiteSpace: isMultiline ? 'pre-line' : 'normal', wordBreak: 'break-word' }}>
+                            {((isAnchor ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')}
+                            {c.key === 'sl_no' && (
+                              <span data-testid="tracking-row-status-new" style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: '#DBEAFE', color: '#1D4ED8', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>SENDING NOW</span>
+                            )}
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    ) : (
+      <div style={{ fontSize: 11, color: '#94A3B8', padding: 10, border: '1px dashed #E2E8F0', borderRadius: 8 }}>
+        {trackingLoading ? 'Loading the real tracking sheet…' : 'No tracking sheet template resolved yet — pick one above.'}
+      </div>
+    )
+  );
+
   const send = async () => {
     if (resumeStyle === 'manual' && !manualDraft) return;
     if (resumeStyle === 'manual' && additionalCandidates.length) {
@@ -2555,77 +2615,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
             existing overflowX:'auto' picks up the slack by scrolling
             horizontally, matching this codebase's established "wide
             content scrolls in its own container" convention. */}
-        {trackingPreview?.columns?.length ? (
-          <div data-testid="tracking-sheet-editable-table" style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, opacity: trackingLoading ? 0.6 : 1 }}>
-            <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 11 }}>
-              <thead>
-                <tr>
-                  {trackingPreview.columns.map((c: any) => (
-                    <th key={c.key} style={{ padding: '6px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', border: '1px solid #CBD5E1', whiteSpace: 'normal', minWidth: TRACKING_COL_MIN_WIDTH[c.key] || 90 }}>{c.label}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {(trackingPreview.rows || []).map((r: any, i: number) => {
-                  // REAL BUG FIX (2026-09-08): every row this preview shows
-                  // is a brand-new candidate about to be sent (never real
-                  // history — see _client_tracking_sheet_rows'/the combined
-                  // preview endpoint's own docstrings), so ALL rows are
-                  // "SENDING NOW," not just the last one. Only the ANCHOR's
-                  // row (the candidate this modal was opened for, always
-                  // index 0) is bound to the editable `fields` state — a
-                  // manual override the KAE typed can never silently land
-                  // on someone else's row, matching the backend's own
-                  // field_values-applies-to-the-anchor-only rule.
-                  const isAnchor = i === 0;
-                  return (
-                    <tr key={i} style={{ background: isAnchor ? '#EFF6FF' : (i % 2 ? '#F8FAFC' : '#fff') }}>
-                      {trackingPreview.columns!.map((c: any) => {
-                        const editable = isAnchor && c.key !== 'sl_no';
-                        const isMultiline = c.key === 'skill_summary';
-                        const minW = TRACKING_COL_MIN_WIDTH[c.key] || 90;
-                        return (
-                          <td key={c.key} style={{ padding: editable ? 2 : '6px 10px', border: '1px solid #CBD5E1', verticalAlign: 'top', minWidth: minW }}>
-                            {editable ? (
-                              /* Real bug fix (2026-09-03, reported live: a real
-                                 multi-line skill_summary default — "SAP FICO:
-                                 8 Yrs\nSAP COPA: 3 Yrs\n..." — was rendered
-                                 in a single-line <input>, which silently
-                                 collapses every newline, so it displayed as
-                                 one unreadable run-together string. A plain
-                                 skill_summary is genuinely multi-line by
-                                 design (see kae_submission.py's
-                                 _format_skill_summary_default); every other
-                                 column here is genuinely one line. */
-                              isMultiline ? (
-                                <textarea data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
-                                  rows={4} style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit', resize: 'vertical' }} />
-                              ) : (
-                                <input data-testid={`tracking-cell-${c.key}`} value={fields[c.key] ?? r[c.key] ?? ''} onChange={e => setFields({ ...fields, [c.key]: e.target.value })}
-                                  style={{ width: '100%', border: 'none', background: 'transparent', padding: '4px 8px', fontSize: 11, fontFamily: 'inherit' }} />
-                              )
-                            ) : (
-                              <span style={{ whiteSpace: isMultiline ? 'pre-line' : 'normal', wordBreak: 'break-word' }}>
-                                {((isAnchor ? (fields[c.key] ?? r[c.key]) : r[c.key]) || '')}
-                                {c.key === 'sl_no' && (
-                                  <span data-testid="tracking-row-status-new" style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: '#DBEAFE', color: '#1D4ED8', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>SENDING NOW</span>
-                                )}
-                              </span>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div style={{ fontSize: 11, color: '#94A3B8', padding: 10, border: '1px dashed #E2E8F0', borderRadius: 8 }}>
-            {trackingLoading ? 'Loading the real tracking sheet…' : 'No tracking sheet template resolved yet — pick one above.'}
-          </div>
-        )}
+        {renderTrackingTable()}
         <p style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
           This is the exact table that will be sent, in ONE email — real, sequential SL Nos continuing this role's
           history, but only the candidate(s) being submitted right now are shown here. Need a different
@@ -2899,10 +2889,10 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                 <textarea rows={6} value={emailBody} onChange={e => setEmailBody(e.target.value)}
                   style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontFamily: 'inherit', resize: 'vertical', minHeight: 110, flexShrink: 0 }} />
               </div>
-              {emailPreview.tracking_html && (
-                <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, flexShrink: 0 }}
-                  dangerouslySetInnerHTML={{ __html: emailPreview.tracking_html }} />
-              )}
+              <div style={{ flexShrink: 0 }}>
+                <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', display: 'block', marginBottom: 3 }}>TRACKING SHEET</label>
+                {renderTrackingTable()}
+              </div>
               {emailPreview.signature_html && (
                 <div style={{ flexShrink: 0 }} dangerouslySetInnerHTML={{ __html: emailPreview.signature_html }} />
               )}
