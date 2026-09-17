@@ -36,12 +36,25 @@ router = APIRouter(prefix="/recruiter-attribution", tags=["recruiter-attribution
 
 
 def _date_filter(date_from: Optional[str], date_to: Optional[str], params: list, col: str = "h.created_at") -> str:
+    """Real bug found + fixed 2026-09-18 (while building the trend endpoint
+    below, which is the first caller to ALWAYS pass both date_from and
+    date_to on every call): the SQL's explicit `::date` cast makes asyncpg
+    resolve that parameter's wire-protocol type to `date` when it prepares
+    the statement, so it then requires a real `datetime.date` object to
+    encode the bind message -- a plain `str` (exactly what
+    `date_from: Optional[str] = Query(None)` hands this function on every
+    real HTTP call) fails with `'str' object has no attribute 'toordinal'`
+    at the asyncpg codec layer, before the query ever reaches Postgres.
+    Same recurring bug class as CLAUDE.md's "asyncpg needs real date/
+    datetime/UUID objects, not bare strings." Existing callers of the
+    plain (snapshot) sender-tracking endpoint would have hit this exact
+    500 any time both date_from and date_to were actually supplied."""
     clause = ""
     if date_from:
-        params.append(date_from)
+        params.append(date.fromisoformat(date_from))
         clause += f" AND {col} >= ${len(params)}::date"
     if date_to:
-        params.append(date_to)
+        params.append(date.fromisoformat(date_to))
         clause += f" AND {col} < (${len(params)}::date + interval '1 day')"
     return clause
 
