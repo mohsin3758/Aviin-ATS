@@ -944,6 +944,7 @@ export default function MailboxPage() {
   // seconds, so this polls sentData briefly rather than assuming the
   // first fetch already has it.
   const openMsgIdHeader = useRef<string | null>(null);
+  const msgidPollAttempts = useRef(0);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const folderParam = params.get('folder');
@@ -953,25 +954,6 @@ export default function MailboxPage() {
     if (msgIdHeader) openMsgIdHeader.current = msgIdHeader;
     window.history.replaceState(null, '', window.location.pathname);
   }, []);
-  const msgidPollAttempts = useRef(0);
-  useEffect(() => {
-    if (!openMsgIdHeader.current) return;
-    const match = (sentData || []).find(m => m.message_id_header === openMsgIdHeader.current);
-    if (match) {
-      setSelectedId(match.id);
-      openMsgIdHeader.current = null;
-      return;
-    }
-    msgidPollAttempts.current += 1;
-    if (msgidPollAttempts.current >= 5) {
-      setToast('Sent, but still syncing to the mailbox — refresh in a few seconds if you don\'t see it yet.');
-      setToastOk(true);
-      openMsgIdHeader.current = null;
-      return;
-    }
-    const t = setTimeout(() => refetchSent(), 2000);
-    return () => clearTimeout(t);
-  }, [sentData, refetchSent]);
   const [search, setSearch] = useState('');
   const [showSearchFilters, setShowSearchFilters] = useState(false);
   const [searchFrom, setSearchFrom] = useState('');
@@ -1026,6 +1008,27 @@ export default function MailboxPage() {
   useEffect(()=>{ if(inboxCountData?.total) setTotalCount(inboxCountData.total); },[inboxCountData]);
   const prevUnreadRef = useRef(0);
   const { data: sentData, refetch: refetchSent } = useFetch<Msg[]>('/communications/sent?limit=200');
+  // REAL BUG FIX (2026-09-17) continued from the ?open_msgid effect above
+  // — needs sentData/refetchSent, which don't exist yet at that point in
+  // the component, so the actual polling logic lives here instead.
+  useEffect(() => {
+    if (!openMsgIdHeader.current) return;
+    const match = (sentData || []).find(m => m.message_id_header === openMsgIdHeader.current);
+    if (match) {
+      setSelectedId(match.id);
+      openMsgIdHeader.current = null;
+      return;
+    }
+    msgidPollAttempts.current += 1;
+    if (msgidPollAttempts.current >= 5) {
+      setToast('Sent, but still syncing to the mailbox — refresh in a few seconds if you don\'t see it yet.');
+      setToastOk(true);
+      openMsgIdHeader.current = null;
+      return;
+    }
+    const t = setTimeout(() => refetchSent(), 2000);
+    return () => clearTimeout(t);
+  }, [sentData, refetchSent]);
   const { data: archiveData, refetch: refetchArchive } = useFetch<Msg[]>(folder==='archive'?'/communications/archive?limit=200':null);
   const { data: junkData, refetch: refetchJunk } = useFetch<Msg[]>(folder==='junk'?'/communications/junk?limit=200':null);
   const { data: trashData, refetch: refetchTrash } = useFetch<Msg[]>('/communications/trash?limit=200');
