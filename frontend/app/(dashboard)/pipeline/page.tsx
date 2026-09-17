@@ -2875,23 +2875,36 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
                 real min-width still needs its own horizontal scroll,
                 contained to just that box now instead of the whole
                 modal). */}
+            {/* REAL BUG FIX (2026-09-17, reported live via a screenshot
+                showing the Message box squeezed down to one visible line
+                with the table header looking cut off): a flex COLUMN
+                container with overflowY:auto does NOT, by itself, make
+                its children "overflow and scroll" — every flex child
+                defaults to flex-shrink:1, so once the table+signature's
+                real content made the total taller than the modal, the
+                browser proportionally SHRANK every child (including the
+                6-row textarea) to force it all to fit, instead of
+                scrolling. flexShrink:0 on every direct child here is
+                what actually makes overflowY:auto behave the way it
+                visually looks like it should — nothing shrinks, the
+                container scrolls instead. */}
             <div style={{ padding: '14px 16px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div>
+              <div style={{ flexShrink: 0 }}>
                 <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', display: 'block', marginBottom: 3 }}>SUBJECT</label>
                 <input value={emailSubject} onChange={e => setEmailSubject(e.target.value)}
                   style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontWeight: 600 }} />
               </div>
-              <div>
+              <div style={{ flexShrink: 0 }}>
                 <label style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', display: 'block', marginBottom: 3 }}>MESSAGE</label>
                 <textarea rows={6} value={emailBody} onChange={e => setEmailBody(e.target.value)}
-                  style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontFamily: 'inherit', resize: 'vertical' }} />
+                  style={{ width: '100%', padding: '7px 9px', border: '1px solid #E2E8F0', borderRadius: 6, fontSize: 12, fontFamily: 'inherit', resize: 'vertical', minHeight: 110, flexShrink: 0 }} />
               </div>
               {emailPreview.tracking_html && (
-                <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8 }}
+                <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: 8, flexShrink: 0 }}
                   dangerouslySetInnerHTML={{ __html: emailPreview.tracking_html }} />
               )}
               {emailPreview.signature_html && (
-                <div dangerouslySetInnerHTML={{ __html: emailPreview.signature_html }} />
+                <div style={{ flexShrink: 0 }} dangerouslySetInnerHTML={{ __html: emailPreview.signature_html }} />
               )}
             </div>
             <div style={{ padding: '10px 16px', borderTop: '1px solid #E2E8F0', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
