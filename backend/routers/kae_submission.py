@@ -1030,6 +1030,34 @@ def _default_client_email_text(role_title: str, contact_name: Optional[str], sen
     return subject, body
 
 
+def _assemble_email_html_body(body_text: str, body_html_extra: str, signature_html: str | None) -> str:
+    """Extracted verbatim from _send_kae_email (2026-09-17) so the real send
+    path and the new pre-send email-preview endpoint below render
+    byte-for-byte the same HTML -- a hand-rolled second copy of this logic
+    for "just a preview" would inevitably drift from what actually gets
+    sent, defeating the entire point of a preview. See the original real
+    bug-fix comments in git history (2026-09-03/04) for why each of these
+    choices (explicit <br> over CSS white-space, a height-based spacer div,
+    signature after the sign-off) exists -- all Outlook-rendering quirks
+    confirmed against real received emails, not guessed."""
+    if "\n\n" in body_text.strip():
+        message_part, _, signature_part = body_text.rpartition("\n\n")
+    else:
+        message_part, signature_part = body_text, ""
+
+    def _html_lines(t: str) -> str:
+        return _esc(t).replace("\n", "<br>")
+
+    _style = "font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#0f172a;"
+    _spacer = '<div style="height:18px;line-height:18px;font-size:1px;">&nbsp;</div>'
+    html_body = f'<div style="{_style}">{_html_lines(message_part)}</div>{_spacer}{body_html_extra}'
+    if signature_part:
+        html_body += f'<div style="{_style}margin-top:14px;">{_html_lines(signature_part)}</div>'
+    if signature_html:
+        html_body += f'<div style="margin-top:16px;">{signature_html}</div>'
+    return html_body
+
+
 async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
                            body_text: str, attachments: list, body_html_extra: str = "",
                            message_id_header: str = None, signature_html: str = None) -> tuple:
@@ -1090,63 +1118,7 @@ async def _send_kae_email(tenant_id: str, to_emails, cc_emails, subject: str,
         if body_html_extra or signature_html:
             alt = MIMEMultipart("alternative")
             alt.attach(MIMEText(body_text, "plain"))
-            # REAL FIX (2026-09-03, reported live via real Outlook desktop
-            # screenshots): 2 genuine issues with every one of these real
-            # sent emails, both confirmed against the actual rendered
-            # message, not guessed. (1) relying on CSS white-space:
-            # pre-wrap to preserve the real \n\n paragraph breaks already
-            # present in body_text doesn't work in Outlook desktop - its
-            # HTML rendering engine is Word's own, a well-known, long-
-            # standing quirk where that CSS property is not reliably
-            # respected - the real greeting/message/sign-off ran together
-            # onto one crammed line with zero visible spacing. Every real
-            # \n now converts to an explicit <br>, the standard, portable
-            # workaround for exactly this. (2) the closing "Regards,
-            # {name}" block always rendered BEFORE the tracking-sheet
-            # table, sandwiched awkwardly ahead of the actual data -
-            # moved to render AFTER it instead, matching both where a
-            # real signature naturally belongs and the real reference
-            # email the user provided as the correct example. Split on
-            # the LAST genuine \n\n boundary - a structural rule, not a
-            # keyword match on "Regards"/"Thanks & Regards" specifically -
-            # so this holds for both this module's own real templates AND
-            # any custom text a KAE actually types into the compose box;
-            # if the whole message has no \n\n boundary at all, nothing
-            # splits and the full text renders before the table exactly
-            # as it always has, a safe, unchanged fallback.
-            if "\n\n" in body_text.strip():
-                message_part, _, signature_part = body_text.rpartition("\n\n")
-            else:
-                message_part, signature_part = body_text, ""
-            def _html_lines(t: str) -> str:
-                return _esc(t).replace("\n", "<br>")
-            _style = "font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#0f172a;"
-            # REAL FIX (2026-09-04, reported live via a real Outlook
-            # screenshot showing the table starting immediately below the
-            # message text with no visible gap): _build_tracking_html_
-            # table()'s own `margin:12px 0` on the <table> element is not
-            # reliably honored by Outlook's Word rendering engine — a
-            # well-known limitation, margin on table elements specifically
-            # (not divs) is one of the least-supported CSS properties
-            # there. A real spacer element with an explicit, non-zero
-            # HEIGHT (not margin) is the standard, portable Outlook-safe
-            # technique for forcing vertical space between two blocks.
-            _spacer = '<div style="height:18px;line-height:18px;font-size:1px;">&nbsp;</div>'
-            html_body = f'<div style="{_style}">{_html_lines(message_part)}</div>{_spacer}{body_html_extra}'
-            if signature_part:
-                html_body += f'<div style="{_style}margin-top:14px;">{_html_lines(signature_part)}</div>'
-            # REAL FIX (2026-09-04, reported live via a real received email
-            # + a real Settings screenshot showing a genuine, configured
-            # signature that never appeared): the sender's actual signature
-            # block, rendered after the plain-text "Regards, {name}" close —
-            # matching exactly where the user's own real reference email
-            # (sent manually, not through this automated flow) placed it.
-            # A real signature is inherently rich HTML (a logo image, icon
-            # badges) with no meaningful plain-text equivalent, so — same as
-            # every real-world mail client's own convention — it only ever
-            # renders in the HTML alternative, never the plain-text one.
-            if signature_html:
-                html_body += f'<div style="margin-top:16px;">{signature_html}</div>'
+            html_body = _assemble_email_html_body(body_text, body_html_extra, signature_html)
             alt.attach(MIMEText(html_body, "html"))
             msg.attach(alt)
         else:
@@ -2163,6 +2135,7 @@ async def _do_client_submission(
     field_values: Optional[dict], to_emails_override: Optional[list], cc_self: bool, save_as_default: bool,
     trigger_source: str = "manual", contact_id: Optional[str] = None, default_scope: str = "client",
     subject_override: Optional[str] = None, body_override: Optional[str] = None,
+    preview_only: bool = False,
 ) -> dict:
     """The KAE->Client hop: mirrors _do_kae_submission's shape (same
     _app_context, same resume attachment, same audit/outbox discipline) but
@@ -2246,7 +2219,11 @@ async def _do_client_submission(
         # branches and read by the INSERT below.
         used_template_id = template["id"] if template else None
 
-        if save_as_default and columns_override:
+        # preview_only (2026-09-17, new email-preview endpoint below) must
+        # never persist anything -- a KAE opening a preview before deciding
+        # to send should not silently save a new default template just by
+        # looking at it.
+        if save_as_default and columns_override and not preview_only:
             # Real scope tuple this save targets — matches _resolve_
             # template()/_unset_other_defaults()'s own tiering exactly, so
             # a 'contact'-scoped save can never silently clobber (or get
@@ -2360,6 +2337,28 @@ async def _do_client_submission(
         row["role_title"], contact_name_for_greeting, actor.full_name)
     subject = (subject_override or "").strip() or default_subject
     body_text = (body_override or "").strip() or default_body
+
+    # REAL FEATURE (2026-09-17, reported live via a real screenshot of what
+    # a genuine email compose window looks like: "i want one more option
+    # to view the compose ready email before sending... not yet sent, its
+    # compose email before sending to mail"). Everything above this line is
+    # the exact same resolution the real send below uses (contacts,
+    # template, tracking-sheet rows/HTML, signature, subject/body
+    # defaults) -- reusing it here rather than a second hand-rolled preview
+    # path is what guarantees this can never drift from what Approve &
+    # Send to Client actually sends. Stops before the one real side effect
+    # that matters (the actual SMTP send + every DB write below) ever runs.
+    if preview_only:
+        return {
+            "subject": subject,
+            "html_body": _assemble_email_html_body(body_text, body_html_extra, signature_html),
+            "to_emails": to_recipients,
+            "cc_emails": cc_recipients,
+            "resume_filename": resume_filename,
+            "recipient_name": primary_contact["contact_name"] if (primary_contact and not to_emails_override) else "Client/KAM",
+            "sender_email": recruiter_email,
+        }
+
     message_id_header = email_tracking.generate_message_id()
     email_sent, email_error = await _send_kae_email(
         tenant_id, to_recipients, cc_recipients, subject, body_text, attachments,
@@ -2860,6 +2859,50 @@ async def submit_to_client(
         field_values=body.field_values, to_emails_override=body.to_emails, cc_self=body.cc_self,
         save_as_default=body.save_as_default, contact_id=body.contact_id, default_scope=body.default_scope,
         subject_override=body.email_subject, body_override=body.email_body,
+    )
+
+
+@router.post("/applications/{application_id}/submit-to-client/email-preview")
+async def submit_to_client_email_preview(
+    application_id: str, body: SubmitToClientIn,
+    actor: Actor = Depends(require_role("admin", "super_admin", "manager", "kae", "kam")),
+):
+    """REAL FEATURE (2026-09-17, reported live via a real screenshot of an
+    actual email compose window — From/To/Cc, subject, an attachment chip,
+    the fully rendered message body with the tracking sheet embedded —
+    with the explicit ask "i want one more option to view the compose
+    ready email before sending... not yet sent"). The existing COMPOSE
+    EMAIL / TRACKING SHEET PREVIEW sections on the page already show every
+    real value that goes into a send, but as separate raw editable
+    fields, not what the actual received email looks like.
+
+    Deliberately skips real resume-byte generation (_resolve_resume_bytes
+    renders an actual PDF/DOCX — slow, and pointless for a preview whose
+    whole point is the email text/table, not the resume file; that's what
+    "Generate & Preview Resume" is already for) and passes a real,
+    correctly-computed filename with empty placeholder bytes instead --
+    safe because _do_client_submission's preview_only path returns before
+    attachments are ever read, only after the same real contact/template/
+    tracking-sheet/signature/subject resolution the actual send uses."""
+    if body.resume_style not in _RESUME_STYLES:
+        raise HTTPException(400, f"resume_style must be one of {', '.join(_RESUME_STYLES)}")
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        row, _ = await _app_context(conn, application_id)
+    if body.resume_style == "manual":
+        mr = body.manual_resume or {}
+        filename = build_resume_filename(mr.get("name") or row["full_name"], mr.get("designation") or row["current_designation"], row["total_exp_mo"], "pdf")
+    else:
+        filename = build_resume_filename(row["full_name"], row["current_designation"], row["total_exp_mo"], "pdf")
+
+    return await _do_client_submission(
+        actor.tenant_id, application_id, actor, b"",
+        filename, body.resume_style,
+        _RESUME_LABELS.get(body.resume_style, body.resume_style),
+        template_id=body.template_id, columns_override=body.columns, hidden_columns=body.hidden_columns,
+        field_values=body.field_values, to_emails_override=body.to_emails, cc_self=body.cc_self,
+        save_as_default=False, contact_id=body.contact_id, default_scope=body.default_scope,
+        subject_override=body.email_subject, body_override=body.email_body,
+        preview_only=True,
     )
 
 

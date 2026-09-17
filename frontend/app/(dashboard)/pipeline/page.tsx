@@ -2321,6 +2321,51 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   const isFileTemplate = selectedTemplate?.template_type === 'file';
   const toggleHidden = (key: string) => setHiddenKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
 
+  // REAL FEATURE (2026-09-17, reported live via a real screenshot of an
+  // actual email compose window: "i want one more option to view the
+  // compose ready email before sending... not yet sent, its compose email
+  // before sending to mail"). Extracted out of send() so the preview call
+  // below sends the exact same payload the real send would — one form
+  // state, one place it turns into a request body, no risk of the
+  // preview silently showing something different from what Approve &
+  // Send to Client would actually do with the current form values.
+  const buildSubmitBody = () => {
+    const visibleColumns = (selectedTemplate?.columns || []).filter((c: any) => !hiddenKeys.includes(c.key));
+    return {
+      template_id: templateId || undefined,
+      contact_id: toContactId || undefined,
+      to_emails: toEmail ? [toEmail] : undefined,
+      columns: saveAsDefault && hiddenKeys.length ? visibleColumns : undefined,
+      hidden_columns: hiddenKeys,
+      field_values: fields, cc_self: ccSelf, save_as_default: saveAsDefault, default_scope: defaultScope,
+      email_subject: emailSubject || undefined, email_body: emailBody || undefined,
+      resume_style: resumeStyle,
+      manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
+      visual_theme: resumeStyle !== 'manual' ? visualTheme : undefined,
+      logo_position: resumeStyle !== 'manual' ? logoPosition : undefined,
+    };
+  };
+
+  const [emailPreview, setEmailPreview] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const openEmailPreview = async () => {
+    if (resumeStyle === 'manual' && !manualDraft) {
+      showToast('Finish the manual resume summary first, or pick a different resume format', false);
+      return;
+    }
+    setPreviewLoading(true);
+    try {
+      const p = await apiFetch(`/applications/${appId}/submit-to-client/email-preview`, {
+        method: 'POST', body: JSON.stringify(buildSubmitBody()),
+      });
+      setEmailPreview(p);
+    } catch (e: any) {
+      showToast(e.message || 'Could not build preview', false);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const send = async () => {
     if (resumeStyle === 'manual' && !manualDraft) return;
     if (resumeStyle === 'manual' && additionalCandidates.length) {
@@ -2329,20 +2374,7 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
     }
     setSending(true);
     try {
-      const visibleColumns = (selectedTemplate?.columns || []).filter((c: any) => !hiddenKeys.includes(c.key));
-      const body: any = {
-        template_id: templateId || undefined,
-        contact_id: toContactId || undefined,
-        to_emails: toEmail ? [toEmail] : undefined,
-        columns: saveAsDefault && hiddenKeys.length ? visibleColumns : undefined,
-        hidden_columns: hiddenKeys,
-        field_values: fields, cc_self: ccSelf, save_as_default: saveAsDefault, default_scope: defaultScope,
-        email_subject: emailSubject || undefined, email_body: emailBody || undefined,
-        resume_style: resumeStyle,
-        manual_resume: resumeStyle === 'manual' ? manualDraft : undefined,
-        visual_theme: resumeStyle !== 'manual' ? visualTheme : undefined,
-        logo_position: resumeStyle !== 'manual' ? logoPosition : undefined,
-      };
+      const body: any = buildSubmitBody();
       let stageBumped: boolean;
       if (additionalCandidates.length) {
         const r = await apiFetch(`/applications/${appId}/submit-to-client/batch`, {
@@ -2781,10 +2813,53 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         </div>
       )}
 
+      {/* REAL FEATURE (2026-09-17, reported live): "one more option to view
+          the compose ready email before sending... not yet sent, its
+          compose email before sending to mail" — a genuine email-client-
+          style preview (From/To/Cc, subject, attachment chip, the fully
+          rendered body with the tracking sheet embedded exactly as the
+          client will see it), not just the raw editable fields already
+          above. Nothing is sent by opening this. */}
+      <button onClick={openEmailPreview} disabled={previewLoading}
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px', background: '#fff', color: '#1D4ED8', border: '1px solid #93C5FD', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: previewLoading ? 'default' : 'pointer', opacity: previewLoading ? 0.7 : 1 }}>
+        <ExternalLink size={13} /> {previewLoading ? 'Building preview…' : 'Preview Email Before Sending'}
+      </button>
       <button onClick={send} disabled={sending}
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px', background: '#16A34A', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.7 : 1 }}>
         <Send size={13} /> {sending ? 'Sending…' : 'Approve & Send to Client'}
       </button>
+      {emailPreview && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={() => setEmailPreview(null)}>
+          <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 720, maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#0F172A' }}>Not yet sent — preview only</div>
+              <button onClick={() => setEmailPreview(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B', fontSize: 18, lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #E2E8F0', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div><span style={{ color: '#94A3B8', display: 'inline-block', width: 46 }}>From</span>{emailPreview.sender_email || '—'}</div>
+              <div><span style={{ color: '#94A3B8', display: 'inline-block', width: 46 }}>To</span>{(emailPreview.to_emails || []).join(', ') || '—'}</div>
+              {emailPreview.cc_emails?.length > 0 && (
+                <div><span style={{ color: '#94A3B8', display: 'inline-block', width: 46 }}>Cc</span>{emailPreview.cc_emails.join(', ')}</div>
+              )}
+              <div style={{ fontWeight: 700, marginTop: 2 }}>{emailPreview.subject}</div>
+              {emailPreview.resume_filename && (
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#F1F5F9', border: '1px solid #E2E8F0', borderRadius: 8, padding: '5px 10px', fontSize: 11, width: 'fit-content', marginTop: 2 }}>
+                  📎 {emailPreview.resume_filename}
+                </div>
+              )}
+            </div>
+            <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1 }}
+              dangerouslySetInnerHTML={{ __html: emailPreview.html_body }} />
+            <div style={{ padding: '10px 16px', borderTop: '1px solid #E2E8F0', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setEmailPreview(null)} style={{ padding: '7px 14px', background: '#fff', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Keep editing</button>
+              <button onClick={() => { setEmailPreview(null); send(); }} disabled={sending}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 16px', background: '#16A34A', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'default' : 'pointer' }}>
+                <Send size={12} /> Looks good — Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* REAL GAP FIX (2026-09-08, reported live: "how i know its sent or
           not... no sent mail box to verify") — a toast alone is
           transient, and SUBMISSION HISTORY below only ever shows up once
