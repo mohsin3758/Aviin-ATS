@@ -2160,10 +2160,14 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
   // complete email details") — the link below used to be a bare,
   // param-less `/conversations` href that always opened the default
   // Inbox with nothing selected, before OR after a send. Now tracks the
-  // real candidate_messages.id the backend just created (added to the
-  // submit-to-client/batch response) so the link can deep-link straight
-  // to that exact sent email once it exists.
-  const [lastSentMessageId, setLastSentMessageId] = useState<string | null>(null);
+  // real Message-ID header the backend just embedded on the actual sent
+  // email (submit-to-client/batch response) so the link can ask
+  // Conversations to find that exact message — deliberately NOT a
+  // candidate_messages.id: confirmed live that GET /communications/sent
+  // sources "Sent" for channel='email' from the IMAP-synced copy
+  // (imap_messages), a different id namespace entirely. message_id_header
+  // is the one value both tables share for the same physical email.
+  const [lastSentMessageIdHeader, setLastSentMessageIdHeader] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
   const [manualDraft, setManualDraft] = useState<Record<string, string> | null>(null);
   const [manualLoading, setManualLoading] = useState(false);
@@ -2349,14 +2353,14 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
         showToast(ok === total ? `Sent all ${total} ✓` : `Sent ${ok}/${total} — check individual results`, ok > 0);
         const anchorResult = (r.results || []).find((x: any) => x.application_id === appId);
         stageBumped = !!anchorResult?.stage_bumped_to_submitted;
-        if (anchorResult?.message_id) setLastSentMessageId(anchorResult.message_id);
+        if (anchorResult?.message_id_header) setLastSentMessageIdHeader(anchorResult.message_id_header);
         fetchAdditionalHistory(additionalCandidates);
         setAdditionalCandidates([]);
       } else {
         const r = await apiFetch(`/applications/${appId}/submit-to-client`, { method: 'POST', body: JSON.stringify(body) });
         showToast(r.email_sent ? `Sent to ${r.recipient_name} ✓` : `Logged, but email failed: ${r.email_error || 'SMTP error'}`, !!r.email_sent);
         stageBumped = !!r.stage_bumped_to_submitted;
-        if (r.message_id) setLastSentMessageId(r.message_id);
+        if (r.message_id_header) setLastSentMessageIdHeader(r.message_id_header);
       }
       setInitialized(false);
       setHiddenKeys([]);
@@ -2795,19 +2799,23 @@ function SubmitClientTab({ appId, showToast, onSubmitted }: any) {
           no params at all, so it always opened the default empty Inbox,
           never the actual sent email, before OR after clicking Send.
           Before a send in this session it now at least opens straight to
-          the Sent folder (not Inbox); after a successful send it deep-
-          links to that exact message via ?open_id, using the real
-          candidate_messages.id the backend now returns (see
-          kae_submission.py's submit-to-client response). The COMPOSE
-          EMAIL / TRACKING SHEET PREVIEW sections above this button are
-          the actual pre-send review — nothing is sent until Approve &
-          Send to Client is clicked. */}
+          the Sent folder (not Inbox); after a successful send it asks
+          Conversations to find the exact message via ?open_msgid, using
+          the real Message-ID header actually embedded on the sent email
+          (see kae_submission.py's submit-to-client response, and its
+          comment on why this is a Message-ID and not a database id).
+          Note this depends on IMAP having synced the Sent folder copy
+          yet — Conversations shows a toast and falls back to just the
+          Sent folder if it can't find it within a few seconds. The
+          COMPOSE EMAIL / TRACKING SHEET PREVIEW sections above this
+          button are the actual pre-send review — nothing is sent until
+          Approve & Send to Client is clicked. */}
       <a
-        href={lastSentMessageId ? `/conversations?folder=sent&open_id=${lastSentMessageId}` : '/conversations?folder=sent'}
+        href={lastSentMessageIdHeader ? `/conversations?folder=sent&open_msgid=${encodeURIComponent(lastSentMessageIdHeader)}` : '/conversations?folder=sent'}
         target="_blank" rel="noreferrer"
         style={{ fontSize: 10, fontWeight: 700, color: '#2563EB', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
       >
-        <ExternalLink size={11} /> {lastSentMessageId ? 'View this email in Sent Mailbox →' : 'View Sent Mailbox (Email / Conversations) →'}
+        <ExternalLink size={11} /> {lastSentMessageIdHeader ? 'View this email in Sent Mailbox →' : 'View Sent Mailbox (Email / Conversations) →'}
       </a>
 
       {(history.length > 0 || Object.values(additionalHistory).some(h => h.length > 0)) && (

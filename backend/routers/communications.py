@@ -114,6 +114,7 @@ MSG_COLS = """cm.id, cm.candidate_id,
     cm.stage_at_send, cm.created_at, cm.deleted_at,
     cm.is_read, cm.is_starred, cm.to_email, cm.cc,
     cm.email_opened_at, cm.email_open_count, cm.tracking_token,
+    cm.message_id_header,
     u.full_name AS sent_by_name"""
 
 MSG_JOINS = """FROM candidate_messages cm
@@ -596,6 +597,7 @@ async def sent(limit: int = Query(200, le=500), actor: Actor = Depends(get_actor
                 COALESCE(im.html_body, im.body, '') AS body,
                 'sent'::text AS status,
                 im.received_at AS created_at, NULL::text AS deleted_at,
+                im.message_id_header,
                 ua.display_name AS sent_by_name,
                 TRUE AS is_read,
                 im.is_starred,

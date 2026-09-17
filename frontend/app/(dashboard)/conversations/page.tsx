@@ -20,7 +20,7 @@ interface Msg {
   subject: string; body: string; status: string; created_at: string;
   deleted_at?: string; sent_by_name?: string; is_read: boolean;
   is_starred: boolean; to_email?: string; cc?: string;
-  msg_count?: number; unread_count?: number;
+  msg_count?: number; unread_count?: number; message_id_header?: string;
 }
 interface Draft {
   id: string; candidate_id?: string; candidate_name?: string;
@@ -933,19 +933,45 @@ export default function MailboxPage() {
   // Mailbox" link always opened here empty, on Inbox, with nothing
   // selected — before OR after a real client-facing send). Reads
   // ?folder=<name> to open directly on that folder (e.g. Sent, instead
-  // of always defaulting to Inbox), and ?open_id=<candidate_messages.id>
-  // to select the exact message once the caller actually has one (see
-  // pipeline/page.tsx's SubmitClientTab, which only has an id to pass
-  // after a send succeeds — before that it only sets ?folder=sent).
+  // of always defaulting to Inbox). ?open_msgid=<Message-ID header>
+  // additionally asks to auto-select the exact email just sent, once it
+  // exists — deliberately a Message-ID, not a candidate_messages.id:
+  // GET /communications/sent sources Sent for channel='email' from the
+  // IMAP-synced copy (imap_messages), a different id namespace than
+  // candidate_messages, and message_id_header is the one value both
+  // share for the same physical email (see kae_submission.py's own
+  // comment on this). IMAP sync can genuinely lag a live send by a few
+  // seconds, so this polls sentData briefly rather than assuming the
+  // first fetch already has it.
+  const openMsgIdHeader = useRef<string | null>(null);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const folderParam = params.get('folder');
-    const openId = params.get('open_id');
-    if (!folderParam && !openId) return;
+    const msgIdHeader = params.get('open_msgid');
+    if (!folderParam && !msgIdHeader) return;
     if (folderParam) setFolder(folderParam as Folder);
-    if (openId) setSelectedId(openId);
+    if (msgIdHeader) openMsgIdHeader.current = msgIdHeader;
     window.history.replaceState(null, '', window.location.pathname);
   }, []);
+  const msgidPollAttempts = useRef(0);
+  useEffect(() => {
+    if (!openMsgIdHeader.current) return;
+    const match = (sentData || []).find(m => m.message_id_header === openMsgIdHeader.current);
+    if (match) {
+      setSelectedId(match.id);
+      openMsgIdHeader.current = null;
+      return;
+    }
+    msgidPollAttempts.current += 1;
+    if (msgidPollAttempts.current >= 5) {
+      setToast('Sent, but still syncing to the mailbox — refresh in a few seconds if you don\'t see it yet.');
+      setToastOk(true);
+      openMsgIdHeader.current = null;
+      return;
+    }
+    const t = setTimeout(() => refetchSent(), 2000);
+    return () => clearTimeout(t);
+  }, [sentData, refetchSent]);
   const [search, setSearch] = useState('');
   const [showSearchFilters, setShowSearchFilters] = useState(false);
   const [searchFrom, setSearchFrom] = useState('');

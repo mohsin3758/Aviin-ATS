@@ -2390,7 +2390,7 @@ async def _do_client_submission(
         # earlier the same day is meant to measure), and threading a real
         # Message-ID through means a client's real reply now correlates
         # back correctly too, not just the send itself becoming visible.
-        logged_msg = await _log_candidate_message(
+        await _log_candidate_message(
             conn, tenant_id, row["candidate_id"], application_id, "email", subject, body_text,
             "sent" if email_sent else "failed", actor.user_id,
             to_email=", ".join(to_recipients), cc=", ".join(cc_recipients) if cc_recipients else None,
@@ -2503,12 +2503,18 @@ async def _do_client_submission(
     out["stage_bumped_to_submitted"] = bumped
     # Real gap fix (2026-09-17, reported live: "View in Sent Mailbox" always
     # opened Conversations empty, with no way to jump to the email that was
-    # actually just sent) -- _log_candidate_message's own {id, ...} return
-    # was already computed and simply discarded before this. Threading the
-    # real candidate_messages.id through lets the frontend deep-link
-    # straight to this exact sent message instead of a dead /conversations
-    # link with no params.
-    out["message_id"] = str(logged_msg["id"]) if logged_msg else None
+    # actually just sent). Deliberately message_id_header, NOT
+    # logged_msg["id"] (candidate_messages.id) -- confirmed live that
+    # GET /communications/sent excludes channel='email' rows from its
+    # candidate_messages branch entirely and instead sources "Sent" email
+    # from the IMAP-synced copy in imap_messages, a completely different
+    # id namespace. message_id_header is the one real value both tables
+    # share for the same physical email (embedded on the wire by
+    # _send_kae_email above, and stored on both the candidate_messages row
+    # via message_id_header_override and, once IMAP sync catches up, on
+    # the synced imap_messages row too) -- see communications.py's
+    # MSG_COLS/imap_sent SELECT, both now expose it for this exact match.
+    out["message_id_header"] = message_id_header
     return out
 
 
@@ -2719,7 +2725,7 @@ async def _do_client_submission_batch(
                 "sent" if email_sent else "failed", email_error, actor.user_id,
                 hidden_columns or [], primary_contact["id"] if (primary_contact and not to_emails_override) else None,
             )
-            logged_msg = await _log_candidate_message(
+            await _log_candidate_message(
                 conn, tenant_id, row["candidate_id"], app_id, "email", subject, body_text,
                 "sent" if email_sent else "failed", actor.user_id,
                 to_email=", ".join(to_recipients), cc=", ".join(cc_recipients) if cc_recipients else None,
@@ -2783,9 +2789,11 @@ async def _do_client_submission_batch(
             out["candidate_id"] = str(row["candidate_id"])
             out["candidate_name"] = row["full_name"]
             # Same "View in Sent Mailbox" deep-link fix as the single-
-            # candidate path — each candidate in a combined batch send
-            # gets their own real candidate_messages row/id.
-            out["message_id"] = str(logged_msg["id"]) if logged_msg else None
+            # candidate path — see the matching comment there for why
+            # this is message_id_header, not a candidate_messages.id.
+            # Every candidate in a combined batch send shares the one
+            # real email/Message-ID actually sent.
+            out["message_id_header"] = message_id_header
             results.append(out)
 
     for (app_id, row, _), out in zip(contexts, results):
