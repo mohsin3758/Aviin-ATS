@@ -17,6 +17,7 @@ import db
 import events
 from deps import Actor
 from permissions import require_permission
+from routers.whatsapp_bot import check_number_exists
 from schemas import _validate_phone
 from services import activity_events, source_attribution
 from services import candidate_ownership as ownership
@@ -148,23 +149,26 @@ async def maybe_auto_enroll_for_new_application(tenant_id: str, candidate_id: st
 
 async def _enroll_row(conn, actor: Actor, row: ScreeningEnrollRow, requisition_id: str,
                        enrolled_via: str, default_stage: str, whatsapp_account_id: Optional[str],
-                       language: str = "en") -> dict:
+                       waha_session_name: Optional[str], language: str = "en") -> dict:
     if not row.candidate_id and not (row.full_name and row.phone):
         return {"status": "error", "detail": "Name and phone are required", "row": row.model_dump()}
 
     is_new_candidate = False
     if row.candidate_id:
         candidate_id = row.candidate_id
-        existing = await conn.fetchval(
-            "SELECT id FROM candidates WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
+        existing = await conn.fetchrow(
+            "SELECT id, phone FROM candidates WHERE id=$1 AND tenant_id=$2 AND is_active IS NOT FALSE",
             candidate_id, actor.tenant_id)
         if not existing:
             return {"status": "error", "detail": "Candidate not found", "candidate_id": candidate_id}
+        phone_for_check = existing["phone"]
     else:
         parsed = {"name": row.full_name, "email": row.email, "phone": row.phone}
         dedup = await check_duplicate(conn, actor.tenant_id, parsed)
         if dedup.matched_candidate_id and dedup.should_merge:
             candidate_id = dedup.matched_candidate_id
+            phone_for_check = await conn.fetchval(
+                "SELECT phone FROM candidates WHERE id=$1", candidate_id)
         else:
             async with conn.transaction():
                 candidate_id = await conn.fetchval(
@@ -172,6 +176,22 @@ async def _enroll_row(conn, actor: Actor, row: ScreeningEnrollRow, requisition_i
                        VALUES ($1,$2,$3,$4,'whatsapp_screening') RETURNING id""",
                     actor.tenant_id, row.full_name, row.email, row.phone)
             is_new_candidate = True
+            phone_for_check = row.phone
+
+    # REAL BUG FIX (2026-09-19): a malformed/nonexistent phone number made
+    # WAHA reject the send outright at dispatch time, but the session just
+    # sat at pending_optin retried silently forever -- confirmed live on a
+    # real Skill Matrix "Send" click (candidate had an 11-digit typo'd
+    # number). Checking here, before any application/screening_session row
+    # is created, gives an honest instant error instead of a false success
+    # toast for a message that will never arrive. Fails OPEN (proceeds
+    # normally) when the check itself couldn't complete (returns None) --
+    # see check_number_exists's own docstring for why.
+    if phone_for_check and waha_session_name:
+        exists = await check_number_exists(phone_for_check, waha_session_name)
+        if exists is False:
+            return {"status": "error", "detail": "This phone number is not on WhatsApp — check for a typo",
+                    "candidate_id": str(candidate_id)}
 
     if is_new_candidate:
         if actor.user_id and actor.email:
@@ -202,13 +222,15 @@ async def enroll(body: ScreeningEnrollRequest, actor: Actor = Depends(require_pe
         if req["is_active"] is False:
             raise HTTPException(400, "This requisition has been closed and can no longer accept new candidates")
 
-        whatsapp_account_id = await conn.fetchval(
-            """SELECT id FROM user_whatsapp_accounts
+        wa_account = await conn.fetchrow(
+            """SELECT id, waha_session_name FROM user_whatsapp_accounts
                WHERE tenant_id=$1 AND user_id=$2 AND status='working' AND is_active=TRUE""",
             actor.tenant_id, actor.user_id)
-        if not whatsapp_account_id:
+        if not wa_account:
             raise HTTPException(
                 400, "Connect your own WhatsApp number first (Settings > WhatsApp) before enrolling candidates")
+        whatsapp_account_id = wa_account["id"]
+        waha_session_name = wa_account["waha_session_name"]
 
         default_stage = await _default_add_stage(conn, actor.tenant_id)
 
@@ -225,7 +247,7 @@ async def enroll(body: ScreeningEnrollRequest, actor: Actor = Depends(require_pe
                 async with conn.transaction():
                     result = await _enroll_row(
                         conn, actor, row, body.requisition_id, body.enrolled_via,
-                        default_stage, str(whatsapp_account_id), body.language)
+                        default_stage, str(whatsapp_account_id), waha_session_name, body.language)
             except Exception as exc:
                 result = {"status": "error", "detail": str(exc)}
             results.append(result)

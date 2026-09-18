@@ -26,6 +26,29 @@ HELP_LINES = [
 ]
 HELP_MSG = "\n".join(HELP_LINES)
 
+async def check_number_exists(phone: str, session: str = SESSION) -> Optional[bool]:
+    """WAHA's /api/contacts/check-exists -- confirmed live (2026-09-19) as
+    the fix for a real stuck-forever bug: a malformed/nonexistent phone
+    number made WAHA reject sendText outright ("No LID for user"), but
+    send_wa_get_id's failure return is indistinguishable from a transient
+    WAHA hiccup, so the number just retried silently every 2 minutes
+    forever. Returns None (not False) on any network/timeout error so
+    callers can fail OPEN -- a diagnostic call that couldn't complete must
+    never itself block or misclassify a real send attempt."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{WAHA_URL}/api/contacts/check-exists",
+                headers={"X-Api-Key": WAHA_KEY},
+                params={"session": session, "phone": phone},
+            )
+            if r.status_code >= 400:
+                return None
+            return bool(r.json().get("numberExists"))
+    except Exception:
+        return None
+
+
 async def send_wa(phone: str, message: str, session: str = SESSION) -> bool:
     try:
         async with httpx.AsyncClient(timeout=10) as client:

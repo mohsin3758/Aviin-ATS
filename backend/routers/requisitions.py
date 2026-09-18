@@ -668,10 +668,28 @@ async def skill_matrix(requisition_id: str, actor: Actor = Depends(require_permi
                 years_by_candidate.setdefault(str(r["candidate_id"]), {})[r["skill_name"]] = (
                     float(r["years_experience"]) if r["years_experience"] is not None else None)
 
+        # REAL BUG FIX (2026-09-19): the WhatsApp "Send" column had no way
+        # to show a screening send had permanently failed (e.g. a
+        # malformed phone number WAHA rejects outright) -- it just looked
+        # identical to "never sent." Most recent session for THIS role,
+        # matching the same "for this role" framing as recruiter_name
+        # above (screening_sessions is role-scoped via requisition_id,
+        # same candidate can be screened separately per role).
+        screening_status_by_candidate: dict = {}
+        if candidate_ids:
+            session_rows = await conn.fetch(
+                """SELECT DISTINCT ON (candidate_id) candidate_id, status
+                   FROM screening_sessions
+                   WHERE candidate_id = ANY($1::uuid[]) AND tenant_id = $2 AND requisition_id = $3
+                   ORDER BY candidate_id, created_at DESC""",
+                candidate_ids, actor.tenant_id, requisition_id)
+            screening_status_by_candidate = {str(r["candidate_id"]): r["status"] for r in session_rows}
+
     candidates = []
     for r in candidate_rows:
         d = dict(r)
         d["skill_years"] = years_by_candidate.get(str(r["id"]), {})
+        d["screening_status"] = screening_status_by_candidate.get(str(r["id"]))
         candidates.append(d)
 
     return {"requisition_id": str(req["id"]), "requisition_title": req["title"], "skills": skills, "candidates": candidates}

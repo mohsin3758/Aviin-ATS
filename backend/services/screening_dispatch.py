@@ -6,23 +6,23 @@ pacing all work together, per the blueprint's own guardrail note that no
 one of these alone is enough to keep WAHA (an unofficial client) from
 getting a number banned.
 
-NOT implemented here (scoped out of Milestone 1, noted for a fast-follow):
-true delivery-ack-based bad_number detection. WAHA's webhook integration
-in this codebase (backend/routers/whatsapp_bot.py) only ever registered
-for INBOUND messages -- there is no existing handler for WAHA's async
-message.ack delivery-status event, confirmed by grep (no hits anywhere
-in backend/ for message.ack/messageAck). send_wa()'s own return value
-only confirms WAHA accepted the API call, not that WhatsApp delivered it
-to a real number -- using that as a bad_number signal would misclassify
-a temporarily-down WAHA session the same as a genuinely invalid number.
-A failed send here is left as pending_optin and retried on the next
-dispatch tick rather than guessed at.
+Two distinct bad_number signals now exist, deliberately separate because
+they answer different questions: (1) `check_number_exists()` below, called
+before every send attempt, definitively confirms whether the number is on
+WhatsApp at all -- a real gap fixed 2026-09-19 after a malformed number
+sat retrying silently forever; (2) `routers/whatsapp_bot.py`'s message.ack
+webhook handler catches a number WAHA already accepted but WhatsApp later
+failed to deliver to. Neither substitutes for the other. A generic failed
+send call (network blip, WAHA session temporarily down) is still left as
+plain pending_optin and retried next tick rather than guessed at as
+bad_number -- only a definitive "no" from one of the two signals above
+ever sets that status.
 """
 import random
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
-from routers.whatsapp_bot import send_wa, send_wa_get_id
+from routers.whatsapp_bot import check_number_exists, send_wa, send_wa_get_id
 from services.screening_i18n import t
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -110,6 +110,25 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
         if not session or not session["phone"]:
             continue
 
+        # REAL BUG FIX (2026-09-19): sessions enrolled some way other than
+        # /screening/enroll's own instant check (auto-enroll, CSV import,
+        # re-engagement) had no gate at all -- a malformed/nonexistent
+        # number just retried here silently forever. Confirmed live: WAHA
+        # rejects sendText outright for a number that doesn't exist, with
+        # no ambiguity, so this ISN'T guessing at bad_number from a failed
+        # send the way the module docstring warns against for a generic
+        # failure -- it's a definitive answer from a dedicated check, done
+        # before the send is even attempted. A generic failed send call
+        # below (network blip, WAHA down) still just stays pending_optin
+        # for the next tick, exactly as before.
+        normalized_phone = normalize_phone_for_whatsapp(session["phone"])
+        exists = await check_number_exists(normalized_phone, acct["waha_session_name"])
+        if exists is False:
+            await conn.execute(
+                "UPDATE screening_sessions SET status='bad_number', updated_at=now() WHERE id=$1",
+                session["id"])
+            continue
+
         text = t(
             "opt_in", session["language"] or "en",
             name=(session["full_name"] or "").split()[0] or "there",
@@ -118,12 +137,9 @@ async def dispatch_pending_screening_messages(conn, tenant_id: str) -> int:
             client=session["client_name"] or "our client",
         )
         delivered, waha_msg_id = await send_wa_get_id(
-            normalize_phone_for_whatsapp(session["phone"]), text, session=acct["waha_session_name"])
+            normalized_phone, text, session=acct["waha_session_name"])
         if not delivered:
-            # Left as pending_optin -- retried next tick. See module
-            # docstring for why this doesn't guess at bad_number from a
-            # failed send call itself (as opposed to a real message.ack
-            # ERROR event afterward, now handled in routers/whatsapp_bot.py).
+            # Left as pending_optin -- retried next tick.
             continue
 
         await conn.execute(

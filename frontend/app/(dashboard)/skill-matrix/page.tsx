@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { EditableCell } from '@/components/sourcing-tracker/EditableCell';
 import { ProjectDetailsCell } from '@/components/sourcing-tracker/ProjectDetailsCell';
-import { MessageCircle, Plus } from 'lucide-react';
+import { MessageCircle, Plus, XCircle } from 'lucide-react';
 
 // Skill Matrix (2026-09-19, reported live against a real manual Google
 // Sheet: one column per mandatory skill on a role, showing years of
@@ -320,11 +320,19 @@ export default function SkillMatrixPage() {
                     </td>
                     <td style={{ ...td, color: c.recruiter_name ? '#374151' : '#cbd5e1' }}>{c.recruiter_name || 'Unassigned'}</td>
                     <td style={td}>
-                      <button onClick={() => sendViaWhatsApp(c.id)} disabled={sendingId === c.id}
-                        title="Send the screening questions (including these skills) over WhatsApp"
-                        style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 7, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#166534', fontSize: 11, fontWeight: 700, cursor: sendingId === c.id ? 'default' : 'pointer' }}>
-                        <MessageCircle size={12} /> {sendingId === c.id ? 'Sending…' : 'Send'}
-                      </button>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+                        <button onClick={() => sendViaWhatsApp(c.id)} disabled={sendingId === c.id}
+                          title="Send the screening questions (including these skills) over WhatsApp"
+                          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 7, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#166534', fontSize: 11, fontWeight: 700, cursor: sendingId === c.id ? 'default' : 'pointer' }}>
+                          <MessageCircle size={12} /> {sendingId === c.id ? 'Sending…' : 'Send'}
+                        </button>
+                        {c.screening_status === 'bad_number' && (
+                          <span title="This phone number is not on WhatsApp — check for a typo, then Send again"
+                            style={{ display: 'flex', alignItems: 'center', gap: 3, color: '#b91c1c', fontSize: 10.5, fontWeight: 700 }}>
+                            <XCircle size={11} /> Invalid number
+                          </span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
