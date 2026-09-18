@@ -204,12 +204,31 @@ async def sender_tracking(
     return {"senders": rows}
 
 
+def _month_bounds(year: int, month: int) -> tuple[date, date]:
+    """First and last real calendar day of (year, month). Extracted from
+    the month branch below (2026-09-19) so the new quarter branch can
+    reuse the exact same "last day of month" arithmetic for a quarter's
+    end month, instead of a second, slightly-different copy of it."""
+    start = date(year, month, 1)
+    end_month = month % 12 + 1
+    end_year = year + (1 if month == 12 else 0)
+    end = date(end_year, end_month, 1) - timedelta(days=1)
+    return start, end
+
+
 def _bucket_bounds(period: str, count: int) -> list[tuple[str, str]]:
     """N most-recent whole periods ending today, oldest first. Reuses
     plain Python date arithmetic rather than a SQL generate_series — this
     only ever needs a handful of buckets (gap-analysis Part 10: "pick the
     canonical source, extend to full funnel + day/week/month" -- not a
-    from-scratch reporting engine)."""
+    from-scratch reporting engine). quarter/year added 2026-09-19 for the
+    Recruitment Overview Dashboard -- real calendar quarters (Jan-Mar,
+    Apr-Jun, Jul-Sep, Oct-Dec) and calendar years, not fixed day-count
+    approximations (the only other quarter/year concept in this codebase,
+    analytics/page.tsx's client-side period toggle, is explicitly a
+    day-count approximation per its own comment -- this is the first real
+    calendar-aware version, and both this function's existing caller
+    (/sender-tracking/trend) and the new dashboard share it)."""
     today = date.today()
     bounds = []
     if period == "day":
@@ -225,24 +244,35 @@ def _bucket_bounds(period: str, count: int) -> list[tuple[str, str]]:
             start = start_of_this_week - timedelta(weeks=i)
             end = start + timedelta(days=6)
             bounds.append((start.isoformat(), end.isoformat()))
-    else:  # month
+    elif period == "month":
         y, m = today.year, today.month
         for i in range(count):
             mm = m - i
             yy = y + (mm - 1) // 12
             mm = ((mm - 1) % 12) + 1
-            start = date(yy, mm, 1)
-            end_month = mm % 12 + 1
-            end_year = yy + (1 if mm == 12 else 0)
-            end = date(end_year, end_month, 1) - timedelta(days=1)
+            start, end = _month_bounds(yy, mm)
             bounds.append((start.isoformat(), end.isoformat()))
+    elif period == "quarter":
+        this_q = (today.month - 1) // 3  # 0-3
+        for i in range(count):
+            q_index = this_q - i
+            yy = today.year + q_index // 4
+            qq = q_index % 4  # 0-3, Python's floor division keeps this in range for negative q_index too
+            start_month = qq * 3 + 1
+            start, _ = _month_bounds(yy, start_month)
+            _, end = _month_bounds(yy, start_month + 2)
+            bounds.append((start.isoformat(), end.isoformat()))
+    else:  # year
+        for i in range(count):
+            yy = today.year - i
+            bounds.append((date(yy, 1, 1).isoformat(), date(yy, 12, 31).isoformat()))
     bounds.reverse()
     return bounds
 
 
 @router.get("/sender-tracking/trend")
 async def sender_tracking_trend(
-    period: str = Query("week", pattern="^(day|week|month)$"),
+    period: str = Query("week", pattern="^(day|week|month|quarter|year)$"),
     buckets: int = Query(8, ge=1, le=52),
     actor: Actor = Depends(require_permission("sender_tracking", "read")),
 ):

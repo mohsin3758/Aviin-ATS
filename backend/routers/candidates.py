@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, 
 from pydantic import BaseModel, Field
 from typing import List
 from typing import Optional
+from datetime import date as _date
 import json
 import re
 import db, events
@@ -266,6 +267,72 @@ async def list_candidates(
         d["active_application"] = json.loads(aa) if aa else None
         items.append(d)
     return {"items": items, "total": int(total), "limit": limit, "offset": offset}
+
+
+@router.get("/sourcing-status-summary")
+async def sourcing_status_summary(
+    client_id: Optional[str] = Query(None),
+    requisition_id: Optional[str] = Query(None),
+    recruiter_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    actor: Actor = Depends(require_permission("candidates", "read")),
+):
+    """Recruitment Overview Dashboard, "Screening Tracker" section
+    (2026-09-19, confirmed live to mean the sourcing_status funnel, not a
+    new named feature) -- GROUP BY sourcing_status, no such summary
+    endpoint existed anywhere before this (confirmed by search).
+
+    Real, disclosed limitation: sourcing_status is specifically a
+    PRE-role field -- it freezes the moment a candidate is linked to a
+    requisition (see sourcing-tracker/page.tsx's own "hand off cleanly"
+    design), and the real, live pipeline stage takes over from there.
+    So client_id/requisition_id here scope to candidates who have EVER
+    been linked to that role (via applications), but their
+    sourcing_status shown will typically be whatever it was frozen at,
+    not live pre-role activity for that specific role -- this endpoint
+    answers "what were these candidates' last sourcing status before
+    a role" not "how is sourcing going for this role right now" (that
+    second question is what Sourcing Tracker's own per-role filter +
+    the real pipeline stage already answer).
+
+    recruiter_id filters by active candidate_ownership (the real
+    "who sourced this" concept) -- distinct from applications.
+    assigned_recruiter_id (a role-specific work assignment), matching
+    sourcing_status's own pre-role, ownership-centric nature.
+    """
+    conditions = ["c.tenant_id = $1", "c.is_active IS NOT FALSE"]
+    params: list = [actor.tenant_id]
+    joins = ""
+    if recruiter_id:
+        joins += (" JOIN candidate_ownership co ON co.candidate_id = c.id"
+                  " AND co.status = 'active'")
+        params.append(recruiter_id)
+        conditions.append(f"co.recruiter_id = ${len(params)}")
+    if client_id or requisition_id:
+        exists_conditions = ["a.candidate_id = c.id", "a.tenant_id = c.tenant_id"]
+        if requisition_id:
+            params.append(requisition_id)
+            exists_conditions.append(f"a.requisition_id = ${len(params)}")
+        if client_id:
+            params.append(client_id)
+            exists_conditions.append(
+                f"EXISTS (SELECT 1 FROM requisitions r WHERE r.id = a.requisition_id AND r.client_id = ${len(params)})")
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM applications a WHERE {' AND '.join(exists_conditions)})")
+    if date_from:
+        params.append(_date.fromisoformat(date_from))
+        conditions.append(f"c.created_at >= ${len(params)}::date")
+    if date_to:
+        params.append(_date.fromisoformat(date_to))
+        conditions.append(f"c.created_at < (${len(params)}::date + interval '1 day')")
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        rows = await conn.fetch(
+            f"SELECT c.sourcing_status, COUNT(*) AS n FROM candidates c {joins}"
+            f" WHERE {' AND '.join(conditions)} GROUP BY c.sourcing_status",
+            *params)
+    return {"counts": {r["sourcing_status"]: r["n"] for r in rows}}
 
 
 @router.post("/bulk-delete")

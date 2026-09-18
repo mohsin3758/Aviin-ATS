@@ -289,6 +289,122 @@ async def create_requisition(
     return result
 
 
+@router.get("/skill-match-summary")
+async def skill_match_summary(
+    client_id: Optional[str] = Query(None),
+    requisition_id: Optional[str] = Query(None),
+    recruiter_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    actor: Actor = Depends(require_permission("requisitions", "read")),
+):
+    """Recruitment Overview Dashboard, "Skills Match" section
+    (2026-09-19) -- a tenant-wide aggregate across roles (unlike the
+    single-role skill_matrix() below, which this reuses the same join
+    pattern from), filtered the same way as the other two dashboard
+    summary endpoints today. Placed BEFORE GET /{requisition_id} on
+    purpose -- that path-param route would otherwise swallow this
+    literal path (matches the existing GET "" list route's placement
+    for the same reason).
+
+    recruiter_id filters via applications.assigned_recruiter_id (a
+    role-specific work assignment) -- the right concept here, since this
+    is about who's working which roles, not who originally sourced a
+    candidate (candidate_ownership, used by sourcing-status-summary
+    instead)."""
+    conditions = ["r.tenant_id = $1", "r.is_active IS NOT FALSE", "r.mandatory_skills IS NOT NULL",
+                  "array_length(r.mandatory_skills, 1) > 0"]
+    params: list = [actor.tenant_id]
+    if client_id:
+        params.append(client_id)
+        conditions.append(f"r.client_id = ${len(params)}")
+    if requisition_id:
+        params.append(requisition_id)
+        conditions.append(f"r.id = ${len(params)}")
+    if date_from:
+        params.append(_date.fromisoformat(date_from))
+        conditions.append(f"r.created_at >= ${len(params)}::date")
+    if date_to:
+        params.append(_date.fromisoformat(date_to))
+        conditions.append(f"r.created_at < (${len(params)}::date + interval '1 day')")
+    recruiter_join = ""
+    if recruiter_id:
+        recruiter_join = "JOIN applications a2 ON a2.requisition_id = r.id AND a2.assigned_recruiter_id = $%d AND a2.is_active IS NOT FALSE" % (len(params) + 1)
+        params.append(recruiter_id)
+
+    async with db.tenant_conn(actor.tenant_id) as conn:
+        role_rows = await conn.fetch(
+            f"SELECT DISTINCT r.id FROM requisitions r {recruiter_join}"
+            f" WHERE {' AND '.join(conditions)}",
+            *params)
+        role_ids = [r["id"] for r in role_rows]
+
+        candidates_tracked = 0
+        total_possible = 0
+        skills_filled = 0
+        avg_years_by_skill: list = []
+        if role_ids:
+            candidates_tracked = await conn.fetchval(
+                """SELECT COUNT(DISTINCT a.candidate_id) FROM applications a
+                   WHERE a.requisition_id = ANY($1::uuid[]) AND a.tenant_id = $2 AND a.is_active IS NOT FALSE""",
+                role_ids, actor.tenant_id)
+
+            # Correctly-scoped (role, skill, candidate) combinations --
+            # NOT a flat len(mandatory_skills) sum (that counts skill
+            # SLOTS across roles, not real candidate x skill pairs, and
+            # would silently produce a meaningless fill-rate% by
+            # comparing two different units). role_skills expands each
+            # role's mandatory_skills into one row per skill;
+            # role_candidates is who's actually linked to that role;
+            # their cross product is every real "this candidate needs
+            # this skill for this role" combination, which is the true
+            # denominator. A candidate's years_experience for a skill
+            # counts regardless of which role's screening/matrix entry
+            # originally captured it -- 6 years of SAP FICO is true
+            # regardless of which role prompted the answer.
+            pair_rows = await conn.fetch(
+                """WITH role_skills AS (
+                       SELECT r2.id AS requisition_id, unnest(r2.mandatory_skills) AS skill_name
+                       FROM requisitions r2 WHERE r2.id = ANY($1::uuid[])
+                   ),
+                   role_candidates AS (
+                       SELECT DISTINCT a.requisition_id, a.candidate_id
+                       FROM applications a
+                       WHERE a.requisition_id = ANY($1::uuid[]) AND a.tenant_id = $2 AND a.is_active IS NOT FALSE
+                   ),
+                   pairs AS (
+                       SELECT rc.candidate_id, rs.skill_name
+                       FROM role_skills rs JOIN role_candidates rc ON rc.requisition_id = rs.requisition_id
+                   )
+                   SELECT p.candidate_id, p.skill_name, cse.years_experience
+                   FROM pairs p
+                   LEFT JOIN LATERAL (
+                       SELECT years_experience FROM candidate_skill_experience cse2
+                       WHERE cse2.candidate_id = p.candidate_id AND cse2.skill_name = p.skill_name AND cse2.tenant_id = $2
+                       ORDER BY cse2.created_at DESC LIMIT 1
+                   ) cse ON true""",
+                role_ids, actor.tenant_id)
+            total_possible = len(pair_rows)
+            by_skill: dict = {}
+            for r in pair_rows:
+                if r["years_experience"] is not None:
+                    skills_filled += 1
+                    by_skill.setdefault(r["skill_name"], []).append(float(r["years_experience"]))
+            avg_years_by_skill = [
+                {"skill": s, "avg_years": round(sum(v) / len(v), 1), "candidates_with_data": len(v)}
+                for s, v in sorted(by_skill.items())
+            ]
+
+    return {
+        "roles_with_skills": len(role_ids),
+        "candidates_tracked": int(candidates_tracked or 0),
+        "skills_filled": skills_filled,
+        "skills_total_possible": total_possible,
+        "fill_rate_pct": round(100 * skills_filled / total_possible, 1) if total_possible else 0,
+        "avg_years_by_skill": avg_years_by_skill,
+    }
+
+
 @router.get("/{requisition_id}")
 async def get_requisition(requisition_id: str, actor: Actor = Depends(get_actor)):
     async with db.tenant_conn(actor.tenant_id) as conn:

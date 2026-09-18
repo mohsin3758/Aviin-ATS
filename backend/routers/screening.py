@@ -7,9 +7,10 @@ Stops at consent: a session reaching 'awaiting_screening' is as far as
 this milestone goes. Milestone 2 wires Phase 3 (the skill-question loop)
 onto that same status transition inside whatsapp_bot.py.
 """
+from datetime import date as _date
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 
 import db
@@ -238,16 +239,49 @@ async def enroll(body: ScreeningEnrollRequest, actor: Actor = Depends(require_pe
 
 
 @router.get("/summary")
-async def summary(mine: bool = True, actor: Actor = Depends(require_permission("screening", "read"))):
+async def summary(
+    mine: bool = True,
+    client_id: Optional[str] = Query(None),
+    requisition_id: Optional[str] = Query(None),
+    recruiter_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    actor: Actor = Depends(require_permission("screening", "read")),
+):
+    """Recruitment Overview Dashboard (2026-09-19): client_id/
+    requisition_id/recruiter_id/date_from/date_to are new, additive
+    filters -- the existing /screening page keeps calling this with just
+    `mine`, unchanged. An explicit recruiter_id wins over the `mine`
+    toggle's own derived recruiter (the dashboard cares about "show me
+    recruiter X's funnel" regardless of who's viewing, not the logged-in
+    viewer's own default). date_from/date_to use real date objects, not
+    bare strings, against the ::date-cast bind -- the exact asyncpg bug
+    class already found and fixed once today in recruiter_attribution.
+    py's _date_filter()."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        eff_recruiter = actor.user_id if (mine or actor.role not in _BROAD_VISIBILITY_ROLES) else None
-        conditions = ["tenant_id = $1"]
+        eff_recruiter = recruiter_id or (actor.user_id if (mine or actor.role not in _BROAD_VISIBILITY_ROLES) else None)
+        conditions = ["ss.tenant_id = $1"]
         params: list = [actor.tenant_id]
+        joins = ""
         if eff_recruiter:
             params.append(eff_recruiter)
-            conditions.append(f"created_by = ${len(params)}")
+            conditions.append(f"ss.created_by = ${len(params)}")
+        if requisition_id:
+            params.append(requisition_id)
+            conditions.append(f"ss.requisition_id = ${len(params)}")
+        if client_id:
+            joins = "JOIN requisitions r ON r.id = ss.requisition_id"
+            params.append(client_id)
+            conditions.append(f"r.client_id = ${len(params)}")
+        if date_from:
+            params.append(_date.fromisoformat(date_from))
+            conditions.append(f"ss.created_at >= ${len(params)}::date")
+        if date_to:
+            params.append(_date.fromisoformat(date_to))
+            conditions.append(f"ss.created_at < (${len(params)}::date + interval '1 day')")
         rows = await conn.fetch(
-            f"SELECT status, COUNT(*) AS n FROM screening_sessions WHERE {' AND '.join(conditions)} GROUP BY status",
+            f"SELECT ss.status, COUNT(*) AS n FROM screening_sessions ss {joins}"
+            f" WHERE {' AND '.join(conditions)} GROUP BY ss.status",
             *params)
         # WhatsApp automation research (2026-09-14), decision #24: a real
         # green/yellow/red shadow quality rating, not just a reply-rate

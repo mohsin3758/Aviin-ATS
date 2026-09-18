@@ -55,7 +55,7 @@ export default function RecruiterTrackingPage() {
   const [dateTo, setDateTo] = useState('');
   const qs = (dateFrom ? `?date_from=${dateFrom}` : '') + (dateTo ? `${dateFrom ? '&' : '?'}date_to=${dateTo}` : '');
 
-  const [trendPeriod, setTrendPeriod] = useState<'day' | 'week' | 'month'>('week');
+  const [trendPeriod, setTrendPeriod] = useState<'day' | 'week' | 'month' | 'quarter' | 'year'>('week');
   const { data: trendData, loading: trendLoading } = useFetch<{ period: string; buckets: TrendBucket[] }>(
     view === 'trend' ? `/recruiter-attribution/sender-tracking/trend?period=${trendPeriod}&buckets=8` : null
   );
@@ -98,7 +98,7 @@ export default function RecruiterTrackingPage() {
       {view === 'trend' && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-            {(['day', 'week', 'month'] as const).map(p => (
+            {(['day', 'week', 'month', 'quarter', 'year'] as const).map(p => (
               <button key={p} onClick={() => setTrendPeriod(p)} style={{ padding: '5px 12px', borderRadius: 8, border: '1px solid #e2e8f0', background: trendPeriod === p ? '#eff6ff' : '#fff', color: trendPeriod === p ? '#1e40af' : '#64748b', fontSize: 11, fontWeight: 700, cursor: 'pointer', textTransform: 'capitalize' }}>{p}ly</button>
             ))}
           </div>
