@@ -3,8 +3,9 @@ import uuid
 from typing import Optional
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from datetime import date as _date
 
 import db
 import events
