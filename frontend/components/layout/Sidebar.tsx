@@ -63,6 +63,7 @@ const NAV_GROUPS = [
     { icon:MessageCircle,   href:'/screening',     label:'WhatsApp Screening', feature:'screening' },
     { icon:Target,          href:'/sourcing-tracker', label:'Sourcing Tracker', feature:'sourcing_tracker' },
     { icon:Gauge,           href:'/skill-matrix',  label:'Skill Matrix', feature:'skill_matrix' },
+    { icon:PieChart,        href:'/recruitment-dashboard', label:'Recruitment Dashboard', feature:'recruitment_dashboard' },
     { icon:Calendar,        href:'/interviews',   label:'Interviews', feature:'interviews' },
     { icon:CalendarDays,    href:'/calendar',      label:'Calendar', feature:'calendar' },
     { icon:Video,           href:'/video-screening', label:'Video Screening', feature:'video_screening' },

@@ -7,6 +7,7 @@ import { EditableCell } from '@/components/sourcing-tracker/EditableCell';
 import { ProjectDetailsCell } from '@/components/sourcing-tracker/ProjectDetailsCell';
 import { Modal } from '@/components/ui/Modal';
 import { Plus, Download } from 'lucide-react';
+import { SOURCING_STATUSES, STATUS_LABEL } from '@/lib/screeningConstants';
 
 // Sourcing Tracker — ATS-internal, spreadsheet-styled grid for the
 // sourcing-through-role-assignment workflow (5 recruiters, ~60+ profiles
@@ -23,17 +24,6 @@ import { Plus, Download } from 'lucide-react';
 // resume-inbox/page.tsx already uses), a real Project Details count, and
 // an optional resume upload on Quick Add.
 
-const SOURCING_STATUSES = [
-  { value: 'sourced', label: 'Sourced' },
-  { value: 'contacted', label: 'Contacted' },
-  { value: 'whatsapp_sent', label: 'WhatsApp Sent' },
-  { value: 'interested', label: 'Interested' },
-  { value: 'not_interested', label: 'Not Interested' },
-  { value: 'screening_pending', label: 'Screening Pending' },
-  { value: 'screening_completed', label: 'Screening Completed' },
-  { value: 'qualified', label: 'Qualified' },
-];
-const STATUS_LABEL = Object.fromEntries(SOURCING_STATUSES.map(s => [s.value, s.label]));
 const SORTABLE = new Set(['full_name', 'total_exp_mo', 'expected_ctc']); // matches candidates.py's ALLOWED sort_by set
 
 const th: React.CSSProperties = { padding: '8px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', fontWeight: 700, fontSize: 11, whiteSpace: 'nowrap', position: 'sticky', top: 0 };

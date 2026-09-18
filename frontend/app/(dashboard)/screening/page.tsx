@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { getTokenPayload } from '@/lib/auth';
 import { MessageCircle, Plus, Trash2, Send, RotateCcw } from 'lucide-react';
+import { FUNNEL_LABELS } from '@/lib/screeningConstants';
 
 const card: React.CSSProperties = { background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: 16 };
 const label: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.04em' };
@@ -18,12 +19,6 @@ const LANGUAGES: Record<string, string> = {
   kn: 'ಕನ್ನಡ (Kannada)', ml: 'മലയാളം (Malayalam)', mr: 'मराठी (Marathi)', gu: 'ગુજરાતી (Gujarati)',
   pa: 'ਪੰਜਾਬੀ (Punjabi)', bn: 'বাংলা (Bengali)', or: 'ଓଡ଼ିଆ (Odia)', as: 'অসমীয়া (Assamese)',
   ur: 'اردو (Urdu)', kok: 'कोंकणी (Konkani)',
-};
-
-const FUNNEL_LABELS: Record<string, string> = {
-  pending_optin: 'Pending opt-in', sent: 'Sent, awaiting reply', awaiting_screening: 'Consented',
-  in_progress: 'Answering questions', awaiting_resume: 'Awaiting resume', completed: 'Completed',
-  declined: 'Declined', opted_out: 'Opted out', no_response: 'No response', bad_number: 'Bad number',
 };
 
 export default function ScreeningPage() {
