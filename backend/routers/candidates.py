@@ -357,14 +357,26 @@ async def sourcing_status_summary(
         params: list = [actor.tenant_id]
         joins = []
         if client_id or requisition_id:
-            exists_conditions = ["a.candidate_id = c.id", "a.tenant_id = c.tenant_id"]
+            # Real bug found and fixed live (2026-09-19), a third fix in
+            # this same endpoint today: this EXISTS clause never checked
+            # a.is_active -- the exact "missing is_active filter on a
+            # joined table" class CLAUDE.md itself calls out as "the
+            # single most-repeated bug in this codebase." Confirmed live:
+            # ALL 860 of a real recruiter's "assigned" Invenio
+            # applications had is_active=false (long since removed from
+            # the pipeline) -- her real, CURRENT count for that client is
+            # zero, not 860. requisitions.py's skill_match_summary
+            # (built the same day) already got this right; this endpoint
+            # didn't, until now.
+            exists_conditions = ["a.candidate_id = c.id", "a.tenant_id = c.tenant_id", "a.is_active IS NOT FALSE"]
             if requisition_id:
                 params.append(requisition_id)
                 exists_conditions.append(f"a.requisition_id = ${len(params)}")
             if client_id:
                 params.append(client_id)
                 exists_conditions.append(
-                    f"EXISTS (SELECT 1 FROM requisitions r WHERE r.id = a.requisition_id AND r.client_id = ${len(params)})")
+                    f"EXISTS (SELECT 1 FROM requisitions r WHERE r.id = a.requisition_id"
+                    f" AND r.is_active IS NOT FALSE AND r.client_id = ${len(params)})")
             if recruiter_id:
                 params.append(recruiter_id)
                 exists_conditions.append(f"a.assigned_recruiter_id = ${len(params)}")
