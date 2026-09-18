@@ -358,22 +358,56 @@ async def summary(
 
 
 @router.get("/sessions")
-async def list_sessions(mine: bool = True, actor: Actor = Depends(require_permission("screening", "read"))):
+async def list_sessions(
+    mine: bool = True,
+    status: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+    requisition_id: Optional[str] = Query(None),
+    recruiter_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    actor: Actor = Depends(require_permission("screening", "read")),
+):
     """Feeds the /screening dashboard's queue + Phase 7's one-click
     interview-invite action (surfaced here rather than on the shared
     candidate drawer, to keep this milestone's frontend footprint
-    contained to files this feature already owns)."""
+    contained to files this feature already owns).
+
+    status/client_id/requisition_id/recruiter_id/date_from/date_to
+    (2026-09-19, Recruitment Dashboard drill-down): additive filters so a
+    click on a dashboard funnel card lands on the exact real rows behind
+    that number -- same filter-building/param precedence as /summary
+    (recruiter_id wins over mine's own derived recruiter), copied here
+    rather than shared, since this query's base table alias (`s`) and
+    joins differ from /summary's aggregate query."""
     async with db.tenant_conn(actor.tenant_id) as conn:
-        eff_recruiter = actor.user_id if (mine or actor.role not in _BROAD_VISIBILITY_ROLES) else None
+        eff_recruiter = recruiter_id or (actor.user_id if (mine or actor.role not in _BROAD_VISIBILITY_ROLES) else None)
         conditions = ["s.tenant_id = $1"]
         params: list = [actor.tenant_id]
+        joins = ""
         if eff_recruiter:
             params.append(eff_recruiter)
             conditions.append(f"s.created_by = ${len(params)}")
+        if status:
+            params.append(status)
+            conditions.append(f"s.status = ${len(params)}")
+        if requisition_id:
+            params.append(requisition_id)
+            conditions.append(f"s.requisition_id = ${len(params)}")
+        if client_id:
+            joins = "JOIN requisitions rc ON rc.id = s.requisition_id"
+            params.append(client_id)
+            conditions.append(f"rc.client_id = ${len(params)}")
+        if date_from:
+            params.append(_date.fromisoformat(date_from))
+            conditions.append(f"s.created_at >= ${len(params)}::date")
+        if date_to:
+            params.append(_date.fromisoformat(date_to))
+            conditions.append(f"s.created_at < (${len(params)}::date + interval '1 day')")
         rows = await conn.fetch(
             f"""SELECT s.id, s.status, s.recommendation, s.created_at, s.updated_at,
                        c.id AS candidate_id, c.full_name, c.phone, r.title AS requisition_title
-                FROM screening_sessions s
+                FROM screening_sessions s {joins}
                 JOIN candidates c ON c.id = s.candidate_id
                 JOIN requisitions r ON r.id = s.requisition_id
                 WHERE {' AND '.join(conditions)}

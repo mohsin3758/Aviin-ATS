@@ -344,6 +344,7 @@ async def skill_match_summary(
         total_possible = 0
         skills_filled = 0
         avg_years_by_skill: list = []
+        by_role: list = []
         if role_ids:
             candidates_tracked = await conn.fetchval(
                 """SELECT COUNT(DISTINCT a.candidate_id) FROM applications a
@@ -374,10 +375,10 @@ async def skill_match_summary(
                        WHERE a.requisition_id = ANY($1::uuid[]) AND a.tenant_id = $2 AND a.is_active IS NOT FALSE
                    ),
                    pairs AS (
-                       SELECT rc.candidate_id, rs.skill_name
+                       SELECT rc.requisition_id, rc.candidate_id, rs.skill_name
                        FROM role_skills rs JOIN role_candidates rc ON rc.requisition_id = rs.requisition_id
                    )
-                   SELECT p.candidate_id, p.skill_name, cse.years_experience
+                   SELECT p.requisition_id, p.candidate_id, p.skill_name, cse.years_experience
                    FROM pairs p
                    LEFT JOIN LATERAL (
                        SELECT years_experience FROM candidate_skill_experience cse2
@@ -387,14 +388,45 @@ async def skill_match_summary(
                 role_ids, actor.tenant_id)
             total_possible = len(pair_rows)
             by_skill: dict = {}
+            by_role_pairs: dict = {}
             for r in pair_rows:
+                role_bucket = by_role_pairs.setdefault(str(r["requisition_id"]), {"filled": 0, "total": 0})
+                role_bucket["total"] += 1
                 if r["years_experience"] is not None:
                     skills_filled += 1
+                    role_bucket["filled"] += 1
                     by_skill.setdefault(r["skill_name"], []).append(float(r["years_experience"]))
             avg_years_by_skill = [
                 {"skill": s, "avg_years": round(sum(v) / len(v), 1), "candidates_with_data": len(v)}
                 for s, v in sorted(by_skill.items())
             ]
+
+            # Per-role breakdown (2026-09-19 gap fix): the tenant-wide
+            # totals above collapse every role into one number, giving no
+            # way to see WHICH roles actually have skill data filled in
+            # vs. which are still empty -- the exact thing a recruiter
+            # would need to know to prioritize follow-up.
+            role_titles = await conn.fetch(
+                "SELECT id, title FROM requisitions WHERE id = ANY($1::uuid[])", role_ids)
+            title_by_id = {str(r["id"]): r["title"] for r in role_titles}
+            role_candidate_rows = await conn.fetch(
+                """SELECT requisition_id, COUNT(DISTINCT candidate_id) AS n FROM applications
+                   WHERE requisition_id = ANY($1::uuid[]) AND tenant_id = $2 AND is_active IS NOT FALSE
+                   GROUP BY requisition_id""",
+                role_ids, actor.tenant_id)
+            candidates_by_role = {str(r["requisition_id"]): int(r["n"]) for r in role_candidate_rows}
+            by_role = [
+                {
+                    "requisition_id": rid,
+                    "title": title_by_id.get(rid, "—"),
+                    "candidates_tracked": candidates_by_role.get(rid, 0),
+                    "skills_filled": bucket["filled"],
+                    "skills_total_possible": bucket["total"],
+                    "fill_rate_pct": round(100 * bucket["filled"] / bucket["total"], 1) if bucket["total"] else 0,
+                }
+                for rid, bucket in by_role_pairs.items()
+            ]
+            by_role.sort(key=lambda x: x["title"] or "")
 
     return {
         "roles_with_skills": len(role_ids),
@@ -403,6 +435,7 @@ async def skill_match_summary(
         "skills_total_possible": total_possible,
         "fill_rate_pct": round(100 * skills_filled / total_possible, 1) if total_possible else 0,
         "avg_years_by_skill": avg_years_by_skill,
+        "by_role": by_role,
     }
 
 
