@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useFetch } from '@/lib/useFetch';
 import { FUNNEL_LABELS, SOURCING_STATUSES, STATUS_LABEL } from '@/lib/screeningConstants';
-import { MessageCircle, Filter as FilterIcon, Target, Gauge } from 'lucide-react';
+import { MessageCircle, Filter as FilterIcon, Target, Gauge, Download } from 'lucide-react';
 
 // Recruitment Overview Dashboard (2026-09-19) -- combines the three
 // systems built earlier today into one filterable view: WhatsApp
@@ -60,6 +60,38 @@ function periodToRange(period: Period): { from: string; to: string } | null {
     return { from: `${today.getFullYear()}-01-01`, to: `${today.getFullYear()}-12-31` };
   }
   return null; // 'all' or 'custom' -- no auto-computed range
+}
+
+// Report export (2026-09-19 gap fix): every section's data is already a
+// small, already-fetched aggregate, so this builds and downloads a real
+// CSV file client-side -- no new backend endpoint needed for a page-view
+// this size. escapeCsv wraps any value containing a comma/quote/newline
+// in quotes, doubling embedded quotes, per the standard CSV escaping rule.
+function escapeCsv(v: unknown): string {
+  const s = v == null ? '' : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadCsv(filename: string, headers: string[], rows: (string | number)[][]) {
+  const lines = [headers, ...rows].map(row => row.map(escapeCsv).join(','));
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+const exportBtn: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', borderRadius: 7, border: '1px solid #e2e8f0', background: '#fff', color: '#64748b', fontSize: 11, fontWeight: 700, cursor: 'pointer' };
+
+function drillHref(base: string, params: Record<string, string | undefined>): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) p.set(k, v);
+  const qs = p.toString();
+  return qs ? `${base}?${qs}` : base;
 }
 
 export default function RecruitmentDashboardPage() {
@@ -154,7 +186,15 @@ export default function RecruitmentDashboardPage() {
       </div>
 
       <div style={card}>
-        <div style={sectionTitle}><MessageCircle size={16} color="#16a34a" /> WhatsApp Screening</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div style={{ ...sectionTitle, marginBottom: 0 }}><MessageCircle size={16} color="#16a34a" /> WhatsApp Screening</div>
+          {Object.keys(funnel).length > 0 && (
+            <button style={exportBtn} onClick={() => downloadCsv('whatsapp-screening.csv', ['Status', 'Count'],
+              Object.entries(funnel).map(([status, count]) => [FUNNEL_LABELS[status] || status, count]))}>
+              <Download size={12} /> Export CSV
+            </button>
+          )}
+        </div>
         {loadingScreening ? (
           <div style={{ color: '#94a3b8', fontSize: 12 }}>Loading…</div>
         ) : Object.keys(funnel).length === 0 ? (
@@ -162,10 +202,11 @@ export default function RecruitmentDashboardPage() {
         ) : (
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {Object.entries(funnel).map(([status, count]) => (
-              <div key={status} style={funnelCard}>
+              <a key={status} href={drillHref('/screening', { status, client_id: clientId, requisition_id: reqId, recruiter_id: recruiterId, date_from: dateFrom, date_to: dateTo })}
+                style={{ ...funnelCard, textDecoration: 'none', color: 'inherit', display: 'block' }}>
                 <div style={{ fontSize: 20, fontWeight: 800, color: '#0f172a' }}>{count}</div>
                 <div style={{ fontSize: 11, color: '#64748b' }}>{FUNNEL_LABELS[status] || status}</div>
-              </div>
+              </a>
             ))}
           </div>
         )}
@@ -174,13 +215,21 @@ export default function RecruitmentDashboardPage() {
       <div style={card}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
           <div style={{ ...sectionTitle, marginBottom: 0 }}><Target size={16} color="#2563eb" /> Screening Tracker (Sourcing Status)</div>
-          <div style={{ display: 'flex', gap: 4 }}>
-            {([['', 'All Sources'], ['manual', 'Manual Sourcing'], ['email', 'Email / Auto-Ingested']] as const).map(([val, label]) => (
-              <button key={val} onClick={() => setSourceType(val as '' | 'manual' | 'email')}
-                style={{ padding: '5px 10px', borderRadius: 7, border: '1px solid #e2e8f0', background: sourceType === val ? '#1e40af' : '#fff', color: sourceType === val ? '#fff' : '#64748b', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                {label}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {([['', 'All Sources'], ['manual', 'Manual Sourcing'], ['email', 'Email / Auto-Ingested']] as const).map(([val, label]) => (
+                <button key={val} onClick={() => setSourceType(val as '' | 'manual' | 'email')}
+                  style={{ padding: '5px 10px', borderRadius: 7, border: '1px solid #e2e8f0', background: sourceType === val ? '#1e40af' : '#fff', color: sourceType === val ? '#fff' : '#64748b', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {Object.keys(sourcingCounts).length > 0 && (
+              <button style={exportBtn} onClick={() => downloadCsv('screening-tracker.csv', ['Sourcing Status', 'Count'],
+                SOURCING_STATUSES.filter(s => sourcingCounts[s.value]).map(s => [STATUS_LABEL[s.value], sourcingCounts[s.value]]))}>
+                <Download size={12} /> Export CSV
               </button>
-            ))}
+            )}
           </div>
         </div>
         <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 10 }}>
@@ -194,10 +243,11 @@ export default function RecruitmentDashboardPage() {
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {SOURCING_STATUSES.map(s => (
               sourcingCounts[s.value] ? (
-                <div key={s.value} style={funnelCard}>
+                <a key={s.value} href={drillHref('/sourcing-tracker', { sourcing_status: s.value, client_id: clientId, requisition_id: reqId })}
+                  style={{ ...funnelCard, textDecoration: 'none', color: 'inherit', display: 'block' }}>
                   <div style={{ fontSize: 20, fontWeight: 800, color: '#0f172a' }}>{sourcingCounts[s.value]}</div>
                   <div style={{ fontSize: 11, color: '#64748b' }}>{STATUS_LABEL[s.value]}</div>
-                </div>
+                </a>
               ) : null
             ))}
           </div>
@@ -210,18 +260,62 @@ export default function RecruitmentDashboardPage() {
       </div>
 
       <div style={card}>
-        <div style={sectionTitle}><Gauge size={16} color="#d97706" /> Skills Match</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div style={{ ...sectionTitle, marginBottom: 0 }}><Gauge size={16} color="#d97706" /> Skills Match</div>
+          {skillsSummary?.by_role?.length > 0 && (
+            <button style={exportBtn} onClick={() => downloadCsv('skills-match-by-role.csv',
+              ['Role', 'Candidates Tracked', 'Skills Filled', 'Skills Total Possible', 'Fill Rate %'],
+              skillsSummary.by_role.map((r: any) => [r.title, r.candidates_tracked, r.skills_filled, r.skills_total_possible, r.fill_rate_pct]))}>
+              <Download size={12} /> Export CSV
+            </button>
+          )}
+        </div>
         {loadingSkills ? (
           <div style={{ color: '#94a3b8', fontSize: 12 }}>Loading…</div>
         ) : !skillsSummary || skillsSummary.roles_with_skills === 0 ? (
           <div style={{ color: '#94a3b8', fontSize: 12 }}>No roles with mandatory skills match these filters.</div>
         ) : (
           <>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
-              <div style={funnelCard}><div style={{ fontSize: 20, fontWeight: 800 }}>{skillsSummary.roles_with_skills}</div><div style={{ fontSize: 11, color: '#64748b' }}>Roles Tracked</div></div>
-              <div style={funnelCard}><div style={{ fontSize: 20, fontWeight: 800 }}>{skillsSummary.candidates_tracked}</div><div style={{ fontSize: 11, color: '#64748b' }}>Candidates Tracked</div></div>
-              <div style={funnelCard}><div style={{ fontSize: 20, fontWeight: 800 }}>{skillsSummary.fill_rate_pct}%</div><div style={{ fontSize: 11, color: '#64748b' }}>Skill Data Fill Rate ({skillsSummary.skills_filled}/{skillsSummary.skills_total_possible})</div></div>
-            </div>
+            {(() => {
+              // When exactly one role is in scope, the by_role table below
+              // never renders (nothing to break down), so these summary
+              // cards themselves become the natural drill-down target
+              // instead of a dead end.
+              const singleRole = skillsSummary.by_role?.length === 1 ? skillsSummary.by_role[0] : null;
+              const Wrap: any = singleRole ? 'a' : 'div';
+              const wrapProps = singleRole
+                ? { href: drillHref('/skill-matrix', { client_id: clientId, requisition_id: singleRole.requisition_id }) }
+                : {};
+              return (
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+                  <Wrap {...wrapProps} style={{ ...funnelCard, textDecoration: 'none', color: 'inherit', display: 'block' }}><div style={{ fontSize: 20, fontWeight: 800 }}>{skillsSummary.roles_with_skills}</div><div style={{ fontSize: 11, color: '#64748b' }}>Roles Tracked</div></Wrap>
+                  <Wrap {...wrapProps} style={{ ...funnelCard, textDecoration: 'none', color: 'inherit', display: 'block' }}><div style={{ fontSize: 20, fontWeight: 800 }}>{skillsSummary.candidates_tracked}</div><div style={{ fontSize: 11, color: '#64748b' }}>Candidates Tracked</div></Wrap>
+                  <Wrap {...wrapProps} style={{ ...funnelCard, textDecoration: 'none', color: 'inherit', display: 'block' }}><div style={{ fontSize: 20, fontWeight: 800 }}>{skillsSummary.fill_rate_pct}%</div><div style={{ fontSize: 11, color: '#64748b' }}>Skill Data Fill Rate ({skillsSummary.skills_filled}/{skillsSummary.skills_total_possible})</div></Wrap>
+                </div>
+              );
+            })()}
+            {skillsSummary.by_role?.length > 1 && (
+              <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12, marginBottom: 14 }}>
+                <thead>
+                  <tr style={{ background: '#f8fafc' }}>
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 11, color: '#64748b', fontWeight: 700 }}>Role</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'right', fontSize: 11, color: '#64748b', fontWeight: 700 }}>Candidates Tracked</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'right', fontSize: 11, color: '#64748b', fontWeight: 700 }}>Fill Rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {skillsSummary.by_role.map((r: any) => (
+                    <tr key={r.requisition_id} style={{ borderTop: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '6px 10px', fontWeight: 600 }}>
+                        <a href={drillHref('/skill-matrix', { client_id: clientId, requisition_id: r.requisition_id })} style={{ color: '#d97706', textDecoration: 'none' }}>{r.title}</a>
+                      </td>
+                      <td style={{ padding: '6px 10px', textAlign: 'right', color: '#64748b' }}>{r.candidates_tracked}</td>
+                      <td style={{ padding: '6px 10px', textAlign: 'right' }}>{r.fill_rate_pct}% <span style={{ color: '#94a3b8' }}>({r.skills_filled}/{r.skills_total_possible})</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
             {skillsSummary.avg_years_by_skill?.length > 0 && (
               <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
                 <thead>

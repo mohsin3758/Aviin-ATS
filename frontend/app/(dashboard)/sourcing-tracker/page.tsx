@@ -52,6 +52,27 @@ export default function SourcingTrackerPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [filterClientId, setFilterClientId] = useState('');
   const [filterReqId, setFilterReqId] = useState('');
+
+  // Recruitment Dashboard drill-down (2026-09-19): seed filters from the
+  // URL once on mount, same window.location.search pattern already
+  // proven on the candidates page (no useSearchParams -- avoids that
+  // page's Suspense-boundary requirement). Arriving via a dashboard link
+  // means "show the real rows behind that number," so ownedFilter is
+  // widened to '' (Everyone) rather than keeping its 'mine' default,
+  // which would otherwise silently hide most of what the dashboard
+  // counted.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const clientId = p.get('client_id');
+    const reqId = p.get('requisition_id');
+    const status = p.get('sourcing_status');
+    if (clientId || reqId || status) {
+      if (clientId) setFilterClientId(clientId);
+      if (reqId) setFilterReqId(reqId);
+      if (status) setStatusFilter(status);
+      setOwnedFilter('');
+    }
+  }, []);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [sort, setSort] = useState<{ by: string; dir: 'asc' | 'desc' }>({ by: 'created_at', dir: 'desc' });

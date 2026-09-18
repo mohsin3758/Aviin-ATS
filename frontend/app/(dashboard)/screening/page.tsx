@@ -21,9 +21,37 @@ const LANGUAGES: Record<string, string> = {
   ur: 'اردو (Urdu)', kok: 'कोंकणी (Konkani)',
 };
 
+type DrillFilters = {
+  status?: string; client_id?: string; requisition_id?: string;
+  recruiter_id?: string; date_from?: string; date_to?: string;
+};
+
 export default function ScreeningPage() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
+
+  // Recruitment Dashboard drill-down (2026-09-19): a click on a WhatsApp
+  // funnel card lands here with the matching filters in the URL, same
+  // one-time window.location.search read already proven on the
+  // candidates page (no useSearchParams -- this page has no Suspense
+  // boundary). Arriving with any of these means "show me that tenant-
+  // wide number's real rows," not just my own queue, so mine flips to
+  // false rather than silently hiding rows the dashboard counted.
+  const [drillFilters, setDrillFilters] = useState<DrillFilters | null>(null);
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const keys: (keyof DrillFilters)[] = ['status', 'client_id', 'requisition_id', 'recruiter_id', 'date_from', 'date_to'];
+    const found: DrillFilters = {};
+    let any = false;
+    for (const k of keys) {
+      const v = p.get(k);
+      if (v) { found[k] = v; any = true; }
+    }
+    if (any) setDrillFilters(found);
+  }, []);
+  const drillQs = drillFilters
+    ? '&' + Object.entries(drillFilters).map(([k, v]) => `${k}=${encodeURIComponent(v!)}`).join('&')
+    : '';
 
   const { data: reqs } = useFetch<any[]>(mounted ? '/requisitions?status=open' : null);
   const [requisitionId, setRequisitionId] = useState('');
@@ -77,11 +105,12 @@ export default function ScreeningPage() {
     }
   }
 
-  const { data: summary, refetch: refetchSummary } = useFetch<any>(mounted ? '/screening/summary?mine=true' : null);
+  const mineQs = drillFilters ? 'mine=false' : 'mine=true';
+  const { data: summary, refetch: refetchSummary } = useFetch<any>(mounted ? `/screening/summary?${mineQs}${drillQs}` : null);
   const funnel = summary?.funnel || {};
   const numberHealth: any[] = summary?.number_health || [];
   const numberHealthAlerts = numberHealth.filter((h: any) => h.quality_rating !== 'green');
-  const { data: sessionsData, refetch: refetchSessions } = useFetch<any>(mounted ? '/screening/sessions?mine=true' : null);
+  const { data: sessionsData, refetch: refetchSessions } = useFetch<any>(mounted ? `/screening/sessions?${mineQs}${drillQs}` : null);
   const sessions = sessionsData?.sessions || [];
   const [invitingId, setInvitingId] = useState<string | null>(null);
 
@@ -213,6 +242,13 @@ export default function ScreeningPage() {
         <MessageCircle size={20} style={{ color: '#2563EB' }} />
         <div style={{ fontSize: 18, fontWeight: 800, color: '#0F172A' }}>WhatsApp Screening</div>
       </div>
+
+      {drillFilters && (
+        <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: '#1E40AF', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span>Filtered from the Recruitment Dashboard{drillFilters.status ? ` — status: ${FUNNEL_LABELS[drillFilters.status] || drillFilters.status}` : ''}, showing all recruiters' matching sessions.</span>
+          <button onClick={() => setDrillFilters(null)} style={{ background: 'none', border: 'none', color: '#1E40AF', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline', fontSize: 12 }}>Clear</button>
+        </div>
+      )}
 
       {numberHealthAlerts.map((h: any, i: number) => {
         const isRed = h.quality_rating === 'red';

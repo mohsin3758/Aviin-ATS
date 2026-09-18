@@ -48,6 +48,18 @@ export default function SkillMatrixPage() {
 
   const [clientId, setClientId] = useState('');
   const [reqId, setReqId] = useState('');
+
+  // Recruitment Dashboard drill-down (2026-09-19): seed the client/role
+  // dropdowns from the URL once on mount, same window.location.search
+  // pattern used across the other dashboard drill-down targets.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const c = p.get('client_id');
+    const r = p.get('requisition_id');
+    if (c) setClientId(c);
+    if (r) setReqId(r);
+  }, []);
+
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [addingRow, setAddingRow] = useState(false);
