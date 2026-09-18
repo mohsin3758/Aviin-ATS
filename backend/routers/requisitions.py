@@ -520,11 +520,19 @@ async def skill_matrix(requisition_id: str, actor: Actor = Depends(require_permi
             raise HTTPException(404, "Requisition not found")
         skills = req["mandatory_skills"] or []
 
+        # Recruiter attribution (2026-09-19, "how recruiters are working in
+        # each role"): assigned_recruiter_id is who's actually working this
+        # candidate FOR THIS ROLE -- the right signal for a role-scoped
+        # view, same field/JOIN /pipeline above already uses (candidate_
+        # ownership is a different, global-sourcing concept, not role-
+        # specific).
         candidate_rows = await conn.fetch(
             """SELECT DISTINCT ON (c.id) c.id, c.full_name, c.phone, c.email, c.total_exp_mo,
-                      c.current_ctc, c.expected_ctc, c.sourcing_status, c.remarks
+                      c.current_ctc, c.expected_ctc, c.sourcing_status, c.remarks,
+                      ru.full_name AS recruiter_name
                FROM applications a
                JOIN candidates c ON c.id = a.candidate_id
+               LEFT JOIN users ru ON ru.id = a.assigned_recruiter_id
                WHERE a.requisition_id = $1 AND a.tenant_id = $2
                  AND c.is_active IS NOT FALSE AND a.is_active IS NOT FALSE
                ORDER BY c.id, a.updated_at DESC""",

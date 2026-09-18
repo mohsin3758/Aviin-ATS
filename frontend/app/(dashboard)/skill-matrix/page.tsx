@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { EditableCell } from '@/components/sourcing-tracker/EditableCell';
 import { ProjectDetailsCell } from '@/components/sourcing-tracker/ProjectDetailsCell';
-import { MessageCircle } from 'lucide-react';
+import { MessageCircle, Plus } from 'lucide-react';
 
 // Skill Matrix (2026-09-19, reported live against a real manual Google
 // Sheet: one column per mandatory skill on a role, showing years of
@@ -17,14 +17,30 @@ import { MessageCircle } from 'lucide-react';
 // lives as its own page scoped to one role rather than folding into the
 // Sourcing Tracker.
 //
+// Follow-up (same day, live screenshot of the working page): make
+// Name/Mobile/Total Exp editable too, add a Sl No column, let a
+// recruiter add a new candidate row or a new skill column directly from
+// this page (auto-saving on every entry, same as the rest of the grid),
+// and surface "how recruiters are working this role" -- a recruiter
+// column plus a per-role summary strip, reusing applications.
+// assigned_recruiter_id (the same field/JOIN the Kanban pipeline uses
+// for role-scoped attribution) rather than building a separate report
+// page. A fuller, cross-role recruiter productivity view already exists
+// at Recruiter Tracking (Snapshot/Trend) -- this is the role-scoped
+// summary specifically for what's on screen here.
+//
 // Backend: GET /requisitions/{id}/skill-matrix (candidates already
-// linked to the role + one years_experience number per mandatory skill),
-// PATCH /candidates/{id}/skill-years (the one clean way to set a single
-// skill's years, from either this page or screening_extraction.py).
+// linked to the role, one years_experience number per mandatory skill,
+// and the assigned recruiter's name), PATCH /candidates/{id}/skill-years
+// (the one clean way to set a single skill's years, from either this
+// page or screening_extraction.py), PATCH /requisitions/{id} (reused
+// as-is to append a new skill to mandatory_skills), POST /candidates +
+// POST /applications (reused as-is for the inline add-row form).
 
 const selSm: React.CSSProperties = { padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, background: '#fff' };
 const th: React.CSSProperties = { padding: '8px 10px', background: '#1E3A8A', color: '#fff', textAlign: 'left', fontWeight: 700, fontSize: 11, whiteSpace: 'nowrap' };
 const td: React.CSSProperties = { padding: '4px 8px', borderBottom: '1px solid #f1f5f9', verticalAlign: 'top', fontSize: 12, whiteSpace: 'nowrap' };
+const inputSm: React.CSSProperties = { padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12, width: '100%', boxSizing: 'border-box' };
 
 export default function SkillMatrixPage() {
   const [mounted, setMounted] = useState(false);
@@ -34,6 +50,13 @@ export default function SkillMatrixPage() {
   const [reqId, setReqId] = useState('');
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [sendingId, setSendingId] = useState<string | null>(null);
+  const [addingRow, setAddingRow] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newPhone, setNewPhone] = useState('');
+  const [savingRow, setSavingRow] = useState(false);
+  const [addingColumn, setAddingColumn] = useState(false);
+  const [newSkill, setNewSkill] = useState('');
+  const [savingColumn, setSavingColumn] = useState(false);
 
   const { data: clients } = useFetch<any[]>(mounted ? '/clients' : null);
   const { data: reqs } = useFetch<any[]>(mounted && clientId ? `/requisitions?client_id=${clientId}&status=open` : null);
@@ -41,6 +64,13 @@ export default function SkillMatrixPage() {
 
   const skills: string[] = matrix?.skills || [];
   const candidates: any[] = matrix?.candidates || [];
+
+  // Role-scoped "how recruiters are working this role" summary --
+  // grouped straight from the same rows already on screen, no extra
+  // fetch. Unassigned candidates group under "Unassigned" rather than
+  // silently vanishing from the count.
+  const byRecruiter: Record<string, number> = {};
+  candidates.forEach(c => { const k = c.recruiter_name || 'Unassigned'; byRecruiter[k] = (byRecruiter[k] || 0) + 1; });
 
   function showToast(msg: string, ok = true) {
     setToast({ msg, ok });
@@ -62,6 +92,7 @@ export default function SkillMatrixPage() {
       refetch();
     } catch (e: any) {
       showToast(e?.message || `Could not save ${field}`, false);
+      throw e; // let EditableCell show its own inline error too (e.g. bad phone format)
     }
   }
 
@@ -81,12 +112,63 @@ export default function SkillMatrixPage() {
     }
   }
 
+  async function addRow() {
+    if (!newName.trim()) { showToast('Name is required', false); return; }
+    setSavingRow(true);
+    try {
+      const created = await apiFetch('/candidates', {
+        method: 'POST',
+        body: JSON.stringify({ full_name: newName.trim(), phone: newPhone.trim() || undefined, source: 'manual' }),
+      });
+      // Auto-link to the role already selected on this page -- unlike the
+      // Sourcing Tracker's Quick Add, no client/role picker is needed
+      // here, since the whole page is already scoped to one.
+      try {
+        await apiFetch('/applications', { method: 'POST', body: JSON.stringify({ candidate_id: created.id, requisition_id: reqId }) });
+      } catch { /* 409 = already linked, harmless */ }
+      setNewName(''); setNewPhone(''); setAddingRow(false);
+      refetch();
+      showToast('Candidate added');
+    } catch (e: any) {
+      showToast(e?.message || 'Could not add candidate', false);
+    } finally {
+      setSavingRow(false);
+    }
+  }
+
+  async function addColumn() {
+    const skill = newSkill.trim();
+    if (!skill) return;
+    if (skills.some(s => s.toLowerCase() === skill.toLowerCase())) {
+      showToast('That skill column already exists', false);
+      return;
+    }
+    setSavingColumn(true);
+    try {
+      // Appends to the role's real mandatory_skills -- not a display-only
+      // column. That's deliberate: it's the same list WhatsApp screening
+      // already reads to generate its skill questions, so a newly added
+      // column is immediately askable over WhatsApp too, not just a local
+      // label on this page.
+      await apiFetch(`/requisitions/${reqId}`, {
+        method: 'PATCH', body: JSON.stringify({ mandatory_skills: [...skills, skill] }),
+      });
+      setNewSkill(''); setAddingColumn(false);
+      refetch();
+      showToast(`Added "${skill}" as a tracked skill for this role`);
+    } catch (e: any) {
+      showToast(e?.message || 'Could not add skill column', false);
+    } finally {
+      setSavingColumn(false);
+    }
+  }
+
   return (
     <div style={{ padding: 20 }}>
       <div style={{ marginBottom: 16 }}>
         <h1 style={{ fontSize: 18, fontWeight: 800, color: '#0f172a', margin: 0 }}>Skill Matrix</h1>
         <p style={{ fontSize: 12, color: '#64748b', margin: '2px 0 0' }}>
-          One column per mandatory skill for the selected role — type a number to fill it manually, or send screening questions over WhatsApp and this fills in automatically once the candidate replies.
+          One column per mandatory skill for the selected role — type a number to fill it manually, or send screening questions over WhatsApp and this fills in automatically once the candidate replies. Every cell saves the moment you leave it.
         </p>
       </div>
 
@@ -109,32 +191,68 @@ export default function SkillMatrixPage() {
 
       {reqId && (
         <>
-          {skills.length === 0 && !loading && (
-            <div style={{ padding: 12, marginBottom: 12, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
-              This role has no mandatory skills set yet — add them under the role's Skills section to see per-skill columns here.
+          {!loading && candidates.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: 12 }}>
+              <b>{candidates.length} candidate{candidates.length === 1 ? '' : 's'} sourced for this role</b>
+              <span style={{ color: '#64748b' }}>
+                {Object.entries(byRecruiter).map(([name, count], i) => (
+                  <span key={name}>{i > 0 ? ' · ' : ''}{name}: {count}</span>
+                ))}
+              </span>
             </div>
           )}
+
+          {skills.length === 0 && !loading && (
+            <div style={{ padding: 12, marginBottom: 12, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
+              This role has no mandatory skills set yet — add one below to see its column here.
+            </div>
+          )}
+
           <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 10 }}>
             <table style={{ borderCollapse: 'collapse', width: '100%' }}>
               <thead>
                 <tr>
+                  <th style={{ ...th, width: 40 }}>Sl No</th>
                   <th style={th}>Name</th>
                   <th style={th}>Mobile</th>
                   <th style={th}>Total Exp (mo)</th>
                   {skills.map(s => <th key={s} style={{ ...th, minWidth: 140, whiteSpace: 'normal' }}>{s}</th>)}
+                  <th style={{ ...th, minWidth: 110 }}>
+                    {addingColumn ? (
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <input autoFocus value={newSkill} onChange={e => setNewSkill(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') addColumn(); if (e.key === 'Escape') setAddingColumn(false); }}
+                          placeholder="Skill name" style={{ ...inputSm, color: '#0f172a', fontWeight: 400 }} />
+                        <button onClick={addColumn} disabled={savingColumn} style={{ border: 'none', background: '#16a34a', color: '#fff', borderRadius: 5, padding: '0 8px', cursor: 'pointer' }}>✓</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setAddingColumn(true)} style={{ display: 'flex', alignItems: 'center', gap: 4, border: '1px dashed rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', borderRadius: 6, padding: '3px 8px', cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>
+                        <Plus size={11} /> Add Skill
+                      </button>
+                    )}
+                  </th>
                   <th style={th}>Project Details</th>
                   <th style={th}>Current CTC</th>
                   <th style={th}>Expected CTC</th>
                   <th style={th}>Remarks</th>
+                  <th style={th}>Recruiter</th>
                   <th style={th}>WhatsApp</th>
                 </tr>
               </thead>
               <tbody>
-                {candidates.map(c => (
+                {candidates.map((c, i) => (
                   <tr key={c.id}>
-                    <td style={{ ...td, fontWeight: 700 }}>{c.full_name}</td>
-                    <td style={td}>{c.phone || '—'}</td>
-                    <td style={td}>{c.total_exp_mo ?? '—'}</td>
+                    <td style={{ ...td, color: '#94a3b8' }}>{i + 1}</td>
+                    <td style={{ ...td, fontWeight: 700, minWidth: 130 }}>
+                      <EditableCell value={c.full_name || ''} onSave={v => saveField(c.id, 'full_name', v)} />
+                    </td>
+                    <td style={{ ...td, minWidth: 120 }}>
+                      <EditableCell value={c.phone || ''} placeholder="Mobile" onSave={v => saveField(c.id, 'phone', v || null)} />
+                    </td>
+                    <td style={{ ...td, minWidth: 90 }}>
+                      <EditableCell value={c.total_exp_mo != null ? String(c.total_exp_mo) : ''} variant="number" placeholder="—"
+                        onSave={v => saveField(c.id, 'total_exp_mo', v === '' ? null : Number(v))} />
+                    </td>
                     {skills.map(s => (
                       <td key={s} style={td}>
                         <EditableCell
@@ -145,6 +263,7 @@ export default function SkillMatrixPage() {
                         />
                       </td>
                     ))}
+                    <td style={td} />
                     <td style={td}><ProjectDetailsCell candidateId={c.id} candidateName={c.full_name} /></td>
                     <td style={td}>
                       <EditableCell value={c.current_ctc != null ? String(c.current_ctc) : ''} variant="number" placeholder="—"
@@ -157,6 +276,7 @@ export default function SkillMatrixPage() {
                     <td style={{ ...td, minWidth: 150, whiteSpace: 'normal' }}>
                       <EditableCell value={c.remarks || ''} placeholder="Add a remark" onSave={v => saveField(c.id, 'remarks', v || null)} />
                     </td>
+                    <td style={{ ...td, color: c.recruiter_name ? '#374151' : '#cbd5e1' }}>{c.recruiter_name || 'Unassigned'}</td>
                     <td style={td}>
                       <button onClick={() => sendViaWhatsApp(c.id)} disabled={sendingId === c.id}
                         title="Send the screening questions (including these skills) over WhatsApp"
@@ -166,12 +286,41 @@ export default function SkillMatrixPage() {
                     </td>
                   </tr>
                 ))}
+
+                {addingRow ? (
+                  <tr style={{ background: '#f8fafc' }}>
+                    <td style={td}>{candidates.length + 1}</td>
+                    <td style={td}>
+                      <input autoFocus value={newName} onChange={e => setNewName(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') addRow(); if (e.key === 'Escape') setAddingRow(false); }}
+                        placeholder="Name" style={inputSm} />
+                    </td>
+                    <td style={td}>
+                      <input value={newPhone} onChange={e => setNewPhone(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') addRow(); if (e.key === 'Escape') setAddingRow(false); }}
+                        placeholder="Mobile" style={inputSm} />
+                    </td>
+                    <td colSpan={skills.length + 8} style={{ ...td, whiteSpace: 'nowrap' }}>
+                      <button onClick={addRow} disabled={savingRow} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: '#16a34a', color: '#fff', fontSize: 11, fontWeight: 700, cursor: savingRow ? 'default' : 'pointer', marginRight: 6 }}>
+                        {savingRow ? 'Saving…' : 'Save'}
+                      </button>
+                      <button onClick={() => { setAddingRow(false); setNewName(''); setNewPhone(''); }} style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', color: '#64748b', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                        Cancel
+                      </button>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr>
+                    <td colSpan={skills.length + 11} style={{ padding: 8 }}>
+                      <button onClick={() => setAddingRow(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px dashed #cbd5e1', background: 'transparent', color: '#2563eb', borderRadius: 7, padding: '7px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                        <Plus size={13} /> Add Row
+                      </button>
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
             {loading && <div style={{ padding: 16, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>Loading…</div>}
-            {!loading && candidates.length === 0 && (
-              <div style={{ padding: 16, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>No candidates linked to this role yet — assign some from the Sourcing Tracker first.</div>
-            )}
           </div>
         </>
       )}
