@@ -269,6 +269,26 @@ async def list_candidates(
     return {"items": items, "total": int(total), "limit": limit, "offset": offset}
 
 
+# Real bug found and fixed live (2026-09-19): candidate_ownership.source
+# mixes genuine, deliberate recruiter actions with fully-automated email/
+# job-portal attribution -- confirmed against real production data, a
+# recruiter with ZERO manual_add/manual_assign rows still showed up with
+# 211 "owned" candidates, entirely from unregistered_sender (207) +
+# sender_email (4): candidates whose resume/email happened to route
+# through her identity, not candidates she ever actually worked. This is
+# the exact same distinction recruiter_attribution.py's sender-tracking
+# already had to special-case for 'job_portal_feed' (never counted as a
+# real person's own submission there) -- missed when this endpoint was
+# first built, fixed now the same way, generalized to every automated
+# source, not just job_portal_feed.
+_MANUAL_OWNERSHIP_SOURCES = ('manual_add', 'manual_assign', 'screening_enroll', 'bulk_upload')
+_EMAIL_OWNERSHIP_SOURCES = ('job_portal_feed', 'unregistered_sender', 'personal_mailbox', 'sender_email')
+# personal_link/job_share_link (candidate self-applied via a shared/referral
+# link) are neither -- real production counts are small; kept out of both
+# buckets rather than mislabeled as one, and always visible in the
+# "other" breakdown line below so nothing silently disappears.
+
+
 @router.get("/sourcing-status-summary")
 async def sourcing_status_summary(
     client_id: Optional[str] = Query(None),
@@ -276,6 +296,7 @@ async def sourcing_status_summary(
     recruiter_id: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    source_type: Optional[str] = Query(None, pattern="^(manual|email)$"),
     actor: Actor = Depends(require_permission("candidates", "read")),
 ):
     """Recruitment Overview Dashboard, "Screening Tracker" section
@@ -300,39 +321,80 @@ async def sourcing_status_summary(
     "who sourced this" concept) -- distinct from applications.
     assigned_recruiter_id (a role-specific work assignment), matching
     sourcing_status's own pre-role, ownership-centric nature.
+
+    source_type ('manual' | 'email' | omitted for all) filters by HOW
+    that ownership was established -- see _MANUAL_OWNERSHIP_SOURCES /
+    _EMAIL_OWNERSHIP_SOURCES above. The response always includes a
+    source_breakdown independent of this filter, so the split is visible
+    even when viewing "all."
     """
-    conditions = ["c.tenant_id = $1", "c.is_active IS NOT FALSE"]
-    params: list = [actor.tenant_id]
-    joins = ""
-    if recruiter_id:
-        joins += (" JOIN candidate_ownership co ON co.candidate_id = c.id"
-                  " AND co.status = 'active'")
-        params.append(recruiter_id)
-        conditions.append(f"co.recruiter_id = ${len(params)}")
-    if client_id or requisition_id:
-        exists_conditions = ["a.candidate_id = c.id", "a.tenant_id = c.tenant_id"]
-        if requisition_id:
-            params.append(requisition_id)
-            exists_conditions.append(f"a.requisition_id = ${len(params)}")
-        if client_id:
-            params.append(client_id)
-            exists_conditions.append(
-                f"EXISTS (SELECT 1 FROM requisitions r WHERE r.id = a.requisition_id AND r.client_id = ${len(params)})")
-        conditions.append(
-            f"EXISTS (SELECT 1 FROM applications a WHERE {' AND '.join(exists_conditions)})")
-    if date_from:
-        params.append(_date.fromisoformat(date_from))
-        conditions.append(f"c.created_at >= ${len(params)}::date")
-    if date_to:
-        params.append(_date.fromisoformat(date_to))
-        conditions.append(f"c.created_at < (${len(params)}::date + interval '1 day')")
+    def _base_filter(include_recruiter: bool) -> tuple[list, list, str]:
+        """The client/role/recruiter/date filters shared by both queries
+        below -- built fresh each call (not reused/mutated) so the
+        source_breakdown query can independently decide whether it needs
+        the candidate_ownership JOIN, without inheriting whatever the
+        main query's source_type condition added to it."""
+        conditions = ["c.tenant_id = $1", "c.is_active IS NOT FALSE"]
+        params: list = [actor.tenant_id]
+        joins = []
+        if include_recruiter and recruiter_id:
+            joins.append("JOIN candidate_ownership co ON co.candidate_id = c.id AND co.status = 'active'")
+            params.append(recruiter_id)
+            conditions.append(f"co.recruiter_id = ${len(params)}")
+        if client_id or requisition_id:
+            exists_conditions = ["a.candidate_id = c.id", "a.tenant_id = c.tenant_id"]
+            if requisition_id:
+                params.append(requisition_id)
+                exists_conditions.append(f"a.requisition_id = ${len(params)}")
+            if client_id:
+                params.append(client_id)
+                exists_conditions.append(
+                    f"EXISTS (SELECT 1 FROM requisitions r WHERE r.id = a.requisition_id AND r.client_id = ${len(params)})")
+            conditions.append(f"EXISTS (SELECT 1 FROM applications a WHERE {' AND '.join(exists_conditions)})")
+        if date_from:
+            params.append(_date.fromisoformat(date_from))
+            conditions.append(f"c.created_at >= ${len(params)}::date")
+        if date_to:
+            params.append(_date.fromisoformat(date_to))
+            conditions.append(f"c.created_at < (${len(params)}::date + interval '1 day')")
+        return conditions, params, " ".join(joins)
 
     async with db.tenant_conn(actor.tenant_id) as conn:
+        # Main query: respects source_type, joining candidate_ownership
+        # only if recruiter_id or source_type actually needs it.
+        conditions, params, joins = _base_filter(include_recruiter=True)
+        if source_type and "candidate_ownership co" not in joins:
+            joins += " JOIN candidate_ownership co ON co.candidate_id = c.id AND co.status = 'active'"
+        if source_type:
+            sources = _MANUAL_OWNERSHIP_SOURCES if source_type == 'manual' else _EMAIL_OWNERSHIP_SOURCES
+            params.append(list(sources))
+            conditions.append(f"co.source = ANY(${len(params)}::text[])")
         rows = await conn.fetch(
             f"SELECT c.sourcing_status, COUNT(*) AS n FROM candidates c {joins}"
             f" WHERE {' AND '.join(conditions)} GROUP BY c.sourcing_status",
             *params)
-    return {"counts": {r["sourcing_status"]: r["n"] for r in rows}}
+
+        # Breakdown query: same client/role/recruiter/date filters, but
+        # deliberately NEVER the source_type filter -- this is what shows
+        # the manual/email/other split regardless of which one (if any)
+        # is currently selected in the main query above.
+        b_conditions, b_params, b_joins = _base_filter(include_recruiter=True)
+        if "candidate_ownership co" not in b_joins:
+            b_joins += " JOIN candidate_ownership co ON co.candidate_id = c.id AND co.status = 'active'"
+        breakdown_rows = await conn.fetch(
+            f"SELECT co.source, COUNT(*) AS n FROM candidates c {b_joins}"
+            f" WHERE {' AND '.join(b_conditions)} GROUP BY co.source",
+            *b_params)
+
+    source_breakdown = {"manual": 0, "email": 0, "other": 0}
+    for r in breakdown_rows:
+        if r["source"] in _MANUAL_OWNERSHIP_SOURCES:
+            source_breakdown["manual"] += r["n"]
+        elif r["source"] in _EMAIL_OWNERSHIP_SOURCES:
+            source_breakdown["email"] += r["n"]
+        else:
+            source_breakdown["other"] += r["n"]
+    return {"counts": {r["sourcing_status"]: r["n"] for r in rows}, "source_breakdown": source_breakdown}
 
 
 @router.post("/bulk-delete")
