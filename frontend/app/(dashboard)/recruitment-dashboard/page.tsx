@@ -72,6 +72,15 @@ export default function RecruitmentDashboardPage() {
   const [period, setPeriod] = useState<Period>('all');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
+  // Real bug found live (2026-09-19): candidate_ownership mixes genuine
+  // manual sourcing with fully-automated email/resume-inbox attribution
+  // -- a recruiter with zero manual work still showed real-looking
+  // "sourced" counts here, entirely from emails that happened to route
+  // through her identity. Default stays 'all' (doesn't silently change
+  // what anyone already saw), but the breakdown line below is always
+  // visible regardless of this toggle, so the split can never be missed
+  // again the way it was the first time.
+  const [sourceType, setSourceType] = useState<'' | 'manual' | 'email'>('');
 
   const { data: clients } = useFetch<any[]>(mounted ? '/clients' : null);
   const { data: reqs } = useFetch<any[]>(mounted && clientId ? `/requisitions?client_id=${clientId}&status=open` : null);
@@ -91,12 +100,15 @@ export default function RecruitmentDashboardPage() {
     return p.toString();
   }, [clientId, reqId, recruiterId, dateFrom, dateTo]);
 
+  const sourcingQs = sourceType ? `${sharedQs}&source_type=${sourceType}` : sharedQs;
+
   const { data: screeningSummary, loading: loadingScreening } = useFetch<any>(mounted ? `/screening/summary?mine=false&${sharedQs}` : null);
-  const { data: sourcingSummary, loading: loadingSourcing } = useFetch<any>(mounted ? `/candidates/sourcing-status-summary?${sharedQs}` : null);
+  const { data: sourcingSummary, loading: loadingSourcing } = useFetch<any>(mounted ? `/candidates/sourcing-status-summary?${sourcingQs}` : null);
   const { data: skillsSummary, loading: loadingSkills } = useFetch<any>(mounted ? `/requisitions/skill-match-summary?${sharedQs}` : null);
 
   const funnel: Record<string, number> = screeningSummary?.funnel || {};
   const sourcingCounts: Record<string, number> = sourcingSummary?.counts || {};
+  const sourceBreakdown: { manual: number; email: number; other: number } = sourcingSummary?.source_breakdown || { manual: 0, email: 0, other: 0 };
 
   return (
     <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -160,7 +172,20 @@ export default function RecruitmentDashboardPage() {
       </div>
 
       <div style={card}>
-        <div style={sectionTitle}><Target size={16} color="#2563eb" /> Screening Tracker (Sourcing Status)</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+          <div style={{ ...sectionTitle, marginBottom: 0 }}><Target size={16} color="#2563eb" /> Screening Tracker (Sourcing Status)</div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {([['', 'All Sources'], ['manual', 'Manual Sourcing'], ['email', 'Email / Auto-Ingested']] as const).map(([val, label]) => (
+              <button key={val} onClick={() => setSourceType(val as '' | 'manual' | 'email')}
+                style={{ padding: '5px 10px', borderRadius: 7, border: '1px solid #e2e8f0', background: sourceType === val ? '#1e40af' : '#fff', color: sourceType === val ? '#fff' : '#64748b', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 10 }}>
+          Of the candidates matching these filters: <b style={{ color: '#166534' }}>{sourceBreakdown.manual} manually sourced</b> (added directly, WhatsApp-enrolled, or bulk-imported by a recruiter) · <b style={{ color: '#b45309' }}>{sourceBreakdown.email} from email/resume-inbox auto-intake</b> (never manually worked, just attributed by whose inbox a resume routed through){sourceBreakdown.other > 0 && <> · {sourceBreakdown.other} via referral/shared link</>}.
+        </div>
         {loadingSourcing ? (
           <div style={{ color: '#94a3b8', fontSize: 12 }}>Loading…</div>
         ) : Object.keys(sourcingCounts).length === 0 ? (
