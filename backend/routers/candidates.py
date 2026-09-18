@@ -328,19 +328,34 @@ async def sourcing_status_summary(
     source_breakdown independent of this filter, so the split is visible
     even when viewing "all."
     """
-    def _base_filter(include_recruiter: bool) -> tuple[list, list, str]:
+    def _base_filter() -> tuple[list, list, str]:
         """The client/role/recruiter/date filters shared by both queries
         below -- built fresh each call (not reused/mutated) so the
         source_breakdown query can independently decide whether it needs
         the candidate_ownership JOIN, without inheriting whatever the
-        main query's source_type condition added to it."""
+        main query's source_type condition added to it.
+
+        Real bug found and fixed live (2026-09-19), same day as the
+        manual-vs-email fix above: when a client/role filter is active
+        together with recruiter_id, the recruiter must be checked
+        against THAT SPECIFIC application's assigned_recruiter_id, not
+        candidate_ownership (a global, often auto-attributed "who this
+        candidate record belongs to" fact, completely independent of
+        which client/role it's linked to). The original version ANDed
+        two unrelated facts -- "Aiman owns this candidate somehow" and,
+        separately, "this candidate has SOME application to an Invenio
+        role, worked by someone else entirely" -- and made it look like
+        Aiman had worked 109 Invenio candidates when she had assigned_
+        recruiter_id on precisely zero of their real applications
+        (confirmed live: all 109 belonged to 6 other real recruiters).
+        Only when NO client/role filter is active does recruiter_id fall
+        back to candidate_ownership -- matching sourcing_status's own
+        pre-role, ownership-centric nature, where there's no specific
+        application to check against yet.
+        """
         conditions = ["c.tenant_id = $1", "c.is_active IS NOT FALSE"]
         params: list = [actor.tenant_id]
         joins = []
-        if include_recruiter and recruiter_id:
-            joins.append("JOIN candidate_ownership co ON co.candidate_id = c.id AND co.status = 'active'")
-            params.append(recruiter_id)
-            conditions.append(f"co.recruiter_id = ${len(params)}")
         if client_id or requisition_id:
             exists_conditions = ["a.candidate_id = c.id", "a.tenant_id = c.tenant_id"]
             if requisition_id:
@@ -350,7 +365,14 @@ async def sourcing_status_summary(
                 params.append(client_id)
                 exists_conditions.append(
                     f"EXISTS (SELECT 1 FROM requisitions r WHERE r.id = a.requisition_id AND r.client_id = ${len(params)})")
+            if recruiter_id:
+                params.append(recruiter_id)
+                exists_conditions.append(f"a.assigned_recruiter_id = ${len(params)}")
             conditions.append(f"EXISTS (SELECT 1 FROM applications a WHERE {' AND '.join(exists_conditions)})")
+        elif recruiter_id:
+            joins.append("JOIN candidate_ownership co ON co.candidate_id = c.id AND co.status = 'active'")
+            params.append(recruiter_id)
+            conditions.append(f"co.recruiter_id = ${len(params)}")
         if date_from:
             params.append(_date.fromisoformat(date_from))
             conditions.append(f"c.created_at >= ${len(params)}::date")
@@ -361,8 +383,10 @@ async def sourcing_status_summary(
 
     async with db.tenant_conn(actor.tenant_id) as conn:
         # Main query: respects source_type, joining candidate_ownership
-        # only if recruiter_id or source_type actually needs it.
-        conditions, params, joins = _base_filter(include_recruiter=True)
+        # only if source_type actually needs it (recruiter_id no longer
+        # implies this join when a client/role filter is also active --
+        # see _base_filter's own docstring above).
+        conditions, params, joins = _base_filter()
         if source_type and "candidate_ownership co" not in joins:
             joins += " JOIN candidate_ownership co ON co.candidate_id = c.id AND co.status = 'active'"
         if source_type:
@@ -378,7 +402,7 @@ async def sourcing_status_summary(
         # deliberately NEVER the source_type filter -- this is what shows
         # the manual/email/other split regardless of which one (if any)
         # is currently selected in the main query above.
-        b_conditions, b_params, b_joins = _base_filter(include_recruiter=True)
+        b_conditions, b_params, b_joins = _base_filter()
         if "candidate_ownership co" not in b_joins:
             b_joins += " JOIN candidate_ownership co ON co.candidate_id = c.id AND co.status = 'active'"
         breakdown_rows = await conn.fetch(
