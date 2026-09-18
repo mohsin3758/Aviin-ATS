@@ -58,17 +58,40 @@ export default function SkillMatrixPage() {
   const [newSkill, setNewSkill] = useState('');
   const [savingColumn, setSavingColumn] = useState(false);
 
+  // Table filters (2026-09-19, live request) -- the dataset behind one
+  // role is small (candidates already linked to it), so these filter the
+  // already-fetched rows client-side rather than adding new backend
+  // query params; the summary strip below still reflects the filtered
+  // set, not the unfiltered total, so it stays honest about what's on
+  // screen.
+  const [filterRemarks, setFilterRemarks] = useState('');
+  const [filterLocation, setFilterLocation] = useState('');
+  const [filterCtcMin, setFilterCtcMin] = useState('');
+  const [filterCtcMax, setFilterCtcMax] = useState('');
+  const [filterExpCtcMin, setFilterExpCtcMin] = useState('');
+  const [filterExpCtcMax, setFilterExpCtcMax] = useState('');
+
   const { data: clients } = useFetch<any[]>(mounted ? '/clients' : null);
   const { data: reqs } = useFetch<any[]>(mounted && clientId ? `/requisitions?client_id=${clientId}&status=open` : null);
   const { data: matrix, loading, refetch } = useFetch<any>(mounted && reqId ? `/requisitions/${reqId}/skill-matrix` : null);
 
   const skills: string[] = matrix?.skills || [];
-  const candidates: any[] = matrix?.candidates || [];
+  const allCandidates: any[] = matrix?.candidates || [];
+  const anyFilterActive = !!(filterRemarks || filterLocation || filterCtcMin || filterCtcMax || filterExpCtcMin || filterExpCtcMax);
+  const candidates = allCandidates.filter(c => {
+    if (filterRemarks && !(c.remarks || '').toLowerCase().includes(filterRemarks.toLowerCase())) return false;
+    if (filterLocation && !(c.location || '').toLowerCase().includes(filterLocation.toLowerCase())) return false;
+    if (filterCtcMin && !(c.current_ctc != null && c.current_ctc >= Number(filterCtcMin))) return false;
+    if (filterCtcMax && !(c.current_ctc != null && c.current_ctc <= Number(filterCtcMax))) return false;
+    if (filterExpCtcMin && !(c.expected_ctc != null && c.expected_ctc >= Number(filterExpCtcMin))) return false;
+    if (filterExpCtcMax && !(c.expected_ctc != null && c.expected_ctc <= Number(filterExpCtcMax))) return false;
+    return true;
+  });
 
   // Role-scoped "how recruiters are working this role" summary --
-  // grouped straight from the same rows already on screen, no extra
-  // fetch. Unassigned candidates group under "Unassigned" rather than
-  // silently vanishing from the count.
+  // grouped straight from the same (filtered) rows already on screen, no
+  // extra fetch. Unassigned candidates group under "Unassigned" rather
+  // than silently vanishing from the count.
   const byRecruiter: Record<string, number> = {};
   candidates.forEach(c => { const k = c.recruiter_name || 'Unassigned'; byRecruiter[k] = (byRecruiter[k] || 0) + 1; });
 
@@ -183,6 +206,21 @@ export default function SkillMatrixPage() {
         </select>
       </div>
 
+      {reqId && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+          <input placeholder="Filter: Remarks contains…" value={filterRemarks} onChange={e => setFilterRemarks(e.target.value)} style={{ ...selSm, width: 170 }} />
+          <input placeholder="Filter: Location contains…" value={filterLocation} onChange={e => setFilterLocation(e.target.value)} style={{ ...selSm, width: 170 }} />
+          <input placeholder="Current CTC min" type="number" value={filterCtcMin} onChange={e => setFilterCtcMin(e.target.value)} style={{ ...selSm, width: 120 }} />
+          <input placeholder="Current CTC max" type="number" value={filterCtcMax} onChange={e => setFilterCtcMax(e.target.value)} style={{ ...selSm, width: 120 }} />
+          <input placeholder="Expected CTC min" type="number" value={filterExpCtcMin} onChange={e => setFilterExpCtcMin(e.target.value)} style={{ ...selSm, width: 120 }} />
+          <input placeholder="Expected CTC max" type="number" value={filterExpCtcMax} onChange={e => setFilterExpCtcMax(e.target.value)} style={{ ...selSm, width: 120 }} />
+          {anyFilterActive && (
+            <button onClick={() => { setFilterRemarks(''); setFilterLocation(''); setFilterCtcMin(''); setFilterCtcMax(''); setFilterExpCtcMin(''); setFilterExpCtcMax(''); }}
+              style={{ fontSize: 11, color: '#dc2626', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, padding: '5px 10px', cursor: 'pointer' }}>✕ Clear filters</button>
+          )}
+        </div>
+      )}
+
       {!reqId && (
         <div style={{ padding: 24, textAlign: 'center', color: '#94a3b8', fontSize: 12, border: '1px dashed #e2e8f0', borderRadius: 10 }}>
           Pick a client and role to see its skill matrix.
@@ -191,9 +229,9 @@ export default function SkillMatrixPage() {
 
       {reqId && (
         <>
-          {!loading && candidates.length > 0 && (
+          {!loading && allCandidates.length > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: 12 }}>
-              <b>{candidates.length} candidate{candidates.length === 1 ? '' : 's'} sourced for this role</b>
+              <b>{candidates.length} candidate{candidates.length === 1 ? '' : 's'} sourced for this role{anyFilterActive ? ` (of ${allCandidates.length} total)` : ''}</b>
               <span style={{ color: '#64748b' }}>
                 {Object.entries(byRecruiter).map(([name, count], i) => (
                   <span key={name}>{i > 0 ? ' · ' : ''}{name}: {count}</span>
@@ -216,6 +254,7 @@ export default function SkillMatrixPage() {
                   <th style={th}>Name</th>
                   <th style={th}>Mobile</th>
                   <th style={th}>Total Exp (mo)</th>
+                  <th style={th}>Location</th>
                   {skills.map(s => <th key={s} style={{ ...th, minWidth: 140, whiteSpace: 'normal' }}>{s}</th>)}
                   <th style={{ ...th, minWidth: 110 }}>
                     {addingColumn ? (
@@ -252,6 +291,9 @@ export default function SkillMatrixPage() {
                     <td style={{ ...td, minWidth: 90 }}>
                       <EditableCell value={c.total_exp_mo != null ? String(c.total_exp_mo) : ''} variant="number" placeholder="—"
                         onSave={v => saveField(c.id, 'total_exp_mo', v === '' ? null : Number(v))} />
+                    </td>
+                    <td style={{ ...td, minWidth: 110 }}>
+                      <EditableCell value={c.location || ''} placeholder="Location" onSave={v => saveField(c.id, 'location', v || null)} />
                     </td>
                     {skills.map(s => (
                       <td key={s} style={td}>
@@ -300,7 +342,7 @@ export default function SkillMatrixPage() {
                         onKeyDown={e => { if (e.key === 'Enter') addRow(); if (e.key === 'Escape') setAddingRow(false); }}
                         placeholder="Mobile" style={inputSm} />
                     </td>
-                    <td colSpan={skills.length + 8} style={{ ...td, whiteSpace: 'nowrap' }}>
+                    <td colSpan={skills.length + 9} style={{ ...td, whiteSpace: 'nowrap' }}>
                       <button onClick={addRow} disabled={savingRow} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: '#16a34a', color: '#fff', fontSize: 11, fontWeight: 700, cursor: savingRow ? 'default' : 'pointer', marginRight: 6 }}>
                         {savingRow ? 'Saving…' : 'Save'}
                       </button>
@@ -311,7 +353,7 @@ export default function SkillMatrixPage() {
                   </tr>
                 ) : (
                   <tr>
-                    <td colSpan={skills.length + 11} style={{ padding: 8 }}>
+                    <td colSpan={skills.length + 12} style={{ padding: 8 }}>
                       <button onClick={() => setAddingRow(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px dashed #cbd5e1', background: 'transparent', color: '#2563eb', borderRadius: 7, padding: '7px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
                         <Plus size={13} /> Add Row
                       </button>
