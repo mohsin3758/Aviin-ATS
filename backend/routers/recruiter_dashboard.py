@@ -199,7 +199,8 @@ async def my_overview(actor: Actor = Depends(get_actor)):
         total_submissions = await conn.fetchval(
             """SELECT COUNT(*) FROM applications a
                JOIN candidates c ON c.id=a.candidate_id
-               WHERE a.assigned_recruiter_id=$1 AND c.is_active IS NOT FALSE
+               WHERE a.assigned_recruiter_id=$1 AND a.is_active IS NOT FALSE
+                 AND c.is_active IS NOT FALSE
                  AND (a.stage LIKE '%interview%' OR a.stage IN
                       ('submitted','client_submission','offer','offer_accepted','placed'))""",
             uid,
@@ -219,7 +220,8 @@ async def my_overview(actor: Actor = Depends(get_actor)):
             """SELECT COUNT(*) FROM offers o
                JOIN applications a ON a.id=o.application_id
                JOIN candidates c ON c.id=a.candidate_id
-               WHERE a.assigned_recruiter_id=$1 AND c.is_active IS NOT FALSE
+               WHERE a.assigned_recruiter_id=$1 AND a.is_active IS NOT FALSE
+                 AND c.is_active IS NOT FALSE
                  AND o.status IN ('issued','accepted','declined')""",
             uid,
         )

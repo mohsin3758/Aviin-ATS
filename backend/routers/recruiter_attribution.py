@@ -157,11 +157,12 @@ async def _sender_tracking_rows(conn, tenant_id: str, date_from, date_to):
         stage_counts = {r["stage"]: int(r["cnt"]) for r in stage_counts_rows}
         offers = await conn.fetchval(
             "SELECT COUNT(DISTINCT o.id) FROM offers o JOIN applications a ON a.id=o.application_id "
-            "WHERE o.tenant_id=$1 AND a.candidate_id = ANY($2::uuid[])",
+            "WHERE o.tenant_id=$1 AND a.candidate_id = ANY($2::uuid[]) AND a.is_active IS NOT FALSE",
             tenant_id, candidate_ids)
         offers_accepted = await conn.fetchval(
             "SELECT COUNT(DISTINCT o.id) FROM offers o JOIN applications a ON a.id=o.application_id "
-            "WHERE o.tenant_id=$1 AND a.candidate_id = ANY($2::uuid[]) AND o.status='accepted'",
+            "WHERE o.tenant_id=$1 AND a.candidate_id = ANY($2::uuid[]) AND a.is_active IS NOT FALSE "
+            "AND o.status='accepted'",
             tenant_id, candidate_ids)
         joinees = await conn.fetchval(
             "SELECT COUNT(DISTINCT id) FROM placements WHERE tenant_id=$1 AND candidate_id = ANY($2::uuid[])",

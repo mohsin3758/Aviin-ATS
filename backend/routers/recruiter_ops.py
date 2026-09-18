@@ -49,6 +49,7 @@ async def list_targets(recruiter_id: Optional[str] = None, period_year: Optional
             f"""SELECT t.*, u.full_name AS recruiter_name,
                        (SELECT COUNT(*) FROM applications a
                         WHERE a.assigned_recruiter_id = t.recruiter_id
+                          AND a.is_active IS NOT FALSE
                           AND EXTRACT(MONTH FROM a.created_at) = t.period_month
                           AND EXTRACT(YEAR FROM a.created_at) = t.period_year) AS actual_submissions
                 FROM recruiter_targets t

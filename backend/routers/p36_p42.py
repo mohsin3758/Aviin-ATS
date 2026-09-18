@@ -55,6 +55,7 @@ async def recruiter_performance(month: Optional[int]=None, year: Optional[int]=N
                 COALESCE(k.calculated_incentive,0) AS incentive
             FROM users u
             LEFT JOIN applications a ON a.assigned_recruiter_id=u.id AND a.tenant_id=u.tenant_id
+                AND a.is_active IS NOT FALSE
                 AND ($1::int IS NULL OR EXTRACT(MONTH FROM a.created_at)=$1)
                 AND ($2::int IS NULL OR EXTRACT(YEAR FROM a.created_at)=$2)
             LEFT JOIN recruiter_kpi_scores k ON k.user_id=u.id AND k.tenant_id=u.tenant_id
@@ -99,7 +100,7 @@ async def dashboard_summary(actor: Actor=Depends(get_actor)):
                 COUNT(*) FILTER (WHERE status='open' AND is_active IS NOT FALSE) AS open_reqs,
                 COUNT(*) FILTER (WHERE is_active IS NOT FALSE) AS total_reqs,
                 (SELECT COUNT(*) FROM applications a JOIN candidates c ON c.id=a.candidate_id
-                 WHERE a.tenant_id=$1 AND c.is_active IS NOT FALSE) AS total_apps,
+                 WHERE a.tenant_id=$1 AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE) AS total_apps,
                 (SELECT COUNT(*) FROM placements p JOIN candidates c ON c.id=p.candidate_id
                  WHERE p.tenant_id=$1 AND c.is_active IS NOT FALSE) AS total_placements,
                 (SELECT COUNT(*) FROM candidates WHERE tenant_id=$1 AND is_active IS NOT FALSE) AS total_candidates

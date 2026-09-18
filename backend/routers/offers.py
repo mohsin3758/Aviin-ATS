@@ -48,7 +48,8 @@ async def list_offers(application_id: str | None = None, mine: bool | None = Non
     if mine:
         params.append(actor.user_id)
         conditions.append(
-            f"application_id IN (SELECT id FROM applications WHERE assigned_recruiter_id=${len(params)})"
+            f"application_id IN (SELECT id FROM applications WHERE assigned_recruiter_id=${len(params)}"
+            f" AND is_active IS NOT FALSE)"
         )
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""

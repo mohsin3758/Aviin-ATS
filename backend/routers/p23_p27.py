@@ -510,7 +510,8 @@ async def client_requisitions(client_name: str, actor: Actor=Depends(get_actor))
                    COUNT(a.id) FILTER (WHERE a.stage='placed') AS hires
             FROM requisitions r
             LEFT JOIN applications a ON a.requisition_id=r.id AND a.tenant_id=r.tenant_id
-            WHERE r.tenant_id=$1 AND r.client_name ILIKE '%'||$2||'%'
+                AND a.is_active IS NOT FALSE
+            WHERE r.tenant_id=$1 AND r.is_active IS NOT FALSE AND r.client_name ILIKE '%'||$2||'%'
             GROUP BY r.id ORDER BY r.created_at DESC
         """, actor.tenant_id, client_name)
     return [dict(r) for r in rows]
@@ -529,6 +530,7 @@ async def client_shortlist(requisition_id: str, actor: Actor=Depends(get_actor))
             LEFT JOIN candidate_scores cs ON cs.candidate_id=c.id AND cs.tenant_id=c.tenant_id
             LEFT JOIN client_feedback cf ON cf.application_id=a.id
             WHERE a.requisition_id=$1 AND a.tenant_id=$2
+              AND a.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
             ORDER BY cs.readiness_index DESC NULLS LAST
         """, requisition_id, actor.tenant_id)
     return [dict(r) for r in rows]

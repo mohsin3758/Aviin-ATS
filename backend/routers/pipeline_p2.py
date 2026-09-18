@@ -891,8 +891,9 @@ async def get_active_requisitions(actor: Actor = Depends(get_actor)):
                    COALESCE(r.status, 'open') as status,
                    COUNT(a.id) as app_count
             FROM requisitions r
-            LEFT JOIN applications a ON a.requisition_id=r.id
-            WHERE r.tenant_id = $1
+            LEFT JOIN applications a ON a.requisition_id=r.id AND a.tenant_id=r.tenant_id
+                AND a.is_active IS NOT FALSE
+            WHERE r.tenant_id = $1 AND r.is_active IS NOT FALSE
             GROUP BY r.id, r.title, r.location, r.status
             HAVING COUNT(a.id) > 0
             ORDER BY app_count DESC, r.created_at DESC

@@ -161,7 +161,8 @@ async def get_submission_pack(client_id: str, actor: Actor = Depends(get_actor))
             FROM applications a
             JOIN requisitions r ON r.id = a.requisition_id
             JOIN candidates   c ON c.id = a.candidate_id
-            WHERE r.client_id = $1 AND c.is_active IS NOT FALSE
+            WHERE r.client_id = $1 AND a.is_active IS NOT FALSE
+              AND r.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
             ORDER BY a.stage, c.full_name
         """, client_id)
 

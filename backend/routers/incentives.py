@@ -186,7 +186,7 @@ async def suggest_scorecard(
         offer_stats = await conn.fetchrow("""
             SELECT COUNT(*) generated, COUNT(*) FILTER (WHERE o.status='accepted') accepted
             FROM offers o JOIN applications a ON a.id=o.application_id
-            WHERE o.tenant_id=$1 AND a.assigned_recruiter_id=$2
+            WHERE o.tenant_id=$1 AND a.assigned_recruiter_id=$2 AND a.is_active IS NOT FALSE
               AND o.created_at >= $3 AND o.created_at < $4
         """, actor.tenant_id, user_id, period_start, period_end)
         offer_score = round(10.0 * offer_stats["accepted"] / offer_stats["generated"], 2) if offer_stats and offer_stats["generated"] else 0.0
@@ -194,7 +194,8 @@ async def suggest_scorecard(
         sat = await conn.fetchrow("""
             SELECT AVG(f.rating) avg_rating, COUNT(*) n
             FROM client_feedback f JOIN applications a ON a.id=f.application_id
-            WHERE f.tenant_id=$1 AND a.assigned_recruiter_id=$2 AND f.rating IS NOT NULL
+            WHERE f.tenant_id=$1 AND a.assigned_recruiter_id=$2 AND a.is_active IS NOT FALSE
+              AND f.rating IS NOT NULL
               AND f.created_at >= $3 AND f.created_at < $4
         """, actor.tenant_id, user_id, period_start, period_end)
         # Neutral midpoint (not zero) when no feedback exists yet — avoids

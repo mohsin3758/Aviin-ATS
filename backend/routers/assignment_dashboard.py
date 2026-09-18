@@ -241,6 +241,7 @@ async def summary(
             JOIN applications a ON a.id = cf.application_id
             JOIN requisitions r ON r.id = a.requisition_id
             WHERE cf.tenant_id = $1 AND cf.created_at > s.submitted_at
+              AND a.is_active IS NOT FALSE AND r.is_active IS NOT FALSE
             GROUP BY r.client_id
             """,
             actor.tenant_id,

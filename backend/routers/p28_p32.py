@@ -92,6 +92,7 @@ async def export_requisitions(include_inactive: bool = False, actor: Actor=Depen
                    COUNT(a.id) FILTER (WHERE a.stage='placed') AS hires
             FROM requisitions r
             LEFT JOIN applications a ON a.requisition_id=r.id AND a.tenant_id=r.tenant_id
+                AND ($2::boolean OR a.is_active IS NOT FALSE)
             -- BUG FIX (2026-08-10 audit): no is_active filter meant 240 of
             -- 283 exported rows (85%) were soft-deleted (mostly QA test
             -- garbage), dominating the real 43 live requisitions.

@@ -54,6 +54,7 @@ async def _training_rows(conn, tenant_id: str):
            JOIN applications a ON a.requisition_id = r.id AND a.tenant_id = r.tenant_id
            JOIN candidates c ON c.id = a.candidate_id
            WHERE r.tenant_id = $1 AND a.stage IN ('placed', 'offer_accepted')
+             AND a.is_active IS NOT FALSE
              AND r.is_active IS NOT FALSE AND c.is_active IS NOT FALSE
            GROUP BY r.id""",
         tenant_id,
