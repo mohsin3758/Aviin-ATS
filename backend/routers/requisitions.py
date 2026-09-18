@@ -679,7 +679,7 @@ async def skill_matrix(requisition_id: str, actor: Actor = Depends(require_permi
         candidate_rows = await conn.fetch(
             """SELECT DISTINCT ON (c.id) c.id, c.full_name, c.phone, c.email, c.total_exp_mo,
                       c.current_ctc, c.expected_ctc, c.sourcing_status, c.remarks, c.location,
-                      ru.full_name AS recruiter_name
+                      ru.full_name AS recruiter_name, a.id AS application_id
                FROM applications a
                JOIN candidates c ON c.id = a.candidate_id
                LEFT JOIN users ru ON ru.id = a.assigned_recruiter_id

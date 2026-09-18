@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { EditableCell } from '@/components/sourcing-tracker/EditableCell';
 import { ProjectDetailsCell } from '@/components/sourcing-tracker/ProjectDetailsCell';
-import { MessageCircle, Plus, XCircle } from 'lucide-react';
+import { MessageCircle, Plus, XCircle, Trash2 } from 'lucide-react';
 
 // Skill Matrix (2026-09-19, reported live against a real manual Google
 // Sheet: one column per mandatory skill on a role, showing years of
@@ -144,6 +144,26 @@ export default function SkillMatrixPage() {
       showToast(e?.message || 'Could not send — connect your WhatsApp number under Settings first', false);
     } finally {
       setSendingId(null);
+    }
+  }
+
+  // "there is no delete option" (2026-09-19, live gap report) -- reuses
+  // the existing, already-audited "Remove from Pipeline" endpoint
+  // (DELETE /applications/{id}, backend/routers/applications.py) rather
+  // than a new one: this removes the candidate from THIS role's pipeline
+  // only (soft-delete on the application row), never the candidate
+  // record itself -- matches this codebase's hard rule against ever
+  // hard-deleting a candidate, and lets the same server-side tiered
+  // role/ownership checks that already govern every other pipeline
+  // removal apply here too.
+  async function removeCandidate(c: any) {
+    if (!window.confirm(`Remove ${c.full_name || 'this candidate'} from this role? They'll no longer be tracked here, but their candidate record and any resume/screening history is kept.`)) return;
+    try {
+      await apiFetch(`/applications/${c.application_id}`, { method: 'DELETE', body: JSON.stringify({ reason: 'Removed from Skill Matrix' }) });
+      showToast('Removed from this role');
+      refetch();
+    } catch (e: any) {
+      showToast(e?.message || 'Could not remove', false);
     }
   }
 
@@ -288,6 +308,7 @@ export default function SkillMatrixPage() {
                   <th style={th}>Remarks</th>
                   <th style={th}>Recruiter</th>
                   <th style={th}>WhatsApp</th>
+                  <th style={{ ...th, width: 40 }} />
                 </tr>
               </thead>
               <tbody>
@@ -346,6 +367,14 @@ export default function SkillMatrixPage() {
                         )}
                       </div>
                     </td>
+                    <td style={{ ...td, textAlign: 'center' }}>
+                      <button onClick={() => removeCandidate(c)} title="Remove from this role"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', background: 'transparent', color: '#cbd5e1', cursor: 'pointer', padding: 4 }}
+                        onMouseEnter={e => (e.currentTarget.style.color = '#dc2626')}
+                        onMouseLeave={e => (e.currentTarget.style.color = '#cbd5e1')}>
+                        <Trash2 size={14} />
+                      </button>
+                    </td>
                   </tr>
                 ))}
 
@@ -362,7 +391,7 @@ export default function SkillMatrixPage() {
                         onKeyDown={e => { if (e.key === 'Enter') addRow(); if (e.key === 'Escape') setAddingRow(false); }}
                         placeholder="Mobile" style={inputSm} />
                     </td>
-                    <td colSpan={skills.length + 9} style={{ ...td, whiteSpace: 'nowrap' }}>
+                    <td colSpan={skills.length + 10} style={{ ...td, whiteSpace: 'nowrap' }}>
                       <button onClick={addRow} disabled={savingRow} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: '#16a34a', color: '#fff', fontSize: 11, fontWeight: 700, cursor: savingRow ? 'default' : 'pointer', marginRight: 6 }}>
                         {savingRow ? 'Saving…' : 'Save'}
                       </button>
@@ -373,7 +402,7 @@ export default function SkillMatrixPage() {
                   </tr>
                 ) : (
                   <tr>
-                    <td colSpan={skills.length + 12} style={{ padding: 8 }}>
+                    <td colSpan={skills.length + 13} style={{ padding: 8 }}>
                       <button onClick={() => setAddingRow(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px dashed #cbd5e1', background: 'transparent', color: '#2563eb', borderRadius: 7, padding: '7px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
                         <Plus size={13} /> Add Row
                       </button>
