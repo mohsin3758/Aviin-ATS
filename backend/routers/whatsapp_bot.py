@@ -1,5 +1,6 @@
 """Enhanced WhatsApp Bot — candidate self-service via WAHA."""
 import httpx, os, asyncio
+import asyncpg
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -541,7 +542,7 @@ async def _handle_screening_reply(conn, tenant_id: str, cand, session, cmd: str,
     if session.get("followup_stage") in ("cross_match_offered", "referral_asked", "csat_asked"):
         return await _handle_followup_reply(conn, tenant_id, cand, session, cmd, text)
 
-    if status in ("pending_optin", "sent"):
+    if status in ("pending_optin", "sent", "no_response"):
         if cmd == "YES":
             consent_id = await conn.fetchval(
                 """INSERT INTO consent_records (tenant_id,candidate_id,data_category,channel,consent_given,consent_text)
@@ -649,12 +650,20 @@ async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id:
               (tenant_id, candidate_id, channel, direction, body, status, from_whatsapp_account_id)
             VALUES ($1,$2,'whatsapp','inbound',$3,'received',$4)
         """, tenant_id, cand["id"], text[:2000], whatsapp_account_id)
+        # REAL BUG FIX (2026-09-19, live report): a candidate who replied
+        # "Yes" AFTER 3 missed reminders auto-classified their session as
+        # no_response got the generic HELP_MSG command list instead of
+        # continuing the screening -- their reply arrived, it just wasn't
+        # in time. no_response is an SLA-driven silence timeout, not a
+        # deliberate refusal (unlike declined/opted_out, deliberately left
+        # out here) -- any genuine reply, however late, should resume the
+        # same conversation rather than orphaning it.
         active_screening = await conn.fetchrow(
             """SELECT id, status, requisition_id, candidate_id, current_question_key, language,
                       followup_stage, cross_match_requisition_id
                FROM screening_sessions
                WHERE candidate_id=$1 AND tenant_id=$2
-                 AND (status IN ('pending_optin','sent','in_progress','awaiting_resume')
+                 AND (status IN ('pending_optin','sent','in_progress','awaiting_resume','no_response')
                       OR followup_stage IN ('cross_match_offered','referral_asked','csat_asked'))
                ORDER BY created_at DESC LIMIT 1""",
             cand["id"], tenant_id)
@@ -875,6 +884,31 @@ async def webhook(request: Request):
             await _handle_message_ack(data.get("payload") or {})
             return {"ok": True}
         msg  = data.get("payload", {})
+
+        # REAL BUG FIX (2026-09-19, live report): a candidate's single
+        # "Yes" reply produced two identical outbound bot replies --
+        # confirmed root cause is WAHA re-delivering the same inbound
+        # webhook event, with no idempotency guard anywhere in this
+        # handler. Same defensive id-shape extraction already used for
+        # the OUTBOUND send id in send_wa_get_id above, since WAHA's
+        # message id can be a flat string or nested under _data.id.id
+        # depending on engine/event. Fails OPEN on anything but a
+        # confirmed duplicate (a transient DB hiccup here must never
+        # silently drop a real inbound message).
+        raw_msg_id = (
+            msg.get("id")
+            or (msg.get("_data") or {}).get("id", {}).get("id")
+            or (msg.get("_data") or {}).get("id")
+        )
+        if raw_msg_id:
+            try:
+                async with db.system_conn() as _dconn:
+                    await _dconn.execute(
+                        "INSERT INTO whatsapp_inbound_dedup (waha_message_id) VALUES ($1)",
+                        str(raw_msg_id))
+            except asyncpg.UniqueViolationError:
+                return {"ok": True}
+
         text = (msg.get("body") or "").strip()
         from_  = msg.get("from", "")
         phone  = await _resolve_phone(from_)
