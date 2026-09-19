@@ -609,12 +609,40 @@ async def _handle_joining_reply(conn, tenant_id: str, cand, offer, cmd: str, tex
     return t("joining_ack", lang, name=name)
 
 
+async def _resolve_candidate_by_phone(conn, phone_tail: str, tenant_id: str):
+    """REAL BUG FIX (2026-09-19, live report): a candidate's real "Yes"
+    reply kept hitting the generic HELP_MSG no matter what status-based
+    fix was applied, root-caused to something more fundamental -- three
+    separate candidate records (created 2026-08-25, 09-14 x2) all share
+    the exact same phone number (a real, longstanding duplicate-data
+    problem this app's own /duplicates admin page exists to catch, just
+    never caught for this one), and every phone lookup in this file used
+    a bare `LIMIT 1` with NO ORDER BY -- Postgres picked whichever row it
+    felt like, confirmed live to be the wrong one (the oldest record,
+    with zero screening history), every single time. This is the exact
+    "no ORDER BY, ambiguous row order" bug class this same file's tenant
+    lookup above was already fixed for -- never applied here.
+
+    Prefers whichever duplicate has the MOST RECENT screening_sessions
+    activity (the one actually in a live conversation), falling back to
+    the most recently created candidate record when none have any
+    screening history at all. Not a fix for the duplicate records
+    themselves (that's /duplicates' job, and merging candidates isn't
+    something to do silently as a side effect of a bot reply) -- just
+    makes the bot resolve to the RIGHT one of them deterministically."""
+    return await conn.fetchrow(
+        """SELECT c.* FROM candidates c
+           WHERE c.phone LIKE '%'||$1||'%' AND c.tenant_id=$2 AND c.is_active IS NOT FALSE
+           ORDER BY (SELECT MAX(s.created_at) FROM screening_sessions s WHERE s.candidate_id = c.id) DESC NULLS LAST,
+                    c.created_at DESC
+           LIMIT 1""",
+        phone_tail, tenant_id)
+
+
 async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id: str = None) -> str:
     cmd = text.strip().upper().split()[0] if text.strip() else "HELP"
     async with db.tenant_conn(tenant_id) as conn:
-        cand = await conn.fetchrow(
-            "SELECT * FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
-            phone[-10:], tenant_id)
+        cand = await _resolve_candidate_by_phone(conn, phone[-10:], tenant_id)
         if not cand:
             # WhatsApp automation research round 3 (2026-09-15): inbound
             # keyword self-signup (Phenom's "text DRIVER to apply"
@@ -973,9 +1001,7 @@ async def webhook(request: Request):
             # command parsing, no auto-reply, no resume auto-processing.
             # The recruiter reads and answers it themselves.
             async with db.tenant_conn(tenant_id) as _lconn:
-                cand = await _lconn.fetchrow(
-                    "SELECT id FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
-                    phone[-10:], tenant_id)
+                cand = await _resolve_candidate_by_phone(_lconn, phone[-10:], tenant_id)
                 if cand:
                     body = f"[Media attachment]" if has_media else text[:2000]
                     await _lconn.execute(
@@ -987,9 +1013,7 @@ async def webhook(request: Request):
 
         if has_location:
             async with db.tenant_conn(tenant_id) as _lconn:
-                _cand = await _lconn.fetchrow(
-                    "SELECT id, full_name FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
-                    phone[-10:], tenant_id)
+                _cand = await _resolve_candidate_by_phone(_lconn, phone[-10:], tenant_id)
                 _session = await _lconn.fetchrow(
                     """SELECT id, candidate_id, requisition_id, status, current_question_key, language
                        FROM screening_sessions
@@ -1018,9 +1042,7 @@ async def webhook(request: Request):
             # cold-inbound dedup pipeline below, which is built for a
             # stranger's resume arriving with no context.
             async with db.tenant_conn(tenant_id) as _rconn:
-                _cand = await _rconn.fetchrow(
-                    "SELECT id FROM candidates WHERE phone LIKE '%'||$1||'%' AND tenant_id=$2 LIMIT 1",
-                    phone[-10:], tenant_id)
+                _cand = await _resolve_candidate_by_phone(_rconn, phone[-10:], tenant_id)
                 _session = await _rconn.fetchrow(
                     """SELECT id, candidate_id, status, language FROM screening_sessions
                        WHERE candidate_id=$1 AND tenant_id=$2
