@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import { useFetch, apiFetch } from '@/lib/useFetch';
 import { EditableCell } from '@/components/sourcing-tracker/EditableCell';
 import { ProjectDetailsCell } from '@/components/sourcing-tracker/ProjectDetailsCell';
-import { MessageCircle, Plus, XCircle, Trash2 } from 'lucide-react';
+import { MessageCircle, Plus, XCircle, Trash2, Clock, CheckCircle2 } from 'lucide-react';
+import { FUNNEL_LABELS } from '@/lib/screeningConstants';
 
 // Skill Matrix (2026-09-19, reported live against a real manual Google
 // Sheet: one column per mandatory skill on a role, showing years of
@@ -363,6 +364,18 @@ export default function SkillMatrixPage() {
                           <span title="This phone number is not on WhatsApp — check for a typo, then Send again"
                             style={{ display: 'flex', alignItems: 'center', gap: 3, color: '#b91c1c', fontSize: 10.5, fontWeight: 700 }}>
                             <XCircle size={11} /> Invalid number
+                          </span>
+                        )}
+                        {c.screening_status === 'pending_optin' && (
+                          <span title="Queued — only sent between 9 AM-7 PM IST (Mon-Sat), a deliberate pace to keep the WhatsApp number from being flagged as spam"
+                            style={{ display: 'flex', alignItems: 'center', gap: 3, color: '#92400e', fontSize: 10.5, fontWeight: 700 }}>
+                            <Clock size={11} /> Queued, sends 9am-7pm
+                          </span>
+                        )}
+                        {c.screening_status && !['bad_number', 'pending_optin'].includes(c.screening_status) && (
+                          <span title={`Last screening status: ${FUNNEL_LABELS[c.screening_status] || c.screening_status}`}
+                            style={{ display: 'flex', alignItems: 'center', gap: 3, color: '#166534', fontSize: 10.5, fontWeight: 700 }}>
+                            <CheckCircle2 size={11} /> {FUNNEL_LABELS[c.screening_status] || c.screening_status}
                           </span>
                         )}
                       </div>
