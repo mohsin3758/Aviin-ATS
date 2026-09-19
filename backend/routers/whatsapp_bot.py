@@ -479,12 +479,27 @@ async def _handle_followup_reply(conn, tenant_id: str, cand, session, cmd: str, 
         # the referral ASK already happened a step earlier; this just gives
         # them something concrete to literally forward to a friend.
         info = await conn.fetchrow(
-            """SELECT r.title, cl.name AS client_name, ua.phone_number AS recruiter_phone
+            """SELECT r.title, r.id AS requisition_id, s.application_id, cl.name AS client_name,
+                      ua.phone_number AS recruiter_phone
                FROM screening_sessions s
                JOIN requisitions r ON r.id = s.requisition_id
                LEFT JOIN clients cl ON cl.id = r.client_id
                LEFT JOIN user_whatsapp_accounts ua ON ua.id = s.whatsapp_account_id
                WHERE s.id=$1""", session["id"])
+        # REAL GAP FIX (2026-09-19, live report): a 1-2/5 rating (a candidate
+        # actively saying the experience was bad) got the exact same "Thanks
+        # for the feedback! All the best" close-out as a 5/5 -- no different
+        # treatment at all. A poor screening experience is worth a human
+        # actually looking at, same escalation pattern already used for an
+        # explicit AGENT/HELP request above.
+        if rating is not None and rating <= 2:
+            await conn.execute(
+                """INSERT INTO recruiter_tasks
+                     (tenant_id, requisition_id, application_id, candidate_name, req_title,
+                      task_type, title, priority)
+                   VALUES ($1,$2,$3,$4,$5,'callback_request',$6,'medium')""",
+                tenant_id, info["requisition_id"], info["application_id"], cand["full_name"], info["title"],
+                f"{cand['full_name']} rated the WhatsApp screening experience {rating}/5 -- worth a look")
         return t("csat_thanks_share", lang, role=info["title"] or "this",
                   client=info["client_name"] or "our client",
                   recruiter_phone=info["recruiter_phone"] or "your recruiter")
@@ -686,15 +701,29 @@ async def handle_cmd(phone: str, text: str, tenant_id: str, whatsapp_account_id:
         # deliberate refusal (unlike declined/opted_out, deliberately left
         # out here) -- any genuine reply, however late, should resume the
         # same conversation rather than orphaning it.
-        active_screening = await conn.fetchrow(
+        #
+        # SECOND BUG FIX, same day: the fix above initially picked the most
+        # recent MATCHING session, which broke the moment a candidate had
+        # BOTH a stale no_response session AND a newer, fully completed one
+        # for the same role (a real "Send" retry after a phone fix) --
+        # confirmed live, a candidate's post-completion "Okay" got matched
+        # to the old no_response session and re-triggered the opt-in
+        # reprompt right after they'd finished the whole screening. Always
+        # take the candidate's single most recent session overall first,
+        # THEN check whether that one specifically is resumable -- an
+        # older resumable session must never outrank a newer, already-
+        # concluded one.
+        latest_session = await conn.fetchrow(
             """SELECT id, status, requisition_id, candidate_id, current_question_key, language,
                       followup_stage, cross_match_requisition_id
                FROM screening_sessions
                WHERE candidate_id=$1 AND tenant_id=$2
-                 AND (status IN ('pending_optin','sent','in_progress','awaiting_resume','no_response')
-                      OR followup_stage IN ('cross_match_offered','referral_asked','csat_asked'))
                ORDER BY created_at DESC LIMIT 1""",
             cand["id"], tenant_id)
+        active_screening = latest_session if latest_session and (
+            latest_session["status"] in ("pending_optin", "sent", "in_progress", "awaiting_resume", "no_response")
+            or latest_session["followup_stage"] in ("cross_match_offered", "referral_asked", "csat_asked")
+        ) else None
         if active_screening:
             return await _handle_screening_reply(conn, tenant_id, cand, active_screening, cmd, text)
         joining_offer = await conn.fetchrow(
